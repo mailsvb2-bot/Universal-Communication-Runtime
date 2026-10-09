@@ -300,15 +300,56 @@ fn subscriptions_require_accepted_sources_and_are_recipient_owned() {
         subscriptions: vec![ConferenceMediaSubscription {
             source: alice.principal.clone(),
             media_kind: MediaKind::Audio,
+            stream_id: None,
         }],
     };
     assert_eq!(coordinator.set_subscriptions(&bob, &alice_audio), Ok(1));
+    // One real accepted participant can change only THEIR receive selection:
+    // prepare the low protected layer while HD and audio are still subscribed.
+    // The sender's capture, encoder, crypto keys and the third participant are
+    // not modified by this canonical Conference routing operation.
+    let hd = ConferenceMediaSubscription {
+        source: alice.principal.clone(),
+        media_kind: MediaKind::Video,
+        stream_id: Some(oid("camera-hd")),
+    };
+    let low = ConferenceMediaSubscription {
+        stream_id: Some(oid("camera-low")),
+        ..hd.clone()
+    };
+    let audio = alice_audio.subscriptions[0].clone();
+    let preparing_handover = ConferenceSubscriptionSet {
+        scope: scope(),
+        call_id: start.call_id.clone(),
+        subscriptions: vec![audio.clone(), hd, low.clone()],
+    };
+    assert_eq!(
+        coordinator.set_subscriptions(&bob, &preparing_handover),
+        Ok(3),
+        "audio and both encrypted video layers coexist during preparation"
+    );
+    let low_selected = ConferenceSubscriptionSet {
+        scope: scope(),
+        call_id: start.call_id.clone(),
+        subscriptions: vec![audio.clone(), low.clone()],
+    };
+    assert_eq!(
+        coordinator.set_subscriptions(&bob, &low_selected),
+        Ok(2),
+        "release HD only after the low receive path has become selectable"
+    );
+    assert_eq!(
+        coordinator.set_subscriptions(&bob, &alice_audio),
+        Ok(1),
+        "audio survives video unsubscribe"
+    );
     let charlie_video = ConferenceSubscriptionSet {
         scope: scope(),
         call_id: start.call_id.clone(),
         subscriptions: vec![ConferenceMediaSubscription {
             source: charlie.principal.clone(),
             media_kind: MediaKind::Video,
+            stream_id: None,
         }],
     };
     assert_eq!(

@@ -803,6 +803,57 @@ where
         }))
     }
 
+    async fn get_receive_roster(
+        &self,
+        request: Request<pb::RealtimeGetReceiveRosterRequest>,
+    ) -> Result<Response<pb::RealtimeGetReceiveRosterResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let fields = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(fields.scope, fields.call_id, fields.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    let now = self.now()?;
+                    if !self
+                        .registry
+                        .contains_active_session(&claims, now)
+                        .map_err(map_registry_error)?
+                    {
+                        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+                    }
+                    self.require_live_universal_conference(&claims)?;
+                    self.require_accepted_conference_participant(&claims)?;
+                    let snapshot = conference_runtime(self)
+                        .snapshot(&actor_for(&claims), &scope, &call_id)
+                        .map_err(|error| map_conference_error(&error))?;
+                    Ok(pb::RealtimeReceiveRoster {
+                        call_revision: snapshot.call.revision,
+                        accepted_sources: snapshot
+                            .call
+                            .participants
+                            .iter()
+                            .filter(|participant| {
+                                participant.principal != claims.participant
+                                    && participant.state == CallParticipantState::Accepted
+                                    && participant.left_revision.is_none()
+                            })
+                            .map(|participant| pb_principal_ref(&participant.principal))
+                            .collect(),
+                    })
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeGetReceiveRosterResponse {
+            result: Some(match result {
+                Ok(roster) => pb::realtime_get_receive_roster_response::Result::Roster(roster),
+                Err(error) => {
+                    pb::realtime_get_receive_roster_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
     async fn set_subscriptions(
         &self,
         request: Request<pb::RealtimeSetSubscriptionsRequest>,
@@ -2871,6 +2922,10 @@ fn decode_media_subscription(
     Ok(ConferenceMediaSubscription {
         source: decode_principal_ref(value.source.ok_or_else(invalid_argument)?)?,
         media_kind: decode_media_kind(value.media_kind)?,
+        stream_id: value
+            .stream_id
+            .map(|opaque| decode_opaque(Some(opaque)))
+            .transpose()?,
     })
 }
 

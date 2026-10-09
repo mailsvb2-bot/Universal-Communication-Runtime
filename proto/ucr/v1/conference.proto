@@ -37,6 +37,8 @@ message ConferenceSnapshot {
 message ConferenceMediaSubscription {
   PrincipalRef source = 1;
   MediaKind media_kind = 2;
+  // Optional exact source stream to forward for this subscriber. None = legacy receive-all.
+  OpaqueId stream_id = 3;
 }
 
 message ConferenceSubscriptionSet {

@@ -1213,8 +1213,10 @@ where
         let call_id = validated.media.envelope().frame.header.call_id.clone();
         let source = validated.media.envelope().frame.header.source.clone();
         let media_kind = validated.media.envelope().frame.header.media_kind;
+        let stream_id = validated.media.envelope().frame.header.stream_id.clone();
         self.prune_subscriptions(&scope, &call_id)?;
-        let recipients = self.subscribers_for_source(&validated.call, &source, media_kind)?;
+        let recipients =
+            self.subscribers_for_source(&validated.call, &source, media_kind, &stream_id)?;
         if recipients.is_empty() {
             return Ok(None);
         }
@@ -1234,6 +1236,7 @@ where
         call: &CallSession,
         source: &PrincipalRef,
         media_kind: MediaKind,
+        stream_id: &ucr_model::OpaqueId,
     ) -> Result<Vec<PrincipalRef>, ConferenceError> {
         let state = self
             .state
@@ -1245,7 +1248,12 @@ where
             entry.scope == call.scope
                 && entry.call_id == call.call_id
                 && entry.subscriptions.iter().any(|subscription| {
-                    subscription.source == *source && subscription.media_kind == media_kind
+                    conference_subscription_matches_stream(
+                        subscription,
+                        source,
+                        media_kind,
+                        stream_id,
+                    )
                 })
         }) {
             if is_accepted_participant(call, &entry.recipient) {
@@ -1304,6 +1312,22 @@ fn append_chat_notification(
         state.events.drain(..overflow);
     }
     Ok(sequence)
+}
+
+/// One already-authorized encrypted source frame can be forwarded only to subscribers
+/// who explicitly selected its stream, or who retain legacy receive-all preference.
+fn conference_subscription_matches_stream(
+    selection: &ConferenceMediaSubscription,
+    source: &PrincipalRef,
+    media_kind: MediaKind,
+    stream_id: &ucr_model::OpaqueId,
+) -> bool {
+    selection.source == *source
+        && selection.media_kind == media_kind
+        && selection
+            .stream_id
+            .as_ref()
+            .is_none_or(|chosen| chosen == stream_id)
 }
 
 fn prune_subscription_state(
@@ -1560,6 +1584,80 @@ mod subscription_state_tests {
         }
     }
 
+    #[test]
+    fn chameleon_sfu_only_routes_authenticated_ciphertext_streams_subscribed_by_viewer() {
+        let video_hd = oid("publisher-hd");
+        let video_low = oid("publisher-low");
+        let speaker = principal("speaker");
+        let layer = ConferenceMediaSubscription {
+            source: speaker.clone(),
+            media_kind: MediaKind::Video,
+            stream_id: Some(video_hd.clone()),
+        };
+        assert!(conference_subscription_matches_stream(
+            &layer,
+            &speaker,
+            MediaKind::Video,
+            &video_hd
+        ));
+        assert!(!conference_subscription_matches_stream(
+            &layer,
+            &speaker,
+            MediaKind::Video,
+            &video_low
+        ));
+        assert!(!conference_subscription_matches_stream(
+            &layer,
+            &principal("other"),
+            MediaKind::Video,
+            &video_hd
+        ));
+        assert!(!conference_subscription_matches_stream(
+            &layer,
+            &speaker,
+            MediaKind::Audio,
+            &video_hd
+        ));
+        let wildcard = ConferenceMediaSubscription {
+            stream_id: None,
+            ..layer
+        };
+        assert!(conference_subscription_matches_stream(
+            &wildcard,
+            &speaker,
+            MediaKind::Video,
+            &video_hd
+        ));
+        assert!(conference_subscription_matches_stream(
+            &wildcard,
+            &speaker,
+            MediaKind::Video,
+            &video_low
+        ));
+        // The stream match depends on subscriber preference and authenticated
+        // envelope identity, NEVER conference name or attendee-count thresholds.
+        for index in 0..1_000 {
+            let choice = if index % 2 == 0 {
+                video_hd.clone()
+            } else {
+                video_low.clone()
+            };
+            let selected = ConferenceMediaSubscription {
+                stream_id: Some(choice),
+                ..wildcard.clone()
+            };
+            assert_eq!(
+                conference_subscription_matches_stream(
+                    &selected,
+                    &speaker,
+                    MediaKind::Video,
+                    &video_hd
+                ),
+                index % 2 == 0
+            );
+        }
+    }
+
     fn entry() -> RecipientSubscriptionState {
         RecipientSubscriptionState {
             scope: scope(),
@@ -1568,6 +1666,7 @@ mod subscription_state_tests {
             subscriptions: vec![ConferenceMediaSubscription {
                 source: principal("alice"),
                 media_kind: MediaKind::Video,
+                stream_id: None,
             }],
         }
     }

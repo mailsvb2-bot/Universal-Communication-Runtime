@@ -21,6 +21,7 @@ p{color:var(--ucr-muted);line-height:1.45}
 .video-card{background:var(--ucr-panel-deep);border:1px solid var(--ucr-border);border-radius:14px;overflow:hidden}
 .video-card header{padding:8px 10px;color:var(--ucr-muted);font-size:.85rem}
 video{display:block;width:100%;aspect-ratio:16/9;background:#000;object-fit:cover}
+canvas.remote-media{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;object-fit:contain}
 .controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
 select,button,input{border-radius:12px;padding:12px 14px;font:inherit}
 select,input{background:var(--ucr-panel);color:var(--ucr-text);border:1px solid var(--ucr-border);min-width:0}
@@ -31,6 +32,7 @@ button:disabled,select:disabled,input:disabled{opacity:.45;cursor:not-allowed}
 #status{white-space:pre-wrap;background:var(--ucr-panel-deep);border-radius:12px;padding:12px;min-height:48px}
 .small{font-size:.85rem;color:#94a3b8}
 .hidden{display:none}
+canvas.remote-media.hidden{display:none}
 </style>
 </head>
 <body>
@@ -47,9 +49,10 @@ button:disabled,select:disabled,input:disabled{opacity:.45;cursor:not-allowed}
 <div class="media">
 <div class="video-card"><header id="local-label">You</header><video id="local-video" autoplay muted playsinline></video></div>
 <div id="screen-card" class="video-card hidden"><header id="screen-label">Your screen</header><video id="screen-video" autoplay muted playsinline></video></div>
-<div class="video-card"><header id="remote-label">Remote</header><video id="remote-video" autoplay playsinline></video></div>
+<div class="video-card"><header id="remote-label">Remote</header><video id="remote-video" autoplay playsinline></video><canvas id="remote-e2ee-canvas" class="remote-media hidden" width="640" height="360" aria-label="Decrypted endpoint-only video"></canvas></div>
 </div>
 <div class="controls">
+<select id="privacy-mode" aria-label="Network privacy mode"><option value="secure">Protected call (normal network)</option><option value="private">Higher privacy (TURN relay only)</option><option value="maximum" disabled>Maximum privacy (independent relay not configured)</option></select>
 <select id="microphone" aria-label="Microphone"><option value="">Default microphone</option></select>
 <select id="camera" aria-label="Camera"><option value="">Default camera</option></select>
 <button id="mic-toggle" class="secondary" disabled>Mute microphone</button>
@@ -91,12 +94,17 @@ const ui={
   brandLogo:$("brand-logo"),brandName:$("brand-name"),intro:$("intro"),
   stateLabel:$("state-label"),webrtcLabel:$("webrtc-label"),packetsLabel:$("packets-label"),expiresLabel:$("expires-label"),
   localLabel:$("local-label"),screenLabel:$("screen-label"),remoteLabel:$("remote-label"),footerNote:$("footer-note"),chatCard:$("chat-card"),
-  localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),
-  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
+  localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),remoteCanvas:$("remote-e2ee-canvas"),
+  privacyMode:$("privacy-mode"),mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
 };
-let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false;
+let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false,adaptiveMediaGeneration=0;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
-let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
+let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
+let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
+let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
+let receiveRosterGeneration=0,receiveRosterInFlight=false,receiveSubscriptionFingerprint=null;
+let receiveSubscriptionInFlight=false,receiveSubscriptionDirty=false;
+let receiveRosterSources=[],receiveSpeakerId=null,receiveSpeakerCandidate=null,receiveSpeakerSamples=0;
 let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_ENDPOINT_CONTRACT_VERSION="ucr.endpoint-e2ee.v1";
@@ -120,9 +128,12 @@ const E2EE_CHUNK_HEADER_BYTES=24;
 const E2EE_DATA_MESSAGE_BYTES=16000;
 const E2EE_CHUNK_PAYLOAD_BYTES=E2EE_DATA_MESSAGE_BYTES-E2EE_CHUNK_HEADER_BYTES;
 const E2EE_MAX_WIRE_BYTES=2*1024*1024+8192;
+const E2EE_MAX_BUFFERED_SEND_BYTES=2*1024*1024;
 const ENTRY_RETRY_MS=2000;
 const STREAM_RETRY_MS=1500;
-const WEBRTC_RETRY_MS=2000;
+// Recovery is bounded; only a newly authenticated E2EE DataChannel resets it.
+const WEBRTC_RETRY_DELAYS_MS=[250,500,1000,2000,4000,8000,15000];
+let webrtcRecoveryAttempt=0,webrtcNeedsPeerRebuild=false;
 const BRANDING_FRAGMENT_KEY="ucr_brand";
 const BRANDING_MAX_JSON_BYTES=4096;
 const BRAND_NAME_MAX=80;
@@ -642,13 +653,39 @@ function requireCompatibleE2eeAdapter(adapter){
   return adapter;
 }
 function closeE2eeTransport(){
+  stopAdaptiveMediaMonitoring();
+  resetReceiveRoster();
+  appliedAdaptiveQuality=null;e2eeAdapterReady=false;
+  if(ui.remoteCanvas){
+    const context=ui.remoteCanvas.getContext("2d");
+    if(context)context.clearRect(0,0,ui.remoteCanvas.width,ui.remoteCanvas.height);
+    ui.remoteCanvas.classList.add("hidden");
+    ui.remoteVideo.classList.remove("hidden");
+  }
+  ++e2eeActivationGeneration;
   ui.screenToggle.disabled=true;
   if(screenStream){
     const current=screenStream;screenStream=null;setScreenUi(false);
     current.getTracks().forEach(track=>track.stop());
   }
   const adapter=e2eeAdapter();
-  if(adapter&&typeof adapter.stop==="function"){try{adapter.stop();}catch(_){}}
+  if(adapter&&typeof adapter.stop==="function"){
+    try{
+      // stop() retires crypto immediately, but media cleanup can reject later.
+      // Observe the Promise so failed device teardown never becomes an unhandled error.
+      Promise.resolve(adapter.stop()).catch(()=>{
+        if(sessionActive)ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
+      });
+    }catch(_){
+      if(sessionActive)ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
+    }
+  }
+  // The canonical bridge revokes permanently on stop. Never reuse a retired
+  // adapter on reconnection: reconstruct it from fresh authoritative admission.
+  if(adapter&&adapter===e2eeManagedAdapter){
+    if(window.ucrE2eeEndpoint===adapter)delete window.ucrE2eeEndpoint;
+    e2eeManagedAdapter=null;
+  }
   if(e2eeChannel){
     e2eeChannel.onopen=null;e2eeChannel.onmessage=null;e2eeChannel.onclose=null;e2eeChannel.onerror=null;
     try{e2eeChannel.close();}catch(_){}
@@ -686,6 +723,9 @@ function sendE2eeEnvelope(wire){
   if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media channel is not open");
   const bytes=wire instanceof Uint8Array?wire:new Uint8Array(wire);
   if(bytes.length===0||bytes.length>E2EE_MAX_WIRE_BYTES)throw new Error("Encrypted media envelope exceeds transport bounds");
+  if(e2eeChannel.bufferedAmount+bytes.length+Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES)*E2EE_CHUNK_HEADER_BYTES>E2EE_MAX_BUFFERED_SEND_BYTES){
+    throw new Error("Encrypted media transport congested; frame not queued");
+  }
   const count=Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES);
   if(count>65535)throw new Error("Encrypted media envelope requires too many chunks");
   const messageId=BigInt(e2eeMessageId++);
@@ -735,7 +775,9 @@ async function applyMediaPolicy(value){
       for(const track of localStream.getVideoTracks()){localStream.removeTrack(track);track.stop();sourcesChanged=true;}
     }
   }
-  if(!policyAllows("screen")&&screenStream)await stopScreenShare(true);
+  // Stop physical capture even while a source update is pending; the codec
+  // owner serializes generation-bound updates so stale sources cannot return.
+  if(!policyAllows("screen")&&screenStream)await stopScreenShare(true,screenShareBusy);
   if(sourcesChanged&&e2eeChannel&&e2eeChannel.readyState==="open"){
     const adapter=e2eeAdapter();
     if(adapter&&typeof adapter.updateSources==="function")await syncEndpointMediaSources();
@@ -774,15 +816,19 @@ async function startScreenShare(){
   let captured=null;
   try{
     captured=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
-    if(!sessionActive)throw new Error("Conference session ended while screen capture was being selected");
+    if(!sessionActive||!mediaActive||!policyAllows("screen")){
+      throw new Error("Screen sharing authorization changed while choosing capture");
+    }
     if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media transport changed while screen capture was being selected");
     const track=captured.getVideoTracks()[0];
     if(!track)throw new Error("Screen capture returned no video track");
     screenStream=captured;setScreenUi(true);
     await syncEndpointMediaSources();
-    if(track.readyState==="ended"||screenStream!==captured){
+    if(track.readyState==="ended"||screenStream!==captured||
+       !sessionActive||!mediaActive||!policyAllows("screen")||
+       !e2eeChannel||e2eeChannel.readyState!=="open"){
       await stopScreenShare(true,true);
-      throw new Error("Screen sharing ended before publication became active");
+      throw new Error("Screen sharing ended or authorization changed before publication became active");
     }
     track.addEventListener("ended",()=>{if(screenStream===captured)stopScreenShare(true).catch(e=>{ui.status.textContent="Screen-share cleanup failed: "+e.message;});},{once:true});
   }catch(e){
@@ -796,15 +842,86 @@ async function startScreenShare(){
     screenShareBusy=false;refreshScreenShareControl();
   }
 }
+let referenceMediaInstallerPromise=null;
+async function requireAuthorizedMediaInstaller(){
+  // A product integration may supply the exact canonical installer before
+  // startup. Otherwise load UCR's bundled reference adapter code on demand.
+  if(typeof window.ucrInstallAuthorizedMediaEndpoint==="function"){
+    return window.ucrInstallAuthorizedMediaEndpoint;
+  }
+  if(!referenceMediaInstallerPromise){
+    referenceMediaInstallerPromise=import("./endpoint-media/reference_browser_media_installer.js")
+      .then(module=>{
+        if(typeof module.installUcrReferenceBrowserMedia!=="function"){
+          throw new Error("Invalid UCR endpoint media installer bundle");
+        }
+        return module.installUcrReferenceBrowserMedia;
+      }).catch(error=>{
+        referenceMediaInstallerPromise=null;
+        throw error;
+      });
+  }
+  return referenceMediaInstallerPromise;
+}
 async function activateE2eeAdapter(){
+  e2eeAdapterReady=false;
+  const generation=e2eeActivationGeneration;
+  const channel=e2eeChannel;
+  const isCurrent=()=>generation===e2eeActivationGeneration&&channel===e2eeChannel&&channel?.readyState==="open";
+  if(!isCurrent())throw new Error("Encrypted media transport no longer active");
+  // Integration owner must supply authenticated MLS/media/signing state; the
+  // browser must never invent a default device key or silently send plaintext.
+  if(!e2eeAdapter()){
+    const install=await requireAuthorizedMediaInstaller();
+    if(!isCurrent())throw new Error("Encrypted media session retired before installer load");
+    const mls=await ensureEndpointMlsReady();
+    if(!mls)throw new Error("Endpoint-owned MLS required for encrypted media");
+    const installed=await install(Object.freeze({
+      state:mls,
+      claims:Object.freeze({
+        tenantId:claims.tenant_id,
+        namespaceId:claims.namespace_id??null,
+        callId:claims.call_id,
+        deviceId:claims.device_id,
+        participantId:claims.participant_id,
+        participantKind:claims.participant_kind,
+        sessionId:claims.session_id
+      }),
+      groupId:endpointMlsGroupId,
+      loadWasm:loadEndpointWasmModule
+    }));
+    if(!isCurrent()){
+      if(installed&&typeof installed.stop==="function")await installed.stop();
+      if(window.ucrE2eeEndpoint===installed)delete window.ucrE2eeEndpoint;
+      throw new Error("Encrypted media session changed during adapter installation");
+    }
+    if(installed&&typeof installed==="object"&&!e2eeAdapter()){
+      window.ucrE2eeEndpoint=installed;
+    }
+    if(installed&&window.ucrE2eeEndpoint===installed)e2eeManagedAdapter=installed;
+  }
   const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());
   if(!adapter||typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"){
-    ui.status.textContent="WebRTC transport connected. Encrypted endpoint media adapter is required before camera/microphone/screen media can be published.";
-    return;
+    throw new Error("Authorized endpoint E2EE media adapter unavailable; refusing plaintext media");
   }
   const restoreState=await restoreEndpointPersistedState(adapter);
+  if(!isCurrent())throw new Error("Encrypted media session changed during restore");
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
+  if(!isCurrent()){
+    await adapter.stop();
+    throw new Error("Encrypted media session changed during startup");
+  }
   const persisted=await persistEndpointState(adapter);
+  if(!isCurrent())return;
+  e2eeAdapterReady=true;
+  // A connected ICE transport alone is never evidence of recovered E2EE.
+  webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
+  // Admission happens before the protected DataChannel opens. Only now do we
+  // have a live, authorized decoder and measured downlink telemetry provider.
+  startAdaptiveMediaMonitoring();
+  syncReceiveSubscriptions().catch(e=>{if(sessionActive)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
+  ui.remoteVideo.classList.add("hidden");
+  ui.remoteCanvas.classList.remove("hidden");
   refreshScreenShareControl();
   ui.status.textContent=restoreState==="restored"
     ?"Endpoint E2EE media transport restored from sealed local state. Media keys remain on this endpoint."
@@ -815,19 +932,31 @@ async function activateE2eeAdapter(){
 function attachE2eeDataChannel(channel){
   if(channel.label!==E2EE_CHANNEL_LABEL){channel.close();return;}
   closeE2eeTransport();e2eeChannel=channel;e2eeChannel.binaryType="arraybuffer";
-  channel.onopen=()=>{activateE2eeAdapter().catch(e=>{ui.status.textContent="Endpoint E2EE adapter failed: "+e.message;});};
+  channel.onopen=()=>{activateE2eeAdapter().catch(e=>{
+    if(e2eeChannel!==channel)return;
+    closeE2eeTransport();ui.webrtcState.textContent="E2EE unavailable";
+    ui.status.textContent="Endpoint E2EE adapter failed; encrypted transport closed: "+e.message;
+  });};
   channel.onmessage=event=>{
     try{
       const wire=receiveE2eeChunk(event.data);if(!wire)return;
       packetCount++;ui.packets.textContent=String(packetCount);
       const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());if(!adapter||typeof adapter.onEnvelope!=="function")return;
+      // Endpoint MLS and sealed restart state are persisted at session/epoch
+      // boundaries, never after every encoded video/audio frame. Per-frame
+      // IndexedDB writes inflate latency, flash wear and battery consumption.
       Promise.resolve(adapter.onEnvelope(wire))
-        .then(()=>persistEndpointState(adapter))
-        .catch(e=>{ui.status.textContent="Encrypted media open/persist failed: "+e.message;});
+        .catch(e=>{ui.status.textContent="Encrypted media frame rejected: "+e.message;});
     }catch(e){e2eePending=null;ui.status.textContent="Encrypted media transport rejected data: "+e.message;}
   };
   channel.onerror=()=>{ui.status.textContent="Encrypted media DataChannel failed.";};
-  channel.onclose=()=>{if(e2eeChannel===channel){closeE2eeTransport();}};
+  channel.onclose=()=>{if(e2eeChannel===channel){
+    // ICE restart cannot reopen a terminally closed encrypted DataChannel.
+    // Retire its MLS media bridge before scheduling a fresh WebRTC peer.
+    webrtcNeedsPeerRebuild=true;
+    closeE2eeTransport();
+    scheduleWebRtcRetry();
+  }};
 }
 function scheduleStreamRetry(){
   if(!sessionActive||!mediaActive||Date.now()>=claims.expires)return;
@@ -853,6 +982,13 @@ async function openStream(){
     if(streamAbort===controller){streamAbort=null;if(sessionActive)scheduleStreamRetry();}
   }
 }
+// Prefer real Full HD source capture where the camera and browser can provide it.
+// 'ideal' is deliberately non-mandatory: a 720p-only camera must still work.
+function preferredCameraCapture(deviceId){
+  const video={width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:30,max:30}};
+  if(deviceId)video.deviceId={exact:deviceId};
+  return video;
+}
 async function ensureLocalMedia(force=false){
   if(!mediaActive)throw new Error("Conference media is not admitted yet");
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("Camera/microphone access is unavailable in this browser");
@@ -863,9 +999,17 @@ async function ensureLocalMedia(force=false){
     localStream=new MediaStream();ui.localVideo.srcObject=localStream;refreshLocalMediaControls();return localStream;
   }
   const audio=audioAllowed?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):false;
-  const video=cameraAllowed?(ui.camera.value?{deviceId:{exact:ui.camera.value}}:true):false;
-  localStream=await navigator.mediaDevices.getUserMedia({audio,video});
-  ui.localVideo.srcObject=localStream;
+  const video=cameraAllowed?preferredCameraCapture(ui.camera.value):false;
+  const generation=mediaCaptureGeneration;
+  const captured=await navigator.mediaDevices.getUserMedia({audio,video});
+  // Permission prompts can outlive Leave, admission withdrawal and a peer
+  // replacement. Never publish or retain a track from a stale capture.
+  if(generation!==mediaCaptureGeneration||!sessionActive||!mediaActive||
+     audioAllowed!==policyAllows("audio")||cameraAllowed!==policyAllows("camera")||localStream){
+    captured.getTracks().forEach(track=>track.stop());
+    throw new Error("Media capture authorization changed while device access was pending");
+  }
+  localStream=captured;ui.localVideo.srcObject=captured;
   refreshLocalMediaControls();
   await refreshDevices();
   return localStream;
@@ -877,8 +1021,14 @@ async function ensureLocalTrack(kind){
   const existing=kind==="audio"?localStream.getAudioTracks()[0]:localStream.getVideoTracks()[0];
   if(existing&&existing.readyState==="live")return existing;
   if(existing){localStream.removeTrack(existing);existing.stop();}
-  const constraint=kind==="audio"?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):(ui.camera.value?{deviceId:{exact:ui.camera.value}}:true);
+  const constraint=kind==="audio"?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):preferredCameraCapture(ui.camera.value);
+  const generation=mediaCaptureGeneration,ownerStream=localStream;
   const captured=await navigator.mediaDevices.getUserMedia(kind==="audio"?{audio:constraint,video:false}:{audio:false,video:constraint});
+  if(generation!==mediaCaptureGeneration||!sessionActive||!mediaActive||
+     !policyAllows(kind)||localStream!==ownerStream){
+    captured.getTracks().forEach(track=>track.stop());
+    throw new Error("Media track authorization changed while device access was pending");
+  }
   const track=kind==="audio"?captured.getAudioTracks()[0]:captured.getVideoTracks()[0];
   if(!track){captured.getTracks().forEach(value=>value.stop());throw new Error("Requested media device returned no track");}
   localStream.addTrack(track);
@@ -927,7 +1077,13 @@ function applyToggleLabels(){
   ui.micToggle.textContent=!policyAllows("audio")?tr("microphoneUnavailable"):audio?(audio.enabled?tr("muteMicrophone"):tr("unmuteMicrophone")):tr("startMicrophone");
   ui.cameraToggle.textContent=!policyAllows("camera")?tr("cameraUnavailable"):video?(video.enabled?tr("turnCameraOff"):tr("turnCameraOn")):tr("startCamera");
 }
+function stopLocalCapture(){
+  ++mediaCaptureGeneration;
+  if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;}
+  ui.localVideo.srcObject=null;
+}
 function teardownPeer(){
+  ++mediaCaptureGeneration;
   closeE2eeTransport();
   if(peer){peer.onicecandidate=null;peer.ontrack=null;peer.ondatachannel=null;peer.onconnectionstatechange=null;peer.close();peer=null;}
   remoteStream=null;ui.remoteVideo.srcObject=null;ui.webrtcState.textContent="Idle";
@@ -936,19 +1092,54 @@ async function closeServerPeer(keepalive=false){
   if(!sessionActive)return;
   try{await api("/v1/realtime/webrtc/close",body(),undefined,keepalive);}catch(_){}
 }
-function scheduleWebRtcRetry(){
-  if(!sessionActive||!mediaActive||Date.now()>=claims.expires||restarting)return;
-  if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
+function scheduleWebRtcRetry(immediate=false){
+  if(!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine||restarting)return;
+  if(webrtcRetryTimer){
+    if(!immediate)return; // repeated ICE notifications cannot postpone recovery.
+    clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;
+  }
   ui.webrtcState.textContent="Reconnecting";
-  webrtcRetryTimer=setTimeout(()=>{webrtcRetryTimer=null;recoverWebRtc();},WEBRTC_RETRY_MS);
+  const delay=immediate?0:WEBRTC_RETRY_DELAYS_MS[Math.min(webrtcRecoveryAttempt,WEBRTC_RETRY_DELAYS_MS.length-1)];
+  if(!immediate)webrtcRecoveryAttempt=Math.min(webrtcRecoveryAttempt+1,WEBRTC_RETRY_DELAYS_MS.length-1);
+  webrtcRetryTimer=setTimeout(()=>{
+    webrtcRetryTimer=null;
+    recoverWebRtc().catch(e=>{
+      if(!sessionActive||!mediaActive)return;
+      ui.status.textContent="Secure media reconnection failed: "+e.message;
+      scheduleWebRtcRetry();
+    });
+  },delay);
+}
+function rtcNetworkConfiguration(iceServers,mode){
+  if(mode!=="secure"&&mode!=="private")throw new Error("Requested privacy mode requires unavailable infrastructure");
+  if(!Array.isArray(iceServers))throw new Error("Invalid canonical ICE server configuration");
+  const hasTurn=iceServers.some(server=>{
+    const urls=typeof server.urls==="string"?[server.urls]:server.urls;
+    return Array.isArray(urls)&&urls.some(url=>typeof url==="string"&&/^turns?:/i.test(url));
+  });
+  if(mode==="private"&&!hasTurn)throw new Error("Higher privacy requires configured TURN relay; refusing direct network fallback");
+  return {iceServers,iceTransportPolicy:mode==="private"?"relay":"all",bundlePolicy:"max-bundle"};
 }
 async function startWebRtc(forceMedia=false){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
-  const media=await ensureLocalMedia(forceMedia);
+  if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
+  const generation=mediaCaptureGeneration;
+  const ensureCurrent=()=>{
+    if(generation!==mediaCaptureGeneration||!sessionActive||!mediaActive||!navigator.onLine){
+      throw new Error("WebRTC start cancelled by conference media teardown");
+    }
+  };
+  await ensureLocalMedia(forceMedia);
+  ensureCurrent();
   const response=await api("/v1/realtime/webrtc/start",body());
   const offer=await response.json();
-  const pc=new RTCPeerConnection({iceServers:offer.ice_servers||[]});
+  ensureCurrent();
+  const pc=new RTCPeerConnection(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
   peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
+  const ensureOwnedPeer=()=>{
+    ensureCurrent();
+    if(peer!==pc||pc.connectionState==="closed")throw new Error("WebRTC peer retired during negotiation");
+  };
   let remoteDescriptionAccepted=false;
   const pendingCandidates=[];
   const sendCandidate=async candidate=>{
@@ -969,31 +1160,46 @@ async function startWebRtc(forceMedia=false){
       if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
       ui.state.textContent="Connected";ui.status.textContent=e2eeChannel&&e2eeChannel.readyState==="open"?"Encrypted media transport connected.":"WebRTC signalling connected; waiting for encrypted media DataChannel.";
     }
-    if(state==="failed"||state==="disconnected")scheduleWebRtcRetry();
+    if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
   };
   await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
+  ensureOwnedPeer();
   const answer=await pc.createAnswer();
+  ensureOwnedPeer();
   await pc.setLocalDescription(answer);
+  ensureOwnedPeer();
   await api("/v1/realtime/webrtc/remote-description",{...body(),sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
+  ensureOwnedPeer();
   remoteDescriptionAccepted=true;
-  for(const candidate of pendingCandidates.splice(0)){await sendCandidate(candidate);}
+  for(const candidate of pendingCandidates.splice(0)){ensureOwnedPeer();await sendCandidate(candidate);}
+  ensureOwnedPeer();
   ui.webrtcState.textContent="Connecting";
 }
 async function restartIce(){
   if(restarting||!sessionActive||!mediaActive||!navigator.onLine||!peer)return false;
+  const generation=mediaCaptureGeneration,pc=peer;
+  const ensureCurrent=()=>{
+    if(!sessionActive||!mediaActive||!navigator.onLine||
+       generation!==mediaCaptureGeneration||peer!==pc||pc.connectionState==="closed"){
+      throw new Error("ICE restart cancelled by conference media teardown");
+    }
+  };
   restarting=true;
   try{
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     ui.webrtcState.textContent="ICE restart";
     const response=await api("/v1/realtime/webrtc/restart",body());
     const offer=await response.json();
-    const pc=peer;
-    if(!pc||pc.connectionState==="closed")throw new Error("WebRTC peer is unavailable for ICE restart");
-    pc.setConfiguration({iceServers:offer.ice_servers||[]});
+    ensureCurrent();
+    pc.setConfiguration(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
     await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
+    ensureCurrent();
     const answer=await pc.createAnswer();
+    ensureCurrent();
     await pc.setLocalDescription(answer);
+    ensureCurrent();
     await api("/v1/realtime/webrtc/remote-description",{...body(),sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
+    ensureCurrent();
     ui.webrtcState.textContent="Reconnecting";
     ui.status.textContent="Network path changed. ICE restart is reconnecting media without recreating the conference session.";
     return true;
@@ -1003,6 +1209,7 @@ async function restartIce(){
 }
 async function recoverWebRtc(){
   if(restarting||!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine)return;
+  if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}
   if(peer){
     try{
       if(await restartIce())return;
@@ -1013,29 +1220,45 @@ async function recoverWebRtc(){
   await restartWebRtc(false);
 }
 async function restartWebRtc(forceMedia){
-  if(restarting||!sessionActive)return;
+  if(restarting||!sessionActive||!mediaActive||Date.now()>=claims.expires)return;
+  const generation=sessionLifecycleGeneration;
   restarting=true;
   try{
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     await closeServerPeer();
+    // Leave or admission withdrawal during the network request must not
+    // destroy a newer peer or resurrect a revoked call.
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive)return;
     teardownPeer();
     await startWebRtc(forceMedia);
   }catch(e){
-    ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC reconnect failed: "+e.message;
-    setTimeout(()=>{restarting=false;scheduleWebRtcRetry();},WEBRTC_RETRY_MS);
-    return;
+    if(generation===sessionLifecycleGeneration&&sessionActive&&mediaActive){
+      ui.webrtcState.textContent="Retrying";
+      ui.status.textContent="WebRTC reconnect failed: "+e.message;
+      // scheduled in finally after restarting is reset.
+      return scheduleWebRtcRetryAfterRestart();
+    }
+  }finally{
+    restarting=false;
   }
-  restarting=false;
+}
+// Avoid retrying inside the restarting guard; schedule one bounded retry
+// after the current restart attempt has relinquished ownership.
+function scheduleWebRtcRetryAfterRestart(){
+  // A microtask runs after restartWebRtc's finally has reset restarting.
+  Promise.resolve().then(()=>scheduleWebRtcRetry());
 }
 async function activateAdmittedMedia(){
-  await ensureEndpointMlsReady();
   if(!sessionActive||mediaActive)return;
+  const generation=sessionLifecycleGeneration;
+  await ensureEndpointMlsReady();
+  if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive)return;
   mediaActive=true;ui.state.textContent="Connected";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
   if(!reactionTimer){reactionTimer=setInterval(()=>{pollReactions().catch(()=>{});},1000);}
   if(!chatTimer){chatTimer=setInterval(()=>{pollChat().catch(()=>{});},1000);}
   pollReactions().catch(()=>{});
   pollChat().catch(()=>{});
-  startAdaptiveMediaMonitoring();
+  // Quality sampling must start only after activateE2eeAdapter succeeds.
   ui.status.textContent=policyAllows("audio")||policyAllows("camera")?"The host has started the conference. Requesting permitted camera/microphone access…":"The host has started the conference. Viewing mode does not request camera or microphone access.";
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive)ui.status.textContent="Realtime stream closed: "+e.message;});
   try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
@@ -1043,40 +1266,68 @@ async function activateAdmittedMedia(){
 }
 async function applyAdmissionState(state){
   if(state==="waiting_room"){
-    mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
+    // Withdrawal must stop real camera/microphone capture, not just the E2EE
+    // transport. A later re-admission can request devices afresh.
+    mediaActive=false;teardownPeer();stopLocalCapture();
+    if(streamAbort){streamAbort.abort();streamAbort=null;}
+    if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
+    if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+    ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
     ui.status.textContent=waitCopy("waitingRoom");
     return;
   }
   if(state==="closed"){
-    mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
+    mediaActive=false;teardownPeer();stopLocalCapture();ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(streamAbort){streamAbort.abort();streamAbort=null;}
-    teardownPeer();refreshLocalMediaControls();
+    refreshLocalMediaControls();
     ui.state.textContent="Ended";ui.status.textContent="The conference is no longer accepting realtime media.";
     return;
   }
   if(state==="admitted"||!state)await activateAdmittedMedia();
 }
 async function heartbeat(){
-  const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
-  const data=await r.json();
-  await applyMediaPolicy(data.media_policy);
-  await applyAdmissionState(data.admission_state);
+  if(!sessionActive)return;
+  const generation=sessionLifecycleGeneration,request=++heartbeatRequestGeneration;
+  // Ignore out-of-order concurrent heartbeats: an older "admitted" response
+  // must not override newer waiting-room / revoked admission.
+  const current=()=>sessionActive&&generation===sessionLifecycleGeneration&&
+    request===heartbeatRequestGeneration;
+  try{
+    const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
+    if(!current())return;
+    const data=await r.json();
+    if(!current())return;
+    await applyMediaPolicy(data.media_policy);
+    if(!current())return;
+    await applyAdmissionState(data.admission_state);
+    if(current()&&mediaActive&&e2eeAdapterReady){
+      syncReceiveSubscriptions().catch(e=>{if(current()&&e2eeAdapterReady)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
+    }
+  }catch(error){
+    // A failed heartbeat from a retired/replaced session must not invoke the
+    // UI's heartbeat_rejected handler and terminate a newer active session.
+    if(current())throw error;
+  }
 }
 async function join(){
+  if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
+  const generation=++sessionLifecycleGeneration;
   try{
-    if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Authenticating signed session grant…";
     const r=await api("/v1/realtime/join",body());const data=await r.json();
+    if(generation!==sessionLifecycleGeneration)return;
     if(!data.ok)throw new Error(data.message||"Join rejected");
-    sessionActive=true;ui.leave.disabled=false;
+    sessionActive=true;ui.leave.disabled=false;ui.privacyMode.disabled=true;
     await applyMediaPolicy(data.media_policy);
+    if(generation!==sessionLifecycleGeneration)return;
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
     heartbeatTimer=setInterval(()=>{heartbeat().catch(async e=>{if(e.code==="heartbeat_rejected"){await leave();ui.state.textContent="Access ended";ui.status.textContent="Conference access ended by host or server policy.";return;}ui.status.textContent="Heartbeat failed: "+e.message;});},interval);
     await applyAdmissionState(data.admission_state);
   }catch(e){
+    if(generation!==sessionLifecycleGeneration)return;
     if(e.code==="waiting_room"){scheduleEntryRetry();return;}
     ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=false;
   }
@@ -1089,13 +1340,18 @@ function scheduleEntryRetry(){
 }
 async function leave(){
   const wasActive=sessionActive;
-  if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
-  await stopScreenShare(false);
+  // Invalidate late joins, heartbeats and permission prompts synchronously.
+  ++sessionLifecycleGeneration;++mediaCaptureGeneration;mediaActive=false;
+  if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
+  if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+  // Device tracks must stop before the first await on explicit Leave.
   teardownPeer();
-  if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;ui.localVideo.srcObject=null;}
+  stopLocalCapture();
+  await stopScreenShare(false);
   if(wasActive)await closeServerPeer();
   if(endpointMlsState&&typeof endpointMlsState.free==="function"){try{endpointMlsState.free();}catch(_){}}
   endpointMlsState=null;endpointMlsGroupId=null;delete window.ucrEndpointMlsSession;
+  ui.privacyMode.disabled=false;
   sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
@@ -1109,7 +1365,144 @@ function scheduleWaitingRoom(){
   waitTimer=setTimeout(()=>{waitTimer=null;ui.join.disabled=false;join();},delay);
   return true;
 }
+// The server projects accepted sources from the canonical Call; the browser can
+// only select within that bounded, authorized roster. No second roster/room owner.
+// This reference UI has one remote video canvas: exactly one video source at a time.
+function resetReceiveRoster(){
+  ++receiveRosterGeneration;receiveRosterInFlight=false;
+  receiveSubscriptionInFlight=false;receiveSubscriptionDirty=false;
+  receiveSubscriptionFingerprint=null;receiveRosterSources=[];
+  receiveSpeakerId=null;receiveSpeakerCandidate=null;receiveSpeakerSamples=0;
+}
+function validReceiveRoster(value){
+  if(!value||value.ok!==true||!Array.isArray(value.sources)||value.sources.length>1024)return null;
+  const sources=[],seen=new Set();
+  for(const source of value.sources){
+    if(!source||typeof source.source_id!=="string"||source.source_id.length<1||
+        new TextEncoder().encode(source.source_id).length>128||
+        /[\u0000-\u001f\u007f]/.test(source.source_id)||
+        !Number.isInteger(source.source_kind)||source.source_kind<1||source.source_kind>8||
+        seen.has(source.source_kind+":"+source.source_id))return null;
+    seen.add(source.source_kind+":"+source.source_id);
+    if(source.source_id!==claims?.participant_id)sources.push({
+      source_id:source.source_id,source_kind:source.source_kind
+    });
+  }
+  return sources;
+}
+function planReceiveSubscriptions(sources,preferredId,adapter=e2eeAdapter()){
+  // One video canvas; subscriber receives only what the canonical SFU approves.
+  const video=sources.find(s=>s.source_id===preferredId)||sources[0]||null;
+  let videoStreams=video?[null]:[];
+  if(video&&appliedAdaptiveQuality){
+    let target=null;
+    try{target=JSON.parse(appliedAdaptiveQuality);}catch(_){}
+    if(target&&typeof target.stage==="string"&&!target.stage.startsWith("video_")){
+      videoStreams=[];
+    }else if(target&&typeof adapter?.getVerifiedReceiveVideoStreams==="function"&&
+             typeof adapter?.getActiveReceiveVideoStreams==="function"){
+      const verified=adapter.getVerifiedReceiveVideoStreams();
+      const active=adapter.getActiveReceiveVideoStreams();
+      if(Array.isArray(verified)&&Array.isArray(active)){
+        const current=active.find(x=>x&&x.sourceId===video.source_id&&
+          typeof x.streamId==="string"&&typeof x.sourceDeviceId==="string");
+        if(current){
+          const full=current.streamId.endsWith("-low")?
+            current.streamId.slice(0,-4):current.streamId;
+          const low=full+"-low";
+          // No synthetic layers: both precise IDs must first arrive as
+          // authenticated ciphertext from this source/device, else wildcard.
+          const known=id=>verified.some(x=>x&&x.sourceId===video.source_id&&
+            x.sourceDeviceId===current.sourceDeviceId&&x.streamId===id);
+          if(known(full)&&known(low)){
+            const desired=target.stage==="video_1080p"?full:low;
+            videoStreams=current.streamId===desired?[desired]:[current.streamId,desired];
+          }
+        }
+      }
+    }
+  }
+  const audioSources=sources.slice(0,32-videoStreams.length);
+  // Reserve one audio subscription for the selected video/active speaker,
+  // including when they fall beyond the 32-entry SFU cap. Never add a 33rd.
+  if(video&&audioSources.length&&!audioSources.some(s=>
+     s.source_id===video.source_id&&s.source_kind===video.source_kind)){
+    audioSources[audioSources.length-1]=video;
+  }
+  const audio=audioSources.map(s=>({
+    source_id:s.source_id,source_kind:s.source_kind,media_kind:1,stream_id:null
+  }));
+  for(const stream of videoStreams){
+    audio.push({source_id:video.source_id,source_kind:video.source_kind,
+      media_kind:2,stream_id:stream});
+  }
+  return audio;
+}
+async function applyReceiveSubscriptions(sources,preferredId,generation,session,channel){
+  if(!sessionActive||!mediaActive||!e2eeAdapterReady||generation!==receiveRosterGeneration||
+      claims!==session||e2eeChannel!==channel||channel?.readyState!=="open")return;
+  const subscriptions=planReceiveSubscriptions(sources,preferredId);
+  const fingerprint=JSON.stringify(subscriptions);
+  if(fingerprint===receiveSubscriptionFingerprint&&!receiveSubscriptionInFlight)return;
+  if(receiveSubscriptionInFlight){receiveSubscriptionDirty=true;return;}
+  receiveSubscriptionInFlight=true;
+  try{
+    const response=await api("/v1/realtime/subscriptions",{...body(),subscriptions});
+    if(!response.ok)throw new Error("canonical receive subscriptions rejected");
+    if(sessionActive&&mediaActive&&e2eeAdapterReady&&generation===receiveRosterGeneration&&
+       claims===session&&e2eeChannel===channel&&channel?.readyState==="open"){
+      receiveSubscriptionFingerprint=fingerprint;
+    }
+  }finally{
+    if(generation===receiveRosterGeneration){
+      receiveSubscriptionInFlight=false;
+      if(receiveSubscriptionDirty){
+        receiveSubscriptionDirty=false;
+        // Recompute latest speaker + roster; never submit an older preference
+        // concurrently and overwrite the new participant's subscriptions.
+        Promise.resolve().then(()=>applyReceiveSubscriptions(
+          receiveRosterSources,receiveSpeakerId,receiveRosterGeneration,claims,e2eeChannel
+        )).catch(e=>{if(sessionActive&&e2eeAdapterReady)ui.status.textContent="Protected subscription synchronization failed: "+e.message;});
+      }
+    }
+  }
+}
+async function syncReceiveSubscriptions(){
+  if(!sessionActive||!mediaActive||!e2eeAdapterReady||receiveRosterInFlight||
+      e2eeChannel?.readyState!=="open")return;
+  const generation=receiveRosterGeneration,session=claims,channel=e2eeChannel;
+  receiveRosterInFlight=true;
+  try{
+    const response=await api("/v1/realtime/receive-roster",body());
+    const data=await response.json();
+    const sources=validReceiveRoster(data);
+    if(!sources)throw new Error("invalid canonical receive roster");
+    if(!sessionActive||!mediaActive||!e2eeAdapterReady||
+        generation!==receiveRosterGeneration||claims!==session||
+        e2eeChannel!==channel||channel?.readyState!=="open")return;
+    receiveRosterSources=sources;
+    await applyReceiveSubscriptions(sources,receiveSpeakerId,generation,session,channel);
+  }finally{
+    if(generation===receiveRosterGeneration)receiveRosterInFlight=false;
+  }
+}
+function updateReceiveActiveSpeaker(principalId){
+  if(typeof principalId!=="string"||!receiveRosterSources.some(s=>s.source_id===principalId)){
+    receiveSpeakerCandidate=null;receiveSpeakerSamples=0;return;
+  }
+  if(receiveSpeakerCandidate===principalId)receiveSpeakerSamples++;
+  else{receiveSpeakerCandidate=principalId;receiveSpeakerSamples=1;}
+  if(receiveSpeakerSamples<2||receiveSpeakerId===principalId)return;
+  receiveSpeakerId=principalId;
+  if(e2eeChannel?.readyState==="open"&&e2eeAdapterReady){
+    applyReceiveSubscriptions(receiveRosterSources,receiveSpeakerId,
+      receiveRosterGeneration,claims,e2eeChannel).catch(e=>{
+        if(sessionActive&&e2eeAdapterReady)ui.status.textContent="Protected speaker selection unavailable: "+e.message;
+      });
+  }
+}
 function stopAdaptiveMediaMonitoring(){
+  ++adaptiveMediaGeneration;
   if(adaptiveMediaTimer){clearInterval(adaptiveMediaTimer);adaptiveMediaTimer=null;}
   adaptiveMediaReportInFlight=false;
 }
@@ -1127,26 +1520,80 @@ function validAdaptiveMediaTelemetry(value){
   if(estimated_bandwidth_bps==null||packet_loss_basis_points==null||jitter_ms==null||rtt_ms==null||cpu_utilization_percent==null||battery_percent==null||gpu===null&&value.gpu_utilization_percent!=null||!["nominal","elevated","serious","critical"].includes(thermal)||typeof value.external_power!=="boolean")return null;
   return {estimated_bandwidth_bps,packet_loss_basis_points,jitter_ms,rtt_ms,cpu_utilization_percent,gpu_utilization_percent:gpu,battery_percent,external_power:value.external_power,thermal_state:thermal};
 }
+// A bounded target is advisory to the E2EE endpoint codec, never an authorization grant
+// or permission to publish unencrypted media. Room labels/participant thresholds are not inputs.
+function validAdaptiveQualityTarget(value){
+  if(!value||value.ok!==true||typeof value.stage!=="string")return null;
+  const stages=["video_1080p","video_720p","video_480p","video_low_fps","audio","audio_low_bitrate","eventual_fallback_required"];
+  if(!stages.includes(value.stage))return null;
+  const videoStage=value.stage.startsWith("video_");
+  const video=value.video;
+  if(videoStage){
+    if(!video||typeof video!=="object")return null;
+    for(const [field,min,max] of [["width",1,7680],["height",1,4320],["frame_rate",1,120],["target_bitrate_bps",1,100000000]]){
+      if(!Number.isInteger(video[field])||video[field]<min||video[field]>max)return null;
+    }
+    if(typeof video.codec_capability_id!=="string"||video.codec_capability_id.length===0||video.codec_capability_id.length>128)return null;
+  }else if(video!=null)return null;
+  if(value.opus_target_bitrate_bps!=null&&(!Number.isInteger(value.opus_target_bitrate_bps)||value.opus_target_bitrate_bps<6000||value.opus_target_bitrate_bps>510000))return null;
+  return {
+    stage:value.stage,
+    video:videoStage?{
+      codec_capability_id:video.codec_capability_id,width:video.width,height:video.height,
+      frame_rate:video.frame_rate,target_bitrate_bps:video.target_bitrate_bps
+    }:null,
+    opus_target_bitrate_bps:value.opus_target_bitrate_bps??null
+  };
+}
 async function reportAdaptiveMedia(){
-  if(!sessionActive||!mediaActive||adaptiveMediaReportInFlight)return;
+  if(!sessionActive||!mediaActive||adaptiveMediaReportInFlight||!e2eeAdapterReady||e2eeChannel?.readyState!=="open")return;
   const adapter=e2eeAdapter();
-  if(!adapter||typeof adapter.getAdaptiveMediaTelemetry!=="function")return;
+  if(!adapter||typeof adapter.getReceiveMediaTelemetry!=="function"||typeof adapter.applyReceiveMediaDecision!=="function")return;
   adaptiveMediaReportInFlight=true;
+  const session=claims,channel=e2eeChannel,generation=adaptiveMediaGeneration;
+  const current=()=>sessionActive&&mediaActive&&e2eeAdapterReady&&claims===session&&
+    e2eeChannel===channel&&channel?.readyState==="open"&&adaptiveMediaGeneration===generation;
   try{
-    const telemetry=validAdaptiveMediaTelemetry(await adapter.getAdaptiveMediaTelemetry());
-    if(!telemetry)return;
+    const telemetry=validAdaptiveMediaTelemetry(await adapter.getReceiveMediaTelemetry());
+    if(!telemetry||!current())return;
     const response=await api("/v1/realtime/adaptive-media",{...body(),...telemetry});
+    if(!response.ok)throw new Error("Adaptive media policy rejected telemetry");
     const decision=await response.json();
-    if(decision&&decision.requires_media_renegotiation&&sessionActive&&mediaActive)scheduleWebRtcRetry();
+    const target=validAdaptiveQualityTarget(decision);
+    if(!target)throw new Error("Invalid adaptive media quality target");
+    if(!current())return;
+    // Never restart ICE/WebRTC just to change resolution: that breaks an otherwise good call.
+    // Only the authenticated subscriber endpoint may adjust receive/decode subscriptions; never change the publisher encoder based on this viewer's downlink.
+    if(typeof adapter.applyReceiveMediaDecision!=="function")return;
+    const fingerprint=JSON.stringify(target);
+    if(appliedAdaptiveQuality===fingerprint){
+      // Decode readiness may arrive *after* the quality decision; only then
+      // replace two temporary SFU layers with the newly displayed one.
+      if(receiveRosterSources.length){
+        applyReceiveSubscriptions(receiveRosterSources,receiveSpeakerId,
+          receiveRosterGeneration,claims,e2eeChannel).catch(()=>{});
+      }
+      return;
+    }
+    await adapter.applyReceiveMediaDecision(target);
+    if(current()){
+      appliedAdaptiveQuality=fingerprint;
+      if(receiveRosterSources.length){
+        applyReceiveSubscriptions(receiveRosterSources,receiveSpeakerId,
+          receiveRosterGeneration,claims,e2eeChannel).catch(()=>{});
+      }
+    }
+  }catch(_){
+    if(current())ui.status.textContent="Protected media quality adjustment unavailable; media encryption remains required.";
   }finally{
-    adaptiveMediaReportInFlight=false;
+    if(adaptiveMediaGeneration===generation)adaptiveMediaReportInFlight=false;
   }
 }
 function startAdaptiveMediaMonitoring(){
   stopAdaptiveMediaMonitoring();
   if(!sessionActive||!mediaActive)return;
   const adapter=e2eeAdapter();
-  if(!adapter||typeof adapter.getAdaptiveMediaTelemetry!=="function")return;
+  if(!adapter||typeof adapter.getReceiveMediaTelemetry!=="function"||typeof adapter.applyReceiveMediaDecision!=="function")return;
   adaptiveMediaTimer=setInterval(()=>{reportAdaptiveMedia().catch(()=>{});},2000);
   reportAdaptiveMedia().catch(()=>{});
 }
@@ -1185,6 +1632,11 @@ async function pollActiveSpeaker(){
     const data=await r.json();
     const value=data.participant_id_b64;
     ui.activeSpeaker.textContent=value?tr("activeSpeakerPrefix")+value.slice(0,12)+(value.length>12?"…":""):tr("activeSpeakerNone");
+    let speakerId=null;
+    if(typeof value==="string"&&value.length<=256){
+      try{speakerId=new TextDecoder("utf-8",{fatal:true}).decode(Uint8Array.from(atob(value),c=>c.charCodeAt(0)));}catch(_){}
+    }
+    updateReceiveActiveSpeaker(speakerId);
   }finally{
     activeSpeakerPollInFlight=false;
   }
@@ -1296,8 +1748,12 @@ ui.mic.addEventListener("change",()=>{if(sessionActive&&mediaActive)replaceLocal
 ui.camera.addEventListener("change",()=>{if(sessionActive&&mediaActive)replaceLocalTrack("camera").catch(e=>{ui.status.textContent="Camera switch failed: "+e.message;});});
 try{
   const params=new URLSearchParams(location.hash.slice(1));applyBrandingFromFragment(params);token=params.get("ucr_join")||"";
+  // Signed fragment grants are not shared media secrets.
   if(!token)throw new Error("Missing #ucr_join grant");
   claims=readGrant(token);if(Date.now()>=claims.expires)throw new Error("Join grant has expired");
+  if(window.history&&typeof window.history.replaceState==="function"){
+    window.history.replaceState(window.history.state,"",location.pathname+location.search);
+  }
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
   if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
 }catch(e){fail(e.message);}
@@ -1306,8 +1762,8 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
   navigator.mediaDevices.addEventListener("devicechange",()=>{handleMediaDeviceChange();});
 }
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
-window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry();}});
-window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
+window.addEventListener("pagehide",()=>{++sessionLifecycleGeneration;++mediaCaptureGeneration;if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>

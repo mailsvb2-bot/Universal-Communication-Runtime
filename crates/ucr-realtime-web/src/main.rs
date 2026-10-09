@@ -29,7 +29,30 @@ const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_UPSTREAM: &str = "http://127.0.0.1:50051";
 const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BEARER_BYTES: usize = 4096;
+const MAX_SIGNALING_SDP_BYTES: usize = 256 * 1024;
+const MAX_SIGNALING_ICE_CANDIDATE_BYTES: usize = 4096;
+const MAX_SIGNALING_ICE_MID_BYTES: usize = 256;
 const CLIENT_HTML: &str = include_str!("../static/client.html");
+
+// Generated endpoint-only public code: no secrets, grants or MLS state in these
+// artifacts. The gateway serves only an explicit allowlist, never a directory.
+const REFERENCE_MEDIA_ASSETS: [(&str, &str, &str); 3] = [
+    (
+        "/endpoint-media/reference_browser_media_installer.js",
+        "endpoint-media/reference_browser_media_installer.js",
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "/endpoint-wasm/ucr_endpoint_wasm.js",
+        "endpoint-wasm/ucr_endpoint_wasm.js",
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "/endpoint-wasm/ucr_endpoint_wasm_bg.wasm",
+        "endpoint-wasm/ucr_endpoint_wasm_bg.wasm",
+        "application/wasm",
+    ),
+];
 
 type HttpBody = UnsyncBoxBody<Bytes, Infallible>;
 type HttpResponse = Response<HttpBody>;
@@ -119,6 +142,34 @@ struct ReactionListResponse {
 struct ReactionReceiptResponse {
     ok: bool,
     sequence: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ReceiveRosterSourceResponse {
+    source_id: String,
+    source_kind: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct ReceiveRosterResponse {
+    ok: bool,
+    call_revision: u64,
+    sources: Vec<ReceiveRosterSourceResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserMediaSubscription {
+    source_id: String,
+    source_kind: i32,
+    media_kind: i32,
+    stream_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetMediaSubscriptionsRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    subscriptions: Vec<BrowserMediaSubscription>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -428,8 +479,16 @@ async fn handle_request(
     if method == Method::GET && path == "/healthz" {
         return Ok(text_response(StatusCode::OK, "ok"));
     }
-    if method == Method::GET && matches!(path.as_str(), "/" | "/join" | "/conference") {
+    if method == Method::GET
+        && matches!(
+            path.as_str(),
+            "/" | "/join" | "/conference" | "/client.html"
+        )
+    {
         return Ok(html_response(StatusCode::OK, CLIENT_HTML));
+    }
+    if method == Method::GET && reference_media_asset(&path).is_some() {
+        return Ok(serve_reference_media_asset(&path));
     }
 
     if method != Method::POST {
@@ -490,6 +549,14 @@ async fn handle_post_route(state: &AppState, token: &str, path: &str, body: &[u8
         },
         "/v1/realtime/reactions/list" => match decode_json::<ListReactionsRequest>(body) {
             Ok(input) => list_reactions(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/receive-roster" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => get_receive_roster(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/subscriptions" => match decode_json::<SetMediaSubscriptionsRequest>(body) {
+            Ok(input) => set_media_subscriptions(state, token, input).await,
             Err(error) => error.into_response(),
         },
         "/v1/realtime/adaptive-media" => match decode_json::<AdaptiveMediaRequest>(body) {
@@ -1312,6 +1379,139 @@ async fn get_chat_message(
     }
 }
 
+/// The current accepted sender candidates are projected from the canonical
+/// `CallSession`, after validating this same bearer/session and active admission.
+/// These identities cannot be invented or changed by an untrusted browser.
+async fn get_receive_roster(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+    let mut request = GrpcRequest::new(pb::RealtimeGetReceiveRosterRequest {
+        scope: Some(pb_scope(&input)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+    let mut client = client(state);
+    match client.get_receive_roster(request).await {
+        Ok(reply) => match reply.into_inner().result {
+            Some(pb::realtime_get_receive_roster_response::Result::Roster(roster)) => {
+                let mut sources = Vec::with_capacity(roster.accepted_sources.len());
+                for principal in roster.accepted_sources {
+                    let Some(id) = principal.principal_id else {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "invalid_roster",
+                            "canonical source identity unavailable",
+                        );
+                    };
+                    let Ok(source_id) = String::from_utf8(id.value) else {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "unsupported_roster_id",
+                            "canonical source identity cannot be represented in browser",
+                        );
+                    };
+                    if !valid_subscription_id(&source_id) {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "invalid_roster_id",
+                            "canonical source identity exceeds browser bounds",
+                        );
+                    }
+                    sources.push(ReceiveRosterSourceResponse {
+                        source_id,
+                        source_kind: principal.kind,
+                    });
+                }
+                json_response(
+                    StatusCode::OK,
+                    &ReceiveRosterResponse {
+                        ok: true,
+                        call_revision: roster.call_revision,
+                        sources,
+                    },
+                )
+            }
+            Some(pb::realtime_get_receive_roster_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "receive_roster_rejected",
+                "canonical receive roster unavailable or access revoked",
+            ),
+        },
+        Err(error) => grpc_error(&error),
+    }
+}
+
+/// Replace only this authenticated viewer's ephemeral receive set. Exact stream IDs
+/// allow the current canonical SFU to forward a selected ciphertext layer without
+/// decoding frames or changing any publisher's shared encoder.
+async fn set_media_subscriptions(
+    state: &AppState,
+    token: &str,
+    input: SetMediaSubscriptionsRequest,
+) -> HttpResponse {
+    if input.subscriptions.len() > 32 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "too_many_subscriptions",
+            "subscriber stream selection exceeds capacity",
+        );
+    }
+    let mut layers = Vec::with_capacity(input.subscriptions.len());
+    for item in input.subscriptions {
+        if !valid_subscription_id(&item.source_id)
+            || item
+                .stream_id
+                .as_ref()
+                .is_some_and(|id| !valid_subscription_id(id))
+            || item.media_kind != pb::MediaKind::Audio as i32
+                && item.media_kind != pb::MediaKind::Video as i32
+            || item.media_kind == pb::MediaKind::Audio as i32 && item.stream_id.is_some()
+        {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_stream_selection",
+                "invalid subscriber source or encrypted video stream",
+            );
+        }
+        layers.push(pb::ConferenceMediaSubscription {
+            source: Some(pb::PrincipalRef {
+                principal_id: Some(pb_id(&item.source_id)),
+                kind: item.source_kind,
+            }),
+            media_kind: item.media_kind,
+            stream_id: item.stream_id.as_deref().map(pb_id),
+        });
+    }
+    let mut request = GrpcRequest::new(pb::RealtimeSetSubscriptionsRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        subscriptions: layers,
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+    let mut client = client(state);
+    match client.set_subscriptions(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_set_subscriptions_response::Result::Acknowledgement(_)) => {
+                json_response(StatusCode::OK, &serde_json::json!({"ok": true}))
+            }
+            Some(pb::realtime_set_subscriptions_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "subscription_rejected",
+                "canonical subscriber selection denied",
+            ),
+        },
+        Err(error) => grpc_error(&error),
+    }
+}
+
+fn valid_subscription_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
+}
+
 async fn report_adaptive_media(
     state: &AppState,
     token: &str,
@@ -1694,6 +1894,13 @@ async fn set_webrtc_remote_description(
     token: &str,
     input: WebRtcRemoteDescriptionRequest,
 ) -> HttpResponse {
+    if !valid_sdp(&input.sdp) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_sdp",
+            "WebRTC SDP exceeds bounds or has invalid content",
+        );
+    }
     let sdp_type = match input.sdp_type.as_str() {
         "offer" => pb::WebRtcSdpType::Offer as i32,
         "answer" => pb::WebRtcSdpType::Answer as i32,
@@ -1751,6 +1958,13 @@ async fn add_webrtc_ice_candidate(
     token: &str,
     input: WebRtcIceCandidateRequest,
 ) -> HttpResponse {
+    if !valid_ice_candidate(&input.candidate, input.sdp_mid.as_deref()) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_ice_candidate",
+            "WebRTC ICE candidate exceeds bounds or has invalid content",
+        );
+    }
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeAddWebRtcIceCandidateRequest {
         scope: Some(pb_scope(&input.session)),
@@ -1869,6 +2083,24 @@ async fn bounded_body(body: Incoming) -> Result<Bytes, GatewayFailure> {
         ));
     }
     Ok(bytes)
+}
+
+fn valid_sdp(sdp: &str) -> bool {
+    !sdp.is_empty() && sdp.len() <= MAX_SIGNALING_SDP_BYTES && !sdp.bytes().any(|byte| byte == 0)
+}
+
+fn valid_ice_candidate(candidate: &str, mid: Option<&str>) -> bool {
+    !candidate.is_empty()
+        && candidate.len() <= MAX_SIGNALING_ICE_CANDIDATE_BYTES
+        && !candidate
+            .bytes()
+            .any(|byte| byte == 0 || byte == b'\n' || byte == b'\r')
+        && mid.is_none_or(|value| {
+            value.len() <= MAX_SIGNALING_ICE_MID_BYTES
+                && !value
+                    .bytes()
+                    .any(|byte| byte == 0 || byte == b'\n' || byte == b'\r')
+        })
 }
 
 fn decode_json<T>(body: &[u8]) -> Result<T, GatewayFailure>
@@ -2136,6 +2368,40 @@ fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> HttpResponse 
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
+fn reference_media_asset(path: &str) -> Option<(&'static str, &'static str)> {
+    REFERENCE_MEDIA_ASSETS
+        .iter()
+        .find(|(route, _, _)| *route == path)
+        .map(|(_, file, mime)| (*file, *mime))
+}
+
+fn serve_reference_media_asset(path: &str) -> HttpResponse {
+    let Some((file, mime)) = reference_media_asset(path) else {
+        return empty_response(StatusCode::NOT_FOUND);
+    };
+    // A deployment must provide the exact WASM and SDK bundles built for its
+    // source revision. Never generate an adapter dynamically or load a remote
+    // untrusted CDN script. Missing assets fail closed, not to plaintext media.
+    let directory = std::env::var_os("UCR_REALTIME_WEB_ASSET_DIR").map_or_else(
+        || std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
+        std::path::PathBuf::from,
+    );
+    match std::fs::read(directory.join(file)) {
+        Ok(bytes) if !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024 => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, mime)
+            .header(CACHE_CONTROL, "no-store")
+            .header("X-Content-Type-Options", "nosniff")
+            .body(full_body(Bytes::from(bytes)))
+            .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR)),
+        _ => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "endpoint_media_asset_missing",
+            "Authorized endpoint E2EE package not installed on the gateway",
+        ),
+    }
+}
+
 fn html_response(status: StatusCode, html: &'static str) -> HttpResponse {
     Response::builder()
         .status(status)
@@ -2168,6 +2434,75 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_webrtc_signaling_rejects_malformed_or_oversized_inputs() {
+        assert!(valid_sdp("v=0\r\n"));
+        assert!(!valid_sdp(""));
+        assert!(!valid_sdp(&"a".repeat(MAX_SIGNALING_SDP_BYTES + 1)));
+        assert!(!valid_sdp("v=0\0"));
+        assert!(valid_ice_candidate(
+            "candidate:1 1 udp 1 127.0.0.1 1234 typ host",
+            Some("0")
+        ));
+        assert!(!valid_ice_candidate("", None));
+        assert!(!valid_ice_candidate(
+            &"x".repeat(MAX_SIGNALING_ICE_CANDIDATE_BYTES + 1),
+            None
+        ));
+        assert!(!valid_ice_candidate("candidate:1\nspoof", None));
+        assert!(!valid_ice_candidate("candidate:1", Some("x\rspoof")));
+        assert!(!valid_ice_candidate(
+            "candidate:1",
+            Some(&"x".repeat(MAX_SIGNALING_ICE_MID_BYTES + 1))
+        ));
+    }
+
+    #[test]
+    fn browser_privacy_modes_restrict_network_and_preserve_fragment_grant() {
+        assert!(CLIENT_HTML.contains("id=\"privacy-mode\""));
+        assert!(CLIENT_HTML.contains("iceTransportPolicy:mode===\"private\"?\"relay\":\"all\""));
+        assert!(CLIENT_HTML.contains("Higher privacy requires configured TURN relay"));
+        assert!(CLIENT_HTML.contains("ui.privacyMode.disabled=true"));
+        assert!(CLIENT_HTML.contains("ui.privacyMode.disabled=false"));
+        assert!(CLIENT_HTML.contains("token=params.get(\"ucr_join\")"));
+        assert!(CLIENT_HTML.contains("window.history.replaceState("));
+        assert!(CLIENT_HTML.contains("location.pathname+location.search"));
+        assert!(CLIENT_HTML.contains("claims=readGrant(token);if(Date.now()>=claims.expires)"));
+
+        assert!(CLIENT_HTML.contains("Independent privacy relay is not configured"));
+        assert!(CLIENT_HTML.contains("adapter===e2eeManagedAdapter"));
+        assert!(CLIENT_HTML.contains("delete window.ucrE2eeEndpoint"));
+        assert!(CLIENT_HTML.contains("e2eeManagedAdapter=installed"));
+        assert!(CLIENT_HTML.contains("pc.setConfiguration(rtcNetworkConfiguration("));
+        assert!(CLIENT_HTML.contains("Endpoint E2EE adapter failed; encrypted transport closed"));
+        // Closing the encrypted DataChannel is terminal for its old media
+        // signer. A new peer and fresh canonical admission are required.
+        // The previous single-line test rejected this stricter recovery path.
+        for required in [
+            "channel.onclose=()=>{if(e2eeChannel===channel){",
+            "webrtcNeedsPeerRebuild=true;",
+            "closeE2eeTransport();",
+            "scheduleWebRtcRetry();",
+            "if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}",
+            "webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;",
+        ] {
+            assert!(
+                CLIENT_HTML.contains(required),
+                "secure E2EE DataChannel rebuild contract missing: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_e2ee_activation_rejects_stale_channels() {
+        assert!(CLIENT_HTML.contains("e2eeActivationGeneration"));
+        assert!(
+            CLIENT_HTML.contains("Encrypted media session changed during adapter installation")
+        );
+        assert!(CLIENT_HTML.contains("Encrypted media session changed during startup"));
+        assert!(CLIENT_HTML.contains("if(e2eeChannel!==channel)return;"));
+    }
 
     #[test]
     fn browser_client_exposes_live_webrtc_media_and_reconnect_flow() {
@@ -2276,6 +2611,27 @@ mod tests {
             response.headers().get(CACHE_CONTROL),
             Some(&hyper::header::HeaderValue::from_static("no-store"))
         );
+    }
+
+    #[test]
+    fn browser_media_assets_use_only_fixed_local_paths_and_correct_mime() {
+        assert_eq!(
+            reference_media_asset("/endpoint-wasm/ucr_endpoint_wasm_bg.wasm"),
+            Some((
+                "endpoint-wasm/ucr_endpoint_wasm_bg.wasm",
+                "application/wasm"
+            )),
+        );
+        assert_eq!(
+            reference_media_asset("/endpoint-media/reference_browser_media_installer.js"),
+            Some((
+                "endpoint-media/reference_browser_media_installer.js",
+                "text/javascript; charset=utf-8",
+            )),
+        );
+        assert!(reference_media_asset("/endpoint-wasm/../private.key").is_none());
+        assert!(reference_media_asset("/endpoint-media/signing-seed").is_none());
+        assert!(reference_media_asset("/client.html").is_none());
     }
 
     #[test]

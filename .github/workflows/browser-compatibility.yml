@@ -59,6 +59,16 @@ jobs:
           wasm-bindgen             "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm"             --target web             --out-dir crates/ucr-realtime-web/static/endpoint-wasm             --out-name ucr_endpoint_wasm
           test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm.js
           test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm_bg.wasm
+      - name: Bundle canonical browser endpoint media installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p crates/ucr-realtime-web/static/endpoint-media
+          npm exec --yes --package=esbuild@0.25.5 -- \
+            esbuild sdk/typescript/src/reference_browser_media_installer.ts \
+            --bundle --format=esm --platform=browser --target=es2022 \
+            --outfile=crates/ucr-realtime-web/static/endpoint-media/reference_browser_media_installer.js
+          test -s crates/ucr-realtime-web/static/endpoint-media/reference_browser_media_installer.js
       - name: Enable Safari WebDriver
         if: matrix.browser == 'safari'
         run: sudo safaridriver --enable

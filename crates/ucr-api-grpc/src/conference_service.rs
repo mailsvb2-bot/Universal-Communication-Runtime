@@ -478,6 +478,10 @@ fn decode_subscription_set(
                         subscription.source.ok_or_else(invalid_argument)?,
                     )?,
                     media_kind: decode_media_kind(subscription.media_kind)?,
+                    stream_id: subscription
+                        .stream_id
+                        .map(|opaque| decode_opaque(Some(opaque)))
+                        .transpose()?,
                 })
             })
             .collect::<Result<Vec<_>, CanonicalError>>()?,
@@ -622,7 +626,8 @@ fn map_conference_protocol_error(error: ConferenceProtocolError) -> CanonicalErr
         | ConferenceProtocolError::GroupMismatch
         | ConferenceProtocolError::MissingMlsState
         | ConferenceProtocolError::DuplicateSubscription
-        | ConferenceProtocolError::SelfSubscription => {
+        | ConferenceProtocolError::SelfSubscription
+        | ConferenceProtocolError::InvalidStreamSelection => {
             CanonicalError::new(CanonicalErrorCode::InvalidArgument)
         }
     }

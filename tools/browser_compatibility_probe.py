@@ -329,6 +329,46 @@ Promise.resolve()
             raise RuntimeError(
                 f"endpoint WASM browser execution failed: {endpoint_wasm_execution!r}"
             )
+        # Import the SAME ESM bundle that the actual DataChannel will load.
+        # With no canonical device signer/trusted keys provisioned, activation
+        # must refuse rather than creating keys in JS or falling back to RTP.
+        media_installer_probe = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+Promise.resolve().then(async () => {
+  const module = await import("./endpoint-media/reference_browser_media_installer.js");
+  let denied = "";
+  try {
+    await module.installUcrReferenceBrowserMedia({
+      state: {}, groupId: "probe-group",
+      claims: {
+        tenantId: "probe-tenant", namespaceId: null,
+        callId: "probe-call", participantId: "probe-person",
+        participantKind: "person", deviceId: "probe-device",
+        sessionId: "probe-session"
+      },
+      loadWasm: () => window.ucrEndpointWasm.load()
+    });
+  } catch (error) { denied = String(error); }
+  done({
+    ok: typeof module.installUcrReferenceBrowserMedia === "function" &&
+      denied.includes("Canonical device media signing/trust authority is not wired"),
+    entrypoint: typeof module.installUcrReferenceBrowserMedia,
+    noAuthorityRejected: denied.includes("Canonical device media signing/trust authority is not wired")
+  });
+}).catch(error => done({ok: false, error: String(error)}));
+""",
+        )
+        media_installer_verified = (
+            isinstance(media_installer_probe, dict)
+            and media_installer_probe.get("ok") is True
+        )
+        if not media_installer_verified:
+            raise RuntimeError(
+                f"bundled E2EE installer did not reject missing canonical authority: "
+                f"{media_installer_probe!r}"
+            )
         legacy_key = f"ucr-browser-legacy-{args.browser}"
         legacy_bytes = [11, 22, 33, 44, 55]
         legacy_upgrade = execute_async(
@@ -717,6 +757,76 @@ Promise.resolve()
             and vault_after.get("ok") is True
         )
 
+        # Real browser codec execution, not a capability-name checkbox. This synthetic
+        # local frame probe is intentionally NOT evidence of WAN/TURN or two-device QoE.
+        full_hd_codec_probe = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+(async () => {
+  if (typeof VideoEncoder !== "function" || typeof VideoDecoder !== "function" ||
+      typeof VideoFrame !== "function" || typeof OffscreenCanvas !== "function") {
+    return {supported: false, reason: "WebCodecs encode/decode or canvas unavailable"};
+  }
+  const config = {codec: "vp8", width: 1920, height: 1080,
+    bitrate: 4000000, framerate: 30, latencyMode: "realtime"};
+  const supported = await VideoEncoder.isConfigSupported(config);
+  if (!supported.supported) return {supported: false, reason: "Full HD VP8 encoder unsupported"};
+  let encodedBytes = 0, decodedWidth = 0, decodedHeight = 0, decodedFrames = 0;
+  const start = performance.now();
+  const decoder = new VideoDecoder({
+    output(frame) {
+      decodedWidth = frame.displayWidth;
+      decodedHeight = frame.displayHeight;
+      decodedFrames++;
+      frame.close();
+    },
+    error(error) { throw error; }
+  });
+  decoder.configure({codec: "vp8"});
+  const encoder = new VideoEncoder({
+    output(chunk) {
+      encodedBytes += chunk.byteLength;
+      const payload = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(payload);
+      decoder.decode(new EncodedVideoChunk({
+        type: chunk.type, timestamp: chunk.timestamp, data: payload
+      }));
+    },
+    error(error) { throw error; }
+  });
+  try {
+    encoder.configure(config);
+    const canvas = new OffscreenCanvas(1920, 1080);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("synthetic Full HD canvas unavailable");
+    const pixels = ctx.createLinearGradient(0, 0, 1920, 1080);
+    pixels.addColorStop(0, "#153a60");
+    pixels.addColorStop(1, "#f4c251");
+    ctx.fillStyle = pixels;
+    ctx.fillRect(0, 0, 1920, 1080);
+    const frame = new VideoFrame(canvas, {timestamp: 0});
+    try { encoder.encode(frame, {keyFrame: true}); } finally { frame.close(); }
+    await encoder.flush();
+    await decoder.flush();
+    return {supported: true, codec: "vp8", sourceWidth: 1920,
+      sourceHeight: 1080, decodedWidth, decodedHeight, decodedFrames,
+      encodedBytes, localEncodeDecodeMs: Math.round(performance.now() - start),
+      verified: decodedWidth === 1920 && decodedHeight === 1080 &&
+        decodedFrames >= 1 && encodedBytes > 0};
+  } finally {
+    encoder.close();
+    decoder.close();
+  }
+})().then(done).catch(error => done({supported: true, verified: false,
+  error: String(error)}));
+""",
+        )
+        if not isinstance(full_hd_codec_probe, dict):
+            raise RuntimeError("Full HD codec probe did not return structured browser evidence")
+        if full_hd_codec_probe.get("supported") and not full_hd_codec_probe.get("verified"):
+            raise RuntimeError(f"Full HD codec encode/decode failed: {full_hd_codec_probe!r}")
+
         branding_failures = []
         if probe.get("brandName") != "UCR Browser Probe":
             branding_failures.append("brandName")
@@ -790,6 +900,13 @@ Promise.resolve()
             "platform_name": reported.get("platformName"),
             "evidence_kind": "real-desktop-browser-webdriver-smoke",
             "probe": probe,
+            "full_hd_local_codec_probe": full_hd_codec_probe,
+            "full_hd_local_codec_probe_kind": "real-browser-synthetic-frame-no-network",
+            "endpoint_media_installer": {
+                "module_imported": media_installer_verified,
+                "no_authority_fails_closed": media_installer_probe.get("noAuthorityRejected") is True,
+                "probe": media_installer_probe,
+            },
             "endpoint_wasm_execution": {
                 "contract": probe.get("endpointWasmContract"),
                 "generated_package_loaded": endpoint_wasm_execution_verified,
@@ -832,6 +949,8 @@ Promise.resolve()
                 "display_capture_api_observed": bool(probe.get("getDisplayMedia")),
                 "media_permissions_exercised": False,
                 "conference_network_join_exercised": False,
+                "two_real_devices_exercised": False,
+                "public_turn_traversal_exercised": False,
                 "endpoint_state_reload_exercised": True,
                 "generated_endpoint_wasm_exercised": True,
                 "openmls_key_package_generation_exercised": True,

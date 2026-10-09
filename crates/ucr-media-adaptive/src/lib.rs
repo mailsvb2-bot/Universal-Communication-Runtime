@@ -118,6 +118,204 @@ impl AdaptiveMediaController {
     }
 }
 
+/// An already-authorized, already-encrypted quality layer advertised by the existing media owner.
+/// This is selection metadata only: no stream, route, key, subscription or permission authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewerVideoLayer {
+    pub spatial_id: u8,
+    pub width: u32,
+    pub height: u32,
+    pub frame_rate: u32,
+    pub bitrate_bps: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerLayerSelectionError {
+    TooManyLayers,
+    InvalidLayer,
+    DuplicateLayer,
+    InvalidViewport,
+}
+
+/// Pick the highest actually available decodable quality layer for **one viewer**.
+/// Callers must first validate subscription permission and E2EE/epoch bindings through canonical
+/// owners. This helper cannot authorize a feed or cause a transport switch.
+///
+/// A thumbnail has no reason to consume a Full HD layer; a pinned Full HD viewport gets the
+/// highest fitting layer if the adaptive network/device stage permits it. Participant count,
+/// room name and the words "webinar" / "conference" are intentionally not inputs.
+///
+/// A missing fitting layer is returned as None, never faked by an upscaled source.
+/// Audio-only stages also select no video. Invalid/duplicate metadata fails closed.
+/// No layer is synthesized and no plaintext access is required.
+///
+/// # Errors
+/// Returns a bounded metadata error for invalid viewport dimensions, more than eight layers,
+/// malformed layer properties, or duplicate spatial IDs.
+pub fn select_viewer_video_layer(
+    stage: AdaptiveMediaStage,
+    viewport_width: u32,
+    viewport_height: u32,
+    layers: &[ViewerVideoLayer],
+) -> Result<Option<ViewerVideoLayer>, ViewerLayerSelectionError> {
+    if viewport_width == 0
+        || viewport_height == 0
+        || viewport_width > 7680
+        || viewport_height > 4320
+    {
+        return Err(ViewerLayerSelectionError::InvalidViewport);
+    }
+    if layers.len() > 8 {
+        return Err(ViewerLayerSelectionError::TooManyLayers);
+    }
+    for (i, layer) in layers.iter().enumerate() {
+        if layer.width == 0
+            || layer.height == 0
+            || layer.width > 7680
+            || layer.height > 4320
+            || layer.frame_rate == 0
+            || layer.frame_rate > 120
+            || layer.bitrate_bps == 0
+            || layer.bitrate_bps > 100_000_000
+        {
+            return Err(ViewerLayerSelectionError::InvalidLayer);
+        }
+        if layers[..i]
+            .iter()
+            .any(|prior| prior.spatial_id == layer.spatial_id)
+        {
+            return Err(ViewerLayerSelectionError::DuplicateLayer);
+        }
+    }
+
+    let config =
+        reference_video_config(stage).map_err(|_| ViewerLayerSelectionError::InvalidLayer)?;
+    let Some(ceiling) = config else {
+        return Ok(None);
+    };
+    let max_width = viewport_width.min(ceiling.width);
+    let max_height = viewport_height.min(ceiling.height);
+    Ok(layers
+        .iter()
+        .copied()
+        .filter(|layer| {
+            layer.width <= max_width
+                && layer.height <= max_height
+                && layer.bitrate_bps <= ceiling.target_bitrate_bps
+                && layer.frame_rate <= ceiling.frame_rate
+        })
+        .max_by_key(|layer| {
+            (
+                u64::from(layer.width) * u64::from(layer.height),
+                layer.frame_rate,
+                layer.bitrate_bps,
+            )
+        }))
+}
+
+/// Ephemeral per-subscriber hysteresis. Quality drop and authorization-driven removal are
+/// immediate; restoration to a better *actually available* layer requires two valid observations.
+/// Never owns subscription, Call, E2EE epoch, codec, transport or publisher state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewerLayerController {
+    selected: Option<ViewerVideoLayer>,
+    pending_improvement: Option<ViewerVideoLayer>,
+    improvement_samples: u8,
+}
+
+impl ViewerLayerController {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            selected: None,
+            pending_improvement: None,
+            improvement_samples: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn selected(&self) -> Option<ViewerVideoLayer> {
+        self.selected
+    }
+
+    /// Recompute one subscriber's layer from already-authorized advertised options.
+    ///
+    /// # Errors
+    /// Returns bounded metadata errors without changing the current selection.
+    pub fn observe(
+        &mut self,
+        stage: AdaptiveMediaStage,
+        viewport_width: u32,
+        viewport_height: u32,
+        layers: &[ViewerVideoLayer],
+    ) -> Result<Option<ViewerVideoLayer>, ViewerLayerSelectionError> {
+        let preferred = select_viewer_video_layer(stage, viewport_width, viewport_height, layers)?;
+        let Some(candidate) = preferred else {
+            self.selected = None;
+            self.pending_improvement = None;
+            self.improvement_samples = 0;
+            return Ok(None);
+        };
+        let current = self.selected;
+        let current_still_suitable = current.is_some_and(|old| {
+            layers.contains(&old)
+                && old.width <= viewport_width
+                && old.height <= viewport_height
+                && reference_video_config(stage).is_ok_and(|cfg| {
+                    cfg.is_some_and(|cap| {
+                        old.width <= cap.width
+                            && old.height <= cap.height
+                            && old.frame_rate <= cap.frame_rate
+                            && old.bitrate_bps <= cap.target_bitrate_bps
+                    })
+                })
+        });
+        if !current_still_suitable {
+            self.selected = Some(candidate);
+            self.pending_improvement = None;
+            self.improvement_samples = 0;
+            return Ok(self.selected);
+        }
+        if current == Some(candidate) {
+            self.pending_improvement = None;
+            self.improvement_samples = 0;
+            return Ok(self.selected);
+        }
+        let Some(current) = current else {
+            return Ok(self.selected);
+        };
+        let candidate_pixels = u64::from(candidate.width) * u64::from(candidate.height);
+        let current_pixels = u64::from(current.width) * u64::from(current.height);
+        if (
+            candidate_pixels,
+            candidate.frame_rate,
+            candidate.bitrate_bps,
+        ) < (current_pixels, current.frame_rate, current.bitrate_bps)
+        {
+            self.selected = Some(candidate);
+            self.pending_improvement = None;
+            self.improvement_samples = 0;
+        } else if self.pending_improvement == Some(candidate) {
+            self.improvement_samples = self.improvement_samples.saturating_add(1);
+            if self.improvement_samples >= 2 {
+                self.selected = Some(candidate);
+                self.pending_improvement = None;
+                self.improvement_samples = 0;
+            }
+        } else {
+            self.pending_improvement = Some(candidate);
+            self.improvement_samples = 1;
+        }
+        Ok(self.selected)
+    }
+}
+
+impl Default for ViewerLayerController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ucr_model::{
@@ -126,6 +324,240 @@ mod tests {
     };
 
     use super::AdaptiveMediaController;
+
+    #[test]
+    fn viewer_quality_follows_viewport_and_telemetry_not_conference_label_or_count() {
+        let layers = [
+            super::ViewerVideoLayer {
+                spatial_id: 0,
+                width: 640,
+                height: 360,
+                frame_rate: 15,
+                bitrate_bps: 300_000,
+            },
+            super::ViewerVideoLayer {
+                spatial_id: 1,
+                width: 1280,
+                height: 720,
+                frame_rate: 30,
+                bitrate_bps: 1_800_000,
+            },
+            super::ViewerVideoLayer {
+                spatial_id: 2,
+                width: 1920,
+                height: 1080,
+                frame_rate: 30,
+                bitrate_bps: 3_500_000,
+            },
+        ];
+        let pick = |stage, width, height| {
+            super::select_viewer_video_layer(stage, width, height, &layers).expect("valid")
+        };
+        assert_eq!(
+            pick(AdaptiveMediaStage::Video1080p, 1920, 1080),
+            Some(layers[2])
+        );
+        assert_eq!(
+            pick(AdaptiveMediaStage::Video1080p, 1280, 720),
+            Some(layers[1])
+        );
+        assert_eq!(
+            pick(AdaptiveMediaStage::Video1080p, 640, 360),
+            Some(layers[0])
+        );
+        assert_eq!(
+            pick(AdaptiveMediaStage::Video720p, 1920, 1080),
+            Some(layers[1])
+        );
+        assert_eq!(
+            pick(AdaptiveMediaStage::Video480p, 1920, 1080),
+            Some(layers[0])
+        );
+        assert_eq!(pick(AdaptiveMediaStage::Audio, 1920, 1080), None);
+        assert_eq!(
+            pick(AdaptiveMediaStage::EventualFallbackRequired, 1920, 1080),
+            None
+        );
+    }
+
+    #[test]
+    fn viewer_quality_never_invents_full_hd_or_accepts_untrusted_layer_metadata() {
+        use super::{
+            ViewerLayerSelectionError as Error, ViewerVideoLayer as Layer,
+            select_viewer_video_layer as select,
+        };
+        let small = Layer {
+            spatial_id: 0,
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            bitrate_bps: 300_000,
+        };
+        assert_eq!(
+            select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[small]),
+            Ok(Some(small))
+        );
+        assert_eq!(
+            select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[]),
+            Ok(None)
+        );
+        assert_eq!(
+            select(AdaptiveMediaStage::Video1080p, 0, 1080, &[small]),
+            Err(Error::InvalidViewport)
+        );
+        assert_eq!(
+            select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[small, small]),
+            Err(Error::DuplicateLayer)
+        );
+        assert_eq!(
+            select(
+                AdaptiveMediaStage::Video1080p,
+                1920,
+                1080,
+                &[Layer {
+                    bitrate_bps: 0,
+                    ..small
+                }]
+            ),
+            Err(Error::InvalidLayer)
+        );
+        assert_eq!(
+            select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[small; 9]),
+            Err(Error::TooManyLayers)
+        );
+        assert_eq!(
+            select(
+                AdaptiveMediaStage::Video1080p,
+                1920,
+                1080,
+                &[Layer {
+                    spatial_id: 1,
+                    width: 3840,
+                    height: 2160,
+                    frame_rate: 60,
+                    bitrate_bps: 12_000_000
+                }]
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn quality_selection_scales_across_thousand_independent_viewers_without_a_room_mode() {
+        let layers = [
+            super::ViewerVideoLayer {
+                spatial_id: 0,
+                width: 640,
+                height: 360,
+                frame_rate: 12,
+                bitrate_bps: 300_000,
+            },
+            super::ViewerVideoLayer {
+                spatial_id: 1,
+                width: 1280,
+                height: 720,
+                frame_rate: 30,
+                bitrate_bps: 1_800_000,
+            },
+            super::ViewerVideoLayer {
+                spatial_id: 2,
+                width: 1920,
+                height: 1080,
+                frame_rate: 30,
+                bitrate_bps: 3_500_000,
+            },
+        ];
+        for viewer in 0..1_000 {
+            let (stage, width, height, expected) = match viewer % 4 {
+                0 => (AdaptiveMediaStage::Video1080p, 1920, 1080, Some(layers[2])),
+                1 => (AdaptiveMediaStage::Video720p, 1920, 1080, Some(layers[1])),
+                2 => (AdaptiveMediaStage::Video1080p, 640, 360, Some(layers[0])),
+                _ => (AdaptiveMediaStage::Audio, 1920, 1080, None),
+            };
+            assert_eq!(
+                super::select_viewer_video_layer(stage, width, height, &layers),
+                Ok(expected),
+                "unexpected layer for viewer {viewer}"
+            );
+        }
+    }
+
+    #[test]
+    fn subscriber_switches_down_immediately_and_up_only_after_stable_samples() {
+        let lower = super::ViewerVideoLayer {
+            spatial_id: 0,
+            width: 640,
+            height: 360,
+            frame_rate: 12,
+            bitrate_bps: 300_000,
+        };
+        let higher = super::ViewerVideoLayer {
+            spatial_id: 1,
+            width: 1920,
+            height: 1080,
+            frame_rate: 30,
+            bitrate_bps: 3_500_000,
+        };
+        let layers = [lower, higher];
+        let mut receiver = super::ViewerLayerController::new();
+        let observe = |controller: &mut super::ViewerLayerController, stage| {
+            controller
+                .observe(stage, 1920, 1080, &layers)
+                .expect("bounded viewer quality")
+        };
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::Video1080p),
+            Some(higher)
+        );
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::VideoLowFps),
+            Some(lower)
+        );
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::Video1080p),
+            Some(lower)
+        );
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::VideoLowFps),
+            Some(lower)
+        );
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::Video1080p),
+            Some(lower)
+        );
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::Video1080p),
+            Some(higher)
+        );
+        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Audio), None);
+        assert_eq!(receiver.selected(), None);
+    }
+
+    #[test]
+    fn subscriber_selection_rejects_invalid_updates_without_changing_running_layer() {
+        let valid = super::ViewerVideoLayer {
+            spatial_id: 0,
+            width: 640,
+            height: 360,
+            frame_rate: 12,
+            bitrate_bps: 300_000,
+        };
+        let mut receiver = super::ViewerLayerController::default();
+        assert_eq!(
+            receiver.observe(AdaptiveMediaStage::Video1080p, 640, 360, &[valid]),
+            Ok(Some(valid))
+        );
+        assert_eq!(
+            receiver.observe(AdaptiveMediaStage::Video1080p, 0, 360, &[valid]),
+            Err(super::ViewerLayerSelectionError::InvalidViewport)
+        );
+        assert_eq!(receiver.selected(), Some(valid));
+        assert_eq!(
+            receiver.observe(AdaptiveMediaStage::Video1080p, 640, 360, &[]),
+            Ok(None)
+        );
+        assert_eq!(receiver.selected(), None);
+    }
 
     fn ideal() -> AdaptiveMediaTelemetry {
         AdaptiveMediaTelemetry {
