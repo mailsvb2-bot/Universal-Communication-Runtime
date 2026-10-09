@@ -465,6 +465,44 @@ assert.doesNotThrow(() => strictAdapterCtx.verifyAdapter({
   start() {}, onEnvelope() {}, stop() {},
 }));
 
+// Production device preflight: never trigger a camera prompt, signaling, or
+// MLS registration when the canonical trusted Device media host is absent.
+const preflightSnippet = browser.slice(
+  browser.indexOf("function requireCanonicalMediaHostReady(){"),
+  browser.indexOf("function closeE2eeTransport(){"),
+);
+assert.ok(preflightSnippet.startsWith("function requireCanonicalMediaHostReady(){"));
+const preflightCtx: Record<string, any> = {
+  window: {}, e2eeAdapter: () => null,
+  requireCompatibleE2eeAdapter: (x: any) => x,
+};
+runInNewContext(preflightSnippet +
+  "\nthis.preflight = requireCanonicalMediaHostReady;", preflightCtx);
+assert.throws(() => preflightCtx.preflight(), /Canonical Device signing\/trust integration is unavailable/);
+preflightCtx.window.ucrCanonicalAuthorizedMediaFactory = () => ({});
+assert.doesNotThrow(() => preflightCtx.preflight(),
+  "registered host authority allows capture to proceed to real E2EE validation");
+delete preflightCtx.window.ucrCanonicalAuthorizedMediaFactory;
+preflightCtx.window.ucrInstallAuthorizedMediaEndpoint = () => ({});
+assert.doesNotThrow(() => preflightCtx.preflight(),
+  "custom canonical host installer is permitted only under later strict E2EE checks");
+delete preflightCtx.window.ucrInstallAuthorizedMediaEndpoint;
+let unexpectedCapture = 0, unexpectedSignalling = 0;
+const earlyBlockedCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, navigator: {onLine: true},
+  claims: {expires: Date.now() + 5000},
+  ui: {privacyMode: {value: "secure"}},
+  mediaCaptureGeneration: 1,
+  requireCanonicalMediaHostReady: preflightCtx.preflight,
+  ensureLocalMedia: async () => {unexpectedCapture++;},
+  api: async () => {unexpectedSignalling++;},
+};
+runInNewContext(startCode + "\nthis.start = startWebRtc;", earlyBlockedCtx);
+await assert.rejects(earlyBlockedCtx.start(),
+  /Canonical Device signing\/trust integration is unavailable/);
+assert.equal(unexpectedCapture, 0, "no microphone/camera prompt without trusted signer");
+assert.equal(unexpectedSignalling, 0, "no network offer without trusted signer");
+
 // Chameleon lifecycle: no telemetry may be reported before the endpoint is
 // authenticated and running; the first report must start after E2EE activation.
 const activateSnippet = browser.slice(
@@ -667,6 +705,7 @@ const startCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   navigator: {onLine: true},
   ui: {privacyMode: {value: "secure"}},
+  requireCanonicalMediaHostReady() {},
   ensureLocalMedia: async () => startCaptureGate,
   api: async () => { staleServerStarts++; throw new Error("stale server peer opened"); },
 };
@@ -713,6 +752,7 @@ const admissionCtx: Record<string, any> = {
   ui: admissionUi, claims: {not_before: 0}, sessionActive: true,
   mediaActive: true, mediaCaptureGeneration: 0, sessionLifecycleGeneration: 0,
   heartbeatRequestGeneration: 0,
+  requireCanonicalMediaHostReady() {},
   endpointMlsInvalidationGeneration: 0, endpointMlsBootstrapAbort: null,
   endpointMlsState: null, endpointMlsGroupId: null, window: {},
   localStream: makePhysicalStream(), streamAbort: {abort() {}},
@@ -853,6 +893,7 @@ const negotiationCtx: Record<string, any> = {
   ui: {privacyMode: {value: "secure"}, remoteVideo: {srcObject: null},
     webrtcState: {textContent: ""}, state: {textContent: ""},
     status: {textContent: ""}},
+  requireCanonicalMediaHostReady() {},
   ensureLocalMedia: async () => ({}),
   api: async (path: string) => {
     if(path.endsWith("/webrtc/start"))return {json: async () => ({
