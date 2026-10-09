@@ -67,6 +67,13 @@ fuzz_target!(|data: &[u8]| {
             } else {
                 MediaKind::Video
             },
+            // Exercise legacy receive-all, exact encrypted layers, and invalid
+            // audio selectors through the same canonical authorization validator.
+            stream_id: if data.get(offset + 1).copied().unwrap_or(0) & 2 == 0 {
+                None
+            } else {
+                Some(opaque("layer-", data.get(offset..end).unwrap_or(&[])))
+            },
         });
     }
     let set = ConferenceSubscriptionSet {
