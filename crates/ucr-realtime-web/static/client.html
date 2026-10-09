@@ -1085,6 +1085,10 @@ async function startWebRtc(forceMedia=false){
   ensureCurrent();
   const pc=new RTCPeerConnection(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
   peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
+  const ensureOwnedPeer=()=>{
+    ensureCurrent();
+    if(peer!==pc||pc.connectionState==="closed")throw new Error("WebRTC peer retired during negotiation");
+  };
   let remoteDescriptionAccepted=false;
   const pendingCandidates=[];
   const sendCandidate=async candidate=>{
@@ -1108,28 +1112,43 @@ async function startWebRtc(forceMedia=false){
     if(state==="failed"||state==="disconnected")scheduleWebRtcRetry();
   };
   await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
+  ensureOwnedPeer();
   const answer=await pc.createAnswer();
+  ensureOwnedPeer();
   await pc.setLocalDescription(answer);
+  ensureOwnedPeer();
   await api("/v1/realtime/webrtc/remote-description",{...body(),sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
+  ensureOwnedPeer();
   remoteDescriptionAccepted=true;
-  for(const candidate of pendingCandidates.splice(0)){await sendCandidate(candidate);}
+  for(const candidate of pendingCandidates.splice(0)){ensureOwnedPeer();await sendCandidate(candidate);}
+  ensureOwnedPeer();
   ui.webrtcState.textContent="Connecting";
 }
 async function restartIce(){
   if(restarting||!sessionActive||!mediaActive||!navigator.onLine||!peer)return false;
+  const generation=mediaCaptureGeneration,pc=peer;
+  const ensureCurrent=()=>{
+    if(!sessionActive||!mediaActive||!navigator.onLine||
+       generation!==mediaCaptureGeneration||peer!==pc||pc.connectionState==="closed"){
+      throw new Error("ICE restart cancelled by conference media teardown");
+    }
+  };
   restarting=true;
   try{
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     ui.webrtcState.textContent="ICE restart";
     const response=await api("/v1/realtime/webrtc/restart",body());
     const offer=await response.json();
-    const pc=peer;
-    if(!pc||pc.connectionState==="closed")throw new Error("WebRTC peer is unavailable for ICE restart");
+    ensureCurrent();
     pc.setConfiguration(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
     await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
+    ensureCurrent();
     const answer=await pc.createAnswer();
+    ensureCurrent();
     await pc.setLocalDescription(answer);
+    ensureCurrent();
     await api("/v1/realtime/webrtc/remote-description",{...body(),sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
+    ensureCurrent();
     ui.webrtcState.textContent="Reconnecting";
     ui.status.textContent="Network path changed. ICE restart is reconnecting media without recreating the conference session.";
     return true;
