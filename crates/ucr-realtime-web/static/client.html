@@ -1228,15 +1228,21 @@ async function heartbeat(){
   // must not override newer waiting-room / revoked admission.
   const current=()=>sessionActive&&generation===sessionLifecycleGeneration&&
     request===heartbeatRequestGeneration;
-  const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
-  if(!current())return;
-  const data=await r.json();
-  if(!current())return;
-  await applyMediaPolicy(data.media_policy);
-  if(!current())return;
-  await applyAdmissionState(data.admission_state);
-  if(current()&&mediaActive&&e2eeAdapterReady){
-    syncReceiveSubscriptions().catch(e=>{if(sessionActive&&e2eeAdapterReady)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
+  try{
+    const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
+    if(!current())return;
+    const data=await r.json();
+    if(!current())return;
+    await applyMediaPolicy(data.media_policy);
+    if(!current())return;
+    await applyAdmissionState(data.admission_state);
+    if(current()&&mediaActive&&e2eeAdapterReady){
+      syncReceiveSubscriptions().catch(e=>{if(current()&&e2eeAdapterReady)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
+    }
+  }catch(error){
+    // A failed heartbeat from a retired/replaced session must not invoke the
+    // UI's heartbeat_rejected handler and terminate a newer active session.
+    if(current())throw error;
   }
 }
 async function join(){
