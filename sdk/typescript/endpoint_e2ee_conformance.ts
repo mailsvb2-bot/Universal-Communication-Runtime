@@ -8,6 +8,10 @@ import {
   type UcrEndpointE2eeAdapterV1,
 } from "./src/endpoint_e2ee.ts";
 import { createUcrEndpointWasmPersistence } from "./src/endpoint_wasm_persistence.ts";
+import {
+  UcrChameleonReceiveHandover,
+  type UcrEncryptedReceivePath,
+} from "./src/chameleon_receive_handover.ts";
 
 const v1 = {
   contractVersion: UCR_ENDPOINT_E2EE_CONTRACT_VERSION,
@@ -197,6 +201,65 @@ const zeroKeyPersistence = createUcrEndpointWasmPersistence(
   { getWrappingKey: () => new Uint8Array(32) },
 );
 await assert.rejects(() => zeroKeyPersistence.sealState(), /must not be all-zero/);
+
+// Chameleon: no sender/encoder mutation; transport changes are subscriber-only and
+// the old ciphertext path stays live until the new authenticated keyframe is decodable.
+const handoverEvents: string[] = [];
+const binding = {callId: "call1", sessionId: "session1", cryptoEpoch: 4n};
+function receivePath(
+  id: string,
+  readiness: {authenticatedKeyframe: boolean; decoderReady: boolean} =
+    {authenticatedKeyframe: true, decoderReady: true},
+  wait?: Promise<void>,
+): UcrEncryptedReceivePath {
+  return {
+    pathId: id,
+    binding,
+    async prepare() {
+      handoverEvents.push("prepare:" + id);
+      if (wait) await wait;
+      return readiness;
+    },
+    async activate(guard) {
+      guard();
+      handoverEvents.push("activate:" + id);
+    },
+    async retire() { handoverEvents.push("retire:" + id); },
+  };
+}
+let receiveAllowed = true;
+const pathA = receivePath("A");
+const chameleon = new UcrChameleonReceiveHandover(pathA, () => receiveAllowed);
+assert.equal(chameleon.activePathId, "A");
+assert.equal(await chameleon.handover(receivePath("B")), true);
+assert.equal(chameleon.activePathId, "B");
+assert.deepEqual(handoverEvents, ["prepare:B", "activate:B", "retire:A"]);
+await assert.rejects(chameleon.handover(receivePath("bad", {
+  authenticatedKeyframe: false, decoderReady: true,
+})), /cannot decode an authenticated keyframe/);
+assert.equal(chameleon.activePathId, "B");
+assert.ok(handoverEvents.includes("retire:bad"));
+receiveAllowed = false;
+await assert.rejects(chameleon.handover(receivePath("revoked")), /authorization revoked/);
+assert.equal(chameleon.activePathId, "B");
+assert.ok(!handoverEvents.includes("activate:revoked"));
+assert.ok(handoverEvents.includes("retire:revoked"));
+receiveAllowed = true;
+await assert.rejects(chameleon.handover({
+  ...receivePath("wrong-epoch"), binding: {...binding, cryptoEpoch: 5n},
+}), /retain canonical session and crypto epoch/);
+assert.equal(chameleon.activePathId, "B");
+let releasePrepare: () => void = () => {};
+const delayedPrepare = new Promise<void>((resolve) => { releasePrepare = resolve; });
+const pending = chameleon.handover(receivePath("late", undefined, delayedPrepare));
+await Promise.resolve();
+await chameleon.stop();
+releasePrepare();
+await assert.rejects(pending, /cancelled or authorization revoked/);
+assert.ok(!handoverEvents.includes("activate:late"));
+assert.ok(handoverEvents.includes("retire:B"));
+assert.ok(handoverEvents.includes("retire:late"));
+await assert.rejects(chameleon.handover(receivePath("after-close")), /receive session retired/);
 
 const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
 assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
