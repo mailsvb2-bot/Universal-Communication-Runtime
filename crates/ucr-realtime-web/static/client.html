@@ -1414,7 +1414,20 @@ async function join(){
     await applyAdmissionState(data.admission_state);
   }catch(e){
     if(generation!==sessionLifecycleGeneration)return;
-    if(e.code==="waiting_room"){scheduleEntryRetry();return;}
+    if(e.code==="waiting_room"&&!sessionActive){scheduleEntryRetry();return;}
+    // The server may already have accepted the join when MLS or admission
+    // activation fails. Never leave heartbeat, camera or an authorized
+    // session running behind a misleading "Rejected" Join button.
+    if(sessionActive){
+      try{await leave();}catch(cleanupError){
+        // Local revocation must precede any best-effort remote Leave.
+        ++sessionLifecycleGeneration;++mediaCaptureGeneration;
+        mediaActive=false;sessionActive=false;
+        retireEndpointMlsState();teardownPeer();stopLocalCapture();
+        if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
+        ui.leave.disabled=true;ui.privacyMode.disabled=false;
+      }
+    }
     ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=false;
   }
 }
