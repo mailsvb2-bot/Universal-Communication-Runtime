@@ -185,6 +185,26 @@ message RealtimeDownlinkMedia {
   SfuForwardEnvelope envelope = 1;
 }
 
+// Read-only projection of already accepted Conference/Call participants.
+// This is not a second participant roster, nor proof of E2EE media source readiness.
+message RealtimeGetReceiveRosterRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+}
+
+message RealtimeReceiveRoster {
+  uint64 call_revision = 1;
+  repeated PrincipalRef accepted_sources = 2;
+}
+
+message RealtimeGetReceiveRosterResponse {
+  oneof result {
+    RealtimeReceiveRoster roster = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 message RealtimeSetSubscriptionsRequest {
   TenantScope scope = 1;
   OpaqueId call_id = 2;
@@ -468,6 +488,7 @@ service RealtimeService {
   rpc GetMlsAdmissionContext(RealtimeGetMlsAdmissionContextRequest) returns (RealtimeGetMlsAdmissionContextResponse);
   rpc RegisterMlsKeyPackage(RealtimeRegisterMlsKeyPackageRequest) returns (RealtimeRegisterMlsKeyPackageResponse);
   rpc GetMlsBootstrap(RealtimeGetMlsBootstrapRequest) returns (RealtimeGetMlsBootstrapResponse);
+  rpc GetReceiveRoster(RealtimeGetReceiveRosterRequest) returns (RealtimeGetReceiveRosterResponse);
   rpc SetSubscriptions(RealtimeSetSubscriptionsRequest) returns (RealtimeSetSubscriptionsResponse);
   rpc SetRaisedHand(RealtimeSetRaisedHandRequest) returns (RealtimeSetRaisedHandResponse);
   rpc PublishReaction(RealtimePublishReactionRequest) returns (RealtimePublishReactionResponse);

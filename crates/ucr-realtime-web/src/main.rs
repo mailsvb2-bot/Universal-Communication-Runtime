@@ -124,6 +124,19 @@ struct ReactionReceiptResponse {
     sequence: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct ReceiveRosterSourceResponse {
+    source_id: String,
+    source_kind: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct ReceiveRosterResponse {
+    ok: bool,
+    call_revision: u64,
+    sources: Vec<ReceiveRosterSourceResponse>,
+}
+
 #[derive(Debug, Deserialize)]
 struct BrowserMediaSubscription {
     source_id: String,
@@ -508,6 +521,10 @@ async fn handle_post_route(state: &AppState, token: &str, path: &str, body: &[u8
         },
         "/v1/realtime/reactions/list" => match decode_json::<ListReactionsRequest>(body) {
             Ok(input) => list_reactions(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/receive-roster" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => get_receive_roster(state, token, input).await,
             Err(error) => error.into_response(),
         },
         "/v1/realtime/subscriptions" => match decode_json::<SetMediaSubscriptionsRequest>(body) {
@@ -1331,6 +1348,69 @@ async fn get_chat_message(
             ),
         },
         Err(status) => grpc_error(&status),
+    }
+}
+
+/// The current accepted sender candidates are projected from the canonical
+/// CallSession, after validating this same bearer/session and active admission.
+/// These identities cannot be invented or changed by an untrusted browser.
+async fn get_receive_roster(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+    let mut request = GrpcRequest::new(pb::RealtimeGetReceiveRosterRequest {
+        scope: Some(pb_scope(&input)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+    let mut client = client(state);
+    match client.get_receive_roster(request).await {
+        Ok(reply) => match reply.into_inner().result {
+            Some(pb::realtime_get_receive_roster_response::Result::Roster(roster)) => {
+                let mut sources = Vec::with_capacity(roster.accepted_sources.len());
+                for principal in roster.accepted_sources {
+                    let Some(id) = principal.principal_id else {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "invalid_roster",
+                            "canonical source identity unavailable",
+                        );
+                    };
+                    let Ok(source_id) = String::from_utf8(id.value) else {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "unsupported_roster_id",
+                            "canonical source identity cannot be represented in browser",
+                        );
+                    };
+                    if !valid_subscription_id(&source_id) {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "invalid_roster_id",
+                            "canonical source identity exceeds browser bounds",
+                        );
+                    }
+                    sources.push(ReceiveRosterSourceResponse {
+                        source_id,
+                        source_kind: principal.kind,
+                    });
+                }
+                json_response(
+                    StatusCode::OK,
+                    &ReceiveRosterResponse {
+                        ok: true,
+                        call_revision: roster.call_revision,
+                        sources,
+                    },
+                )
+            }
+            Some(pb::realtime_get_receive_roster_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "receive_roster_rejected",
+                "canonical receive roster unavailable or access revoked",
+            ),
+        },
+        Err(error) => grpc_error(&error),
     }
 }
 
