@@ -516,7 +516,8 @@ const warmSnippet = browser.slice(
 assert.ok(warmSnippet.startsWith("function prewarmAuthorizedMediaRuntime(){"));
 let warmWasm = 0, warmInstaller = 0;
 const warmCtx: Record<string, any> = {
-  window: {}, Promise,
+  window: {}, Promise, e2eeAdapter: () => null,
+  requireCompatibleE2eeAdapter: (x: unknown) => x,
   loadEndpointWasmModule: async () => {warmWasm++;},
   requireAuthorizedMediaInstaller: async () => {warmInstaller++;},
 };
@@ -530,6 +531,14 @@ warmCtx.warm();
 await Promise.resolve();
 assert.equal(warmWasm, 1, "public WASM can be loaded before Join");
 assert.equal(warmInstaller, 1, "public endpoint code can be loaded before Join");
+// A preinstalled, validated adapter needs no new installer, but MLS WASM
+// should still be warm before admission.
+warmCtx.window.ucrCanonicalAuthorizedMediaFactory = undefined;
+warmCtx.e2eeAdapter = () => ({contractVersion: "ucr.endpoint-e2ee.v1"});
+warmCtx.warm();
+await Promise.resolve();
+assert.equal(warmWasm, 2, "installed endpoint still prewarms WASM");
+assert.equal(warmInstaller, 1, "installed endpoint skips installer preload");
 
 // The same preflight must happen even earlier: before a signed invite can
 // create a realtime session or start a heartbeat in the first place.
