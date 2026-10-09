@@ -276,7 +276,10 @@ mod tests {
         let wildcard = ConferenceSubscriptionSet {
             subscriptions: vec![
                 hd.clone(),
-                ucr_model::ConferenceMediaSubscription { stream_id: None, ..hd.clone() },
+                ucr_model::ConferenceMediaSubscription {
+                    stream_id: None,
+                    ..hd.clone()
+                },
             ],
             ..selection.clone()
         };
