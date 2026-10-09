@@ -1422,7 +1422,14 @@ function planReceiveSubscriptions(sources,preferredId,adapter=e2eeAdapter()){
       }
     }
   }
-  const audio=sources.slice(0,32-videoStreams.length).map(s=>({
+  const audioSources=sources.slice(0,32-videoStreams.length);
+  // Reserve one audio subscription for the selected video/active speaker,
+  // including when they fall beyond the 32-entry SFU cap. Never add a 33rd.
+  if(video&&audioSources.length&&!audioSources.some(s=>
+     s.source_id===video.source_id&&s.source_kind===video.source_kind)){
+    audioSources[audioSources.length-1]=video;
+  }
+  const audio=audioSources.map(s=>({
     source_id:s.source_id,source_kind:s.source_kind,media_kind:1,stream_id:null
   }));
   for(const stream of videoStreams){
