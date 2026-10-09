@@ -2227,6 +2227,21 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_datachannel_closure_requires_peer_rebuild_not_ice_only() {
+        for required in [
+            "webrtcNeedsPeerRebuild=true;",
+            "if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}",
+            "webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;",
+            "activatingChannel?.readyState!==\"open\"",
+        ] {
+            assert!(
+                CLIENT_HTML.contains(required),
+                "encrypted DataChannel restart guard missing: {required}"
+            );
+        }
+    }
+
+    #[test]
     fn webrtc_domain_errors_preserve_http_semantics() {
         let cases = [
             (pb::ErrorCode::Unauthenticated, StatusCode::UNAUTHORIZED),
