@@ -10,7 +10,7 @@ export interface UcrEndpointE2eeStartInput extends UcrEndpointMediaSources {
   readonly sendEnvelope: (wireEnvelope: Uint8Array) => void;
 }
 
-/** The canonical Phase-23 quality target for one encrypted endpoint stream.
+/** The canonical Phase-23 receive-quality target for one subscriber endpoint.
  * This is not a transport decision, E2EE key or permission to publish.
  * In particular, room type and participant count are deliberately absent.
  */
@@ -38,10 +38,10 @@ export interface UcrEndpointE2eeAdapterV1 {
   onEnvelope(wireEnvelope: Uint8Array): void | Promise<void>;
   stop(): void | Promise<void>;
   updateSources?(sources: UcrEndpointMediaSources): void | Promise<void>;
-  /** Optional until a codec adapter can apply server quality targets without rejoining a call. */
-  applyAdaptiveMediaDecision?(target: UcrEndpointAdaptiveQualityV1): void | Promise<void>;
-  /** Optional; return only measured or explicitly evidenced Phase-23 telemetry. */
-  getAdaptiveMediaTelemetry?(): unknown | Promise<unknown>;
+  /** Subscriber-only. Adjust local inbound layers/decoder, never the shared upstream publisher. */
+  applyReceiveMediaDecision?(target: UcrEndpointAdaptiveQualityV1): void | Promise<void>;
+  /** Subscriber downlink samples only; no guessed CPU/thermal/battery data. */
+  getReceiveMediaTelemetry?(): unknown | Promise<unknown>;
   readonly persistence?: UcrEndpointE2eePersistenceV1;
 }
 
@@ -82,13 +82,13 @@ export function resolveUcrEndpointE2eeAdapter(
     if (typeof value.stop !== "function") {
       throw new Error("ucr.endpoint-e2ee.v1 requires a stop hook");
     }
-    if (value.applyAdaptiveMediaDecision !== undefined &&
-      typeof value.applyAdaptiveMediaDecision !== "function") {
-      throw new Error("ucr.endpoint-e2ee.v1 quality control must be a function");
+    if (value.applyReceiveMediaDecision !== undefined &&
+      typeof value.applyReceiveMediaDecision !== "function") {
+      throw new Error("ucr.endpoint-e2ee.v1 receive quality control must be a function");
     }
-    if (value.getAdaptiveMediaTelemetry !== undefined &&
-      typeof value.getAdaptiveMediaTelemetry !== "function") {
-      throw new Error("ucr.endpoint-e2ee.v1 adaptive telemetry must be a function");
+    if (value.getReceiveMediaTelemetry !== undefined &&
+      typeof value.getReceiveMediaTelemetry !== "function") {
+      throw new Error("ucr.endpoint-e2ee.v1 receive telemetry must be a function");
     }
     if (value.persistence !== undefined) {
       if (
