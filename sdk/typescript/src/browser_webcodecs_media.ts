@@ -299,6 +299,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   #renderGeneration = 0;
   #lowVideoPreferred = false;
   readonly #activeVideoStreams = new Map<string, string>();
+  readonly #pendingVideoStreams = new Map<string, {streamId: string; decoderKey: string}>();
 
   constructor(options: UcrBrowserCodecOptions = {}) {
     this.#videoCanvas = options.videoCanvas;
@@ -314,13 +315,17 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     if ((video && !target.video) || (!video && target.video !== null)) {
       throw new Error("invalid receive quality decision");
     }
-    // Only encoded layers are selectable. This is local decoder control, not SFU routing.
-    this.#lowVideoPreferred = video && target.stage !== "video_1080p";
+    // Never cancel a working decoder merely because a preferred layer has changed.
+    // Discard any prepared candidate from the old preference.
+    const lowPreferred = video && target.stage !== "video_1080p";
+    if (this.#lowVideoPreferred !== lowPreferred) this.#discardPendingVideo();
+    this.#lowVideoPreferred = lowPreferred;
     if (this.#videoEnabled === video) return;
     this.#videoEnabled = video;
     ++this.#renderGeneration;
     if (!video) {
       this.#activeVideoStreams.clear();
+      this.#discardPendingVideo();
       for (const [key, decoder] of this.#decoders) {
         if (key.startsWith("video:")) {
           decoder.close();
@@ -328,6 +333,17 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         }
       }
     }
+  }
+
+  #discardPendingVideo(): void {
+    for (const pending of this.#pendingVideoStreams.values()) {
+      const decoder = this.#decoders.get(pending.decoderKey);
+      if (decoder) {
+        decoder.close();
+        this.#decoders.delete(pending.decoderKey);
+      }
+    }
+    this.#pendingVideoStreams.clear();
   }
 
   /** Decoder identity includes canonical signed source identity, not only a media
@@ -352,36 +368,41 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     source?: SfuForwardEnvelopeWire["frame"]["header"],
   ): void {
     if (frame.mediaKind === "video" && !this.#videoEnabled) return;
+    const key = this.#decoderKey(frame.mediaKind, frame.videoSourceKind, frame.streamId, source);
     let videoSourceKey: string | null = null;
     if (frame.mediaKind === "video" && frame.videoSourceKind === "camera") {
       const isLow = frame.streamId.endsWith("-low");
       const baseTrack = isLow ? frame.streamId.slice(0, -4) : frame.streamId;
-      // Already verified envelope source/device scope; no room-label authority.
+      // The source/device identity is already verified by the MLS endpoint.
       videoSourceKey = JSON.stringify([
         source?.source?.principalId ?? "",
         source?.sourceDeviceId ?? "",
         baseTrack,
       ]);
-      const current = this.#activeVideoStreams.get(videoSourceKey);
-      const preferred = this.#lowVideoPreferred ? baseTrack + "-low" : baseTrack;
-      if (current && current !== frame.streamId) {
-        // Keep rendering the old stream until the replacement keyframe exists.
-        if (frame.streamId !== preferred || !frame.keyframe) return;
-        const oldKey = this.#decoderKey("video", frame.videoSourceKind, current, source);
-        const oldDecoder = this.#decoders.get(oldKey);
-        if (oldDecoder) {
-          oldDecoder.close();
-          this.#decoders.delete(oldKey);
+      const active = this.#activeVideoStreams.get(videoSourceKey);
+      if (active !== frame.streamId) {
+        const preferred = this.#lowVideoPreferred ? baseTrack + "-low" : baseTrack;
+        if (active && frame.streamId !== preferred) return;
+        const pending = this.#pendingVideoStreams.get(videoSourceKey);
+        if (pending?.streamId !== frame.streamId) {
+          if (!frame.keyframe) return;
+          if (pending) {
+            const discarded = this.#decoders.get(pending.decoderKey);
+            if (discarded) {
+              discarded.close();
+              this.#decoders.delete(pending.decoderKey);
+            }
+          }
+          // Preparation only: the currently visible layer stays alive until
+          // the new authenticated keyframe has ACTUALLY decoded and rendered.
+          this.#pendingVideoStreams.set(videoSourceKey, {
+            streamId: frame.streamId, decoderKey: key,
+          });
         }
-        this.#activeVideoStreams.set(videoSourceKey, frame.streamId);
-      } else if (!current) {
-        if (!frame.keyframe) return;
-        this.#activeVideoStreams.set(videoSourceKey, frame.streamId);
       }
     }
     const b = browser();
     if (!ucrWebCodecsSupported()) throw new Error("WebCodecs playback unavailable");
-    const key = this.#decoderKey(frame.mediaKind, frame.videoSourceKind, frame.streamId, source);
     let decoder = this.#decoders.get(key);
     // A newly selected encrypted video layer must start from its keyframe.
     if (frame.mediaKind === "video" && !decoder && !frame.keyframe) return;
@@ -401,22 +422,49 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         decoder = new b.VideoDecoder!({
           output: (video) => {
             try {
-              if (!this.#videoEnabled || this.#renderGeneration !== renderGeneration ||
-                  (selectedSourceKey !== null &&
-                   this.#activeVideoStreams.get(selectedSourceKey) !== selectedStreamId)) return;
+              if (!this.#videoEnabled || this.#renderGeneration !== renderGeneration) return;
+              const oldVisible = selectedSourceKey === null ? undefined
+                : this.#activeVideoStreams.get(selectedSourceKey);
+              const pending = selectedSourceKey === null ? undefined
+                : this.#pendingVideoStreams.get(selectedSourceKey);
+              if (selectedSourceKey !== null && oldVisible !== selectedStreamId &&
+                  (pending?.streamId !== selectedStreamId || pending.decoderKey !== key)) return;
               const canvas = this.#videoCanvas!;
               const width = video.displayWidth, height = video.displayHeight;
               if (width < 1 || height < 1 || width > 7680 || height > 4320) {
                 throw new Error("decoded frame exceeds secure display bounds");
               }
-              if (canvas.width !== width) canvas.width = width;
-              if (canvas.height !== height) canvas.height = height;
               const context = canvas.getContext("2d");
               if (!context) throw new Error("video canvas 2D context unavailable");
+              // Render the new frame before retiring the old decoder. An invalid
+              // keyframe, failed decode or rendering error must retain live video.
+              if (canvas.width !== width) canvas.width = width;
+              if (canvas.height !== height) canvas.height = height;
               (context as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
+              if (selectedSourceKey !== null && oldVisible !== selectedStreamId) {
+                this.#activeVideoStreams.set(selectedSourceKey, selectedStreamId);
+                this.#pendingVideoStreams.delete(selectedSourceKey);
+                if (oldVisible) {
+                  const oldKey = this.#decoderKey("video", frame.videoSourceKind, oldVisible, source);
+                  const oldDecoder = this.#decoders.get(oldKey);
+                  if (oldDecoder) {
+                    oldDecoder.close();
+                    this.#decoders.delete(oldKey);
+                  }
+                }
+              }
             } finally { video.close(); }
           },
-          error: this.#onError,
+          error: (error) => {
+            if (selectedSourceKey !== null) {
+              const pending = this.#pendingVideoStreams.get(selectedSourceKey);
+              if (pending?.streamId === selectedStreamId && pending.decoderKey === key) {
+                this.#pendingVideoStreams.delete(selectedSourceKey);
+                this.#decoders.delete(key);
+              }
+            }
+            this.#onError(error);
+          },
         });
         decoder.configure({codec: VIDEO_CODEC});
       }
@@ -428,9 +476,24 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     if (frame.mediaKind === "audio") {
       decoder.decode(new b.EncodedAudioChunk!({type: "key", timestamp, data}));
     } else {
-      decoder.decode(new b.EncodedVideoChunk!({
-        type: frame.keyframe ? "key" : "delta", timestamp, data,
-      }));
+      try {
+        decoder.decode(new b.EncodedVideoChunk!({
+          type: frame.keyframe ? "key" : "delta", timestamp, data,
+        }));
+      } catch (error) {
+        if (videoSourceKey !== null) {
+          const pending = this.#pendingVideoStreams.get(videoSourceKey);
+          if (pending?.streamId === frame.streamId && pending.decoderKey === key) {
+            this.#pendingVideoStreams.delete(videoSourceKey);
+            const brokenDecoder = this.#decoders.get(key);
+            if (brokenDecoder) {
+              brokenDecoder.close();
+              this.#decoders.delete(key);
+            }
+          }
+        }
+        throw error;
+      }
     }
   }
 
@@ -457,6 +520,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     ++this.#renderGeneration;
     for (const decoder of this.#decoders.values()) decoder.close();
     this.#decoders.clear();
+    this.#pendingVideoStreams.clear();
     this.#activeVideoStreams.clear();
     this.#videoEnabled = true;
     this.#lowVideoPreferred = false;
