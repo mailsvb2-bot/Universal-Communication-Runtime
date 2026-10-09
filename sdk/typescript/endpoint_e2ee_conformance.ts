@@ -75,6 +75,30 @@ assert.throws(
   /persistence requires restoreSealedState and sealState hooks/,
 );
 
+// Chameleon is an optional codec control, not a replacement for endpoint E2EE.
+const qualityTargets: unknown[] = [];
+const withQuality = {
+  ...v1,
+  getAdaptiveMediaTelemetry() {
+    return { estimated_bandwidth_bps: 8_000_000 };
+  },
+  applyAdaptiveMediaDecision(target: unknown) { qualityTargets.push(target); },
+} satisfies UcrEndpointE2eeAdapterV1;
+assert.equal(resolveUcrEndpointE2eeAdapter(withQuality, { allowLegacy: false }).adapter, withQuality);
+await withQuality.applyAdaptiveMediaDecision({
+  stage: "video_1080p",
+  video: { codec_capability_id: "ucr.video.h264", width: 1920, height: 1080,
+    frame_rate: 30, target_bitrate_bps: 4_000_000 },
+  opus_target_bitrate_bps: null,
+});
+assert.equal(qualityTargets.length, 1);
+assert.throws(() => resolveUcrEndpointE2eeAdapter({
+  ...v1, applyAdaptiveMediaDecision: "fullscreen",
+}), /quality control must be a function/);
+assert.throws(() => resolveUcrEndpointE2eeAdapter({
+  ...v1, getAdaptiveMediaTelemetry: 123,
+}), /adaptive telemetry must be a function/);
+
 const target: Record<string, unknown> = {};
 installUcrEndpointE2eeAdapter(target, v1);
 assert.equal(target.ucrE2eeEndpoint, v1);
@@ -178,5 +202,8 @@ assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
 assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
 assert.match(browser, /restoreSealedState/);
 assert.match(browser, /sealState/);
+assert.match(browser, /validAdaptiveQualityTarget/);
+assert.match(browser, /adapter\.applyAdaptiveMediaDecision\(target\)/);
+assert.doesNotMatch(browser.slice(browser.indexOf("async function reportAdaptiveMedia()"), browser.indexOf("function startAdaptiveMediaMonitoring()")), /scheduleWebRtcRetry/);
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
