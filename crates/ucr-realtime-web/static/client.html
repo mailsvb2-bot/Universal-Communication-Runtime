@@ -100,6 +100,7 @@ const ui={
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false,adaptiveMediaGeneration=0;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
+let mediaCaptureGeneration=0;
 let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
 let receiveRosterGeneration=0,receiveRosterInFlight=false,receiveSubscriptionFingerprint=null;
 let receiveSubscriptionInFlight=false,receiveSubscriptionDirty=false;
@@ -811,7 +812,7 @@ async function startScreenShare(){
   let captured=null;
   try{
     captured=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
-    if(!sessionActive)throw new Error("Conference session ended while screen capture was being selected");
+    if(!sessionActive||!mediaActive)throw new Error("Conference session ended while screen capture was being selected");
     if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media transport changed while screen capture was being selected");
     const track=captured.getVideoTracks()[0];
     if(!track)throw new Error("Screen capture returned no video track");
@@ -960,8 +961,16 @@ async function ensureLocalMedia(force=false){
   }
   const audio=audioAllowed?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):false;
   const video=cameraAllowed?preferredCameraCapture(ui.camera.value):false;
-  localStream=await navigator.mediaDevices.getUserMedia({audio,video});
-  ui.localVideo.srcObject=localStream;
+  const generation=mediaCaptureGeneration;
+  const captured=await navigator.mediaDevices.getUserMedia({audio,video});
+  // Permission prompts can outlive Leave, admission withdrawal and a peer
+  // replacement. Never publish or retain a track from a stale capture.
+  if(generation!==mediaCaptureGeneration||!sessionActive||!mediaActive||
+     audioAllowed!==policyAllows("audio")||cameraAllowed!==policyAllows("camera")||localStream){
+    captured.getTracks().forEach(track=>track.stop());
+    throw new Error("Media capture authorization changed while device access was pending");
+  }
+  localStream=captured;ui.localVideo.srcObject=captured;
   refreshLocalMediaControls();
   await refreshDevices();
   return localStream;
@@ -974,7 +983,13 @@ async function ensureLocalTrack(kind){
   if(existing&&existing.readyState==="live")return existing;
   if(existing){localStream.removeTrack(existing);existing.stop();}
   const constraint=kind==="audio"?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):preferredCameraCapture(ui.camera.value);
+  const generation=mediaCaptureGeneration,ownerStream=localStream;
   const captured=await navigator.mediaDevices.getUserMedia(kind==="audio"?{audio:constraint,video:false}:{audio:false,video:constraint});
+  if(generation!==mediaCaptureGeneration||!sessionActive||!mediaActive||
+     !policyAllows(kind)||localStream!==ownerStream){
+    captured.getTracks().forEach(track=>track.stop());
+    throw new Error("Media track authorization changed while device access was pending");
+  }
   const track=kind==="audio"?captured.getAudioTracks()[0]:captured.getVideoTracks()[0];
   if(!track){captured.getTracks().forEach(value=>value.stop());throw new Error("Requested media device returned no track");}
   localStream.addTrack(track);
@@ -1024,6 +1039,7 @@ function applyToggleLabels(){
   ui.cameraToggle.textContent=!policyAllows("camera")?tr("cameraUnavailable"):video?(video.enabled?tr("turnCameraOff"):tr("turnCameraOn")):tr("startCamera");
 }
 function teardownPeer(){
+  ++mediaCaptureGeneration;
   closeE2eeTransport();
   if(peer){peer.onicecandidate=null;peer.ontrack=null;peer.ondatachannel=null;peer.onconnectionstatechange=null;peer.close();peer=null;}
   remoteStream=null;ui.remoteVideo.srcObject=null;ui.webrtcState.textContent="Idle";
@@ -1051,9 +1067,17 @@ function rtcNetworkConfiguration(iceServers,mode){
 async function startWebRtc(forceMedia=false){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
   if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
-  const media=await ensureLocalMedia(forceMedia);
+  const generation=mediaCaptureGeneration;
+  const ensureCurrent=()=>{
+    if(generation!==mediaCaptureGeneration||!sessionActive||!mediaActive||!navigator.onLine){
+      throw new Error("WebRTC start cancelled by conference media teardown");
+    }
+  };
+  await ensureLocalMedia(forceMedia);
+  ensureCurrent();
   const response=await api("/v1/realtime/webrtc/start",body());
   const offer=await response.json();
+  ensureCurrent();
   const pc=new RTCPeerConnection(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
   peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
   let remoteDescriptionAccepted=false;
@@ -1203,6 +1227,8 @@ function scheduleEntryRetry(){
 }
 async function leave(){
   const wasActive=sessionActive;
+  // Invalidate outstanding browser permission dialogs BEFORE any awaited cleanup.
+  ++mediaCaptureGeneration;mediaActive=false;
   if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
   await stopScreenShare(false);
   teardownPeer();
@@ -1615,7 +1641,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry();}});
-window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("pagehide",()=>{++mediaCaptureGeneration;if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>
