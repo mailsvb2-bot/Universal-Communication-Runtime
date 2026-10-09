@@ -671,6 +671,91 @@ await pendingAdmission;
 assert.equal(admissionCtx.mediaActive, false);
 assert.equal(resurrectionAttempts, 0, "revoked MLS bootstrap cannot start WebRTC");
 
+// A real SDP answer may still be pending after the user leaves. Verify the
+// browser aborts the actual negotiation before sending stale server signaling.
+let signalRemoteDescriptionEntered: () => void = () => {};
+const remoteDescriptionEntered = new Promise<void>(resolve => {
+  signalRemoteDescriptionEntered = resolve;
+});
+let releaseRemoteDescription: () => void = () => {};
+const remoteDescriptionGate = new Promise<void>(resolve => {
+  releaseRemoteDescription = resolve;
+});
+let attemptedStaleAnswer = 0;
+let staleRemoteDescriptionPosts = 0;
+class NegotiationPeer {
+  connectionState = "connecting";
+  localDescription = {type: "answer", sdp: "local-answer"};
+  async setRemoteDescription() {
+    signalRemoteDescriptionEntered();
+    await remoteDescriptionGate;
+  }
+  async createAnswer() { attemptedStaleAnswer++; return this.localDescription; }
+  async setLocalDescription() {}
+}
+const negotiationCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 2,
+  navigator: {onLine: true}, peer: null, remoteStream: null,
+  ui: {privacyMode: {value: "secure"}, remoteVideo: {srcObject: null},
+    webrtcState: {textContent: ""}, state: {textContent: ""},
+    status: {textContent: ""}},
+  ensureLocalMedia: async () => ({}),
+  api: async (path: string) => {
+    if(path.endsWith("/webrtc/start"))return {json: async () => ({
+      ice_servers: [], sdp_type: "offer", sdp: "remote-offer",
+    })};
+    staleRemoteDescriptionPosts++;
+    return {ok: true};
+  },
+  body: () => ({}), rtcNetworkConfiguration: () => ({}),
+  RTCPeerConnection: NegotiationPeer, MediaStream: class {},
+  webrtcRetryTimer: null, e2eeChannel: null, scheduleWebRtcRetry() {},
+};
+runInNewContext(startCode + "\nthis.start = startWebRtc;", negotiationCtx);
+const blockedNegotiation = negotiationCtx.start();
+await remoteDescriptionEntered;
+negotiationCtx.mediaCaptureGeneration++;
+negotiationCtx.sessionActive = false;
+releaseRemoteDescription();
+await assert.rejects(blockedNegotiation, /cancelled by conference media teardown/);
+assert.equal(attemptedStaleAnswer, 0, "teardown must prevent stale SDP answer");
+assert.equal(staleRemoteDescriptionPosts, 0, "teardown must prevent server SDP write");
+
+const restartCode = browser.slice(
+  browser.indexOf("async function restartIce(){"),
+  browser.indexOf("async function recoverWebRtc(){"),
+);
+assert.ok(restartCode.startsWith("async function restartIce(){"));
+let releaseRestartOffer: ((value: any) => void) | undefined;
+const pendingRestartOffer = new Promise<any>(resolve => {
+  releaseRestartOffer = resolve;
+});
+let staleRestartConfigWrites = 0;
+const iceCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 3,
+  navigator: {onLine: true}, restarting: false,
+  peer: {connectionState: "connected", setConfiguration() {
+    staleRestartConfigWrites++;
+  }},
+  webrtcRetryTimer: null,
+  ui: {privacyMode: {value: "secure"}, webrtcState: {textContent: ""},
+    status: {textContent: ""}},
+  api: async () => pendingRestartOffer,
+  body: () => ({}), rtcNetworkConfiguration: () => ({}),
+  clearTimeout() {},
+};
+runInNewContext(restartCode + "\nthis.restart = restartIce;", iceCtx);
+const staleIce = iceCtx.restart();
+iceCtx.mediaActive = false;
+iceCtx.mediaCaptureGeneration++;
+releaseRestartOffer?.({json: async () => ({
+  ice_servers: [], sdp_type: "offer", sdp: "stale-restart",
+})});
+await assert.rejects(staleIce, /ICE restart cancelled by conference media teardown/);
+assert.equal(staleRestartConfigWrites, 0,
+  "revoked conference must not install new ICE configuration");
+assert.equal(iceCtx.restarting, false, "aborted ICE restart must release restart guard");
+
 // Execute browser's canonical roster -> per-viewer SFU subscription journey.
 // The VM never supplies a parallel admission owner or a forged roster.
 const rosterCode = browser.slice(
