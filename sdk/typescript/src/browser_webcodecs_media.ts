@@ -74,6 +74,22 @@ export function ucrVideoEncodingTarget(width: number, height: number): {
   return {frameRate: 12, bitrate: 384_000};
 }
 const MAX_VIDEO_ENCODER_QUEUE = 2;
+const LOW_CAMERA_WIDTH = 640;
+const LOW_CAMERA_HEIGHT = 360;
+const LOW_CAMERA_FPS = 12;
+const LOW_CAMERA_BITRATE_BPS = 384_000;
+const LOW_CAMERA_INTERVAL_US = 1_000_000 / LOW_CAMERA_FPS;
+
+/** Stable, bounded stream identity for one actual encrypted camera quality layer.
+ * Each derived stream gets a distinct MLS traffic key context through its stream ID.
+ */
+export function ucrCameraLayerStreamId(trackId: string, layer: "full" | "low"): string {
+  if (typeof trackId !== "string" || trackId.length < 1 ||
+      trackId.length > 112 || !/^[a-zA-Z0-9_-]+$/.test(trackId)) {
+    throw new Error("invalid authenticated camera track identity");
+  }
+  return layer === "full" ? trackId : trackId + "-low";
+}
 const MAX_AUDIO_ENCODER_QUEUE = 8;
 
 /** Bounded low-latency admission: discard stale source frames, never buffer indefinitely. */
@@ -100,9 +116,14 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
   readonly #readers: ReadableStreamDefaultReader<VideoFrame | AudioData>[] = [];
   #generation = 0;
   #emit: ((frame: UcrEncodedMediaFrame) => void | Promise<void>) | null = null;
+  readonly #layeredCamera: boolean;
 
-  constructor(onError: (error: unknown) => void = () => {}) {
+  constructor(
+    onError: (error: unknown) => void = () => {},
+    layeredCamera = false,
+  ) {
     this.#onError = onError;
+    this.#layeredCamera = layeredCamera;
   }
 
   async start(
@@ -161,7 +182,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     const processor = new b.MediaStreamTrackProcessor!({track});
     const streamId = track.id;
     if (!streamId) throw new Error("media track must have stream identity");
-    const emitChunk = (chunk: EncodedChunkLike) => {
+    const emitChunkFor = (encodedStreamId: string) => (chunk: EncodedChunkLike) => {
       if (generation !== this.#generation || !this.#emit) return;
       if (chunk.byteLength < 1 || chunk.byteLength > MAX_CAPTURE_FRAME_BYTES) {
         this.#onError(new Error("WebCodecs frame exceeds bounded E2EE payload"));
@@ -173,17 +194,19 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         void Promise.resolve(this.#emit({
           mediaKind: kind,
           videoSourceKind: source,
-          streamId,
+          streamId: encodedStreamId,
           timestamp: wireTimestamp(chunk.timestamp),
           keyframe: kind === "audio" || chunk.type === "key",
           bytes,
         })).catch(this.#onError);
       } catch (error) { this.#onError(error); }
     };
+    const encodedStreamId = kind === "video" && source === "camera" &&
+      this.#layeredCamera ? ucrCameraLayerStreamId(streamId, "full") : streamId;
     const onError = (error: Error) => this.#onError(error);
     const encoder = kind === "audio"
-      ? new b.AudioEncoder!({output: emitChunk, error: onError})
-      : new b.VideoEncoder!({output: emitChunk, error: onError});
+      ? new b.AudioEncoder!({output: emitChunkFor(encodedStreamId), error: onError})
+      : new b.VideoEncoder!({output: emitChunkFor(encodedStreamId), error: onError});
     if (kind === "audio") {
       encoder.configure({codec: AUDIO_CODEC, sampleRate: AUDIO_RATE,
         numberOfChannels: AUDIO_CHANNELS, bitrate: 32_000});
@@ -200,10 +223,36 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         bitrate: quality.bitrate, latencyMode: "realtime"});
     }
     this.#encoders.push(encoder);
+    // A second *real* encrypted source layer is opt-in, not a viewer-count mode.
+    // Limit it to a source with enough pixels and browsers with OffscreenCanvas.
+    let lowEncoder: EncoderLike | null = null;
+    let lowCanvas: OffscreenCanvas | null = null;
+    if (kind === "video" && source === "camera" && this.#layeredCamera) {
+      const settings = track.getSettings();
+      if ((settings.width ?? VIDEO_WIDTH) >= 1280 &&
+          (settings.height ?? VIDEO_HEIGHT) >= 720) {
+        if (typeof OffscreenCanvas !== "function" || typeof VideoFrame !== "function") {
+          throw new Error("layered WebCodecs requires endpoint OffscreenCanvas and VideoFrame");
+        }
+        lowCanvas = new OffscreenCanvas(LOW_CAMERA_WIDTH, LOW_CAMERA_HEIGHT);
+        const lowStreamId = ucrCameraLayerStreamId(streamId, "low");
+        lowEncoder = new b.VideoEncoder!({
+          output: emitChunkFor(lowStreamId), error: onError,
+        });
+        lowEncoder.configure({
+          codec: VIDEO_CODEC, width: LOW_CAMERA_WIDTH, height: LOW_CAMERA_HEIGHT,
+          framerate: LOW_CAMERA_FPS, bitrate: LOW_CAMERA_BITRATE_BPS,
+          latencyMode: "realtime",
+        });
+        this.#encoders.push(lowEncoder);
+      }
+    }
     const reader = processor.readable.getReader();
     this.#readers.push(reader);
     const pump = async () => {
       let count = 0;
+      let lowCount = 0;
+      let lastLowTimestamp = -LOW_CAMERA_INTERVAL_US;
       while (generation === this.#generation) {
         const result = await reader.read();
         if (result.done) break;
@@ -211,6 +260,20 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         try {
           if (ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
             encoder.encode(frame, kind === "video" ? {keyFrame: count++ % 60 === 0} : undefined);
+          }
+          if (lowEncoder && lowCanvas && generation === this.#generation &&
+              ucrCodecCanEnqueue("video", lowEncoder.encodeQueueSize) &&
+              frame.timestamp - lastLowTimestamp >= LOW_CAMERA_INTERVAL_US) {
+            const context = lowCanvas.getContext("2d");
+            if (!context) throw new Error("layered capture canvas unavailable");
+            context.drawImage(frame as VideoFrame, 0, 0, LOW_CAMERA_WIDTH, LOW_CAMERA_HEIGHT);
+            const downscaled = new VideoFrame(lowCanvas, {timestamp: frame.timestamp});
+            try {
+              lowEncoder.encode(downscaled, {keyFrame: lowCount++ % 24 === 0});
+              lastLowTimestamp = frame.timestamp;
+            } finally {
+              downscaled.close();
+            }
           }
         } finally {
           frame.close();
