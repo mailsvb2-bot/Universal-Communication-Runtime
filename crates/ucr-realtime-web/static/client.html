@@ -100,7 +100,7 @@ const ui={
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false,adaptiveMediaGeneration=0;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
-let mediaCaptureGeneration=0,sessionLifecycleGeneration=0;
+let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
 let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
 let receiveRosterGeneration=0,receiveRosterInFlight=false,receiveSubscriptionFingerprint=null;
 let receiveSubscriptionInFlight=false,receiveSubscriptionDirty=false;
@@ -1185,7 +1185,9 @@ async function applyAdmissionState(state){
     // transport. A later re-admission can request devices afresh.
     mediaActive=false;teardownPeer();stopLocalCapture();
     if(streamAbort){streamAbort.abort();streamAbort=null;}
-    if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
+    if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
+    if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+    ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
     ui.status.textContent=waitCopy("waitingRoom");
     return;
   }
@@ -1202,8 +1204,11 @@ async function applyAdmissionState(state){
 }
 async function heartbeat(){
   if(!sessionActive)return;
-  const generation=sessionLifecycleGeneration;
-  const current=()=>sessionActive&&generation===sessionLifecycleGeneration;
+  const generation=sessionLifecycleGeneration,request=++heartbeatRequestGeneration;
+  // Ignore out-of-order concurrent heartbeats: an older "admitted" response
+  // must not override newer waiting-room / revoked admission.
+  const current=()=>sessionActive&&generation===sessionLifecycleGeneration&&
+    request===heartbeatRequestGeneration;
   const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
   if(!current())return;
   const data=await r.json();
