@@ -239,7 +239,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       }
       const replayKey = [header.tenantId, header.callId, header.groupId,
         header.source.principalId, header.sourceDeviceId, header.cryptoEpoch.toString(),
-        header.streamId].join("\u0000");
+        header.mediaKind, header.videoSourceKind ?? "", header.streamId].join("\u0000");
       const last = this.#received.get(replayKey);
       const reservation = replayKey + "\u0000" + header.sequence.toString();
       if ((last !== undefined && header.sequence <= last) || this.#reserved.has(reservation)) {
