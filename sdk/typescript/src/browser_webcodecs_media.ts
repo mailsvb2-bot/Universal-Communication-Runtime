@@ -315,6 +315,13 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   #lowVideoPreferred = false;
   readonly #activeVideoStreams = new Map<string, string>();
   readonly #pendingVideoStreams = new Map<string, {streamId: string; decoderKey: string}>();
+  // A single reference canvas may show exactly ONE authenticated video source,
+  // even while a keyframe for its replacement is decoding. Retire all old
+  // decoders only after the replacement has actually rendered successfully.
+  #visibleVideoDecoderKey: string | null = null;
+  #pendingVisibleVideoDecoderKey: string | null = null;
+  #visibleVideoKind: "camera" | "screen_share" | null = null;
+  #lastScreenVideoAt = 0;
 
   constructor(options: UcrBrowserCodecOptions = {}) {
     this.#videoCanvas = options.videoCanvas;
@@ -341,6 +348,10 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     if (!video) {
       this.#activeVideoStreams.clear();
       this.#discardPendingVideo();
+      this.#visibleVideoDecoderKey = null;
+      this.#pendingVisibleVideoDecoderKey = null;
+      this.#visibleVideoKind = null;
+      this.#lastScreenVideoAt = 0;
       for (const [key, decoder] of this.#decoders) {
         if (key.startsWith("video:")) {
           decoder.close();
@@ -359,12 +370,13 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       }
     }
     this.#pendingVideoStreams.clear();
+    this.#pendingVisibleVideoDecoderKey = null;
   }
 
   /** These stream IDs have reached the local video canvas, not just a decoder queue. */
   getActiveReceiveVideoStreams(): readonly UcrVerifiedReceiveVideoStream[] {
     return [...this.#activeVideoStreams.entries()].map(([key, streamId]) => {
-      const [sourceId, sourceDeviceId] = JSON.parse(key) as [string, string, string];
+      const [sourceId, sourceDeviceId] = JSON.parse(key) as [string, string, string, string];
       return {sourceId, sourceDeviceId, streamId};
     });
   }
@@ -393,18 +405,27 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     if (frame.mediaKind === "video" && !this.#videoEnabled) return;
     const key = this.#decoderKey(frame.mediaKind, frame.videoSourceKind, frame.streamId, source);
     let videoSourceKey: string | null = null;
-    if (frame.mediaKind === "video" && frame.videoSourceKind === "camera") {
-      const isLow = frame.streamId.endsWith("-low");
+    if (frame.mediaKind === "video") {
+      const videoKind = frame.videoSourceKind === "screen_share" ? "screen_share" : "camera";
+      // While an authenticated screen-share is playing, do not let concurrent
+      // camera frames overwrite its canvas. Resume camera from a real keyframe
+      // when the screen-share stops transmitting (bounded 1.5s freshness).
+      if (videoKind === "camera" && this.#visibleVideoKind === "screen_share" &&
+          Date.now() - this.#lastScreenVideoAt < 1_500) return;
+      if (videoKind === "screen_share") this.#lastScreenVideoAt = Date.now();
+      const isLow = videoKind === "camera" && frame.streamId.endsWith("-low");
       const baseTrack = isLow ? frame.streamId.slice(0, -4) : frame.streamId;
       // The source/device identity is already verified by the MLS endpoint.
       videoSourceKey = JSON.stringify([
         source?.source?.principalId ?? "",
         source?.sourceDeviceId ?? "",
+        videoKind,
         baseTrack,
       ]);
       const active = this.#activeVideoStreams.get(videoSourceKey);
       if (active !== frame.streamId) {
-        const preferred = this.#lowVideoPreferred ? baseTrack + "-low" : baseTrack;
+        const preferred = videoKind === "camera" && this.#lowVideoPreferred ?
+          baseTrack + "-low" : baseTrack;
         if (active && frame.streamId !== preferred) return;
         const pending = this.#pendingVideoStreams.get(videoSourceKey);
         if (pending?.streamId !== frame.streamId) {
@@ -429,6 +450,16 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     let decoder = this.#decoders.get(key);
     // A newly selected encrypted video layer must start from its keyframe.
     if (frame.mediaKind === "video" && !decoder && !frame.keyframe) return;
+    if (frame.mediaKind === "video" && key !== this.#visibleVideoDecoderKey &&
+        this.#pendingVisibleVideoDecoderKey !== key) {
+      // Only the currently displayed decoder and one candidate may be alive.
+      const pendingKey = this.#pendingVisibleVideoDecoderKey;
+      if (pendingKey && pendingKey !== this.#visibleVideoDecoderKey) {
+        this.#decoders.get(pendingKey)?.close();
+        this.#decoders.delete(pendingKey);
+      }
+      this.#pendingVisibleVideoDecoderKey = key;
+    }
     if (!decoder) {
       if (frame.mediaKind === "audio") {
         if (!this.#audioContext) throw new Error("audio playback context not provided");
@@ -446,6 +477,10 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
           output: (video) => {
             try {
               if (!this.#videoEnabled || this.#renderGeneration !== renderGeneration) return;
+              // Late decoded output from retired sources may never replace the
+              // one selected canvas, including after an active-speaker switch.
+              if (this.#visibleVideoDecoderKey !== key &&
+                  this.#pendingVisibleVideoDecoderKey !== key) return;
               const oldVisible = selectedSourceKey === null ? undefined
                 : this.#activeVideoStreams.get(selectedSourceKey);
               const pending = selectedSourceKey === null ? undefined
@@ -467,14 +502,25 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               if (selectedSourceKey !== null && oldVisible !== selectedStreamId) {
                 this.#activeVideoStreams.set(selectedSourceKey, selectedStreamId);
                 this.#pendingVideoStreams.delete(selectedSourceKey);
-                if (oldVisible) {
-                  const oldKey = this.#decoderKey("video", frame.videoSourceKind, oldVisible, source);
-                  const oldDecoder = this.#decoders.get(oldKey);
-                  if (oldDecoder) {
+              }
+              if (this.#visibleVideoDecoderKey !== key) {
+                // Successful rendering commits the source/quality handover.
+                // Active-speaker and camera/screen transitions must free every
+                // previous VideoDecoder, not only a layer of this same source.
+                this.#visibleVideoDecoderKey = key;
+                this.#pendingVisibleVideoDecoderKey = null;
+                this.#visibleVideoKind = frame.videoSourceKind === "screen_share" ?
+                  "screen_share" : "camera";
+                for (const [oldKey, oldDecoder] of this.#decoders) {
+                  if (oldKey.startsWith("video:") && oldKey !== key) {
                     oldDecoder.close();
                     this.#decoders.delete(oldKey);
                   }
                 }
+                for (const oldSourceKey of this.#activeVideoStreams.keys()) {
+                  if (oldSourceKey !== selectedSourceKey) this.#activeVideoStreams.delete(oldSourceKey);
+                }
+                this.#pendingVideoStreams.clear();
               }
             } finally { video.close(); }
           },
@@ -484,6 +530,9 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               if (pending?.streamId === selectedStreamId && pending.decoderKey === key) {
                 this.#pendingVideoStreams.delete(selectedSourceKey);
                 this.#decoders.delete(key);
+                if (this.#pendingVisibleVideoDecoderKey === key) {
+                  this.#pendingVisibleVideoDecoderKey = null;
+                }
               }
             }
             this.#onError(error);
@@ -545,6 +594,10 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     this.#decoders.clear();
     this.#pendingVideoStreams.clear();
     this.#activeVideoStreams.clear();
+    this.#visibleVideoDecoderKey = null;
+    this.#pendingVisibleVideoDecoderKey = null;
+    this.#visibleVideoKind = null;
+    this.#lastScreenVideoAt = 0;
     this.#videoEnabled = true;
     this.#lowVideoPreferred = false;
     this.#nextAudioTime.clear();
