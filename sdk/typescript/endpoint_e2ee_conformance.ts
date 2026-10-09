@@ -281,6 +281,57 @@ assert.ok(handoverEvents.includes("retire:B"));
 assert.ok(handoverEvents.includes("retire:late"));
 await assert.rejects(chameleon.handover(receivePath("after-close")), /receive session retired/);
 
+// A simultaneous stop must retire a candidate while activate() is still
+// awaiting host work. Merely invalidating its generation leaves ciphertext
+// reception alive until that host promise completes (or forever if it stalls).
+const receiveRaceEvents: string[] = [];
+let activateEntered: () => void = () => {};
+const activationEntered = new Promise<void>((resolve) => { activateEntered = resolve; });
+let releaseActivation: () => void = () => {};
+const activationStalled = new Promise<void>((resolve) => { releaseActivation = resolve; });
+const receiveRace = new UcrChameleonReceiveHandover({
+  ...receivePath("race-old"),
+  async retire() { receiveRaceEvents.push("old-retired"); },
+}, () => true);
+const racingHandover = receiveRace.handover({
+  ...receivePath("race-candidate"),
+  async activate(guard) {
+    guard();
+    activateEntered();
+    await activationStalled;
+  },
+  async retire() { receiveRaceEvents.push("candidate-retired"); },
+});
+await activationEntered;
+await receiveRace.stop();
+assert.ok(receiveRaceEvents.includes("old-retired"));
+assert.ok(receiveRaceEvents.includes("candidate-retired"),
+  "stop must retire the uncommitted in-flight encrypted receiver immediately");
+releaseActivation();
+await assert.rejects(racingHandover, /cancelled or authorization revoked/);
+await assert.rejects(receiveRace.handover(receivePath("after-race")), /receive session retired/);
+
+// Every caller must wait for the same actual cleanup, not an immediate return
+// when a first stop has set the closed flag but is still awaiting retire().
+let releaseRetire: () => void = () => {};
+const retireStalled = new Promise<void>((resolve) => { releaseRetire = resolve; });
+let retireCalls = 0;
+const delayedStop = new UcrChameleonReceiveHandover({
+  ...receivePath("delayed-stop"),
+  async retire() { ++retireCalls; await retireStalled; },
+}, () => true);
+const firstStop = delayedStop.stop();
+const secondStop = delayedStop.stop();
+let secondStopFinished = false;
+void secondStop.then(() => { secondStopFinished = true; });
+await Promise.resolve();
+await Promise.resolve();
+assert.equal(secondStopFinished, false, "concurrent stop cannot report finished early");
+releaseRetire();
+await Promise.all([firstStop, secondStop]);
+assert.equal(retireCalls, 1);
+await delayedStop.stop();
+
 const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
 // Chameleon lifecycle: no telemetry may be reported before the endpoint is
 // authenticated and running; the first report must start after E2EE activation.
