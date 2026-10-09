@@ -3,6 +3,7 @@ import type {
   UcrMediaConsumer,
   UcrMediaProducer,
 } from "./portable_endpoint_media.ts";
+import type { SfuForwardEnvelopeWire } from "./sfu_forward_wire.ts";
 import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1 } from "./endpoint_e2ee.ts";
 
 /**
@@ -85,7 +86,8 @@ const LOW_CAMERA_INTERVAL_US = 1_000_000 / LOW_CAMERA_FPS;
  */
 export function ucrCameraLayerStreamId(trackId: string, layer: "full" | "low"): string {
   if (typeof trackId !== "string" || trackId.length < 1 ||
-      trackId.length > 112 || !/^[a-zA-Z0-9_-]+$/.test(trackId)) {
+      trackId.length > 112 || trackId.endsWith("-low") ||
+      !/^[a-zA-Z0-9_-]+$/.test(trackId)) {
     throw new Error("invalid authenticated camera track identity");
   }
   return layer === "full" ? trackId : trackId + "-low";
@@ -295,6 +297,8 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   #nextAudioTime = 0;
   #videoEnabled = true;
   #renderGeneration = 0;
+  #lowVideoPreferred = false;
+  readonly #activeVideoStreams = new Map<string, string>();
 
   constructor(options: UcrBrowserCodecOptions = {}) {
     this.#videoCanvas = options.videoCanvas;
