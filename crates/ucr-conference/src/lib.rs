@@ -1247,9 +1247,7 @@ where
             entry.scope == call.scope
                 && entry.call_id == call.call_id
                 && entry.subscriptions.iter().any(|subscription| {
-                    subscription.source == *source
-                        && subscription.media_kind == media_kind
-                        && subscription.stream_id.as_ref().is_none_or(|chosen| chosen == stream_id)
+                    conference_subscription_matches_stream(subscription, source, media_kind, stream_id)
                 })
         }) {
             if is_accepted_participant(call, &entry.recipient) {
@@ -1308,6 +1306,19 @@ fn append_chat_notification(
         state.events.drain(..overflow);
     }
     Ok(sequence)
+}
+
+/// One already-authorized encrypted source frame can be forwarded only to subscribers
+/// who explicitly selected its stream, or who retain legacy receive-all preference.
+fn conference_subscription_matches_stream(
+    selection: &ConferenceMediaSubscription,
+    source: &PrincipalRef,
+    media_kind: MediaKind,
+    stream_id: &ucr_model::OpaqueId,
+) -> bool {
+    selection.source == *source
+        && selection.media_kind == media_kind
+        && selection.stream_id.as_ref().is_none_or(|chosen| chosen == stream_id)
 }
 
 fn prune_subscription_state(
