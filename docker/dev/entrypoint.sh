@@ -44,7 +44,16 @@ cat "$RUNTIME_LOG"
 socat TCP-LISTEN:50052,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:50051 &
 PIDS="$PIDS $!"
 
-python3 -m http.server 8080 --bind 0.0.0.0 --directory /opt/ucr/browser &
+# Serve real authorized browser RPCs and revision-pinned WASM/ESM bundles.
+# The Rust gateway is loopback-only; socat is the dev container's public port.
+# Production must terminate HTTPS on a separately authorized ingress.
+UCR_REALTIME_WEB_BIND=127.0.0.1:8081 \
+UCR_REALTIME_GRPC_UPSTREAM=http://127.0.0.1:50051 \
+UCR_REALTIME_WEB_ASSET_DIR=/opt/ucr/browser \
+/usr/local/bin/ucr-realtime-web &
+PIDS="$PIDS $!"
+
+socat TCP-LISTEN:8080,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:8081 &
 PIDS="$PIDS $!"
 
 python3 /opt/ucr/dev/webhook_receiver.py --bind 0.0.0.0 --port 8090 &
