@@ -1103,7 +1103,9 @@ const screenCtx: Record<string, any> = {
   tr: (key: string) => key,
   e2eeAdapter: () => ({updateSources: async () => {}}),
   endpointMediaSources: () => ({screenStream: screenCtx.screenStream}),
-  refreshLocalMediaControls() {},
+  // This slice deliberately excludes the unrelated microphone/camera label
+  // function; execute the real policy controls with a harmless text stub.
+  applyToggleLabels() {},
 };
 runInNewContext(screenCode +
   "\nthis.startScreen = startScreenShare; this.applyPolicy = applyMediaPolicy;",
