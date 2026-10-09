@@ -1091,10 +1091,16 @@ const screenCtx: Record<string, any> = {
   e2eeChannel: {readyState: "open"}, mediaPolicy: allowedScreenPolicy,
   navigator: {mediaDevices: {getDisplayMedia: async () => chosenScreen}},
   ui: {
+    // The VM evaluates the actual browser control refresh code, including
+    // microphone/camera selectors and toggle labels, during policy changes.
+    mic: {disabled: false}, camera: {disabled: false},
+    micToggle: {disabled: false, textContent: ""},
+    cameraToggle: {disabled: false, textContent: ""},
     screenToggle: {disabled: false, textContent: ""},
     screenCard: {classList: {toggle() {}}},
     screenVideo: {srcObject: null}, status: {textContent: ""},
   },
+  tr: (key: string) => key,
   e2eeAdapter: () => ({updateSources: async () => {}}),
   endpointMediaSources: () => ({screenStream: screenCtx.screenStream}),
   refreshLocalMediaControls() {},
