@@ -51,9 +51,10 @@ policy/selection **primitive**, not a claim that SFU can yet switch SVC/simulcas
 layers or that a live 1,000-viewer video fan-out has been performance-tested.
 
 The browser reference client now validates the server target before optionally invoking the
-versioned endpoint adapter's `applyAdaptiveMediaDecision` callback. A quality change never
-triggers an unrelated ICE/WebRTC restart or an E2EE downgrade. Codec application and real
-telemetry collection must be provided by the endpoint media adapter. There is no attempt to
+versioned endpoint adapter's `applyReceiveMediaDecision` callback. A quality change never
+triggers an unrelated ICE/WebRTC restart or an E2EE downgrade. Subscriber receive-layer/decoder control and real telemetry collection must be provided by the
+endpoint media adapter. One viewer's downlink report must NEVER reconfigure the publisher's shared
+encoder; the publisher needs a separate, uplink-grounded decision and authorized layer negotiation. There is no attempt to
 manufacture CPU, battery or thermal telemetry when it is not measured.
 
 ## Security invariants
