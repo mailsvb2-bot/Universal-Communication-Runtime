@@ -148,6 +148,10 @@ pub enum ViewerLayerSelectionError {
 /// A missing fitting layer is returned as None, never faked by an upscaled source.
 /// Audio-only stages also select no video. Invalid/duplicate metadata fails closed.
 /// No layer is synthesized and no plaintext access is required.
+///
+/// # Errors
+/// Returns a bounded metadata error for invalid viewport dimensions, more than eight layers,
+/// malformed layer properties, or duplicate spatial IDs.
 pub fn select_viewer_video_layer(
     stage: AdaptiveMediaStage,
     viewport_width: u32,
