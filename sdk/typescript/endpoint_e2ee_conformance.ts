@@ -1571,7 +1571,7 @@ assert.equal(await canonicalOptions.authorizePublish({} as any), true);
 canonicalMediaCurrent = false;
 assert.equal(await canonicalOptions.authorizePublish({} as any), false);
 assert.equal(await canonicalOptions.authorizeFrame({} as any), false);
-await assert.rejects(canonicalOptions.trustedKeys.resolve({} as any, "signer"),
+assert.throws(() => canonicalOptions.trustedKeys.resolve({} as any, "signer"),
   /authorization revoked/);
 canonicalMediaCurrent = true;
 await assert.rejects(
