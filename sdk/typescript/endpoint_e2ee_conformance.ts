@@ -433,4 +433,65 @@ decoder.play({mediaKind: "video", streamId: "source", timestamp: 1n,
   keyframe: true, bytes: new Uint8Array([1])});
 decoder.stop();
 
+// Actual WebCodecs consumer rendering contract: a 1080p decrypted frame must
+// resize the visible canvas rather than clipping it into the old 640x360 bitmap.
+const visualCalls: string[] = [];
+const canvas = {
+  width: 640, height: 360,
+  getContext() {
+    return {
+      drawImage(_frame: unknown, x: number, y: number, w: number, h: number) {
+        visualCalls.push([x, y, w, h].join(":"));
+      },
+    };
+  },
+};
+const globals = ["MediaStreamTrackProcessor", "AudioEncoder", "VideoEncoder",
+  "AudioDecoder", "VideoDecoder", "EncodedAudioChunk", "EncodedVideoChunk"] as const;
+const savedGlobals = globals.map((key) => ({
+  key, original: Object.getOwnPropertyDescriptor(globalThis, key),
+}));
+let savedVideoOutput: ((frame: any) => void) | null = null;
+for (const key of globals) {
+  Object.defineProperty(globalThis, key, {configurable: true, writable: true, value: class {}});
+}
+Object.defineProperty(globalThis, "VideoDecoder", {
+  configurable: true, writable: true,
+  value: class {
+    constructor(options: {output: (frame: any) => void}) {
+      savedVideoOutput = options.output;
+    }
+    configure() {}
+    decode() {
+      savedVideoOutput?.({displayWidth: 1920, displayHeight: 1080, close() {}});
+    }
+    close() {}
+  },
+});
+Object.defineProperty(globalThis, "EncodedVideoChunk", {
+  configurable: true, writable: true, value: class { constructor(_input: unknown) {} },
+});
+try {
+  const rendering = new UcrBrowserWebCodecsConsumer({
+    videoCanvas: canvas as unknown as HTMLCanvasElement,
+  });
+  rendering.play({mediaKind: "video", videoSourceKind: "camera",
+    streamId: "camera-hd", timestamp: 12n, keyframe: true,
+    bytes: new Uint8Array([1, 2])});
+  assert.equal(canvas.width, 1920);
+  assert.equal(canvas.height, 1080);
+  assert.deepEqual(visualCalls, ["0:0:1920:1080"]);
+  const oldOutput = savedVideoOutput;
+  rendering.setReceiveQuality({stage: "audio", video: null,
+    opus_target_bitrate_bps: 48_000});
+  oldOutput?.({displayWidth: 1920, displayHeight: 1080, close() {}});
+  assert.equal(visualCalls.length, 1, "late callback after downgrade must not render");
+  rendering.stop();
+} finally {
+  for (const item of savedGlobals) {
+    if (item.original) Object.defineProperty(globalThis, item.key, item.original);
+    else Reflect.deleteProperty(globalThis, item.key);
+  }
+}
+
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
