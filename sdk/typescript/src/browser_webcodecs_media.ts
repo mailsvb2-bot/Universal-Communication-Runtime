@@ -231,6 +231,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   readonly #decoders = new Map<string, DecoderLike>();
   #nextAudioTime = 0;
   #videoEnabled = true;
+  #renderGeneration = 0;
 
   constructor(options: UcrBrowserCodecOptions = {}) {
     this.#videoCanvas = options.videoCanvas;
@@ -248,6 +249,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     }
     if (this.#videoEnabled === video) return;
     this.#videoEnabled = video;
+    ++this.#renderGeneration;
     if (!video) {
       for (const [key, decoder] of this.#decoders) {
         if (key.startsWith("video:")) {
@@ -276,12 +278,21 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         decoder.configure({codec: AUDIO_CODEC, sampleRate: AUDIO_RATE, numberOfChannels: AUDIO_CHANNELS});
       } else {
         if (!this.#videoCanvas) throw new Error("video rendering canvas not provided");
+        const renderGeneration = this.#renderGeneration;
         decoder = new b.VideoDecoder!({
           output: (video) => {
             try {
-              const context = this.#videoCanvas!.getContext("2d");
+              if (!this.#videoEnabled || this.#renderGeneration !== renderGeneration) return;
+              const canvas = this.#videoCanvas!;
+              const width = video.displayWidth, height = video.displayHeight;
+              if (width < 1 || height < 1 || width > 7680 || height > 4320) {
+                throw new Error("decoded frame exceeds secure display bounds");
+              }
+              if (canvas.width !== width) canvas.width = width;
+              if (canvas.height !== height) canvas.height = height;
+              const context = canvas.getContext("2d");
               if (!context) throw new Error("video canvas 2D context unavailable");
-              (context as CanvasRenderingContext2D).drawImage(video, 0, 0);
+              (context as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
             } finally { video.close(); }
           },
           error: this.#onError,
@@ -322,6 +333,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   }
 
   stop(): void {
+    ++this.#renderGeneration;
     for (const decoder of this.#decoders.values()) decoder.close();
     this.#decoders.clear();
     this.#videoEnabled = true;
