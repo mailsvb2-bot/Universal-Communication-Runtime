@@ -154,8 +154,10 @@ pub fn select_viewer_video_layer(
     viewport_height: u32,
     layers: &[ViewerVideoLayer],
 ) -> Result<Option<ViewerVideoLayer>, ViewerLayerSelectionError> {
-    if viewport_width == 0 || viewport_height == 0
-        || viewport_width > 7680 || viewport_height > 4320
+    if viewport_width == 0
+        || viewport_height == 0
+        || viewport_width > 7680
+        || viewport_height > 4320
     {
         return Err(ViewerLayerSelectionError::InvalidViewport);
     }
@@ -163,35 +165,48 @@ pub fn select_viewer_video_layer(
         return Err(ViewerLayerSelectionError::TooManyLayers);
     }
     for (i, layer) in layers.iter().enumerate() {
-        if layer.width == 0 || layer.height == 0
-            || layer.width > 7680 || layer.height > 4320
-            || layer.frame_rate == 0 || layer.frame_rate > 120
-            || layer.bitrate_bps == 0 || layer.bitrate_bps > 100_000_000
+        if layer.width == 0
+            || layer.height == 0
+            || layer.width > 7680
+            || layer.height > 4320
+            || layer.frame_rate == 0
+            || layer.frame_rate > 120
+            || layer.bitrate_bps == 0
+            || layer.bitrate_bps > 100_000_000
         {
             return Err(ViewerLayerSelectionError::InvalidLayer);
         }
-        if layers[..i].iter().any(|prior| prior.spatial_id == layer.spatial_id) {
+        if layers[..i]
+            .iter()
+            .any(|prior| prior.spatial_id == layer.spatial_id)
+        {
             return Err(ViewerLayerSelectionError::DuplicateLayer);
         }
     }
 
-    let config = reference_video_config(stage)
-        .map_err(|_| ViewerLayerSelectionError::InvalidLayer)?;
+    let config =
+        reference_video_config(stage).map_err(|_| ViewerLayerSelectionError::InvalidLayer)?;
     let Some(ceiling) = config else {
         return Ok(None);
     };
     let max_width = viewport_width.min(ceiling.width);
     let max_height = viewport_height.min(ceiling.height);
-    Ok(layers.iter().copied()
-        .filter(|layer| layer.width <= max_width
-            && layer.height <= max_height
-            && layer.bitrate_bps <= ceiling.target_bitrate_bps
-            && layer.frame_rate <= ceiling.frame_rate)
-        .max_by_key(|layer| (
-            u64::from(layer.width) * u64::from(layer.height),
-            layer.frame_rate,
-            layer.bitrate_bps,
-        )))
+    Ok(layers
+        .iter()
+        .copied()
+        .filter(|layer| {
+            layer.width <= max_width
+                && layer.height <= max_height
+                && layer.bitrate_bps <= ceiling.target_bitrate_bps
+                && layer.frame_rate <= ceiling.frame_rate
+        })
+        .max_by_key(|layer| {
+            (
+                u64::from(layer.width) * u64::from(layer.height),
+                layer.frame_rate,
+                layer.bitrate_bps,
+            )
+        }))
 }
 
 #[cfg(test)]
@@ -206,31 +221,118 @@ mod tests {
     #[test]
     fn viewer_quality_follows_viewport_and_telemetry_not_conference_label_or_count() {
         let layers = [
-            super::ViewerVideoLayer { spatial_id: 0, width: 640, height: 360, frame_rate: 15, bitrate_bps: 300_000 },
-            super::ViewerVideoLayer { spatial_id: 1, width: 1280, height: 720, frame_rate: 30, bitrate_bps: 1_800_000 },
-            super::ViewerVideoLayer { spatial_id: 2, width: 1920, height: 1080, frame_rate: 30, bitrate_bps: 3_500_000 },
+            super::ViewerVideoLayer {
+                spatial_id: 0,
+                width: 640,
+                height: 360,
+                frame_rate: 15,
+                bitrate_bps: 300_000,
+            },
+            super::ViewerVideoLayer {
+                spatial_id: 1,
+                width: 1280,
+                height: 720,
+                frame_rate: 30,
+                bitrate_bps: 1_800_000,
+            },
+            super::ViewerVideoLayer {
+                spatial_id: 2,
+                width: 1920,
+                height: 1080,
+                frame_rate: 30,
+                bitrate_bps: 3_500_000,
+            },
         ];
-        let pick = |stage, width, height| super::select_viewer_video_layer(stage, width, height, &layers).expect("valid");
-        assert_eq!(pick(AdaptiveMediaStage::Video1080p, 1920, 1080), Some(layers[2]));
-        assert_eq!(pick(AdaptiveMediaStage::Video1080p, 1280, 720), Some(layers[1]));
-        assert_eq!(pick(AdaptiveMediaStage::Video1080p, 640, 360), Some(layers[0]));
-        assert_eq!(pick(AdaptiveMediaStage::Video720p, 1920, 1080), Some(layers[1]));
-        assert_eq!(pick(AdaptiveMediaStage::Video480p, 1920, 1080), Some(layers[0]));
+        let pick = |stage, width, height| {
+            super::select_viewer_video_layer(stage, width, height, &layers).expect("valid")
+        };
+        assert_eq!(
+            pick(AdaptiveMediaStage::Video1080p, 1920, 1080),
+            Some(layers[2])
+        );
+        assert_eq!(
+            pick(AdaptiveMediaStage::Video1080p, 1280, 720),
+            Some(layers[1])
+        );
+        assert_eq!(
+            pick(AdaptiveMediaStage::Video1080p, 640, 360),
+            Some(layers[0])
+        );
+        assert_eq!(
+            pick(AdaptiveMediaStage::Video720p, 1920, 1080),
+            Some(layers[1])
+        );
+        assert_eq!(
+            pick(AdaptiveMediaStage::Video480p, 1920, 1080),
+            Some(layers[0])
+        );
         assert_eq!(pick(AdaptiveMediaStage::Audio, 1920, 1080), None);
-        assert_eq!(pick(AdaptiveMediaStage::EventualFallbackRequired, 1920, 1080), None);
+        assert_eq!(
+            pick(AdaptiveMediaStage::EventualFallbackRequired, 1920, 1080),
+            None
+        );
     }
 
     #[test]
     fn viewer_quality_never_invents_full_hd_or_accepts_untrusted_layer_metadata() {
-        use super::{ViewerLayerSelectionError as Error, ViewerVideoLayer as Layer, select_viewer_video_layer as select};
-        let small = Layer { spatial_id: 0, width: 640, height: 360, frame_rate: 15, bitrate_bps: 300_000 };
-        assert_eq!(select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[small]), Ok(Some(small)));
-        assert_eq!(select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[]), Ok(None));
-        assert_eq!(select(AdaptiveMediaStage::Video1080p, 0, 1080, &[small]), Err(Error::InvalidViewport));
-        assert_eq!(select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[small,small]), Err(Error::DuplicateLayer));
-        assert_eq!(select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[Layer { bitrate_bps: 0, ..small }]), Err(Error::InvalidLayer));
-        assert_eq!(select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[small; 9]), Err(Error::TooManyLayers));
-        assert_eq!(select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[Layer { spatial_id: 1, width: 3840, height: 2160, frame_rate: 60, bitrate_bps: 12_000_000 }]), Ok(None));
+        use super::{
+            ViewerLayerSelectionError as Error, ViewerVideoLayer as Layer,
+            select_viewer_video_layer as select,
+        };
+        let small = Layer {
+            spatial_id: 0,
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            bitrate_bps: 300_000,
+        };
+        assert_eq!(
+            select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[small]),
+            Ok(Some(small))
+        );
+        assert_eq!(
+            select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[]),
+            Ok(None)
+        );
+        assert_eq!(
+            select(AdaptiveMediaStage::Video1080p, 0, 1080, &[small]),
+            Err(Error::InvalidViewport)
+        );
+        assert_eq!(
+            select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[small, small]),
+            Err(Error::DuplicateLayer)
+        );
+        assert_eq!(
+            select(
+                AdaptiveMediaStage::Video1080p,
+                1920,
+                1080,
+                &[Layer {
+                    bitrate_bps: 0,
+                    ..small
+                }]
+            ),
+            Err(Error::InvalidLayer)
+        );
+        assert_eq!(
+            select(AdaptiveMediaStage::Video1080p, 1920, 1080, &[small; 9]),
+            Err(Error::TooManyLayers)
+        );
+        assert_eq!(
+            select(
+                AdaptiveMediaStage::Video1080p,
+                1920,
+                1080,
+                &[Layer {
+                    spatial_id: 1,
+                    width: 3840,
+                    height: 2160,
+                    frame_rate: 60,
+                    bitrate_bps: 12_000_000
+                }]
+            ),
+            Ok(None)
+        );
     }
 
     fn ideal() -> AdaptiveMediaTelemetry {
