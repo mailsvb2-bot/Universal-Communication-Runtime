@@ -281,6 +281,90 @@ assert.ok(handoverEvents.includes("retire:B"));
 assert.ok(handoverEvents.includes("retire:late"));
 await assert.rejects(chameleon.handover(receivePath("after-close")), /receive session retired/);
 
+// Chameleon lifecycle: no telemetry may be reported before the endpoint is
+// authenticated and running; the first report must start after E2EE activation.
+const activateSnippet = browser.slice(
+  browser.indexOf("async function activateE2eeAdapter(){"),
+  browser.indexOf("function attachE2eeDataChannel("),
+);
+const closeSnippet = browser.slice(
+  browser.indexOf("function closeE2eeTransport(){"),
+  browser.indexOf("function readAscii("),
+);
+assert.ok(activateSnippet.startsWith("async function activateE2eeAdapter()"));
+assert.ok(closeSnippet.startsWith("function closeE2eeTransport()"));
+let releaseProtectedStartup: (() => void) | undefined;
+const protectedStartupGate = new Promise<void>((resolve) => {
+  releaseProtectedStartup = resolve;
+});
+const protectedLifecycleEvents: string[] = [];
+const lifecycleChannel = {readyState: "open", close() {}, onopen: null,
+  onmessage: null, onclose: null, onerror: null};
+const protectedAdapter = {
+  start: async () => {
+    protectedLifecycleEvents.push("start-begins");
+    await protectedStartupGate;
+    protectedLifecycleEvents.push("start-completes");
+  },
+  stop: () => { protectedLifecycleEvents.push("stop"); },
+  onEnvelope() {},
+};
+const lifecycleCtx: Record<string, any> = {
+  window: {},
+  e2eeActivationGeneration: 0,
+  e2eeChannel: lifecycleChannel,
+  e2eeAdapterReady: false,
+  e2eeManagedAdapter: null,
+  e2eePending: null,
+  appliedAdaptiveQuality: null,
+  sessionActive: true,
+  mediaActive: true,
+  screenStream: null,
+  ui: {
+    remoteVideo: {classList: {add() {}, remove() {}}},
+    remoteCanvas: {classList: {add() {}, remove() {}},
+      width: 640, height: 360, getContext: () => ({clearRect() {}})},
+    screenToggle: {disabled: false},
+    status: {textContent: ""},
+  },
+  e2eeAdapter: () => protectedAdapter,
+  requireCompatibleE2eeAdapter: () => protectedAdapter,
+  restoreEndpointPersistedState: async () => "empty",
+  endpointMediaSources: () => ({}),
+  sendE2eeEnvelope() {},
+  persistEndpointState: async () => true,
+  refreshScreenShareControl() {},
+  stopAdaptiveMediaMonitoring: () => {protectedLifecycleEvents.push("monitor-stops");},
+  startAdaptiveMediaMonitoring: () => {protectedLifecycleEvents.push("monitor-starts");},
+};
+runInNewContext(
+  closeSnippet + "\n" + activateSnippet +
+  "\nthis.activate = activateE2eeAdapter; this.close = closeE2eeTransport;",
+  lifecycleCtx,
+);
+const activating = lifecycleCtx.activate();
+await Promise.resolve();
+assert.equal(lifecycleCtx.e2eeAdapterReady, false);
+assert.ok(!protectedLifecycleEvents.includes("monitor-starts"),
+  "a missing or unfinished E2EE endpoint must never produce adaptive telemetry");
+releaseProtectedStartup?.();
+await activating;
+assert.equal(lifecycleCtx.e2eeAdapterReady, true);
+assert.deepEqual(protectedLifecycleEvents.slice(0, 3),
+  ["start-begins", "start-completes", "monitor-starts"]);
+lifecycleCtx.close();
+assert.equal(lifecycleCtx.e2eeAdapterReady, false);
+assert.ok(protectedLifecycleEvents.includes("monitor-stops"),
+  "on transport retirement quality polling must stop");
+assert.ok(protectedLifecycleEvents.includes("stop"),
+  "on transport retirement E2EE adapter must be revoked");
+assert.doesNotMatch(
+  browser.slice(browser.indexOf("async function activateAdmittedMedia(){"),
+    browser.indexOf("async function start", browser.indexOf("async function activateAdmittedMedia(){") + 1)),
+  /startAdaptiveMediaMonitoring\\(\\)/,
+  "admission must not begin sampling before the channel and endpoint are active",
+);
+
 const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
 assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
 assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
