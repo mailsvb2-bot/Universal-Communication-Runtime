@@ -12,7 +12,9 @@ export interface UcrReceivePathBinding {
 }
 
 export interface UcrVerifiedReceiveReadiness {
-  /** Set by the trusted endpoint after an authenticated, decodable keyframe. */
+  /** Exact route and crypto epoch of the authenticated, decodable keyframe. */
+  readonly pathId: string;
+  readonly cryptoEpoch: bigint;
   readonly authenticatedKeyframe: boolean;
   readonly decoderReady: boolean;
 }
@@ -28,7 +30,8 @@ export interface UcrEncryptedReceivePath {
   retire(): Promise<void>;
 }
 
-export type UcrReceivePathAuthority = (binding: UcrReceivePathBinding) => boolean;
+/** The canonical owner authorizes the exact candidate path, not merely the Call ID. */
+export type UcrReceivePathAuthority = (candidate: UcrEncryptedReceivePath) => boolean;
 
 /**
  * A per-receiver presentation handover, not a transport planner.
@@ -77,7 +80,7 @@ export class UcrChameleonReceiveHandover {
     let activated = false;
     const assertCurrent = () => {
       if (this.#closed || generation !== this.#generation ||
-          !this.#authorized(next.binding)) {
+          !this.#authorized(next)) {
         throw new Error("receive handover cancelled or authorization revoked");
       }
     };
@@ -85,7 +88,9 @@ export class UcrChameleonReceiveHandover {
       assertCurrent();
       const readiness = await next.prepare();
       assertCurrent();
-      if (readiness.authenticatedKeyframe !== true || readiness.decoderReady !== true) {
+      if (readiness.pathId !== next.pathId ||
+          readiness.cryptoEpoch !== next.binding.cryptoEpoch ||
+          readiness.authenticatedKeyframe !== true || readiness.decoderReady !== true) {
         throw new Error("new encrypted receive path cannot decode an authenticated keyframe");
       }
       // The host MUST invoke assertCurrent at its atomic UI receive switch,
@@ -101,6 +106,7 @@ export class UcrChameleonReceiveHandover {
         // Report but do not lie about which path is visibly active.
         throw new Error("old encrypted receive path cleanup failed");
       }
+      assertCurrent();
       return true;
     } catch (error) {
       if (!activated) {
