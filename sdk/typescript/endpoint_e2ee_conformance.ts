@@ -203,6 +203,10 @@ assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
 assert.match(browser, /restoreSealedState/);
 assert.match(browser, /sealState/);
 assert.match(browser, /validAdaptiveQualityTarget/);
+assert.match(browser, /preferredCameraCapture\(ui\.camera\.value\)/);
+assert.match(browser, /width:\{ideal:1920\},height:\{ideal:1080\}/);
+assert.match(browser, /e2eeAdapterReady=true/);
+assert.match(browser, /!e2eeAdapterReady/);
 assert.match(browser, /adapter\.applyAdaptiveMediaDecision\(target\)/);
 assert.doesNotMatch(browser.slice(browser.indexOf("async function reportAdaptiveMedia()"), browser.indexOf("function startAdaptiveMediaMonitoring()")), /scheduleWebRtcRetry/);
 
