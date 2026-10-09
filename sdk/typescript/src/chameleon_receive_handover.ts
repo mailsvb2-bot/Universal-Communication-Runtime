@@ -46,6 +46,8 @@ export class UcrChameleonReceiveHandover {
   #generation = 0;
   #closed = false;
   #changing = false;
+  #candidate: UcrEncryptedReceivePath | null = null;
+  #stopTask: Promise<void> | null = null;
 
   constructor(active: UcrEncryptedReceivePath, authorized: UcrReceivePathAuthority) {
     if (!active.pathId || !active.binding.callId || !active.binding.sessionId ||
@@ -76,6 +78,7 @@ export class UcrChameleonReceiveHandover {
       throw new Error("receive path must retain canonical session and crypto epoch");
     }
     this.#changing = true;
+    this.#candidate = next;
     const generation = ++this.#generation;
     let activated = false;
     const assertCurrent = () => {
@@ -111,21 +114,39 @@ export class UcrChameleonReceiveHandover {
     } catch (error) {
       if (!activated) {
         try { await next.retire(); } catch { /* retain primary failure */ }
-      } else if (this.#active !== next) {
+      } else if (this.#active !== next || this.#closed) {
         // A late revoke/close can race activation. Retire the candidate;
-        // never silently replace the old authorized receiver.
+        // never silently leave a newly activated receiver alive after stop.
         try { await next.retire(); } catch { /* closed/revoked */ }
       }
       throw error;
     } finally {
+      this.#candidate = null;
       this.#changing = false;
     }
   }
 
   async stop(): Promise<void> {
+    // Concurrent callers must await the same teardown: returning early before
+    // receiver cleanup completes would falsely report that revocation finished.
+    if (this.#stopTask) return this.#stopTask;
     if (this.#closed) return;
     this.#closed = true;
     ++this.#generation;
-    await this.#active.retire();
+    // An asynchronous prepare/activate may still own a live ciphertext path.
+    // Retire both paths, including when the candidate has not been committed.
+    const paths = [this.#active];
+    if (this.#candidate && this.#candidate !== this.#active) {
+      paths.push(this.#candidate);
+    }
+    this.#stopTask = (async () => {
+      const results = await Promise.allSettled(
+        paths.map((path) => Promise.resolve().then(() => path.retire())),
+      );
+      const failure = results.find((result): result is PromiseRejectedResult =>
+        result.status === "rejected");
+      if (failure) throw failure.reason;
+    })();
+    return this.#stopTask;
   }
 }
