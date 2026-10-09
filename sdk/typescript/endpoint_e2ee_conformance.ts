@@ -508,6 +508,29 @@ await assert.rejects(earlyBlockedCtx.start(),
 assert.equal(unexpectedCapture, 0, "no microphone/camera prompt without trusted signer");
 assert.equal(unexpectedSignalling, 0, "no network offer without trusted signer");
 
+// Code prewarming must never mint trust, join sessions or touch camera/audio.
+const warmSnippet = browser.slice(
+  browser.indexOf("function prewarmAuthorizedMediaRuntime(){"),
+  browser.indexOf("async function activateE2eeAdapter(){"),
+);
+assert.ok(warmSnippet.startsWith("function prewarmAuthorizedMediaRuntime(){"));
+let warmWasm = 0, warmInstaller = 0;
+const warmCtx: Record<string, any> = {
+  window: {}, Promise,
+  loadEndpointWasmModule: async () => {warmWasm++;},
+  requireAuthorizedMediaInstaller: async () => {warmInstaller++;},
+};
+runInNewContext(warmSnippet + "\nthis.warm = prewarmAuthorizedMediaRuntime;", warmCtx);
+warmCtx.warm();
+await Promise.resolve();
+assert.equal(warmWasm, 0, "no preload without canonical trust integration");
+assert.equal(warmInstaller, 0, "no installer without canonical host");
+warmCtx.window.ucrCanonicalAuthorizedMediaFactory = () => ({});
+warmCtx.warm();
+await Promise.resolve();
+assert.equal(warmWasm, 1, "public WASM can be loaded before Join");
+assert.equal(warmInstaller, 1, "public endpoint code can be loaded before Join");
+
 // The same preflight must happen even earlier: before a signed invite can
 // create a realtime session or start a heartbeat in the first place.
 const preflightJoinSnippet = browser.slice(
@@ -544,7 +567,7 @@ const acceptedJoinCtx: Record<string, any> = {
   ui: {state: {textContent: ""}, status: {textContent: ""},
     join: {disabled: false}, leave: {disabled: true},
     privacyMode: {disabled: false}, expires: {textContent: ""}},
-  requireCanonicalMediaHostReady() {},
+  requireCanonicalMediaHostReady() {}, prewarmAuthorizedMediaRuntime() {},
   api: async () => ({json: async () => ({ok: true, admission_state: "admitted"})}),
   body: () => ({}),
   applyMediaPolicy: async () => {throw new Error("MLS activation refused");},
