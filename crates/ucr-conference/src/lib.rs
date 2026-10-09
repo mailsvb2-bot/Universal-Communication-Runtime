@@ -1215,7 +1215,8 @@ where
         let media_kind = validated.media.envelope().frame.header.media_kind;
         let stream_id = validated.media.envelope().frame.header.stream_id.clone();
         self.prune_subscriptions(&scope, &call_id)?;
-        let recipients = self.subscribers_for_source(&validated.call, &source, media_kind, &stream_id)?;
+        let recipients =
+            self.subscribers_for_source(&validated.call, &source, media_kind, &stream_id)?;
         if recipients.is_empty() {
             return Ok(None);
         }
@@ -1247,7 +1248,12 @@ where
             entry.scope == call.scope
                 && entry.call_id == call.call_id
                 && entry.subscriptions.iter().any(|subscription| {
-                    conference_subscription_matches_stream(subscription, source, media_kind, stream_id)
+                    conference_subscription_matches_stream(
+                        subscription,
+                        source,
+                        media_kind,
+                        stream_id,
+                    )
                 })
         }) {
             if is_accepted_participant(call, &entry.recipient) {
@@ -1318,7 +1324,10 @@ fn conference_subscription_matches_stream(
 ) -> bool {
     selection.source == *source
         && selection.media_kind == media_kind
-        && selection.stream_id.as_ref().is_none_or(|chosen| chosen == stream_id)
+        && selection
+            .stream_id
+            .as_ref()
+            .is_none_or(|chosen| chosen == stream_id)
 }
 
 fn prune_subscription_state(
@@ -1586,26 +1595,44 @@ mod subscription_state_tests {
             stream_id: Some(video_hd.clone()),
         };
         assert!(conference_subscription_matches_stream(
-            &layer, &speaker, MediaKind::Video, &video_hd
+            &layer,
+            &speaker,
+            MediaKind::Video,
+            &video_hd
         ));
         assert!(!conference_subscription_matches_stream(
-            &layer, &speaker, MediaKind::Video, &video_low
+            &layer,
+            &speaker,
+            MediaKind::Video,
+            &video_low
         ));
         assert!(!conference_subscription_matches_stream(
-            &layer, &principal("other"), MediaKind::Video, &video_hd
+            &layer,
+            &principal("other"),
+            MediaKind::Video,
+            &video_hd
         ));
         assert!(!conference_subscription_matches_stream(
-            &layer, &speaker, MediaKind::Audio, &video_hd
+            &layer,
+            &speaker,
+            MediaKind::Audio,
+            &video_hd
         ));
         let wildcard = ConferenceMediaSubscription {
             stream_id: None,
             ..layer
         };
         assert!(conference_subscription_matches_stream(
-            &wildcard, &speaker, MediaKind::Video, &video_hd
+            &wildcard,
+            &speaker,
+            MediaKind::Video,
+            &video_hd
         ));
         assert!(conference_subscription_matches_stream(
-            &wildcard, &speaker, MediaKind::Video, &video_low
+            &wildcard,
+            &speaker,
+            MediaKind::Video,
+            &video_low
         ));
         // The stream match depends on subscriber preference and authenticated
         // envelope identity, NEVER conference name or attendee-count thresholds.
@@ -1621,7 +1648,10 @@ mod subscription_state_tests {
             };
             assert_eq!(
                 conference_subscription_matches_stream(
-                    &selected, &speaker, MediaKind::Video, &video_hd
+                    &selected,
+                    &speaker,
+                    MediaKind::Video,
+                    &video_hd
                 ),
                 index % 2 == 0
             );
