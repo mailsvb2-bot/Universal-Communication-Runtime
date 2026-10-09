@@ -510,12 +510,10 @@ async fn handle_post_route(state: &AppState, token: &str, path: &str, body: &[u8
             Ok(input) => list_reactions(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/subscriptions" => {
-            match decode_json::<SetMediaSubscriptionsRequest>(body) {
-                Ok(input) => set_media_subscriptions(state, token, input).await,
-                Err(error) => error.into_response(),
-            }
-        }
+        "/v1/realtime/subscriptions" => match decode_json::<SetMediaSubscriptionsRequest>(body) {
+            Ok(input) => set_media_subscriptions(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
         "/v1/realtime/adaptive-media" => match decode_json::<AdaptiveMediaRequest>(body) {
             Ok(input) => report_adaptive_media(state, token, input).await,
             Err(error) => error.into_response(),
@@ -1345,17 +1343,28 @@ async fn set_media_subscriptions(
     input: SetMediaSubscriptionsRequest,
 ) -> HttpResponse {
     if input.subscriptions.len() > 32 {
-        return api_error(StatusCode::BAD_REQUEST, "too_many_subscriptions", "subscriber stream selection exceeds capacity");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "too_many_subscriptions",
+            "subscriber stream selection exceeds capacity",
+        );
     }
     let mut layers = Vec::with_capacity(input.subscriptions.len());
     for item in input.subscriptions {
         if !valid_subscription_id(&item.source_id)
-            || item.stream_id.as_ref().is_some_and(|id| !valid_subscription_id(id))
+            || item
+                .stream_id
+                .as_ref()
+                .is_some_and(|id| !valid_subscription_id(id))
             || item.media_kind != pb::MediaKind::Audio as i32
                 && item.media_kind != pb::MediaKind::Video as i32
             || item.media_kind == pb::MediaKind::Audio as i32 && item.stream_id.is_some()
         {
-            return api_error(StatusCode::BAD_REQUEST, "invalid_stream_selection", "invalid subscriber source or encrypted video stream");
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_stream_selection",
+                "invalid subscriber source or encrypted video stream",
+            );
         }
         layers.push(pb::ConferenceMediaSubscription {
             source: Some(pb::PrincipalRef {
@@ -1381,9 +1390,11 @@ async fn set_media_subscriptions(
             Some(pb::realtime_set_subscriptions_response::Result::Acknowledgement(_)) => {
                 json_response(StatusCode::OK, &serde_json::json!({"ok": true}))
             }
-            Some(pb::realtime_set_subscriptions_response::Result::Error(_)) | None => {
-                api_error(StatusCode::CONFLICT, "subscription_rejected", "canonical subscriber selection denied")
-            }
+            Some(pb::realtime_set_subscriptions_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "subscription_rejected",
+                "canonical subscriber selection denied",
+            ),
         },
         Err(error) => grpc_error(&error),
     }
