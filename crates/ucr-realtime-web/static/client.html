@@ -97,6 +97,7 @@ const ui={
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
+let appliedAdaptiveQuality=null;
 let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_ENDPOINT_CONTRACT_VERSION="ucr.endpoint-e2ee.v1";
@@ -642,6 +643,7 @@ function requireCompatibleE2eeAdapter(adapter){
   return adapter;
 }
 function closeE2eeTransport(){
+  appliedAdaptiveQuality=null;
   ui.screenToggle.disabled=true;
   if(screenStream){
     const current=screenStream;screenStream=null;setScreenUi(false);
@@ -1127,17 +1129,55 @@ function validAdaptiveMediaTelemetry(value){
   if(estimated_bandwidth_bps==null||packet_loss_basis_points==null||jitter_ms==null||rtt_ms==null||cpu_utilization_percent==null||battery_percent==null||gpu===null&&value.gpu_utilization_percent!=null||!["nominal","elevated","serious","critical"].includes(thermal)||typeof value.external_power!=="boolean")return null;
   return {estimated_bandwidth_bps,packet_loss_basis_points,jitter_ms,rtt_ms,cpu_utilization_percent,gpu_utilization_percent:gpu,battery_percent,external_power:value.external_power,thermal_state:thermal};
 }
+// A bounded target is advisory to the E2EE endpoint codec, never an authorization grant
+// or permission to publish unencrypted media. Room labels/participant thresholds are not inputs.
+function validAdaptiveQualityTarget(value){
+  if(!value||value.ok!==true||typeof value.stage!=="string")return null;
+  const stages=["video_1080p","video_720p","video_480p","video_low_fps","audio","audio_low_bitrate","eventual_fallback_required"];
+  if(!stages.includes(value.stage))return null;
+  const videoStage=value.stage.startsWith("video_");
+  const video=value.video;
+  if(videoStage){
+    if(!video||typeof video!=="object")return null;
+    for(const [field,min,max] of [["width",1,7680],["height",1,4320],["frame_rate",1,120],["target_bitrate_bps",1,100000000]]){
+      if(!Number.isInteger(video[field])||video[field]<min||video[field]>max)return null;
+    }
+    if(typeof video.codec_capability_id!=="string"||video.codec_capability_id.length>128)return null;
+  }else if(video!=null)return null;
+  if(value.opus_target_bitrate_bps!=null&&(!Number.isInteger(value.opus_target_bitrate_bps)||value.opus_target_bitrate_bps<6000||value.opus_target_bitrate_bps>510000))return null;
+  return {
+    stage:value.stage,
+    video:videoStage?{
+      codec_capability_id:video.codec_capability_id,width:video.width,height:video.height,
+      frame_rate:video.frame_rate,target_bitrate_bps:video.target_bitrate_bps
+    }:null,
+    opus_target_bitrate_bps:value.opus_target_bitrate_bps??null
+  };
+}
 async function reportAdaptiveMedia(){
   if(!sessionActive||!mediaActive||adaptiveMediaReportInFlight)return;
   const adapter=e2eeAdapter();
   if(!adapter||typeof adapter.getAdaptiveMediaTelemetry!=="function")return;
   adaptiveMediaReportInFlight=true;
+  const session=claims,channel=e2eeChannel;
   try{
     const telemetry=validAdaptiveMediaTelemetry(await adapter.getAdaptiveMediaTelemetry());
     if(!telemetry)return;
     const response=await api("/v1/realtime/adaptive-media",{...body(),...telemetry});
+    if(!response.ok)throw new Error("Adaptive media policy rejected telemetry");
     const decision=await response.json();
-    if(decision&&decision.requires_media_renegotiation&&sessionActive&&mediaActive)scheduleWebRtcRetry();
+    const target=validAdaptiveQualityTarget(decision);
+    if(!target)throw new Error("Invalid adaptive media quality target");
+    if(!sessionActive||!mediaActive||claims!==session||e2eeChannel!==channel||channel?.readyState!=="open")return;
+    // Never restart ICE/WebRTC just to change resolution: that breaks an otherwise good call.
+    // Only the authenticated endpoint media/codec owner can change its encrypted encoder.
+    if(typeof adapter.applyAdaptiveMediaDecision!=="function")return;
+    const fingerprint=JSON.stringify(target);
+    if(appliedAdaptiveQuality===fingerprint)return;
+    await adapter.applyAdaptiveMediaDecision(target);
+    if(sessionActive&&mediaActive&&claims===session&&e2eeChannel===channel){
+      appliedAdaptiveQuality=fingerprint;
+    }
   }finally{
     adaptiveMediaReportInFlight=false;
   }
