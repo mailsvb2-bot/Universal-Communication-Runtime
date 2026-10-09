@@ -21,6 +21,7 @@ p{color:var(--ucr-muted);line-height:1.45}
 .video-card{background:var(--ucr-panel-deep);border:1px solid var(--ucr-border);border-radius:14px;overflow:hidden}
 .video-card header{padding:8px 10px;color:var(--ucr-muted);font-size:.85rem}
 video{display:block;width:100%;aspect-ratio:16/9;background:#000;object-fit:cover}
+canvas.remote-media{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;object-fit:contain}
 .controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
 select,button,input{border-radius:12px;padding:12px 14px;font:inherit}
 select,input{background:var(--ucr-panel);color:var(--ucr-text);border:1px solid var(--ucr-border);min-width:0}
@@ -47,7 +48,7 @@ button:disabled,select:disabled,input:disabled{opacity:.45;cursor:not-allowed}
 <div class="media">
 <div class="video-card"><header id="local-label">You</header><video id="local-video" autoplay muted playsinline></video></div>
 <div id="screen-card" class="video-card hidden"><header id="screen-label">Your screen</header><video id="screen-video" autoplay muted playsinline></video></div>
-<div class="video-card"><header id="remote-label">Remote</header><video id="remote-video" autoplay playsinline></video></div>
+<div class="video-card"><header id="remote-label">Remote</header><video id="remote-video" autoplay playsinline></video><canvas id="remote-e2ee-canvas" class="remote-media hidden" width="640" height="360" aria-label="Decrypted endpoint-only video"></canvas></div>
 </div>
 <div class="controls">
 <select id="privacy-mode" aria-label="Network privacy mode"><option value="secure">Protected call (normal network)</option><option value="private">Higher privacy (TURN relay only)</option><option value="maximum" disabled>Maximum privacy (independent relay not configured)</option></select>
@@ -92,7 +93,7 @@ const ui={
   brandLogo:$("brand-logo"),brandName:$("brand-name"),intro:$("intro"),
   stateLabel:$("state-label"),webrtcLabel:$("webrtc-label"),packetsLabel:$("packets-label"),expiresLabel:$("expires-label"),
   localLabel:$("local-label"),screenLabel:$("screen-label"),remoteLabel:$("remote-label"),footerNote:$("footer-note"),chatCard:$("chat-card"),
-  localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),
+  localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),remoteCanvas:$("remote-e2ee-canvas"),
   privacyMode:$("privacy-mode"),mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false;
@@ -646,6 +647,12 @@ function requireCompatibleE2eeAdapter(adapter){
 }
 function closeE2eeTransport(){
   appliedAdaptiveQuality=null;e2eeAdapterReady=false;
+  if(ui.remoteCanvas){
+    const context=ui.remoteCanvas.getContext("2d");
+    if(context)context.clearRect(0,0,ui.remoteCanvas.width,ui.remoteCanvas.height);
+    ui.remoteCanvas.classList.add("hidden");
+    ui.remoteVideo.classList.remove("hidden");
+  }
   ++e2eeActivationGeneration;
   ui.screenToggle.disabled=true;
   if(screenStream){
@@ -869,6 +876,8 @@ async function activateE2eeAdapter(){
   const persisted=await persistEndpointState(adapter);
   if(!isCurrent())return;
   e2eeAdapterReady=true;
+  ui.remoteVideo.classList.add("hidden");
+  ui.remoteCanvas.classList.remove("hidden");
   refreshScreenShareControl();
   ui.status.textContent=restoreState==="restored"
     ?"Endpoint E2EE media transport restored from sealed local state. Media keys remain on this endpoint."
