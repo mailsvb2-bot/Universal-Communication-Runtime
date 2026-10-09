@@ -335,6 +335,136 @@ assert.equal(retireCalls, 1);
 await delayedStop.stop();
 
 const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
+// Run the browser's *actual* MLS bootstrap and retirement against delayed
+// canonical network responses. A late Welcome or registration reply after
+// leaving the call must not publish a signer or leak an endpoint WASM state.
+const mlsSnippet = browser.slice(
+  browser.indexOf("function retireEndpointMlsState(){"),
+  browser.indexOf("function endpointPersistence(adapter){"),
+);
+assert.ok(mlsSnippet.startsWith("function retireEndpointMlsState(){"));
+let releaseMlsContext: ((value: any) => void) | undefined;
+const mlsContextGate = new Promise<any>(resolve => {releaseMlsContext = resolve;});
+let releaseMlsRegistration: (() => void) | undefined;
+const mlsRegistrationGate = new Promise<void>(resolve => {releaseMlsRegistration = resolve;});
+let registeredPackages = 0, freedMlsStates = 0, publishedSnapshots = 0;
+let capturedMlsSignal: AbortSignal | undefined;
+const mlsClaims = {tenant_id: "tenant", namespace_id: null,
+  call_id: "call", device_id: "device"};
+const mlsFixture = {
+  group_id: "group", endpoint_state_mode: "register",
+};
+const mlsBootstrap = {
+  group_id: "group",
+  welcome_base64: "welcome",
+  welcome_crypto_state: {crypto_epoch: 1, crypto_state_ref: "state"},
+  current_crypto_state: {crypto_epoch: 1, crypto_state_ref: "state"},
+  subsequent_commits: [],
+};
+const mlsContext: Record<string, any> = {
+  claims: mlsClaims, sessionActive: true, sessionLifecycleGeneration: 1,
+  endpointMlsState: null, endpointMlsGroupId: null,
+  endpointMlsInvalidationGeneration: 0, endpointMlsBootstrapPromise: null,
+  endpointMlsBootstrapAbort: null, AbortController, window: {},
+  fetchEndpointMlsContext: async (signal: AbortSignal) => {
+    capturedMlsSignal=signal;return mlsContextGate;
+  },
+  loadEndpointWasmModule: async () => ({
+    EndpointMlsState: class {
+      key_package() {return Uint8Array.of(1);}
+      join_from_welcome() {}
+      crypto_epoch() {return 1n;}
+      free() {freedMlsStates++;}
+    },
+  }),
+  endpointPersistenceStorageKey: () => "sealed-device",
+  loadEndpointState: async () => null,
+  fetchEndpointMlsBootstrap: async () => mlsBootstrap,
+  endpointBytesToBase64: () => "package",
+  endpointBase64ToBytes: () => Uint8Array.of(1),
+  endpointApplyBootstrapCommits() {},
+  sealEndpointMlsSnapshot: async () => {publishedSnapshots++;},
+  body: () => ({}),
+  api: async (_path: string, _body: object, signal: AbortSignal) => {
+    capturedMlsSignal=signal;
+    registeredPackages++;
+    await mlsRegistrationGate;
+  },
+  ENDPOINT_WASM_CONTRACT_VERSION: "ucr.endpoint-wasm.v1",
+};
+runInNewContext(mlsSnippet +
+  "\nthis.ensureMls = ensureEndpointMlsReady; this.retireMls = retireEndpointMlsState;",
+  mlsContext);
+const waitingForContext = mlsContext.ensureMls();
+mlsContext.retireMls();
+assert.equal(capturedMlsSignal?.aborted, true,
+  "retirement must abort an in-flight canonical MLS context request");
+mlsContext.sessionActive = false;
+releaseMlsContext?.(mlsFixture);
+await assert.rejects(waitingForContext, /cancelled by admission withdrawal/);
+assert.equal(registeredPackages, 0,
+  "revoked Welcome must not start a Device key-package registration");
+assert.equal(mlsContext.window.ucrEndpointMlsSession, undefined);
+
+mlsContext.sessionActive = true;
+mlsContext.sessionLifecycleGeneration++;
+mlsContext.fetchEndpointMlsContext = async () => mlsFixture;
+const waitingForRegistration = mlsContext.ensureMls();
+for(let i=0;i<16&&registeredPackages===0;i++)await Promise.resolve();
+assert.equal(registeredPackages, 1, "one canonical Device registration required");
+const sameRegistration = mlsContext.ensureMls();
+mlsContext.retireMls();
+assert.equal(capturedMlsSignal?.aborted, true,
+  "retirement must abort pending canonical Device registration");
+mlsContext.sessionActive = false;
+releaseMlsRegistration?.();
+await assert.rejects(waitingForRegistration, /cancelled by admission withdrawal/);
+await assert.rejects(sameRegistration, /cancelled by admission withdrawal/);
+assert.equal(registeredPackages, 1, "concurrent MLS activation cannot duplicate registration");
+assert.equal(freedMlsStates, 1, "revoked bootstrap must free endpoint WASM state");
+assert.equal(publishedSnapshots, 0, "revoked bootstrap must not publish MLS snapshots");
+assert.equal(mlsContext.endpointMlsState, null);
+assert.equal(mlsContext.window.ucrEndpointMlsSession, undefined);
+
+// A fresh accepted session must still be able to initialize normally.
+mlsContext.sessionActive = true;
+mlsContext.sessionLifecycleGeneration++;
+const freshMls = await mlsContext.ensureMls();
+assert.ok(freshMls, "new admission must establish a live endpoint MLS state");
+assert.equal(registeredPackages, 2);
+assert.equal(publishedSnapshots, 1);
+assert.equal(mlsContext.endpointMlsState, freshMls);
+mlsContext.retireMls();
+assert.equal(freedMlsStates, 2, "retirement frees the current local state synchronously");
+
+// The reference WebRTC browser must not report a protected connection when
+// a legacy/non-revocable host object is injected instead of the canonical v1
+// media bridge. The separate SDK may parse legacy contracts, not this path.
+const strictAdapterSnippet = browser.slice(
+  browser.indexOf("function requireCompatibleE2eeAdapter(adapter){"),
+  browser.indexOf("function closeE2eeTransport(){"),
+);
+assert.ok(strictAdapterSnippet.startsWith("function requireCompatibleE2eeAdapter(adapter){"));
+const strictAdapterCtx: Record<string, any> = {
+  E2EE_ENDPOINT_CONTRACT_VERSION: "ucr.endpoint-e2ee.v1",
+  endpointPersistence() {},
+};
+runInNewContext(strictAdapterSnippet +
+  "\nthis.verifyAdapter = requireCompatibleE2eeAdapter;", strictAdapterCtx);
+assert.equal(strictAdapterCtx.verifyAdapter(null), null);
+for(const candidate of [
+  {start() {}, onEnvelope() {}, stop() {}},
+  {contractVersion: "ucr.endpoint-e2ee.v1", start() {}, onEnvelope() {}},
+  {contractVersion: "ucr.endpoint-e2ee.v2", start() {}, onEnvelope() {}, stop() {}},
+]){
+  assert.throws(() => strictAdapterCtx.verifyAdapter(candidate), /E2EE adapter v1/,
+    "unversioned, non-revocable or unknown E2EE contracts must be rejected");
+}
+assert.doesNotThrow(() => strictAdapterCtx.verifyAdapter({
+  contractVersion: "ucr.endpoint-e2ee.v1",
+  start() {}, onEnvelope() {}, stop() {},
+}));
+
 // Chameleon lifecycle: no telemetry may be reported before the endpoint is
 // authenticated and running; the first report must start after E2EE activation.
 const activateSnippet = browser.slice(
@@ -379,6 +509,7 @@ const lifecycleCtx: Record<string, any> = {
     remoteCanvas: {classList: {add() {}, remove() {}},
       width: 640, height: 360, getContext: () => ({clearRect() {}})},
     screenToggle: {disabled: false},
+    state: {textContent: "Securing"},
     status: {textContent: ""},
   },
   e2eeAdapter: () => protectedAdapter,
@@ -401,11 +532,15 @@ runInNewContext(
 const activating = lifecycleCtx.activate();
 await Promise.resolve();
 assert.equal(lifecycleCtx.e2eeAdapterReady, false);
+assert.equal(lifecycleCtx.ui.state.textContent, "Securing",
+  "ICE connectivity alone must never claim a verified E2EE call");
 assert.ok(!protectedLifecycleEvents.includes("monitor-starts"),
   "a missing or unfinished E2EE endpoint must never produce adaptive telemetry");
 releaseProtectedStartup?.();
 await activating;
 assert.equal(lifecycleCtx.e2eeAdapterReady, true);
+assert.equal(lifecycleCtx.ui.state.textContent, "Connected",
+  "the reference UI becomes connected only after protected endpoint startup");
 assert.deepEqual(protectedLifecycleEvents.slice(0, 3),
   ["start-begins", "start-completes", "monitor-starts"]);
 lifecycleCtx.close();
@@ -578,6 +713,8 @@ const admissionCtx: Record<string, any> = {
   ui: admissionUi, claims: {not_before: 0}, sessionActive: true,
   mediaActive: true, mediaCaptureGeneration: 0, sessionLifecycleGeneration: 0,
   heartbeatRequestGeneration: 0,
+  endpointMlsInvalidationGeneration: 0, endpointMlsBootstrapAbort: null,
+  endpointMlsState: null, endpointMlsGroupId: null, window: {},
   localStream: makePhysicalStream(), streamAbort: {abort() {}},
   webrtcRetryTimer: 1, streamRetryTimer: 2, reactionTimer: null, chatTimer: null,
   clearTimeout() {}, clearInterval() {},
@@ -590,7 +727,7 @@ const admissionCtx: Record<string, any> = {
   api: async () => {throw new Error("unexpected network request");},
 };
 runInNewContext(
-  captureStopCode + "\n" + admissionCode +
+  mlsSnippet + "\n" + captureStopCode + "\n" + admissionCode +
   "\nthis.admission = applyAdmissionState;" +
   "\nthis.heartbeat = heartbeat; this.joinConference = join;" +
   "\nthis.activateAdmitted = activateAdmittedMedia;",
@@ -913,7 +1050,7 @@ assert.equal(staleSubscriptionWrites, 0,
   "outdated roster must never write SFU subscriptions after E2EE retirement");
 
 assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
-assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
+assert.match(browser, /Protected endpoint E2EE adapter v1 with revocation is required/);
 assert.match(browser, /restoreSealedState/);
 assert.match(browser, /sealState/);
 assert.match(browser, /validAdaptiveQualityTarget/);
@@ -1617,15 +1754,16 @@ const inbound = new UcrPortableEndpointMediaAdapter({
     negotiationGeneration: 1n},
   authorizeFrame: () => true, authorizePublish: () => true,
 });
-const inboundWire = (sequence: bigint, principalId: string) =>
+const inboundWire = (sequence: bigint, principalId: string,
+  mediaKind: "audio" | "video" = "video") =>
   encodeSfuForwardEnvelopeWire({frame: {
     header: {
       tenantId: "tenant", namespaceId: null, callId: "call", groupId: "group",
       source: {principalId, kind: "person"}, sourceDeviceId: principalId + "-dev",
       streamId: "camera", negotiationRef: "current", negotiationGeneration: 1n,
       cryptoEpoch: 3n, cryptoStateRef: "state", cryptoSuite: "ucr.v1",
-      headerVersion: 2, mediaKind: "video", videoSourceKind: "camera",
-      sequence, mediaTimestamp: sequence, keyframe: true,
+      headerVersion: 2, mediaKind, videoSourceKind: mediaKind === "video" ? "camera" : null,
+      sequence, mediaTimestamp: sequence, keyframe: mediaKind === "video",
     },
     nonce: new Uint8Array(24), ciphertext: Uint8Array.of(1),
     sourceSignature: {keyId: "trusted", algorithmId: "ed25519",
@@ -1642,6 +1780,13 @@ await Promise.all([firstEncrypted, secondEncrypted]);
 assert.deepEqual(receivedSequences, ["bob:1", "alice:1", "alice:2"],
   "protected inbound frames of each stream must render in signed sequence order");
 await assert.rejects(inbound.onEnvelope(inboundWire(1n, "alice")),
+  /replayed endpoint media frame/);
+// The same signed stream identifier is legal in different media namespaces;
+// replay tracking must never discard audio simply because video seq=1 arrived.
+await inbound.onEnvelope(inboundWire(1n, "alice", "audio"));
+assert.deepEqual(receivedSequences, ["bob:1", "alice:1", "alice:2", "alice:1"],
+  "same source/stream/sequence in audio and video must not collide");
+await assert.rejects(inbound.onEnvelope(inboundWire(1n, "alice", "audio")),
   /replayed endpoint media frame/);
 await inbound.stop();
 

@@ -113,6 +113,8 @@ const ENDPOINT_WRAPPING_KEY_STORE_CONTRACT_VERSION="ucr.endpoint-wrapping-key.v1
 const ENDPOINT_WASM_CONTRACT_VERSION="ucr.endpoint-wasm.v1";
 const ENDPOINT_WASM_MODULE_URL="./endpoint-wasm/ucr_endpoint_wasm.js";
 let endpointWasmModulePromise=null,endpointMlsState=null,endpointMlsGroupId=null;
+let endpointMlsInvalidationGeneration=0,endpointMlsBootstrapPromise=null;
+let endpointMlsBootstrapAbort=null;
 const ENDPOINT_STATE_DB_NAME="ucr-endpoint-state-v1";
 const ENDPOINT_STATE_DB_VERSION=2;
 const ENDPOINT_STATE_OBJECT_STORE="sealed-snapshots";
@@ -460,15 +462,15 @@ function endpointBase64ToBytes(value){
   for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
   return bytes;
 }
-async function fetchEndpointMlsContext(){
-  const response=await api("/v1/realtime/mls-context",body());
+async function fetchEndpointMlsContext(signal){
+  const response=await api("/v1/realtime/mls-context",body(),signal);
   const context=await response.json();
   if(!context||context.ok!==true||typeof context.group_id!=="string"||context.group_id.length===0)throw new Error("Invalid MLS admission context");
   if(!["register","restore","legacy_server_owned"].includes(context.endpoint_state_mode))throw new Error("Invalid MLS endpoint state mode");
   return context;
 }
-async function fetchEndpointMlsBootstrap(){
-  const response=await api("/v1/realtime/mls-bootstrap",body());
+async function fetchEndpointMlsBootstrap(signal){
+  const response=await api("/v1/realtime/mls-bootstrap",body(),signal);
   const bootstrap=await response.json();
   if(!bootstrap||bootstrap.ok!==true||typeof bootstrap.group_id!=="string"||!bootstrap.welcome_crypto_state||!bootstrap.current_crypto_state||!Array.isArray(bootstrap.subsequent_commits))throw new Error("Invalid MLS bootstrap");
   return bootstrap;
@@ -532,46 +534,95 @@ async function sealEndpointMlsSnapshot(state){
     wrappingKey.fill(0);
   }
 }
+// An old Welcome/bootstrap must never publish a new MLS signer after Leave,
+// withdrawal, or a newer session's admission. No duplicate concurrent bootstrap
+// for the same Device; a replaced generation waits for old cleanup.
+function retireEndpointMlsState(){
+  ++endpointMlsInvalidationGeneration;
+  // Abort obsolete requests, so a new admission cannot be held by a lost Welcome.
+  if(endpointMlsBootstrapAbort){endpointMlsBootstrapAbort.abort();endpointMlsBootstrapAbort=null;}
+  if(endpointMlsState&&typeof endpointMlsState.free==="function"){
+    try{endpointMlsState.free();}catch(_){}
+  }
+  endpointMlsState=null;endpointMlsGroupId=null;
+  delete window.ucrEndpointMlsSession;
+}
 async function ensureEndpointMlsReady(){
   if(endpointMlsState)return endpointMlsState;
-  if(window.ucrEndpointMlsSession?.mode==="legacy_server_owned")return null;
-  if(!claims||!claims.device_id)throw new Error("Endpoint-owned MLS requires a Device-bound join grant");
-  const context=await fetchEndpointMlsContext();
-  endpointMlsGroupId=context.group_id;
-  if(context.endpoint_state_mode==="legacy_server_owned"){
-    window.ucrEndpointMlsSession=Object.freeze({
-      contractVersion:ENDPOINT_WASM_CONTRACT_VERSION,
-      groupId:context.group_id,
-      mode:"legacy_server_owned",
-      state:null
-    });
-    return null;
+  const generation=endpointMlsInvalidationGeneration;
+  const pending=endpointMlsBootstrapPromise;
+  if(pending){
+    if(pending.generation===generation)return pending.promise;
+    // Never run two simultaneous Device MLS registrations or snapshot writes.
+    try{await pending.promise;}catch(_){}
+    if(generation!==endpointMlsInvalidationGeneration){
+      throw new Error("Endpoint MLS bootstrap cancelled by admission withdrawal");
+    }
+    return ensureEndpointMlsReady();
   }
-  const module=await loadEndpointWasmModule();
-  const persistenceKey=endpointPersistenceStorageKey();
-  if(!persistenceKey)throw new Error("Endpoint MLS persistence requires a Device-bound identity");
-  const sealed=await loadEndpointState(persistenceKey);
-  let bootstrap,state;
-  if(context.endpoint_state_mode==="restore"){
-    if(sealed===null)throw new Error("Endpoint-owned MLS state is already admitted but its sealed local snapshot is missing");
-    bootstrap=await fetchEndpointMlsBootstrap();
-    if(bootstrap.group_id!==context.group_id)throw new Error("MLS bootstrap Group does not match admission context");
-    state=await restoreEndpointMlsSnapshot(module,context.group_id,sealed,bootstrap);
-  }else if(context.endpoint_state_mode==="register"){
-    if(sealed!==null)throw new Error("Unexpected sealed endpoint MLS state exists before canonical admission");
-    state=new module.EndpointMlsState(
-      claims.tenant_id,
-      claims.namespace_id??undefined,
-      context.group_id,
-      claims.device_id
-    );
-    try{
+  const controller=new AbortController();
+  endpointMlsBootstrapAbort=controller;
+  const promise=bootstrapEndpointMlsForCurrentAdmission(generation,controller.signal);
+  const entry={generation,promise};
+  endpointMlsBootstrapPromise=entry;
+  try{return await promise;}
+  finally{
+    if(endpointMlsBootstrapPromise===entry)endpointMlsBootstrapPromise=null;
+    if(endpointMlsBootstrapAbort===controller)endpointMlsBootstrapAbort=null;
+  }
+}
+async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
+  const sessionGeneration=sessionLifecycleGeneration;
+  const identity=claims;
+  const current=()=>sessionActive&&claims===identity&&
+    sessionGeneration===sessionLifecycleGeneration&&
+    generation===endpointMlsInvalidationGeneration;
+  const requireCurrent=()=>{
+    if(!current())throw new Error("Endpoint MLS bootstrap cancelled by admission withdrawal");
+  };
+  requireCurrent();
+  if(window.ucrEndpointMlsSession?.mode==="legacy_server_owned")return null;
+  if(!identity||!identity.device_id)throw new Error("Endpoint-owned MLS requires a Device-bound join grant");
+  let state=null;
+  try{
+    const context=await fetchEndpointMlsContext(signal);
+    requireCurrent();
+    if(context.endpoint_state_mode==="legacy_server_owned"){
+      endpointMlsGroupId=context.group_id;
+      window.ucrEndpointMlsSession=Object.freeze({
+        contractVersion:ENDPOINT_WASM_CONTRACT_VERSION,
+        groupId:context.group_id,
+        mode:"legacy_server_owned",
+        state:null
+      });
+      return null;
+    }
+    const module=await loadEndpointWasmModule();
+    requireCurrent();
+    const persistenceKey=endpointPersistenceStorageKey(identity);
+    if(!persistenceKey)throw new Error("Endpoint MLS persistence requires a Device-bound identity");
+    const sealed=await loadEndpointState(persistenceKey);
+    requireCurrent();
+    let bootstrap;
+    if(context.endpoint_state_mode==="restore"){
+      if(sealed===null)throw new Error("Endpoint-owned MLS state is already admitted but its sealed local snapshot is missing");
+      bootstrap=await fetchEndpointMlsBootstrap(signal);
+      requireCurrent();
+      if(bootstrap.group_id!==context.group_id)throw new Error("MLS bootstrap Group does not match admission context");
+      state=await restoreEndpointMlsSnapshot(module,context.group_id,sealed,bootstrap);
+      requireCurrent();
+    }else if(context.endpoint_state_mode==="register"){
+      if(sealed!==null)throw new Error("Unexpected sealed endpoint MLS state exists before canonical admission");
+      state=new module.EndpointMlsState(
+        identity.tenant_id,identity.namespace_id??undefined,context.group_id,identity.device_id
+      );
       const keyPackage=state.key_package();
       await api("/v1/realtime/mls-key-package",{
-        ...body(),
-        key_package_base64:endpointBytesToBase64(keyPackage)
-      });
-      bootstrap=await fetchEndpointMlsBootstrap();
+        ...body(),key_package_base64:endpointBytesToBase64(keyPackage)
+      },signal);
+      requireCurrent();
+      bootstrap=await fetchEndpointMlsBootstrap(signal);
+      requireCurrent();
       if(bootstrap.group_id!==context.group_id)throw new Error("MLS bootstrap Group does not match admission context");
       state.join_from_welcome(
         endpointBase64ToBytes(bootstrap.welcome_base64),
@@ -579,26 +630,30 @@ async function ensureEndpointMlsReady(){
         bootstrap.welcome_crypto_state.crypto_state_ref
       );
       endpointApplyBootstrapCommits(state,bootstrap,0);
-    }catch(error){
-      if(typeof state.free==="function")state.free();
-      throw error;
+    }else{
+      throw new Error("Unsupported MLS endpoint state mode");
     }
-  }else{
-    throw new Error("Unsupported MLS endpoint state mode");
+    requireCurrent();
+    if(BigInt(state.crypto_epoch())!==BigInt(bootstrap.current_crypto_state.crypto_epoch)){
+      throw new Error("Endpoint MLS epoch does not match canonical current state");
+    }
+    await sealEndpointMlsSnapshot(state);
+    requireCurrent();
+    endpointMlsState=state;
+    endpointMlsGroupId=context.group_id;
+    window.ucrEndpointMlsSession=Object.freeze({
+      contractVersion:ENDPOINT_WASM_CONTRACT_VERSION,
+      groupId:context.group_id,
+      mode:context.endpoint_state_mode,
+      state
+    });
+    state=null; // transferred to the current, revocable session owner
+    return endpointMlsState;
+  }finally{
+    if(state&&typeof state.free==="function"){
+      try{state.free();}catch(_){}
+    }
   }
-  if(BigInt(state.crypto_epoch())!==BigInt(bootstrap.current_crypto_state.crypto_epoch)){
-    if(typeof state.free==="function")state.free();
-    throw new Error("Endpoint MLS epoch does not match canonical current state");
-  }
-  await sealEndpointMlsSnapshot(state);
-  endpointMlsState=state;
-  window.ucrEndpointMlsSession=Object.freeze({
-    contractVersion:ENDPOINT_WASM_CONTRACT_VERSION,
-    groupId:context.group_id,
-    mode:context.endpoint_state_mode,
-    state
-  });
-  return state;
 }
 function endpointPersistence(adapter){
   if(!adapter||adapter.contractVersion!==E2EE_ENDPOINT_CONTRACT_VERSION||adapter.persistence===undefined)return null;
@@ -646,8 +701,12 @@ function e2eeAdapter(){
 }
 function requireCompatibleE2eeAdapter(adapter){
   if(!adapter)return null;
-  if(adapter.contractVersion!==undefined&&adapter.contractVersion!==E2EE_ENDPOINT_CONTRACT_VERSION){
-    throw new Error("Unsupported endpoint E2EE adapter contract version");
+  // RT0 protected media requires the revocable v1 contract; accepting an
+  // unversioned legacy object here could mark an unverified media path as live.
+  if(adapter.contractVersion!==E2EE_ENDPOINT_CONTRACT_VERSION||
+     typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"||
+     typeof adapter.stop!=="function"){
+    throw new Error("Protected endpoint E2EE adapter v1 with revocation is required");
   }
   endpointPersistence(adapter);
   return adapter;
@@ -914,6 +973,7 @@ async function activateE2eeAdapter(){
   const persisted=await persistEndpointState(adapter);
   if(!isCurrent())return;
   e2eeAdapterReady=true;
+  ui.state.textContent="Connected"; // only authenticated E2EE media is a connected call
   // A connected ICE transport alone is never evidence of recovered E2EE.
   webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
   // Admission happens before the protected DataChannel opens. Only now do we
@@ -935,6 +995,7 @@ function attachE2eeDataChannel(channel){
   channel.onopen=()=>{activateE2eeAdapter().catch(e=>{
     if(e2eeChannel!==channel)return;
     closeE2eeTransport();ui.webrtcState.textContent="E2EE unavailable";
+    ui.state.textContent="Protected media unavailable";
     ui.status.textContent="Endpoint E2EE adapter failed; encrypted transport closed: "+e.message;
   });};
   channel.onmessage=event=>{
@@ -955,6 +1016,7 @@ function attachE2eeDataChannel(channel){
     // Retire its MLS media bridge before scheduling a fresh WebRTC peer.
     webrtcNeedsPeerRebuild=true;
     closeE2eeTransport();
+    if(sessionActive&&mediaActive)ui.state.textContent="Reconnecting";
     scheduleWebRtcRetry();
   }};
 }
@@ -1158,7 +1220,8 @@ async function startWebRtc(forceMedia=false){
     const state=pc.connectionState;ui.webrtcState.textContent=state||"Connecting";
     if(state==="connected"){
       if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
-      ui.state.textContent="Connected";ui.status.textContent=e2eeChannel&&e2eeChannel.readyState==="open"?"Encrypted media transport connected.":"WebRTC signalling connected; waiting for encrypted media DataChannel.";
+      ui.state.textContent=e2eeAdapterReady?"Connected":"Securing";
+       ui.status.textContent=e2eeAdapterReady?"Encrypted media transport connected.":"WebRTC signalling connected; waiting for authorized encrypted media.";
     }
     if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
   };
@@ -1253,7 +1316,7 @@ async function activateAdmittedMedia(){
   const generation=sessionLifecycleGeneration;
   await ensureEndpointMlsReady();
   if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive)return;
-  mediaActive=true;ui.state.textContent="Connected";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
+  mediaActive=true;ui.state.textContent="Connecting";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
   if(!reactionTimer){reactionTimer=setInterval(()=>{pollReactions().catch(()=>{});},1000);}
   if(!chatTimer){chatTimer=setInterval(()=>{pollChat().catch(()=>{});},1000);}
   pollReactions().catch(()=>{});
@@ -1268,7 +1331,7 @@ async function applyAdmissionState(state){
   if(state==="waiting_room"){
     // Withdrawal must stop real camera/microphone capture, not just the E2EE
     // transport. A later re-admission can request devices afresh.
-    mediaActive=false;teardownPeer();stopLocalCapture();
+    mediaActive=false;teardownPeer();retireEndpointMlsState();stopLocalCapture();
     if(streamAbort){streamAbort.abort();streamAbort=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
@@ -1277,7 +1340,7 @@ async function applyAdmissionState(state){
     return;
   }
   if(state==="closed"){
-    mediaActive=false;teardownPeer();stopLocalCapture();ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
+    mediaActive=false;teardownPeer();retireEndpointMlsState();stopLocalCapture();ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(streamAbort){streamAbort.abort();streamAbort=null;}
@@ -1342,6 +1405,7 @@ async function leave(){
   const wasActive=sessionActive;
   // Invalidate late joins, heartbeats and permission prompts synchronously.
   ++sessionLifecycleGeneration;++mediaCaptureGeneration;mediaActive=false;
+  retireEndpointMlsState();
   if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
   if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
   // Device tracks must stop before the first await on explicit Leave.
@@ -1349,8 +1413,6 @@ async function leave(){
   stopLocalCapture();
   await stopScreenShare(false);
   if(wasActive)await closeServerPeer();
-  if(endpointMlsState&&typeof endpointMlsState.free==="function"){try{endpointMlsState.free();}catch(_){}}
-  endpointMlsState=null;endpointMlsGroupId=null;delete window.ucrEndpointMlsSession;
   ui.privacyMode.disabled=false;
   sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
@@ -1763,7 +1825,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
-window.addEventListener("pagehide",()=>{++sessionLifecycleGeneration;++mediaCaptureGeneration;if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("pagehide",()=>{++sessionLifecycleGeneration;++mediaCaptureGeneration;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>
