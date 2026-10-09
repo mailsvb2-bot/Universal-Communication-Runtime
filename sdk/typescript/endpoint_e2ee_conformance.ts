@@ -552,7 +552,7 @@ const acceptedJoinCtx: Record<string, any> = {
   leave: async () => {acceptedJoinCleanup++;acceptedJoinCtx.sessionActive = false;},
   scheduleWaitingRoom() {}, scheduleEntryRetry() {},
 };
-runInNewContext(preflightJoinSnippet + "\\nthis.joinCall = join;", acceptedJoinCtx);
+runInNewContext(preflightJoinSnippet + "\nthis.joinCall = join;", acceptedJoinCtx);
 await acceptedJoinCtx.joinCall();
 assert.equal(acceptedJoinCleanup, 1, "accepted session is retired on activation failure");
 assert.equal(acceptedJoinCtx.sessionActive, false, "no orphan active session");
