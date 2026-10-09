@@ -118,6 +118,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
   readonly #readers: ReadableStreamDefaultReader<VideoFrame | AudioData>[] = [];
   #generation = 0;
   #emit: ((frame: UcrEncodedMediaFrame) => void | Promise<void>) | null = null;
+  #sourceUpdateTail: Promise<void> = Promise.resolve();
   readonly #layeredCamera: boolean;
 
   constructor(
@@ -145,14 +146,25 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
 
   async updateSources(sources: UcrEndpointMediaSources): Promise<void> {
     if (!this.#emit) throw new Error("WebCodecs producer not running");
-    ++this.#generation;
-    await this.#reset();
-    await this.#attach(sources, this.#generation);
+    const generation = ++this.#generation;
+    // A screen-share revocation may arrive while an earlier reader.cancel()
+    // awaits. Serialize resets and attach ONLY that update's generation:
+    // otherwise an older capture can be reattached after the newer revoke.
+    const next = this.#sourceUpdateTail.catch(() => {}).then(async () => {
+      if (generation !== this.#generation || !this.#emit) return;
+      await this.#reset();
+      if (generation !== this.#generation || !this.#emit) return;
+      await this.#attach(sources, generation);
+    });
+    this.#sourceUpdateTail = next;
+    await next;
   }
 
   async stop(): Promise<void> {
     ++this.#generation;
     this.#emit = null;
+    // No post-stop update may reattach an encoder after cleanup has finished.
+    await this.#sourceUpdateTail.catch(() => {});
     await this.#reset();
   }
 
