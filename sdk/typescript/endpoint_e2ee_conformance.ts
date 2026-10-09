@@ -14,6 +14,8 @@ import {
 } from "./src/portable_endpoint_media.ts";
 import {
   UcrBrowserWebCodecsConsumer,
+  UcrBrowserWebCodecsProducer,
+  ucrCameraLayerStreamId,
   ucrVideoEncodingTarget,
 } from "./src/browser_webcodecs_media.ts";
 import {
@@ -491,6 +493,96 @@ try {
   for (const item of savedGlobals) {
     if (item.original) Object.defineProperty(globalThis, item.key, item.original);
     else Reflect.deleteProperty(globalThis, item.key);
+  }
+}
+
+// Execute the real WebCodecs producer with bounded injected host APIs. One camera
+// reader feeds exactly two independent encrypted stream IDs, never per-viewer encoders.
+assert.equal(ucrCameraLayerStreamId("track123", "full"), "track123");
+assert.equal(ucrCameraLayerStreamId("track123", "low"), "track123-low");
+assert.throws(() => ucrCameraLayerStreamId("x".repeat(113), "low"), /invalid authenticated/);
+const originalGlobals = [
+  "MediaStreamTrackProcessor", "AudioEncoder", "VideoEncoder", "AudioDecoder",
+  "VideoDecoder", "EncodedAudioChunk", "EncodedVideoChunk", "OffscreenCanvas",
+  "VideoFrame",
+].map((key) => ({key, descriptor: Object.getOwnPropertyDescriptor(globalThis, key)}));
+const producerConfigured: object[] = [];
+let lowDraws = 0;
+const outputFrames: {streamId: string; timestamp: bigint; keyframe: boolean}[] = [];
+let captureCount = 0;
+const fakeReader = {
+  async read() {
+    if (captureCount >= 12) return {done: true};
+    const timestamp = captureCount++ * 33_333;
+    return {done: false, value: {timestamp, close() {}}};
+  },
+  async cancel() {},
+};
+for (const {key} of originalGlobals) {
+  Object.defineProperty(globalThis, key, {configurable: true, writable: true, value: class {}});
+}
+Object.defineProperty(globalThis, "MediaStreamTrackProcessor", {
+  configurable: true, value: class {
+    readonly readable = {getReader() {return fakeReader;}};
+  },
+});
+Object.defineProperty(globalThis, "OffscreenCanvas", {
+  configurable: true, value: class {
+    constructor(readonly width: number, readonly height: number) {}
+    getContext() {return {drawImage() {lowDraws++;}};}
+  },
+});
+Object.defineProperty(globalThis, "VideoFrame", {
+  configurable: true, value: class {
+    readonly timestamp: number;
+    constructor(_canvas: unknown, opts: {timestamp: number}) {this.timestamp = opts.timestamp;}
+    close() {}
+  },
+});
+Object.defineProperty(globalThis, "VideoEncoder", {
+  configurable: true, value: class {
+    readonly encodeQueueSize = 0;
+    readonly #output: (chunk: unknown) => void;
+    constructor({output}: {output: (chunk: unknown) => void}) {this.#output = output;}
+    configure(config: object) {producerConfigured.push(config);}
+    encode(frame: {timestamp: number}, opts: {keyFrame: boolean}) {
+      this.#output({
+        timestamp: frame.timestamp, byteLength: 2,
+        type: opts.keyFrame ? "key" : "delta",
+        copyTo(out: Uint8Array) {out.set([1, 2]);},
+      });
+    }
+    async flush() {}
+    close() {}
+  },
+});
+try {
+  const layerProducer = new UcrBrowserWebCodecsProducer(() => {}, true);
+  const videoTrack = {
+    id: "camera123",
+    getSettings: () => ({width: 1920, height: 1080, frameRate: 30}),
+  };
+  await layerProducer.start({
+    stream: {getAudioTracks: () => []},
+    cameraStream: {getVideoTracks: () => [videoTrack]},
+    screenStream: null,
+  } as unknown as any, (frame) => {
+    outputFrames.push({streamId: frame.streamId,
+      timestamp: frame.timestamp, keyframe: frame.keyframe});
+  });
+  for (let spin = 0; spin < 24; spin++) await Promise.resolve();
+  await layerProducer.stop();
+  assert.equal(producerConfigured.length, 2, "one camera creates at most two encoders");
+  assert.deepEqual(producerConfigured.map((c: any) => [c.width, c.height]),
+    [[1920, 1080], [640, 360]]);
+  assert.equal(outputFrames.filter(f => f.streamId === "camera123").length, 12);
+  assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length >= 3);
+  assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length <= 6);
+  assert.equal(lowDraws, outputFrames.filter(f => f.streamId === "camera123-low").length);
+} finally {
+  for (const {key, descriptor} of originalGlobals) {
+    if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+    else Reflect.deleteProperty(globalThis, key);
   }
 }
 
