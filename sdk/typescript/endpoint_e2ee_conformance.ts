@@ -337,6 +337,8 @@ const lifecycleCtx: Record<string, any> = {
   refreshScreenShareControl() {},
   stopAdaptiveMediaMonitoring: () => {protectedLifecycleEvents.push("monitor-stops");},
   startAdaptiveMediaMonitoring: () => {protectedLifecycleEvents.push("monitor-starts");},
+  syncReceiveSubscriptions: async () => {protectedLifecycleEvents.push("roster-synced");},
+  resetReceiveRoster: () => {protectedLifecycleEvents.push("roster-reset");},
 };
 runInNewContext(
   closeSnippet + "\n" + activateSnippet +
@@ -587,7 +589,8 @@ const sessionClaims = {session: "1"};
 const channel = {readyState: "open"};
 const ctx: Record<string, any> = {
   sessionActive: true, mediaActive: true, adaptiveMediaReportInFlight: false,
-  adaptiveMediaGeneration: 0,
+  adaptiveMediaGeneration: 0, receiveRosterSources: [],
+  applyReceiveSubscriptions: async () => {},
   e2eeAdapterReady: true, e2eeChannel: channel, appliedAdaptiveQuality: null,
   claims: sessionClaims, e2eeAdapter: () => adapter,
   validAdaptiveMediaTelemetry: (value: unknown) => value,
