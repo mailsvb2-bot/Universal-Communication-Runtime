@@ -1239,7 +1239,7 @@ function validReceiveRoster(value){
   for(const source of value.sources){
     if(!source||typeof source.source_id!=="string"||source.source_id.length<1||
         new TextEncoder().encode(source.source_id).length>128||
-        /[\\u0000-\\u001f\\u007f]/.test(source.source_id)||
+        /[\u0000-\u001f\u007f]/.test(source.source_id)||
         !Number.isInteger(source.source_kind)||source.source_kind<1||source.source_kind>8||
         seen.has(source.source_kind+":"+source.source_id))return null;
     seen.add(source.source_kind+":"+source.source_id);
