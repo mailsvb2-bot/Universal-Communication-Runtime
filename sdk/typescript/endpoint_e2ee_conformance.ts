@@ -534,6 +534,31 @@ assert.equal(preflightJoinCtx.ui.state.textContent, "Secure media unavailable");
 assert.equal(preflightJoinCtx.ui.join.disabled, false,
   "user can retry after canonical media authority is installed");
 
+// A server-accepted join followed by MLS/policy activation failure must
+// synchronously retire its active session rather than leave a heartbeat alive.
+let acceptedJoinCleanup = 0;
+let acceptedJoinHeartbeats = 0;
+const acceptedJoinCtx: Record<string, any> = {
+  claims: {not_before: 0}, sessionLifecycleGeneration: 0,
+  sessionActive: false, mediaActive: false, heartbeatTimer: null,
+  ui: {state: {textContent: ""}, status: {textContent: ""},
+    join: {disabled: false}, leave: {disabled: true},
+    privacyMode: {disabled: false}, expires: {textContent: ""}},
+  requireCanonicalMediaHostReady() {},
+  api: async () => ({json: async () => ({ok: true, admission_state: "admitted"})}),
+  body: () => ({}),
+  applyMediaPolicy: async () => {throw new Error("MLS activation refused");},
+  setInterval: () => {acceptedJoinHeartbeats++;return 1;},
+  leave: async () => {acceptedJoinCleanup++;acceptedJoinCtx.sessionActive = false;},
+  scheduleWaitingRoom() {}, scheduleEntryRetry() {},
+};
+runInNewContext(preflightJoinSnippet + "\\nthis.joinCall = join;", acceptedJoinCtx);
+await acceptedJoinCtx.joinCall();
+assert.equal(acceptedJoinCleanup, 1, "accepted session is retired on activation failure");
+assert.equal(acceptedJoinCtx.sessionActive, false, "no orphan active session");
+assert.equal(acceptedJoinHeartbeats, 0, "no heartbeat before failed policy activation");
+assert.equal(acceptedJoinCtx.ui.state.textContent, "Rejected");
+
 // Chameleon lifecycle: no telemetry may be reported before the endpoint is
 // authenticated and running; the first report must start after E2EE activation.
 const activateSnippet = browser.slice(
