@@ -26,11 +26,17 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
         fs::read_to_string(workspace.join("docker/dev/Dockerfile")).expect("read dev Dockerfile");
     assert!(dockerfile.contains("cargo build --locked --release -p ucr-dev --bin ucr"));
     assert!(dockerfile.contains("crates/ucr-realtime-web/static/client.html"));
-    assert!(dockerfile.contains("cargo build --locked --release -p ucr-realtime-web --bin ucr-realtime-web"));
+    assert!(
+        dockerfile
+            .contains("cargo build --locked --release -p ucr-realtime-web --bin ucr-realtime-web")
+    );
     assert!(dockerfile.contains("--manifest-path crates/ucr-endpoint-wasm/Cargo.toml"));
     assert!(dockerfile.contains("sdk/typescript/src/reference_browser_media_installer.ts"));
     assert!(dockerfile.contains("COPY --from=browser-sdk /out/endpoint-media/"));
-    assert!(dockerfile.contains("COPY --from=builder /src/crates/ucr-realtime-web/static/endpoint-wasm/"));
+    assert!(
+        dockerfile
+            .contains("COPY --from=builder /src/crates/ucr-realtime-web/static/endpoint-wasm/")
+    );
 
     let entrypoint = fs::read_to_string(workspace.join("docker/dev/entrypoint.sh"))
         .expect("read dev entrypoint");
@@ -46,7 +52,9 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
     assert!(entrypoint.contains("UCR_REALTIME_GRPC_UPSTREAM=http://127.0.0.1:50051"));
     assert!(entrypoint.contains("UCR_REALTIME_WEB_ASSET_DIR=/opt/ucr/browser"));
     assert!(entrypoint.contains("/usr/local/bin/ucr-realtime-web &"));
-    assert!(entrypoint.contains("socat TCP-LISTEN:8080,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:8081"));
+    assert!(
+        entrypoint.contains("socat TCP-LISTEN:8080,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:8081")
+    );
     assert!(!entrypoint.contains("python3 -m http.server"));
     assert!(entrypoint.contains("webhook_receiver.py"));
     assert!(entrypoint.contains("turnserver -n"));
