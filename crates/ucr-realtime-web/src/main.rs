@@ -125,6 +125,21 @@ struct ReactionReceiptResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct BrowserMediaSubscription {
+    source_id: String,
+    source_kind: i32,
+    media_kind: i32,
+    stream_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetMediaSubscriptionsRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    subscriptions: Vec<BrowserMediaSubscription>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AdaptiveMediaRequest {
     #[serde(flatten)]
     session: SessionRequest,
@@ -495,6 +510,12 @@ async fn handle_post_route(state: &AppState, token: &str, path: &str, body: &[u8
             Ok(input) => list_reactions(state, token, input).await,
             Err(error) => error.into_response(),
         },
+        "/v1/realtime/subscriptions" => {
+            match decode_json::<SetMediaSubscriptionsRequest>(body) {
+                Ok(input) => set_media_subscriptions(state, token, input).await,
+                Err(error) => error.into_response(),
+            }
+        }
         "/v1/realtime/adaptive-media" => match decode_json::<AdaptiveMediaRequest>(body) {
             Ok(input) => report_adaptive_media(state, token, input).await,
             Err(error) => error.into_response(),
@@ -1313,6 +1334,63 @@ async fn get_chat_message(
         },
         Err(status) => grpc_error(&status),
     }
+}
+
+/// Replace only this authenticated viewer's ephemeral receive set. Exact stream IDs
+/// allow the current canonical SFU to forward a selected ciphertext layer without
+/// decoding frames or changing any publisher's shared encoder.
+async fn set_media_subscriptions(
+    state: &AppState,
+    token: &str,
+    input: SetMediaSubscriptionsRequest,
+) -> HttpResponse {
+    if input.subscriptions.len() > 32 {
+        return api_error(StatusCode::BAD_REQUEST, "too_many_subscriptions", "subscriber stream selection exceeds capacity");
+    }
+    let mut layers = Vec::with_capacity(input.subscriptions.len());
+    for item in input.subscriptions {
+        if !valid_subscription_id(&item.source_id)
+            || item.stream_id.as_ref().is_some_and(|id| !valid_subscription_id(id))
+            || item.media_kind != pb::MediaKind::Audio as i32
+                && item.media_kind != pb::MediaKind::Video as i32
+            || item.media_kind == pb::MediaKind::Audio as i32 && item.stream_id.is_some()
+        {
+            return api_error(StatusCode::BAD_REQUEST, "invalid_stream_selection", "invalid subscriber source or encrypted video stream");
+        }
+        layers.push(pb::ConferenceMediaSubscription {
+            source: Some(pb::PrincipalRef {
+                principal_id: Some(pb_id(&item.source_id)),
+                kind: item.source_kind,
+            }),
+            media_kind: item.media_kind,
+            stream_id: item.stream_id.as_deref().map(pb_id),
+        });
+    }
+    let mut request = GrpcRequest::new(pb::RealtimeSetSubscriptionsRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        subscriptions: layers,
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+    let mut client = client(state);
+    match client.set_subscriptions(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_set_subscriptions_response::Result::Acknowledgement(_)) => {
+                json_response(StatusCode::OK, &serde_json::json!({"ok": true}))
+            }
+            Some(pb::realtime_set_subscriptions_response::Result::Error(_)) | None => {
+                api_error(StatusCode::CONFLICT, "subscription_rejected", "canonical subscriber selection denied")
+            }
+        },
+        Err(error) => grpc_error(&error),
+    }
+}
+
+fn valid_subscription_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
 }
 
 async fn report_adaptive_media(
