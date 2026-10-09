@@ -651,7 +651,17 @@ function closeE2eeTransport(){
     current.getTracks().forEach(track=>track.stop());
   }
   const adapter=e2eeAdapter();
-  if(adapter&&typeof adapter.stop==="function"){try{adapter.stop();}catch(_){}}
+  if(adapter&&typeof adapter.stop==="function"){
+    try{
+      // stop() retires crypto immediately, but media cleanup can reject later.
+      // Observe the Promise so failed device teardown never becomes an unhandled error.
+      Promise.resolve(adapter.stop()).catch(()=>{
+        if(sessionActive)ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
+      });
+    }catch(_){
+      if(sessionActive)ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
+    }
+  }
   // The canonical bridge revokes permanently on stop. Never reuse a retired
   // adapter on reconnection: reconstruct it from fresh authoritative admission.
   if(adapter&&adapter===e2eeManagedAdapter){
