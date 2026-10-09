@@ -1352,7 +1352,7 @@ async fn get_chat_message(
 }
 
 /// The current accepted sender candidates are projected from the canonical
-/// CallSession, after validating this same bearer/session and active admission.
+/// `CallSession`, after validating this same bearer/session and active admission.
 /// These identities cannot be invented or changed by an untrusted browser.
 async fn get_receive_roster(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
     let mut request = GrpcRequest::new(pb::RealtimeGetReceiveRosterRequest {
