@@ -408,6 +408,101 @@ assert.equal(persistedFrameCount, 0,
   "media hot path must not persist MLS state on every decrypted frame");
 
 
+// Execute browser's canonical roster -> per-viewer SFU subscription journey.
+// The VM never supplies a parallel admission owner or a forged roster.
+const rosterCode = browser.slice(
+  browser.indexOf("function resetReceiveRoster(){"),
+  browser.indexOf("function stopAdaptiveMediaMonitoring(){"),
+);
+assert.ok(rosterCode.startsWith("function resetReceiveRoster(){"));
+const sourceList = [
+  {source_id: "self", source_kind: 1},
+  {source_id: "alice", source_kind: 1},
+  {source_id: "bob", source_kind: 1},
+];
+const rosterRequests: Array<{path: string; subscriptions?: any[]}> = [];
+const rosterChannel = {readyState: "open"};
+const rosterClaims = {participant_id: "self"};
+const rosterCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, e2eeAdapterReady: true,
+  e2eeChannel: rosterChannel, claims: rosterClaims,
+  receiveRosterGeneration: 0, receiveRosterInFlight: false,
+  receiveSubscriptionFingerprint: null, receiveSubscriptionInFlight: false,
+  receiveSubscriptionDirty: false, receiveRosterSources: [],
+  receiveSpeakerId: null, receiveSpeakerCandidate: null, receiveSpeakerSamples: 0,
+  ui: {status: {textContent: ""}},
+  TextEncoder, body: () => ({}),
+  api: async (path: string, payload: any) => {
+    rosterRequests.push({path, subscriptions: payload?.subscriptions});
+    return path.endsWith("/receive-roster")
+      ? {ok: true, json: async () => ({ok: true, call_revision: 8,
+          sources: sourceList})}
+      : {ok: true, json: async () => ({ok: true})};
+  },
+};
+runInNewContext(rosterCode +
+  "\nthis.syncRoster = syncReceiveSubscriptions;" +
+  "\nthis.updateSpeaker = updateReceiveActiveSpeaker;" +
+  "\nthis.resetRoster = resetReceiveRoster;" +
+  "\nthis.planRoster = planReceiveSubscriptions;" +
+  "\nthis.validRoster = validReceiveRoster;",
+  rosterCtx);
+await rosterCtx.syncRoster();
+assert.equal(rosterRequests.length, 2, "accepted roster fetch must precede SFU selection");
+assert.equal(rosterRequests[0]?.path, "/v1/realtime/receive-roster");
+assert.equal(rosterRequests[1]?.path, "/v1/realtime/subscriptions");
+assert.deepEqual(
+  rosterRequests[1].subscriptions.map((s: any) => [s.source_id, s.media_kind]),
+  [["alice", 1], ["bob", 1], ["alice", 2]],
+  "self must be excluded; one video source plus bounded audio are chosen"
+);
+await rosterCtx.syncRoster();
+assert.equal(rosterRequests.length, 3,
+  "stable roster must not repeat an identical SFU selection");
+const many = Array.from({length: 1000}, (_, i) => ({
+  source_id: "participant-" + i, source_kind: 1,
+}));
+const bounded = rosterCtx.planRoster(many, "participant-990");
+assert.equal(bounded.length, 32, "viewer never exceeds canonical 32 subscriptions");
+assert.equal(bounded.filter((x: any) => x.media_kind === 2).length, 1,
+  "one video canvas must never mix multiple speakers");
+assert.equal(bounded[31].source_id, "participant-990",
+  "a chosen speaker outside the first audio page is still viewable");
+assert.equal(rosterCtx.validRoster({ok: true, sources: [
+  {source_id: "alice", source_kind: 1},
+  {source_id: "alice", source_kind: 1},
+]}), null, "duplicated canonical identity must be rejected");
+rosterCtx.updateSpeaker("bob");
+rosterCtx.updateSpeaker("bob");
+for(let i=0;i<6;i++)await Promise.resolve();
+assert.ok(rosterRequests.some(r=>r.subscriptions?.some(s=>
+  s.media_kind===2&&s.source_id==="bob"
+)), "a stable authorized active speaker must switch the single video subscription");
+rosterCtx.updateSpeaker("outsider");
+assert.equal(rosterCtx.receiveSpeakerId, "bob",
+  "unlisted speaker must never influence canonical receive subscriptions");
+
+// Stale roster response cannot resurrect a revoked E2EE receiver.
+let releaseRoster: (() => void) | undefined;
+const revokedRosterGate = new Promise<void>(resolve => { releaseRoster = resolve; });
+let staleSubscriptionWrites = 0;
+rosterCtx.api = async (path: string) => {
+  if(path.endsWith("/receive-roster")) {
+    await revokedRosterGate;
+    return {ok: true, json: async () => ({ok: true, sources: sourceList})};
+  }
+  staleSubscriptionWrites++;
+  return {ok: true};
+};
+const revokedRoster = rosterCtx.syncRoster();
+await Promise.resolve();
+rosterCtx.resetRoster();
+rosterCtx.e2eeAdapterReady = false;
+releaseRoster?.();
+await revokedRoster;
+assert.equal(staleSubscriptionWrites, 0,
+  "outdated roster must never write SFU subscriptions after E2EE retirement");
+
 assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
 assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
 assert.match(browser, /restoreSealedState/);
