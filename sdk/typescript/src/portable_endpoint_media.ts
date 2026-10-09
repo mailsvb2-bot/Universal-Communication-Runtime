@@ -3,6 +3,7 @@ import {
   type UcrEndpointE2eeAdapterV1,
   type UcrEndpointE2eeStartInput,
   type UcrEndpointMediaSources,
+  type UcrEndpointAdaptiveQualityV1,
 } from "./endpoint_e2ee.ts";
 import {
   decodeSfuForwardEnvelopeWire,
@@ -53,6 +54,8 @@ export interface UcrMediaProducer {
 
 export interface UcrMediaConsumer {
   play(frame: UcrEncodedMediaFrame, source: SfuForwardEnvelopeWire["frame"]["header"]): void | Promise<void>;
+  /** Local authenticated-receiver quality control only; never changes the shared sender. */
+  setReceiveQuality?(target: UcrEndpointAdaptiveQualityV1): void | Promise<void>;
   stop(): void | Promise<void>;
 }
 
@@ -76,6 +79,8 @@ export interface UcrEndpointPipelineOptions {
   /** Locally cached canonical publish grant; must be updated on revocation/epoch change. */
   readonly authorizePublish?: (frame: UcrEncodedMediaFrame) => boolean | Promise<boolean>;
   readonly onError?: (error: unknown) => void;
+  /** Actual subscriber-side measurements supplied by the trusted host; never estimated/faked here. */
+  readonly measureReceiveTelemetry?: () => unknown | Promise<unknown>;
 }
 
 type InboundHeader = SfuForwardEnvelopeWire["frame"]["header"];
@@ -90,6 +95,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   readonly #authorizeFrame: UcrEndpointPipelineOptions["authorizeFrame"];
   readonly #authorizePublish: NonNullable<UcrEndpointPipelineOptions["authorizePublish"]>;
   readonly #onError: (error: unknown) => void;
+  readonly #measureReceiveTelemetry: UcrEndpointPipelineOptions["measureReceiveTelemetry"];
   readonly #maxFrameBytes: number;
   readonly #maxPendingFrames: number;
   readonly #maxReplayStreams: number;
@@ -121,6 +127,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#authorizeFrame = options.authorizeFrame;
     this.#authorizePublish = options.authorizePublish;
     this.#onError = options.onError ?? (() => {});
+    this.#measureReceiveTelemetry = options.measureReceiveTelemetry;
     this.#maxFrameBytes = options.maxFrameBytes ?? 1_048_576;
     this.#maxPendingFrames = options.maxPendingFrames ?? 64;
     this.#maxReplayStreams = options.maxReplayStreams ?? 4_096;
@@ -164,6 +171,29 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     if (!this.#active) throw new Error("endpoint media not started");
     if (!this.#producer.updateSources) throw new Error("media source updates unsupported by platform producer");
     await this.#producer.updateSources(sources);
+  }
+
+  /** No placeholder CPU/battery/thermal metrics: absent measurement means no report. */
+  async getReceiveMediaTelemetry(): Promise<unknown> {
+    if (!this.#active || this.#retired || !this.#measureReceiveTelemetry) return null;
+    const generation = this.#generation;
+    const value = await this.#measureReceiveTelemetry();
+    return this.#active && !this.#retired && this.#generation === generation ? value : null;
+  }
+
+  /** Applies only local decoder/receive policy, after canonical authorization and MLS binding.
+   * The caller must never interpret this as publisher encoding or permission authority.
+   */
+  async applyReceiveMediaDecision(target: UcrEndpointAdaptiveQualityV1): Promise<void> {
+    if (!this.#active || this.#retired) throw new Error("protected endpoint media is not active");
+    if (!this.#consumer.setReceiveQuality) {
+      throw new Error("receiver does not support adaptive media quality");
+    }
+    const generation = this.#generation;
+    await this.#consumer.setReceiveQuality(target);
+    if (!this.#active || this.#generation !== generation) {
+      throw new Error("protected receive quality change cancelled by session retirement");
+    }
   }
 
   async onEnvelope(wire: Uint8Array): Promise<void> {
