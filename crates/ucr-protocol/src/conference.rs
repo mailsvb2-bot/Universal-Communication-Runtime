@@ -253,6 +253,51 @@ mod tests {
     }
 
     #[test]
+    fn chameleon_accepts_parallel_exact_encrypted_layers_but_rejects_wildcard_overlap() {
+        let viewer = principal("viewer");
+        let hd = ucr_model::ConferenceMediaSubscription {
+            source: principal("speaker"),
+            media_kind: ucr_model::MediaKind::Video,
+            stream_id: Some(oid("camera-hd")),
+        };
+        let low = ucr_model::ConferenceMediaSubscription {
+            stream_id: Some(oid("camera-low")),
+            ..hd.clone()
+        };
+        let selection = ConferenceSubscriptionSet {
+            scope: scope(),
+            call_id: CallId::from_opaque(oid("quality-switch")),
+            subscriptions: vec![hd.clone(), low.clone()],
+        };
+        assert_eq!(
+            canonical_conference_subscription_set(&selection, &scope(), &viewer),
+            Ok(selection.clone())
+        );
+        let wildcard = ConferenceSubscriptionSet {
+            subscriptions: vec![
+                hd.clone(),
+                ucr_model::ConferenceMediaSubscription { stream_id: None, ..hd.clone() },
+            ],
+            ..selection.clone()
+        };
+        assert_eq!(
+            canonical_conference_subscription_set(&wildcard, &scope(), &viewer),
+            Err(ConferenceProtocolError::DuplicateSubscription)
+        );
+        let audio_layer = ConferenceSubscriptionSet {
+            subscriptions: vec![ucr_model::ConferenceMediaSubscription {
+                media_kind: ucr_model::MediaKind::Audio,
+                ..low
+            }],
+            ..selection
+        };
+        assert_eq!(
+            canonical_conference_subscription_set(&audio_layer, &scope(), &viewer),
+            Err(ConferenceProtocolError::InvalidStreamSelection)
+        );
+    }
+
+    #[test]
     fn recipient_owned_subscriptions_are_bounded_unique_and_not_self_targeted() {
         let alice = principal("alice");
         let base = ConferenceSubscriptionSet {
