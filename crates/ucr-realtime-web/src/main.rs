@@ -2476,7 +2476,22 @@ mod tests {
         assert!(CLIENT_HTML.contains("e2eeManagedAdapter=installed"));
         assert!(CLIENT_HTML.contains("pc.setConfiguration(rtcNetworkConfiguration("));
         assert!(CLIENT_HTML.contains("Endpoint E2EE adapter failed; encrypted transport closed"));
-        assert!(CLIENT_HTML.contains("if(e2eeChannel===channel){closeE2eeTransport()"));
+        // Closing the encrypted DataChannel is terminal for its old media
+        // signer. A new peer and fresh canonical admission are required.
+        // The previous single-line test rejected this stricter recovery path.
+        for required in [
+            "channel.onclose=()=>{if(e2eeChannel===channel){",
+            "webrtcNeedsPeerRebuild=true;",
+            "closeE2eeTransport();",
+            "scheduleWebRtcRetry();",
+            "if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}",
+            "webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;",
+        ] {
+            assert!(
+                CLIENT_HTML.contains(required),
+                "secure E2EE DataChannel rebuild contract missing: {required}"
+            );
+        }
     }
 
     #[test]
