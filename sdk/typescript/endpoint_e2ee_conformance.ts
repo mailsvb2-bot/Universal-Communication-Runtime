@@ -481,6 +481,7 @@ const lifecycleCtx: Record<string, any> = {
     remoteCanvas: {classList: {add() {}, remove() {}},
       width: 640, height: 360, getContext: () => ({clearRect() {}})},
     screenToggle: {disabled: false},
+    state: {textContent: "Securing"},
     status: {textContent: ""},
   },
   e2eeAdapter: () => protectedAdapter,
@@ -503,11 +504,15 @@ runInNewContext(
 const activating = lifecycleCtx.activate();
 await Promise.resolve();
 assert.equal(lifecycleCtx.e2eeAdapterReady, false);
+assert.equal(lifecycleCtx.ui.state.textContent, "Securing",
+  "ICE connectivity alone must never claim a verified E2EE call");
 assert.ok(!protectedLifecycleEvents.includes("monitor-starts"),
   "a missing or unfinished E2EE endpoint must never produce adaptive telemetry");
 releaseProtectedStartup?.();
 await activating;
 assert.equal(lifecycleCtx.e2eeAdapterReady, true);
+assert.equal(lifecycleCtx.ui.state.textContent, "Connected",
+  "the reference UI becomes connected only after protected endpoint startup");
 assert.deepEqual(protectedLifecycleEvents.slice(0, 3),
   ["start-begins", "start-completes", "monitor-starts"]);
 lifecycleCtx.close();
