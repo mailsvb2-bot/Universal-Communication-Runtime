@@ -539,6 +539,12 @@ warmCtx.warm();
 await Promise.resolve();
 assert.equal(warmWasm, 2, "installed endpoint still prewarms WASM");
 assert.equal(warmInstaller, 1, "installed endpoint skips installer preload");
+// Invalid injected adapters fail at the actual Join gate, not during page load.
+warmCtx.requireCompatibleE2eeAdapter = () => {throw new Error("incompatible adapter");};
+assert.doesNotThrow(() => warmCtx.warm(), "optional warmup must not crash startup");
+await Promise.resolve();
+assert.equal(warmWasm, 2, "invalid adapter cannot trigger WASM preload");
+assert.equal(warmInstaller, 1, "invalid adapter cannot trigger installer preload");
 
 // The same preflight must happen even earlier: before a signed invite can
 // create a realtime session or start a heartbeat in the first place.
