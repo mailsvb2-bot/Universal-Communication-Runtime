@@ -134,7 +134,11 @@ pub trait WebRtcProvider: fmt::Debug + Send + Sync {
 
     /// Closes only the transport attempt identified by its original offer.
     /// A delayed close must not tear down a subsequent attempt for the same session.
-    fn close_session_if_offer_matches(&self, _session_id: &SessionId, _offer_id: &str) -> Result<(), WebRtcProviderError> {
+    fn close_session_if_offer_matches(
+        &self,
+        _session_id: &SessionId,
+        _offer_id: &str,
+    ) -> Result<(), WebRtcProviderError> {
         Err(WebRtcProviderError::SessionUnavailable)
     }
 }
@@ -625,10 +629,19 @@ impl WebRtcProvider for LiveWebRtcProvider {
         })
     }
 
-    fn close_session_if_offer_matches(&self, session_id: &SessionId, offer_id: &str) -> Result<(), WebRtcProviderError> {
-        if offer_id.is_empty() || offer_id.len() > 64 {return Err(WebRtcProviderError::SessionUnavailable);}
+    fn close_session_if_offer_matches(
+        &self,
+        session_id: &SessionId,
+        offer_id: &str,
+    ) -> Result<(), WebRtcProviderError> {
+        if offer_id.is_empty() || offer_id.len() > 64 {
+            return Err(WebRtcProviderError::SessionUnavailable);
+        }
         self.request(|reply, deadline| LiveWebRtcCommand::Close {
-            session_id: session_id.clone(), offer_id: Some(offer_id.to_owned()), deadline, reply,
+            session_id: session_id.clone(),
+            offer_id: Some(offer_id.to_owned()),
+            deadline,
+            reply,
         })
     }
 }
@@ -718,7 +731,10 @@ async fn run_live_webrtc_worker(
                 handle_live_send_e2ee(&mut sessions, session_id, *envelope, deadline, reply).await;
             }
             LiveWebRtcCommand::Close {
-                session_id, offer_id, deadline, reply,
+                session_id,
+                offer_id,
+                deadline,
+                reply,
             } => handle_live_close(&mut sessions, session_id, offer_id, deadline, reply).await,
         }
     }
