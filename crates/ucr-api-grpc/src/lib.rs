@@ -4166,6 +4166,8 @@ mod tests {
         COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
         CONVERSATION_WRITE_PERMISSION, DEFAULT_MAX_PAYLOAD_LEN, DEVICE_READ_PERMISSION,
         DEVICE_REGISTER_PERMISSION, DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION,
+        TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
+        KEY_FORMAT_VERSION,
         EVENT_CONSUME_PERMISSION, EVENT_DEAD_LETTER_READ_PERMISSION, EVENT_REPLAY_PERMISSION,
         EVENT_SUBSCRIBE_PERMISSION, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
         EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, EXTERNAL_MESSAGE_ID_LIMIT,
@@ -5358,6 +5360,66 @@ mod tests {
         }
     }
 
+    // Public gRPC end-to-end Device→canonical trusted key provisioning/read.
+    // The Service Principal credential, quota/audit and exact permissions are
+    // reused; neither signing seed nor phone identity appears in these RPCs.
+    async fn provision_and_read_trusted_device_key(
+        devices: &mut TestDeviceClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+    ) {
+        let wire_key = pb::PublicKeyDescriptor {
+            key_id: Some(pb_id("trusted-device-key-grpc")),
+            device_id: Some(pb_id("device-multi-grpc")),
+            purpose: pb::KeyPurpose::Signing as i32,
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            key_format_version: KEY_FORMAT_VERSION,
+            public_key: vec![7; 32],
+        };
+        for _ in 0..2 {
+            // An identical retry cannot create a second trusted-key owner.
+            let mut provision = Request::new(pb::DeviceProvisionTrustedSigningKeyRequest {
+                scope: Some(wire_scope()),
+                signing_key: Some(wire_key.clone()),
+            });
+            attach_service_credential(&mut provision, credential_id, secret);
+            let answer = devices
+                .provision_trusted_signing_key(provision)
+                .await
+                .expect("ProvisionTrustedSigningKey transport")
+                .into_inner();
+            match answer.result.expect("ProvisionTrustedSigningKey result") {
+                pb::device_provision_trusted_signing_key_response::Result::SigningKey(value) => {
+                    assert_eq!(value.public_key, vec![7; 32]);
+                    assert_eq!(value.device_id.expect("trusted device ID").value, b"device-multi-grpc");
+                }
+                pb::device_provision_trusted_signing_key_response::Result::Error(error) => {
+                    panic!("canonical trusted key provisioning denied: {}", error.code);
+                }
+            }
+        }
+        let mut read = Request::new(pb::DeviceGetActiveTrustedSigningKeyRequest {
+            scope: Some(wire_scope()),
+            device_id: Some(pb_id("device-multi-grpc")),
+        });
+        attach_service_credential(&mut read, credential_id, secret);
+        let current = devices
+            .get_active_trusted_signing_key(read)
+            .await
+            .expect("GetActiveTrustedSigningKey transport")
+            .into_inner();
+        match current.result.expect("GetActiveTrustedSigningKey result") {
+            pb::device_get_active_trusted_signing_key_response::Result::SigningKey(key) => {
+                assert_eq!(key.key_id.expect("key id").value, b"trusted-device-key-grpc");
+                assert_eq!(key.public_key, vec![7; 32]);
+            }
+            pb::device_get_active_trusted_signing_key_response::Result::Error(error) => {
+                panic!("canonical active key read denied: {}", error.code)
+            }
+        }
+    }
+
     async fn create_and_read_sync_session(
         sync: &mut TestSyncClient,
         credential_id: &ucr_model::ServiceCredentialId,
@@ -5534,6 +5596,8 @@ mod tests {
             DEVICE_REGISTER_PERMISSION,
             DEVICE_READ_PERMISSION,
             DEVICE_REVOKE_PERMISSION,
+            TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+            TRUSTED_SIGNING_KEY_READ_PERMISSION,
             SYNC_WRITE_PERMISSION,
             SYNC_READ_PERMISSION,
         ];
@@ -5542,6 +5606,7 @@ mod tests {
             multidevice_clients_and_server(Arc::clone(&store)).await;
 
         register_and_read_multidevice(&mut devices, &credential_id, &secret).await;
+        provision_and_read_trusted_device_key(&mut devices, &credential_id, &secret).await;
         create_and_read_sync_session(&mut sync, &credential_id, &secret).await;
         assert_sync_create_audit(&store);
         transition_checkpoint_and_read_sync(&mut sync, &credential_id, &secret).await;
