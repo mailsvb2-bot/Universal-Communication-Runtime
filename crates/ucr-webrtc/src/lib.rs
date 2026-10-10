@@ -135,6 +135,30 @@ pub trait WebRtcProvider: fmt::Debug + Send + Sync {
         candidate: &WebRtcIceCandidate,
     ) -> Result<(), WebRtcProviderError>;
 
+    /// Applies signaling only to the active transport attempt; never to its successor.
+    ///
+    /// # Errors
+    /// Returns `SessionUnavailable` if the attempt differs or is absent.
+    fn set_remote_description_if_offer_matches(
+        &self,
+        _description: &WebRtcSessionDescription,
+        _offer_id: &str,
+    ) -> Result<(), WebRtcProviderError> {
+        Err(WebRtcProviderError::SessionUnavailable)
+    }
+
+    /// Applies an ICE candidate only to its owning transport attempt.
+    ///
+    /// # Errors
+    /// Returns `SessionUnavailable` if the attempt differs or is absent.
+    fn add_remote_candidate_if_offer_matches(
+        &self,
+        _candidate: &WebRtcIceCandidate,
+        _offer_id: &str,
+    ) -> Result<(), WebRtcProviderError> {
+        Err(WebRtcProviderError::SessionUnavailable)
+    }
+
     /// Closes ephemeral provider state. It does not end the canonical Call by itself.
     ///
     /// # Errors
@@ -387,11 +411,13 @@ enum LiveWebRtcCommand {
     },
     SetRemoteDescription {
         description: WebRtcSessionDescription,
+        offer_id: Option<String>,
         deadline: Instant,
         reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
     },
     AddRemoteCandidate {
         candidate: WebRtcIceCandidate,
+        offer_id: Option<String>,
         deadline: Instant,
         reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
     },
@@ -628,6 +654,7 @@ impl WebRtcProvider for LiveWebRtcProvider {
         let description = canonical_webrtc_description(description)?;
         self.request(|reply, deadline| LiveWebRtcCommand::SetRemoteDescription {
             description,
+            offer_id: None,
             deadline,
             reply,
         })
@@ -640,6 +667,35 @@ impl WebRtcProvider for LiveWebRtcProvider {
         let candidate = canonical_webrtc_candidate(candidate)?;
         self.request(|reply, deadline| LiveWebRtcCommand::AddRemoteCandidate {
             candidate,
+            offer_id: None,
+            deadline,
+            reply,
+        })
+    }
+
+    fn set_remote_description_if_offer_matches(
+        &self,
+        description: &WebRtcSessionDescription,
+        offer_id: &str,
+    ) -> Result<(), WebRtcProviderError> {
+        let description = canonical_webrtc_description(description)?;
+        self.request(|reply, deadline| LiveWebRtcCommand::SetRemoteDescription {
+            description,
+            offer_id: Some(offer_id.to_owned()),
+            deadline,
+            reply,
+        })
+    }
+
+    fn add_remote_candidate_if_offer_matches(
+        &self,
+        candidate: &WebRtcIceCandidate,
+        offer_id: &str,
+    ) -> Result<(), WebRtcProviderError> {
+        let candidate = canonical_webrtc_candidate(candidate)?;
+        self.request(|reply, deadline| LiveWebRtcCommand::AddRemoteCandidate {
+            candidate,
+            offer_id: Some(offer_id.to_owned()),
             deadline,
             reply,
         })
@@ -754,14 +810,22 @@ async fn run_live_webrtc_worker(
             }
             LiveWebRtcCommand::SetRemoteDescription {
                 description,
+                offer_id,
                 deadline,
                 reply,
-            } => handle_live_remote_description(&sessions, description, deadline, reply).await,
+            } => {
+                handle_live_remote_description(&sessions, description, offer_id, deadline, reply)
+                    .await;
+            }
             LiveWebRtcCommand::AddRemoteCandidate {
                 candidate,
+                offer_id,
                 deadline,
                 reply,
-            } => handle_live_remote_candidate(&sessions, candidate, deadline, reply).await,
+            } => {
+                handle_live_remote_candidate(&sessions, candidate, offer_id, deadline, reply)
+                    .await;
+            }
             LiveWebRtcCommand::SendE2ee {
                 session_id,
                 envelope,
@@ -847,6 +911,7 @@ async fn handle_live_restart(
 async fn handle_live_remote_description(
     sessions: &HashMap<String, LiveWebRtcSession>,
     description: WebRtcSessionDescription,
+    offer_id: Option<String>,
     deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
 ) {
@@ -855,6 +920,9 @@ async fn handle_live_remote_description(
         return;
     }
     let result = match sessions.get(&session_key(&description.session_id)) {
+        Some(session) if offer_id.as_deref().is_none_or(|id| id != session.offer_id) => {
+            Err(WebRtcProviderError::SessionUnavailable)
+        }
         Some(session) => {
             set_engine_remote_description(&session.peer_connection, &description).await
         }
@@ -866,6 +934,7 @@ async fn handle_live_remote_description(
 async fn handle_live_remote_candidate(
     sessions: &HashMap<String, LiveWebRtcSession>,
     candidate: WebRtcIceCandidate,
+    offer_id: Option<String>,
     deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
 ) {
@@ -874,6 +943,9 @@ async fn handle_live_remote_candidate(
         return;
     }
     let result = match sessions.get(&session_key(&candidate.session_id)) {
+        Some(session) if offer_id.as_deref().is_none_or(|id| id != session.offer_id) => {
+            Err(WebRtcProviderError::SessionUnavailable)
+        }
         Some(session) => add_engine_remote_candidate(&session.peer_connection, &candidate).await,
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
