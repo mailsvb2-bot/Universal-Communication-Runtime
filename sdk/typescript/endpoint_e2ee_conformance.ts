@@ -32,8 +32,12 @@ import {
 const testDeviceKeyPair = generateKeyPairSync("ed25519");
 const keyBytes = new Uint8Array(testDeviceKeyPair.publicKey.export({format:"der", type:"spki"}).subarray(-32));
 if (!globalThis.crypto) Object.defineProperty(globalThis, "crypto", {value: webcrypto});
-const signDeviceChallenge = async (_binding: unknown, challenge: Uint8Array) =>
-  new Uint8Array(sign(null, challenge, testDeviceKeyPair.privateKey));
+const signDeviceChallenge = async (binding: unknown, challenge: Uint8Array) => {
+  assert.deepEqual(Object.keys(binding as object).sort(),
+    ["deviceId", "namespaceId", "tenantId"],
+    "permanent Device signer vault must never receive transient Call/Session/participant IDs");
+  return new Uint8Array(sign(null, challenge, testDeviceKeyPair.privateKey));
+};
 const deviceBinding = {tenantId: "tenant", namespaceId: null, deviceId: "device",
   participantId: "user", callId: "call", sessionId: "session"};
 let enrolled = false, revoked = false, localSigner: {keyId: string; publicKey: Uint8Array} | null = null;
@@ -48,13 +52,16 @@ const prepareDevice = createUcrCanonicalDevicePreparation({
 }, {
   signChallenge: signDeviceChallenge,
   async load() {return localSigner;},
-  async stageNew() {stagedKeys++; localSigner = {keyId: "key-1", publicKey: keyBytes};
+  async stageNew(scope) {
+    assert.deepEqual(Object.keys(scope).sort(), ["deviceId", "namespaceId", "tenantId"]);
+    stagedKeys++; localSigner = {keyId: "key-1", publicKey: keyBytes};
     return localSigner;},
 });
 await prepareDevice(deviceBinding);
 assert.equal(enrollRequests, 1);
 assert.equal(stagedKeys, 1);
 await prepareDevice(deviceBinding);
+await prepareDevice({...deviceBinding, callId: "another-call", sessionId: "another-session"});
 assert.equal(enrollRequests, 1, "subsequent login must restore same trusted signer");
 assert.equal(stagedKeys, 1, "no new key when canonical Device is already trusted");
 localSigner = {keyId: "key-1", publicKey: new Uint8Array(32).fill(4)};
@@ -87,6 +94,33 @@ const rejectKeySwap = createUcrCanonicalDevicePreparation({
 await assert.rejects(rejectKeySwap(deviceBinding), /private key does not match trusted signer/);
 assert.equal(tamperedLocal.keyId, "tampered");
 
+// The protected vault may sign successfully while the canonical owner revokes
+// or rotates its key. A successful signature is NOT sufficient to join.
+for (const changed of ["revoked", "rotated"] as const) {
+  let inspections = 0, registrations = 0;
+  const timeOfCheckAuthority = {
+    async inspect() {
+      inspections++;
+      return inspections === 1
+        ? {deviceActive: true, deviceRevoked: false,
+           activeKey: {keyId: "key-1", publicKey: keyBytes.slice()}}
+        : {deviceActive: changed !== "revoked", deviceRevoked: changed === "revoked",
+           activeKey: changed === "rotated"
+             ? {keyId: "foreign", publicKey: foreignPublic}
+             : {keyId: "key-1", publicKey: keyBytes.slice()}};
+    },
+    async approveNewDevice() { registrations++; },
+  };
+  const guard = createUcrCanonicalDevicePreparation(timeOfCheckAuthority, {
+    signChallenge: signDeviceChallenge,
+    async load() { return {keyId: "key-1", publicKey: keyBytes.slice()}; },
+    async stageNew() { throw new Error("unexpected stage"); },
+  });
+  await assert.rejects(guard(deviceBinding), /canonical Device trust changed during signing/);
+  assert.equal(inspections, 2, "canonical trust must be re-read after signing");
+  assert.equal(registrations, 0);
+}
+
 // Interrupted enrollment must reuse the staged signer, never silently create
 // a new key after the server response is lost.
 let stagedRetryCount = 0, approvalAttempt = 0, retryConfirmed = false;
@@ -113,6 +147,31 @@ await retryDevice(deviceBinding);
 assert.equal(stagedRetryCount, 1, "transport retry must not create a second Device signing identity");
 assert.equal(approvalAttempt, 2);
 
+// A real first registration precedes issuance of any Call/Session join grant.
+// Canonical Device identity is stable and independent of that future grant.
+const identityOnly = {tenantId: "tenant", namespaceId: null, deviceId: "new-device", participantId: "user"};
+let firstEntryConfirmed = false, issuedGrants = 0;
+const prepareFirstEntry = createUcrCanonicalDevicePreparation({
+  async inspect() {return {deviceActive: firstEntryConfirmed, deviceRevoked: false,
+    activeKey: firstEntryConfirmed ? {keyId: "key-1", publicKey: keyBytes.slice()} : null};},
+  async approveNewDevice(binding, signer) {
+    assert.equal(binding.deviceId, "new-device");
+    assert.equal(binding.callId, undefined);
+    assert.equal(binding.sessionId, undefined);
+    assert.equal(signer.keyId, "key-1");
+    firstEntryConfirmed = true;
+  },
+}, {
+  signChallenge: signDeviceChallenge,
+  async load() {return null;},
+  async stageNew() {return {keyId: "key-1", publicKey: keyBytes.slice()};},
+});
+await prepareFirstEntry(identityOnly);
+assert.equal(firstEntryConfirmed, true);
+if (firstEntryConfirmed) issuedGrants++;
+assert.equal(issuedGrants, 1, "only independently prepared Device can request a canonical grant");
+await assert.rejects(prepareFirstEntry({...identityOnly, callId: "call"}),
+  /Call and Session must both be supplied or both omitted/);
 
 const v1 = {
   contractVersion: UCR_ENDPOINT_E2EE_CONTRACT_VERSION,
@@ -556,8 +615,8 @@ assert.doesNotThrow(() => strictAdapterCtx.verifyAdapter({
 
 // Production device preflight: never trigger a camera prompt, signaling, or
 // MLS registration when the canonical trusted Device media host is absent.
-// Enrollment/recovery is host-authorized only after a successful server join.
-// It is not a side effect of opening an unverified signed URL.
+// Enrollment/recovery is independently host-authorized BEFORE using a join
+// URL, and re-validated after joining. The URL itself approves no Device.
 const devicePrepareCode = browser.slice(
   browser.indexOf("async function prepareCanonicalDeviceAfterJoin("),
   browser.indexOf("async function join(){"),
@@ -578,16 +637,28 @@ const devicePrepareCtx: Record<string, any> = {
   requireCanonicalMediaHostReady() {},
 };
 runInNewContext(devicePrepareCode + "\nthis.prepare = prepareCanonicalDeviceAfterJoin;", devicePrepareCtx);
-await devicePrepareCtx.prepare(4);
+devicePrepareCtx.sessionActive = false;
+await devicePrepareCtx.prepare(4, true);
 assert.equal(canonicalDevicePreparations, 1,
-  "authenticated join composes with host Device key enrollment");
+  "independently authenticated Device preparation occurs before realtime join");
+devicePrepareCtx.sessionActive = true;
+await devicePrepareCtx.prepare(4);
+assert.equal(canonicalDevicePreparations, 2,
+  "accepted Join revalidates canonical trust before media capture");
+const joinScript = browser.slice(browser.indexOf("async function join(){"),
+  browser.indexOf("function scheduleEntryRetry(){"));
+const preJoinIndex = joinScript.indexOf("await prepareCanonicalDeviceAfterJoin(generation,true);");
+const serverJoinIndex = joinScript.indexOf('api("/v1/realtime/join"');
+const postJoinIndex = joinScript.indexOf("await prepareCanonicalDeviceAfterJoin(generation);");
+assert.ok(preJoinIndex >= 0 && serverJoinIndex > preJoinIndex && postJoinIndex > serverJoinIndex,
+  "canonical Device is prepared before redeeming the join grant and rechecked afterwards");
 devicePrepareCtx.claims.device_id = null;
 await assert.rejects(devicePrepareCtx.prepare(4), /Canonical Device identifier/);
-assert.equal(canonicalDevicePreparations, 1, "unbound grant cannot register a Device");
+assert.equal(canonicalDevicePreparations, 2, "unbound grant cannot register a Device");
 devicePrepareCtx.claims.device_id = "device";
 devicePrepareCtx.sessionLifecycleGeneration = 5;
 await assert.rejects(devicePrepareCtx.prepare(4), /session retired/);
-assert.equal(canonicalDevicePreparations, 2, "stale enrollment cannot admit media");
+assert.equal(canonicalDevicePreparations, 3, "stale enrollment cannot admit media");
 
 const preflightSnippet = browser.slice(
   browser.indexOf("function requireCanonicalMediaHostReady(){"),
@@ -709,6 +780,11 @@ const acceptedJoinCtx: Record<string, any> = {
     join: {disabled: false}, leave: {disabled: true},
     privacyMode: {disabled: false}, expires: {textContent: ""}},
   requireCanonicalMediaHostReady() {}, prewarmAuthorizedMediaRuntime() {},
+  prepareCanonicalDeviceAfterJoin: async (_generation: number, beforeJoin = false) => {
+    // This fixture models an already trusted Device: prepare prior to Join,
+    // then revalidate it after server admission before MLS policy activation.
+    assert.equal(typeof beforeJoin, "boolean");
+  },
   api: async () => ({json: async () => ({ok: true, admission_state: "admitted"})}),
   body: () => ({}),
   applyMediaPolicy: async () => {throw new Error("MLS activation refused");},

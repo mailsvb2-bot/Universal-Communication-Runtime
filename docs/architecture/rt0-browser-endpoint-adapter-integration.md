@@ -42,16 +42,19 @@ local capture can occur before this validation; leave, revocation and adapter
 failure must stop all active capture tracks. Mere function presence is not a
 claim that canonical admission is already valid.
 
-### Post-authentication Device preparation hook
+### Independently authenticated Device preparation (before and after Join)
 
-The reference client invokes `window.ucrPrepareCanonicalDevice(binding)`, when supplied,
-**only after** the realtime server has accepted the authenticated join and
-**before** media admission / physical capture. `binding` includes the exact
-scoped tenant, namespace, call, session, participant and Device identifiers.
+The reference client now invokes `window.ucrPrepareCanonicalDevice(binding)`, when supplied,
+**before redeeming** the signed realtime join grant, then invokes it again
+**after** the server has accepted Join and **before** media capture.
+Both invocations require the host's independently authenticated canonical
+Device/Trust backend. The join fragment itself is never registration authority.
+The second check refuses trust revoked or rotated during join. The binding carries
+the exact scoped tenant, namespace, call, session, participant and Device identifiers.
 If the authenticated host already exposes `window.ucrCanonicalDeviceAuthority` and
 `window.ucrProtectedDeviceKeyVault`, the reference browser now imports the
 same pinned ESM bundle and composes the preparation callback **automatically**,
-after the server has accepted the join and before media capture. Existing hosts
+before the server redeems the join grant and then again before media capture. Existing hosts
 may also provide an explicit `window.ucrPrepareCanonicalDevice` override.
 
 The ESM bundle now exports `createUcrCanonicalDevicePreparation(authority, vault)`.
@@ -77,21 +80,29 @@ minting a different identity. A lost local signer for an active registered
 Device fails closed and requires the canonical explicit recovery workflow.
 
 The callback is an integration seam for the host's existing Device lifecycle,
-trusted signing-key provisioning and endpoint secure key vault. It should
+trusted signing-key provisioning and endpoint secure key vault. A new Device
+must first be enrolled through that authority BEFORE any participant-bound
+join URL is issued: `createUcrCanonicalDevicePreparation` now accepts the
+canonical tenant/participant/Device binding without optional Call/Session IDs.
+Only AFTER a confirmed active trusted key should the existing canonical
+Conference owner issue a signed session grant. The browser's extra pre-Join
+check cannot substitute for this separate first-entry authorization flow. It should
 idempotently check or register an authorized Device, recover the already owned
 local signing seed on later joins, independently confirm the *active* trusted
 public-key descriptor and reject revoked/mismatched key state. It must never
 interpret the URL grant as permanent identity enrollment approval.
 
 A missing hook does not invent keys or bypass trust: the downstream canonical
-media resolver still enforces full signing/MLS admission. A supplied hook is
+media resolver still enforces full signing/MLS admission. Neither browser
+fragment nor temporary WebRTC peer is allowed to provision a Device. A supplied hook is
 awaited before media capture, and a stale join lifecycle is rejected after its
 completion. The hook is **not** yet a first-party registration implementation;
 the host must supply its authenticated backend and device-key vault.
 
-**This is not automatic device enrollment or key provisioning.** The UCR reference
-web gateway still has no authenticated first-party route to enroll a device,
-provision/recover a local signing key, and publish its trusted descriptor. Such a
+**This still requires an independently authenticated first-party host.**
+The UCR reference web gateway still has no standalone enrollment credential,
+trusted first-party route to enroll a device, provision/recover a local
+signing key, and publish its trusted descriptor. Such a
 route must be implemented against the existing canonical Device/Identity/Trust
 owners before an unembedded user can complete a real two-device media call.
 
@@ -153,6 +164,17 @@ A production readiness sign-off requires signed device trust provisioning,
 two independently authorized devices using current MLS/negotiation epoch,
 real audio/video encryption and decryption across the SFU with TURN/NAT,
 concurrent capture revocation, and measured full-HD quality and latency.
+
+## First-entry ordering and no second identity database
+
+1. Independently authenticate the owner with the existing canonical Identity/Device authority (not a realtime fragment).
+2. On the endpoint, stage/reuse one protected Ed25519 signer keyed only to the canonical Tenant/Namespace/Device scope. The SDK passes only those three fields to the private-key vault; Call, Session and participant IDs never enter the vault identifier, so a new call cannot silently mint a second signing identity.
+3. Confirm the active canonical trusted public-key descriptor using the existing Device/Trust owner. Protected key possession is challenged locally and trust is re-read after signing; revocation/rotation invalidates the attempt.
+4. Only then request the canonical Conference service to issue the short-lived, device-bound Join URL. The issuer must independently revalidate active Device status and Call/Group policy.
+5. Browser rechecks trust before and after redeeming Join; Rust/WASM MLS state and E2EE media adapter activate only after exact authenticated admission and crypto-epoch checks.
+6. On restart, restore the endpoint-owned signer and sealed MLS state. A lost signer requires existing explicit Recovery, never silent self-enrollment from a link.
+
+The host must provide a concrete authenticated enrollment/provisioning endpoint before this can become a standalone user journey. No second cryptographic authority, shadow Device table, persistent telephone directory, server-retained signing seed, or database of phone numbers is introduced by this integration. The existing canonical Device/Trust/Identity persistence remains in use; this is **not** a stateless/no-data product claim.
 
 ## Canonical Service Principal Device trust RPC (P0 integration seam)
 
