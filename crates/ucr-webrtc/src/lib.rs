@@ -823,8 +823,7 @@ async fn run_live_webrtc_worker(
                 deadline,
                 reply,
             } => {
-                handle_live_remote_candidate(&sessions, candidate, offer_id, deadline, reply)
-                    .await;
+                handle_live_remote_candidate(&sessions, candidate, offer_id, deadline, reply).await;
             }
             LiveWebRtcCommand::SendE2ee {
                 session_id,
