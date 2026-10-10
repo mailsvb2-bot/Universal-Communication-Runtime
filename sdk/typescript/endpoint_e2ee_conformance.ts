@@ -19,11 +19,48 @@ import {
   ucrVideoEncodingTarget,
 } from "./src/browser_webcodecs_media.ts";
 import { createUcrCanonicalBrowserMediaFactory } from "./src/canonical_browser_media_factory.ts";
+import { createUcrCanonicalDevicePreparation } from "./src/canonical_device_enrollment.ts";
 import { encodeSfuForwardEnvelopeWire } from "./src/sfu_forward_wire.ts";
 import {
   UcrChameleonReceiveHandover,
   type UcrEncryptedReceivePath,
 } from "./src/chameleon_receive_handover.ts";
+
+// Real first/repeat-login orchestration over externally authenticated canonical
+// Device/Trust and endpoint-owned key vault; never create a second key owner.
+const keyBytes = new Uint8Array(32).fill(9);
+const deviceBinding = {tenantId: "tenant", namespaceId: null, deviceId: "device",
+  participantId: "user", callId: "call", sessionId: "session"};
+let enrolled = false, revoked = false, localSigner: {keyId: string; publicKey: Uint8Array} | null = null;
+let enrollRequests = 0, stagedKeys = 0;
+const prepareDevice = createUcrCanonicalDevicePreparation({
+  async inspect() {return {deviceActive: enrolled, deviceRevoked: revoked,
+    activeKey: enrolled ? {keyId: "key-1", publicKey: keyBytes} : null};},
+  async approveNewDevice(_binding, signer) {
+    assert.equal(signer.keyId, "key-1");
+    enrollRequests++; enrolled = true;
+  },
+}, {
+  async load() {return localSigner;},
+  async stageNew() {stagedKeys++; localSigner = {keyId: "key-1", publicKey: keyBytes};
+    return localSigner;},
+});
+await prepareDevice(deviceBinding);
+assert.equal(enrollRequests, 1);
+assert.equal(stagedKeys, 1);
+await prepareDevice(deviceBinding);
+assert.equal(enrollRequests, 1, "subsequent login must restore same trusted signer");
+assert.equal(stagedKeys, 1, "no new key when canonical Device is already trusted");
+localSigner = {keyId: "key-1", publicKey: new Uint8Array(32).fill(4)};
+await assert.rejects(prepareDevice(deviceBinding), /local signer differs/);
+assert.equal(enrollRequests, 1, "mismatched local signer must never re-register trust");
+localSigner = {keyId: "key-1", publicKey: keyBytes};
+revoked = true;
+await assert.rejects(prepareDevice(deviceBinding), /Device revoked/);
+revoked = false;
+localSigner = null;
+await assert.rejects(prepareDevice(deviceBinding), /local device signer is absent/);
+assert.equal(enrollRequests, 1, "missing local signer requires explicit recovery");
 
 const v1 = {
   contractVersion: UCR_ENDPOINT_E2EE_CONTRACT_VERSION,
