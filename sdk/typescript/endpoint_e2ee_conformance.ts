@@ -1043,7 +1043,7 @@ const lateFallbackCtx: Record<string, any> = {
   ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null},
     status: {textContent: ""}},
 };
-runInNewContext(captureCode + "\\nthis.getMedia = ensureLocalMedia;", lateFallbackCtx);
+runInNewContext(captureCode + "\nthis.getMedia = ensureLocalMedia;", lateFallbackCtx);
 const cameraPermissionPending = lateFallbackCtx.getMedia();
 assert.equal(lateCaptureAttempts, 1);
 lateFallbackCtx.mediaCaptureGeneration++;
