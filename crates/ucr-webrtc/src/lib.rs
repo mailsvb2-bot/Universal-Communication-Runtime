@@ -908,7 +908,10 @@ async fn handle_live_close(
     }
     let key = session_key(&session_id);
     if let Some(expected) = offer_id.as_deref() {
-        if sessions.get(&key).is_none_or(|current| current.offer_id != expected) {
+        if sessions
+            .get(&key)
+            .is_none_or(|current| current.offer_id != expected)
+        {
             let _ = reply.send(Err(WebRtcProviderError::SessionUnavailable));
             return;
         }
@@ -1601,7 +1604,8 @@ mod tests {
             "late old close cannot delete replacement session"
         );
         assert_eq!(
-            provider.close_session_if_offer_matches(&session_id, &webrtc_offer_id(&replacement.sdp)),
+            provider
+                .close_session_if_offer_matches(&session_id, &webrtc_offer_id(&replacement.sdp)),
             Ok(())
         );
         assert_eq!(
@@ -1620,7 +1624,9 @@ mod tests {
             ice_transport_policy: IceTransportPolicy::All,
         };
         let initial = provider.create_session(&config).expect("initial offer");
-        let offer_id = provider.session_offer_id(&session_id).expect("original offer ID");
+        let offer_id = provider
+            .session_offer_id(&session_id)
+            .expect("original offer ID");
         assert_eq!(offer_id, webrtc_offer_id(&initial.sdp));
         let restarted = provider.restart_session(&config).expect("restart offer");
         assert_eq!(provider.session_offer_id(&session_id), Ok(offer_id.clone()));
