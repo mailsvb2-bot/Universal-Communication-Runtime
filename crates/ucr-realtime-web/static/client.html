@@ -1466,14 +1466,20 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
   let prepare=window.ucrPrepareCanonicalDevice;
   // Compose the existing authenticated host Device/Trust and endpoint-owned
   // secure key vault automatically. Only the host can grant registration.
-  if(typeof prepare!=="function"&&window.ucrCanonicalDeviceAuthority&&
-     window.ucrProtectedDeviceKeyVault){
+  if(typeof prepare!=="function"&&window.ucrCanonicalDeviceAuthority){
+    // The host must provide independently authenticated Device/Trust
+    // authority. Only the local protected signer is provided by UCR itself.
+    // Never create canonical Device trust from a realtime join fragment.
     const module=await import("./endpoint-media/reference_browser_media_installer.js");
     if(!current()){
       throw new Error("Device enrollment completed after conference session retired");
     }
-    if(typeof module.createUcrCanonicalDevicePreparation!=="function"){
+    if(typeof module.createUcrCanonicalDevicePreparation!=="function"||
+       typeof module.createUcrBrowserProtectedDeviceVault!=="function"){
       throw new Error("Canonical Device enrollment runtime unavailable");
+    }
+    if(!window.ucrProtectedDeviceKeyVault){
+      window.ucrProtectedDeviceKeyVault=module.createUcrBrowserProtectedDeviceVault();
     }
     prepare=module.createUcrCanonicalDevicePreparation(
       window.ucrCanonicalDeviceAuthority,window.ucrProtectedDeviceKeyVault);
