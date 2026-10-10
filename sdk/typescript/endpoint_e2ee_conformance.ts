@@ -467,6 +467,36 @@ assert.doesNotThrow(() => strictAdapterCtx.verifyAdapter({
 
 // Production device preflight: never trigger a camera prompt, signaling, or
 // MLS registration when the canonical trusted Device media host is absent.
+// Enrollment/recovery is host-authorized only after a successful server join.
+// It is not a side effect of opening an unverified signed URL.
+const devicePrepareCode = browser.slice(
+  browser.indexOf("async function prepareCanonicalDeviceAfterJoin("),
+  browser.indexOf("async function join(){"),
+);
+assert.ok(devicePrepareCode.startsWith("async function prepareCanonicalDeviceAfterJoin("));
+let canonicalDevicePreparations = 0;
+const devicePrepareCtx: Record<string, any> = {
+  claims: {tenant_id: "tenant", namespace_id: null, device_id: "device",
+    participant_id: "member", call_id: "call", session_id: "session"},
+  sessionLifecycleGeneration: 4, sessionActive: true,
+  window: {ucrPrepareCanonicalDevice: async (binding: any) => {
+    assert.equal(binding.deviceId, "device");
+    canonicalDevicePreparations++;
+  }},
+  requireCanonicalMediaHostReady() {},
+};
+runInNewContext(devicePrepareCode + "\nthis.prepare = prepareCanonicalDeviceAfterJoin;", devicePrepareCtx);
+await devicePrepareCtx.prepare(4);
+assert.equal(canonicalDevicePreparations, 1,
+  "authenticated join composes with host Device key enrollment");
+devicePrepareCtx.claims.device_id = null;
+await assert.rejects(devicePrepareCtx.prepare(4), /Canonical Device identifier/);
+assert.equal(canonicalDevicePreparations, 1, "unbound grant cannot register a Device");
+devicePrepareCtx.claims.device_id = "device";
+devicePrepareCtx.sessionLifecycleGeneration = 5;
+await assert.rejects(devicePrepareCtx.prepare(4), /session retired/);
+assert.equal(canonicalDevicePreparations, 2, "stale enrollment cannot admit media");
+
 const preflightSnippet = browser.slice(
   browser.indexOf("function requireCanonicalMediaHostReady(){"),
   browser.indexOf("function closeE2eeTransport(){"),
