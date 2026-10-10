@@ -1135,7 +1135,7 @@ const negotiationCtx: Record<string, any> = {
   ensureLocalMedia: async () => ({}),
   api: async (path: string) => {
     if(path.endsWith("/webrtc/start"))return {json: async () => ({
-      ice_servers: [], sdp_type: "offer", sdp: "remote-offer",
+      ice_servers: [], offer_id: "A".repeat(43), sdp_type: "offer", sdp: "remote-offer",
     })};
     staleRemoteDescriptionPosts++;
     return {ok: true};
@@ -1143,6 +1143,7 @@ const negotiationCtx: Record<string, any> = {
   body: () => ({}), rtcNetworkConfiguration: () => ({}),
   RTCPeerConnection: NegotiationPeer, MediaStream: class {},
   webrtcRetryTimer: null, e2eeChannel: null, scheduleWebRtcRetry() {},
+  closeServerPeer: async () => {throw new Error("unexpected orphan close during SDP test");},
 };
 runInNewContext(startCode + "\nthis.start = startWebRtc;", negotiationCtx);
 const blockedNegotiation = negotiationCtx.start();
