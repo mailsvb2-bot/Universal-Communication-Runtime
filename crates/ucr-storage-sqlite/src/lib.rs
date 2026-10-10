@@ -2830,6 +2830,69 @@ mod tests {
     }
 
     #[test]
+    fn expired_join_grant_cleanup_is_indexed_bounded_and_drains_backlog() {
+        use ucr_core::ConferenceJoinGrantStore;
+
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open real SQLite");
+        {
+            let connection = store.lock_connection().expect("lock");
+            connection
+                .execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")
+                .expect("fixture transaction");
+            for sequence in 0..4_100 {
+                connection
+                    .execute(
+                        "INSERT INTO conference_join_grants (
+                           tenant_id, namespace_present, namespace_id, session_id,
+                           conference_id, integration_id, call_id, participant_kind,
+                           participant_id, device_id, issued_at_unix_ms,
+                           not_before_unix_ms, expires_at_unix_ms, use_policy,
+                           revoked, redeemed
+                         ) VALUES ('tenant', 0, '', ?1, 'conference', 'integration',
+                                   'call', 'person', 'participant', 'device',
+                                   100, 100, 200, 'single_use', 0, 0)",
+                        [format!("session-{sequence}")],
+                    )
+                    .expect("seed expired grant");
+            }
+            connection.execute_batch("COMMIT;").expect("commit fixture");
+            let plan: String = connection
+                .query_row(
+                    "EXPLAIN QUERY PLAN SELECT session_id
+                     FROM conference_join_grants INDEXED BY conference_join_grants_pending_redaction
+                     WHERE expires_at_unix_ms <= 200
+                       AND (integration_id <> 'expired' OR call_id <> 'expired'
+                            OR participant_id <> 'expired' OR device_id <> 'expired'
+                            OR revoked=0 OR redeemed=0)
+                     LIMIT 4096",
+                    [],
+                    |row| row.get(3),
+                )
+                .expect("indexed grant expiry planner");
+            assert!(
+                plan.contains("conference_join_grants_pending_redaction"),
+                "must traverse only outstanding redactions, plan: {plan}"
+            );
+        }
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(4096));
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(4));
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(0));
+        let connection = store.lock_connection().expect("inspect tombstones");
+        let retained: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM conference_join_grants
+                 WHERE revoked=1 AND redeemed=1 AND integration_id='expired'
+                   AND call_id='expired' AND participant_id='expired'
+                   AND device_id='expired'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("retained anti-replay rows");
+        assert_eq!(retained, 4_100, "no session id may be reused after redaction");
+    }
+
+    #[test]
     fn sqlite_store_initializes_schema_and_is_healthy() {
         let db = TestDbPath::new();
         let store = SqliteLocalStore::open(db.path()).expect("open store");
