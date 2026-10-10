@@ -3,6 +3,7 @@ syntax = "proto3";
 package ucr.v1;
 
 import "ucr/v1/common.proto";
+import "ucr/v1/crypto.proto";
 import "ucr/v1/errors.proto";
 import "ucr/v1/identity.proto";
 import "ucr/v1/runtime.proto";
@@ -37,6 +38,31 @@ message DeviceRevokeRequest {
 message DeviceRevokeResponse {
   oneof result {
     AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Trusted public-key provisioning stays with the *existing* canonical Device
+// and TrustedSigningKeyStore owner, and is authorized by Service Principals.
+// This API never accepts or returns a private signing key, media key, phone
+// number, or a caller-issued trust decision.
+message DeviceProvisionTrustedSigningKeyRequest {
+  TenantScope scope = 1;
+  PublicKeyDescriptor signing_key = 2;
+}
+message DeviceProvisionTrustedSigningKeyResponse {
+  oneof result {
+    PublicKeyDescriptor signing_key = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+message DeviceGetActiveTrustedSigningKeyRequest {
+  TenantScope scope = 1;
+  OpaqueId device_id = 2;
+}
+message DeviceGetActiveTrustedSigningKeyResponse {
+  oneof result {
+    PublicKeyDescriptor signing_key = 1;
     ErrorEnvelope error = 2;
   }
 }
@@ -95,6 +121,8 @@ service DeviceService {
   rpc RegisterDevice(DeviceRegisterRequest) returns (DeviceRegisterResponse);
   rpc GetDevice(DeviceGetRequest) returns (DeviceGetResponse);
   rpc RevokeDevice(DeviceRevokeRequest) returns (DeviceRevokeResponse);
+  rpc ProvisionTrustedSigningKey(DeviceProvisionTrustedSigningKeyRequest) returns (DeviceProvisionTrustedSigningKeyResponse);
+  rpc GetActiveTrustedSigningKey(DeviceGetActiveTrustedSigningKeyRequest) returns (DeviceGetActiveTrustedSigningKeyResponse);
 }
 
 // Thin Phase-40 consumer API over the existing SyncStore owner.
