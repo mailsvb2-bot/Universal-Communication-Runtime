@@ -483,6 +483,10 @@ preflightCtx.window.ucrCanonicalAuthorizedMediaFactory = () => ({});
 assert.doesNotThrow(() => preflightCtx.preflight(),
   "registered host authority allows capture to proceed to real E2EE validation");
 delete preflightCtx.window.ucrCanonicalAuthorizedMediaFactory;
+preflightCtx.window.ucrCanonicalMediaAdmissionResolver = async () => ({});
+assert.doesNotThrow(() => preflightCtx.preflight(),
+  "existing canonical host admission resolver is recognized without manual factory registration");
+delete preflightCtx.window.ucrCanonicalMediaAdmissionResolver;
 preflightCtx.window.ucrInstallAuthorizedMediaEndpoint = () => ({});
 assert.doesNotThrow(() => preflightCtx.preflight(),
   "custom canonical host installer is permitted only under later strict E2EE checks");
