@@ -61,3 +61,7 @@ export async function installUcrReferenceBrowserMedia(
 // The authenticated host can import this directly from the same ESM bundle.
 // It still MUST supply its canonical identity/key owner; the SDK mints none.
 export { createUcrCanonicalBrowserMediaFactory } from "./canonical_browser_media_factory.ts";
+
+// First/repeat-login glue: the host supplies its authorized canonical Device
+// service and existing protected endpoint key vault. No trust is self-issued.
+export { createUcrCanonicalDevicePreparation } from "./canonical_device_enrollment.ts";
