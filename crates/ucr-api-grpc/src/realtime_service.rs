@@ -1481,7 +1481,9 @@ where
                                         .await
                                         {
                                             Ok(Ok(description)) => Ok(pb::RealtimeWebRtcOffer {
-                                                offer_id: Some(ucr_webrtc::webrtc_offer_id(&description.sdp)),
+                                                offer_id: Some(ucr_webrtc::webrtc_offer_id(
+                                                    &description.sdp,
+                                                )),
                                                 description: Some(pb_webrtc_description(
                                                     &description,
                                                 )),
@@ -1665,21 +1667,24 @@ where
                                         let provider = Arc::clone(&self.webrtc_provider);
                                         match tokio::task::spawn_blocking(move || {
                                             let description = provider.restart_session(&config)?;
-                                            let offer_id = provider.session_offer_id(&config.session_id)?;
+                                            let offer_id =
+                                                provider.session_offer_id(&config.session_id)?;
                                             Ok::<_, WebRtcProviderError>((description, offer_id))
                                         })
                                         .await
                                         {
-                                            Ok(Ok((description, offer_id))) => Ok(pb::RealtimeWebRtcOffer {
-                                                offer_id: Some(offer_id),
-                                                description: Some(pb_webrtc_description(
-                                                    &description,
-                                                )),
-                                                ice_servers: ice_servers
-                                                    .iter()
-                                                    .map(pb_webrtc_ice_server)
-                                                    .collect(),
-                                            }),
+                                            Ok(Ok((description, offer_id))) => {
+                                                Ok(pb::RealtimeWebRtcOffer {
+                                                    offer_id: Some(offer_id),
+                                                    description: Some(pb_webrtc_description(
+                                                        &description,
+                                                    )),
+                                                    ice_servers: ice_servers
+                                                        .iter()
+                                                        .map(pb_webrtc_ice_server)
+                                                        .collect(),
+                                                })
+                                            }
                                             Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
                                             Err(_) => Err(CanonicalError::new(
                                                 CanonicalErrorCode::Internal,
@@ -1726,7 +1731,9 @@ where
                         }) {
                             return Ok(Response::new(pb::RealtimeCloseWebRtcResponse {
                                 result: Some(pb::realtime_close_web_rtc_response::Result::Error(
-                                    pb_error(CanonicalError::new(CanonicalErrorCode::InvalidArgument)),
+                                    pb_error(CanonicalError::new(
+                                        CanonicalErrorCode::InvalidArgument,
+                                    )),
                                 )),
                             }));
                         }
