@@ -9701,7 +9701,7 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
             grant.call_id = CallId::from_opaque(hidden.clone());
             grant.integration_id = IntegrationId::from_opaque(hidden.clone());
             grant.participant = PrincipalRef {
-                principal_id: PrincipalId::from_opaque(hidden.clone()),
+                principal_id: ucr_model::PrincipalId::from_opaque(hidden.clone()),
                 kind: PrincipalKind::Person,
             };
             grant.device_id = DeviceId::from_opaque(hidden.clone());
