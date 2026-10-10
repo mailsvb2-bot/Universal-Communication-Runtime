@@ -176,6 +176,34 @@ concurrent capture revocation, and measured full-HD quality and latency.
 
 The host must provide a concrete authenticated enrollment/provisioning endpoint before this can become a standalone user journey. No second cryptographic authority, shadow Device table, persistent telephone directory, server-retained signing seed, or database of phone numbers is introduced by this integration. The existing canonical Device/Trust/Identity persistence remains in use; this is **not** a stateless/no-data product claim.
 
+## Browser-local protected Device signer (implemented, not user authentication)
+
+The reference browser now builds the endpoint-owned `UcrCanonicalDeviceKeyVault`
+automatically when — and **only when** — an independently authenticated
+`window.ucrCanonicalDeviceAuthority` exists. The vault lives in the
+**existing** `ucr-endpoint-state-v1` IndexedDB database,
+`wrapping-key-vault` object store; its key is the canonical
+tenant/namespace/Device tuple, **not** Call, Session, telephone or participant.
+A device signer is staged with an atomic IndexedDB `add`: concurrent tabs
+cannot silently rotate the original signer.
+
+Only the 32-byte Ed25519 public descriptor and its key ID may be supplied for
+canonical trusted-key registration. The private signing seed is AES-GCM
+encrypted using an unextractable browser `CryptoKey`, and not sent to UCR
+servers. The same local signer is restored after a page reload. Signer proof
+uses real Ed25519, and the short-lived seed passed to a preauthorized
+Rust/WASM media bridge is zeroed after use with a canonical trust recheck.
+
+**Limitations and release gates:** IndexedDB/WebCrypto are not a TPM,
+hardware-backed keystore, browser-origin compromise defense or cross-device
+recovery. The existing auth owner must still independently approve
+registration; the grant fragment cannot authorize its own signer. The
+first-party user-authenticated backend/BFF to register Identity and Device
+before granting a Call, active negotiation bindings, two actual Device media
+streams over TURN/NAT, and on-device A/V measurements are **not implemented**
+by this vault and remain open under issue #274. A protected local key is not
+a permission to start sending media.
+
 ## Canonical Service Principal Device trust RPC (P0 integration seam)
 
 The versioned `DeviceService` now includes `ProvisionTrustedSigningKey` and
