@@ -163,7 +163,7 @@ export function createUcrCanonicalDevicePreparation(
     throw new Error("canonical Device/Trust authority and protected key vault required");
   }
   let pending: Promise<void> = Promise.resolve();
-  return (binding) => {
+  return async (binding) => {
     // Capture the exact authorized scope BEFORE queuing an async operation.
     // Mutable caller objects must not change Device, participant or Call during
     // a pending authority lookup or hardware-backed signing prompt.
