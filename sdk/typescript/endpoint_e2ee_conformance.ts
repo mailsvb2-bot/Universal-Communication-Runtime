@@ -87,6 +87,33 @@ const rejectKeySwap = createUcrCanonicalDevicePreparation({
 await assert.rejects(rejectKeySwap(deviceBinding), /private key does not match trusted signer/);
 assert.equal(tamperedLocal.keyId, "tampered");
 
+// The protected vault may sign successfully while the canonical owner revokes
+// or rotates its key. A successful signature is NOT sufficient to join.
+for (const changed of ["revoked", "rotated"] as const) {
+  let inspections = 0, registrations = 0;
+  const timeOfCheckAuthority = {
+    async inspect() {
+      inspections++;
+      return inspections === 1
+        ? {deviceActive: true, deviceRevoked: false,
+           activeKey: {keyId: "key-1", publicKey: keyBytes.slice()}}
+        : {deviceActive: changed !== "revoked", deviceRevoked: changed === "revoked",
+           activeKey: changed === "rotated"
+             ? {keyId: "foreign", publicKey: foreignPublic}
+             : {keyId: "key-1", publicKey: keyBytes.slice()}};
+    },
+    async approveNewDevice() { registrations++; },
+  };
+  const guard = createUcrCanonicalDevicePreparation(timeOfCheckAuthority, {
+    signChallenge: signDeviceChallenge,
+    async load() { return {keyId: "key-1", publicKey: keyBytes.slice()}; },
+    async stageNew() { throw new Error("unexpected stage"); },
+  });
+  await assert.rejects(guard(deviceBinding), /canonical Device trust changed during signing/);
+  assert.equal(inspections, 2, "canonical trust must be re-read after signing");
+  assert.equal(registrations, 0);
+}
+
 // Interrupted enrollment must reuse the staged signer, never silently create
 // a new key after the server response is lost.
 let stagedRetryCount = 0, approvalAttempt = 0, retryConfirmed = false;
