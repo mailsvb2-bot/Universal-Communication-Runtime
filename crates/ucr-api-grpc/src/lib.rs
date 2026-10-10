@@ -12,7 +12,7 @@ use ucr_core::{
     MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES, MessageStore, RouteCandidate, ServiceAuditStore,
     ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
     ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore, SyncStore, SyncTransition,
-    TransportFailureDisposition, TransportProvider,
+    TransportFailureDisposition, TransportProvider, TrustedSigningKeyStore,
 };
 use ucr_group_mls::{
     MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS, MAX_MLS_KEY_PACKAGE_BYTES,
@@ -30,10 +30,10 @@ use ucr_model::{
     GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
     GroupMemberState, GroupMembership, GroupOwnership, GroupPermission, GroupRecord, GroupRole,
     IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
-    IntentConstraints, IntentId, KeyId, MessageCryptoMetadata, MessageEnvelope, MessageId,
+    IntentConstraints, IntentId, KeyId, KeyPurpose, MessageCryptoMetadata, MessageEnvelope, MessageId,
     MessageRelation, MessageRelationKind, MessageSignature, NamespaceId, OpaqueId, OriginRef,
     PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion,
-    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, ServiceAuditOperationRef,
+    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, PublicKeyDescriptor, ServiceAuditOperationRef,
     ServiceCredentialId, SessionId, StoreForwardId, StoreForwardJob, StoreForwardPolicy,
     SyncCheckpoint, SyncLinkKind, SyncMode, SyncSelection, SyncSession, SyncState, TenantId,
     TenantScope,
@@ -1113,6 +1113,7 @@ where
         + ServiceQuotaStore
         + ServiceAuditStore
         + DeviceLifecycleStore
+        + TrustedSigningKeyStore
         + 'static,
 {
     pb::device_service_server::DeviceServiceServer::new(service)
@@ -1129,6 +1130,7 @@ where
         + ServiceQuotaStore
         + ServiceAuditStore
         + DeviceLifecycleStore
+        + TrustedSigningKeyStore
         + 'static,
 {
     async fn register_device(
@@ -1179,6 +1181,65 @@ where
             result: Some(match result {
                 Ok(device) => pb::device_get_response::Result::Device(device),
                 Err(error) => pb::device_get_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn provision_trusted_signing_key(
+        &self,
+        request: Request<pb::DeviceProvisionTrustedSigningKeyRequest>,
+    ) -> Result<Response<pb::DeviceProvisionTrustedSigningKeyResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let scope = body.scope.ok_or_else(invalid_argument).and_then(decode_scope);
+        let descriptor = body
+            .signing_key
+            .ok_or_else(invalid_argument)
+            .and_then(decode_public_key_descriptor);
+        let result = match (credentials, scope, descriptor) {
+            (Ok((credential_id, secret)), Ok(scope), Ok(descriptor)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .provision_trusted_device_signing_key(
+                        &scope, &credential_id, &secret, &scope, &descriptor,
+                    )
+                    .map(|key| pb_public_key_descriptor(&key))
+            }
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::DeviceProvisionTrustedSigningKeyResponse {
+            result: Some(match result {
+                Ok(key) => pb::device_provision_trusted_signing_key_response::Result::SigningKey(key),
+                Err(error) => pb::device_provision_trusted_signing_key_response::Result::Error(
+                    pb_error(error),
+                ),
+            }),
+        }))
+    }
+
+    async fn get_active_trusted_signing_key(
+        &self,
+        request: Request<pb::DeviceGetActiveTrustedSigningKeyRequest>,
+    ) -> Result<Response<pb::DeviceGetActiveTrustedSigningKeyResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let scope = body.scope.ok_or_else(invalid_argument).and_then(decode_scope);
+        let device_id = decode_opaque(body.device_id).map(DeviceId::from_opaque);
+        let result = match (credentials, scope, device_id) {
+            (Ok((credential_id, secret)), Ok(scope), Ok(device_id)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_active_trusted_device_signing_key(
+                        &scope, &credential_id, &secret, &scope, &device_id,
+                    )
+                    .map(|key| pb_public_key_descriptor(&key))
+            }
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::DeviceGetActiveTrustedSigningKeyResponse {
+            result: Some(match result {
+                Ok(key) => pb::device_get_active_trusted_signing_key_response::Result::SigningKey(key),
+                Err(error) => pb::device_get_active_trusted_signing_key_response::Result::Error(
+                    pb_error(error),
+                ),
             }),
         }))
     }
@@ -2992,6 +3053,40 @@ fn decode_device_ref(value: pb::DeviceRef) -> Result<DeviceRef, CanonicalError> 
         device_id: DeviceId::from_opaque(decode_opaque(value.device_id)?),
         identity_id: IdentityId::from_opaque(decode_opaque(value.identity_id)?),
     })
+}
+
+fn decode_public_key_descriptor(
+    value: pb::PublicKeyDescriptor,
+) -> Result<PublicKeyDescriptor, CanonicalError> {
+    let purpose = match pb::KeyPurpose::try_from(value.purpose).map_err(|_| invalid_argument())? {
+        pb::KeyPurpose::Signing => KeyPurpose::Signing,
+        pb::KeyPurpose::KeyAgreement => KeyPurpose::KeyAgreement,
+        pb::KeyPurpose::Unspecified => return Err(invalid_argument()),
+    };
+    Ok(PublicKeyDescriptor {
+        key_id: KeyId::from_opaque(decode_opaque(value.key_id)?),
+        device_id: DeviceId::from_opaque(decode_opaque(value.device_id)?),
+        purpose,
+        algorithm_id: value.algorithm_id,
+        algorithm_version: value.algorithm_version,
+        key_format_version: value.key_format_version,
+        public_key: value.public_key,
+    })
+}
+
+fn pb_public_key_descriptor(value: &PublicKeyDescriptor) -> pb::PublicKeyDescriptor {
+    pb::PublicKeyDescriptor {
+        key_id: Some(pb_opaque(value.key_id.as_opaque())),
+        device_id: Some(pb_opaque(value.device_id.as_opaque())),
+        purpose: match value.purpose {
+            KeyPurpose::Signing => pb::KeyPurpose::Signing as i32,
+            KeyPurpose::KeyAgreement => pb::KeyPurpose::KeyAgreement as i32,
+        },
+        algorithm_id: value.algorithm_id.clone(),
+        algorithm_version: value.algorithm_version,
+        key_format_version: value.key_format_version,
+        public_key: value.public_key.clone(),
+    }
 }
 
 fn decode_device_descriptor(
