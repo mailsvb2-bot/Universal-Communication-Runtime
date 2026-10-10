@@ -119,12 +119,26 @@ export function createUcrCanonicalDevicePreparation(
       }
       const existing = await vault.load(item);
       if (before.activeKey) {
+        // The untrusted vault and a mutable authority adapter may share byte
+        // buffers. Snapshot the independently approved descriptor before awaits.
+        const approved = {
+          keyId: before.activeKey.keyId,
+          publicKey: before.activeKey.publicKey.slice(),
+        };
         validateSigner(existing);
-        if (!before.deviceActive || existing.keyId !== before.activeKey.keyId ||
-            !equalPublicKeys(existing.publicKey, before.activeKey.publicKey)) {
+        if (!before.deviceActive || existing.keyId !== approved.keyId ||
+            !equalPublicKeys(existing.publicKey, approved.publicKey)) {
           throw new Error("local signer differs from active trusted Device key");
         }
-        await provePrivateKeyPossession(item, before.activeKey, vault);
+        await provePrivateKeyPossession(item, approved, vault);
+        // Re-check canonical trust AFTER the asynchronous key operation: a
+        // revoked/rotated Device cannot complete a previously started login.
+        const current = await authority.inspect(item);
+        if (!current?.deviceActive || current.deviceRevoked || !current.activeKey ||
+            current.activeKey.keyId !== approved.keyId ||
+            !equalPublicKeys(current.activeKey.publicKey, approved.publicKey)) {
+          throw new Error("canonical Device trust changed during signing");
+        }
         return;
       }
       if (before.deviceActive) {
@@ -134,12 +148,17 @@ export function createUcrCanonicalDevicePreparation(
       // The canonical server still independently authorizes registration.
       const staged = existing ?? await vault.stageNew(item);
       validateSigner(staged);
-      await provePrivateKeyPossession(item, staged, vault);
-      await authority.approveNewDevice(item, staged);
+      const pendingSigner = {
+        keyId: staged.keyId,
+        publicKey: staged.publicKey.slice(),
+      };
+      await provePrivateKeyPossession(item, pendingSigner, vault);
+      // Approve only the snapshot actually proven by the protected signer.
+      await authority.approveNewDevice(item, pendingSigner);
       const after = await authority.inspect(item);
       if (!after?.deviceActive || after.deviceRevoked || !after.activeKey ||
-          after.activeKey.keyId !== staged.keyId ||
-          !equalPublicKeys(after.activeKey.publicKey, staged.publicKey)) {
+          after.activeKey.keyId !== pendingSigner.keyId ||
+          !equalPublicKeys(after.activeKey.publicKey, pendingSigner.publicKey)) {
         throw new Error("canonical Device trust registration not confirmed");
       }
     };
