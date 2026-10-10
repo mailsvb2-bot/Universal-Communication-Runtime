@@ -21,6 +21,7 @@ SENSITIVE_TABLES = (
     "call_participants",
     "call_signals",
     "conference_join_grants",
+    "universal_conferences",
     "universal_conference_participants",
     "group_memberships",
     "group_mls_transition_admissions",
@@ -47,6 +48,17 @@ def collect_counts(connection: sqlite3.Connection) -> dict[str, int]:
         connection.execute(
             "SELECT COUNT(*) FROM events WHERE event_type LIKE ?",
             (EVENT_PREFIX + "%",),
+        ).fetchone()[0]
+    )
+    # Critical: the durable idempotent command journal retains the ORIGINAL
+    # issue/revoke request payload, which can include external-user IDs even
+    # after conference_join_grants has been scrubbed. Count, never decode.
+    if "accepted_commands" not in table_names:
+        raise ValueError("canonical accepted_commands journal is missing")
+    result["conference_commands"] = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM accepted_commands WHERE command_type LIKE ?",
+            ("ucr.conference.%",),
         ).fetchone()[0]
     )
     return result
