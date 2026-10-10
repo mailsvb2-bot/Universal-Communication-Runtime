@@ -64,9 +64,19 @@ async function provePrivateKeyPossession(
   if (!cryptoProvider?.subtle || typeof cryptoProvider.getRandomValues !== "function") {
     throw new Error("secure Ed25519 verification is unavailable");
   }
-  const challenge = new Uint8Array(48);
-  cryptoProvider.getRandomValues(challenge);
-  // Challenge binds this operation to the scoped Device; no reusable proof is cached.
+  // Explicit domain and scope binding: a possession proof for one Device/Call
+  // must not be replayable as a proof for another Device or session.
+  const scope = new TextEncoder().encode(JSON.stringify([
+    "ucr.device-signer-possession.v1",
+    binding.tenantId, binding.namespaceId, binding.deviceId,
+    binding.participantId, binding.callId, binding.sessionId,
+    signer.keyId,
+  ]));
+  if (scope.length > 1024) throw new Error("Device signer challenge scope exceeds bounds");
+  const challenge = new Uint8Array(scope.length + 48);
+  challenge.set(scope);
+  cryptoProvider.getRandomValues(challenge.subarray(scope.length));
+  // Every proof includes fresh unpredictable bytes and authenticated scope.
   // Snapshot the independently trusted key before awaiting untrusted vault code.
   const approvedPublicKey = signer.publicKey.slice();
   const publicKey = await cryptoProvider.subtle.importKey(
@@ -125,6 +135,14 @@ export function createUcrCanonicalDevicePreparation(
           throw new Error("local signer differs from active trusted Device key");
         }
         await provePrivateKeyPossession(item, before.activeKey, vault);
+        // The protected signer may take time to unlock/sign. Deny if the
+        // canonical Device or trusted key changed while proof was awaited.
+        const current = await authority.inspect(item);
+        if (!current?.deviceActive || current.deviceRevoked || !current.activeKey ||
+            current.activeKey.keyId !== before.activeKey.keyId ||
+            !equalPublicKeys(current.activeKey.publicKey, before.activeKey.publicKey)) {
+          throw new Error("canonical Device trust changed during signer verification");
+        }
         return;
       }
       if (before.deviceActive) {
