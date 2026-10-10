@@ -313,12 +313,14 @@ pub trait ConferenceJoinGrantStore: StorageProvider {
         session_id: &SessionId,
     ) -> Result<ConferenceJoinGrantRecord, DurableStoreError>;
 
-    /// Irreversibly expires no-longer-authorizing session grant metadata.
+    /// Irreversibly sanitizes no-longer-authorizing session grant metadata.
     ///
     /// The caller supplies an authoritative clock. Expiry is inclusive: a grant
-    /// cannot be redeemed at or after its expiry. Removing stale metadata
-    /// limits server database disclosure after a completed session; it does
-    /// NOT erase canonical Call, participant, Event, or backup history.
+    /// cannot be redeemed at or after its expiry. Scrub participant, Device,
+    /// Call and integration association, but retain an irrevocably
+    /// revoked/redeemed exact-session tombstone: the accepted idempotent command
+    /// MUST NOT resurrect a previously expired or revoked credential.
+    /// This does NOT erase other Call, Event, session or backup history.
     ///
     /// # Errors
     /// Negative clocks and storage failures must never count as successful pruning.
