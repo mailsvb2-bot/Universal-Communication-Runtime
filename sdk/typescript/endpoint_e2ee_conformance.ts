@@ -922,6 +922,39 @@ await assert.rejects(secondOrphanStart, /peer constructor refused/);
 assert.equal(serializedOffers, 2, "retry can allocate an offer after cleanup");
 assert.equal(serializedCloses, 2, "each failed attempt cleans up only its own offer");
 
+// A delayed HTTP close must be fenced by the offer that initiated it; its
+// response cannot clear ownership of a newer transport attempt.
+const browserCloseCode = browser.slice(
+  browser.indexOf("async function closeServerPeer("),
+  browser.indexOf("function scheduleWebRtcRetry("),
+);
+let releaseFencedClose: () => void = () => {};
+let enteredFencedClose: () => void = () => {};
+const fencedCloseGate = new Promise<void>(resolve => {releaseFencedClose = resolve;});
+const fencedCloseEntered = new Promise<void>(resolve => {enteredFencedClose = resolve;});
+const observedFencedCloses: string[] = [];
+const fencedCtx: Record<string, any> = {
+  sessionActive: true,
+  startWebRtc: Object.assign(() => {}, {offerId: "A".repeat(43)}),
+  body: () => ({session_id: "session"}),
+  api: async (_route: string, payload: any) => {
+    observedFencedCloses.push(payload.offer_id);
+    if(observedFencedCloses.length===1){enteredFencedClose();await fencedCloseGate;}
+  },
+};
+runInNewContext(browserCloseCode + "\nthis.closeOffer = closeServerPeer;", fencedCtx);
+const oldCloseInFlight = fencedCtx.closeOffer();
+await fencedCloseEntered;
+fencedCtx.startWebRtc.offerId = "B".repeat(43);
+releaseFencedClose();
+await oldCloseInFlight;
+assert.equal(fencedCtx.startWebRtc.offerId, "B".repeat(43), "stale response must preserve new offer");
+await fencedCtx.closeOffer();
+assert.deepEqual(observedFencedCloses, ["A".repeat(43), "B".repeat(43)]);
+assert.equal(fencedCtx.startWebRtc.offerId, null, "owner clears only after its own close");
+await fencedCtx.closeOffer();
+assert.equal(observedFencedCloses.length, 2, "no unfenced session-wide close");
+
 // Real browser conference admission withdrawal must turn OFF physical
 // camera/microphone capture, not only close the encrypted DataChannel.
 const captureStopCode = browser.slice(
