@@ -9716,7 +9716,7 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
 #[cfg(test)]
 mod expired_join_grant_privacy_tests {
     use super::*;
-    use ucr_model::TenantId;
+    use ucr_model::{GroupId, TenantId};
 
     fn opaque(text: &str) -> OpaqueId {
         OpaqueId::new(text).expect("valid opaque test ID")
