@@ -81,7 +81,6 @@ export function createUcrCanonicalDevicePreparation(
   }
   let pending: Promise<void> | null = null;
   return (binding) => {
-    if (pending) return pending.then(() => prepare(binding));
     const prepare = async (item: UcrDeviceEnrollmentBinding): Promise<void> => {
       validateBinding(item);
       const before = await authority.inspect(item);
@@ -97,11 +96,12 @@ export function createUcrCanonicalDevicePreparation(
         }
         return;
       }
-      if (before.deviceActive || existing) {
-        // Never silently replace or reapprove a previously enrolled identity.
+      if (before.deviceActive) {
         throw new Error("existing Device requires independently approved key recovery");
       }
-      const staged = await vault.stageNew(item);
+      // Reuse a staged but not-yet-approved local signer after transport failure.
+      // The canonical server still independently authorizes registration.
+      const staged = existing ?? await vault.stageNew(item);
       validateSigner(staged);
       await authority.approveNewDevice(item, staged);
       const after = await authority.inspect(item);
@@ -111,6 +111,7 @@ export function createUcrCanonicalDevicePreparation(
         throw new Error("canonical Device trust registration not confirmed");
       }
     };
+    if (pending) return pending.then(() => prepare(binding));
     const running = prepare(binding);
     pending = running;
     void running.finally(() => { if (pending === running) pending = null; }).catch(() => {});
