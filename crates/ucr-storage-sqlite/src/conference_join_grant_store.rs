@@ -54,22 +54,33 @@ pub(super) fn create_v51_objects(transaction: &Transaction<'_>) -> Result<(), Du
     transaction
         .execute_batch(
             "CREATE INDEX conference_join_grants_expiry
-             ON conference_join_grants(expires_at_unix_ms);",
+             ON conference_join_grants(expires_at_unix_ms);
+             -- Persistent anti-replay tombstones must not be scanned again.
+             CREATE INDEX conference_join_grants_pending_redaction
+             ON conference_join_grants(expires_at_unix_ms)
+             WHERE integration_id <> 'expired' OR call_id <> 'expired'
+               OR participant_id <> 'expired' OR device_id <> 'expired'
+               OR revoked=0 OR redeemed=0;",
         )
         .map_err(|error| map_schema_change_error(&error))
 }
 
 pub(super) fn verify_v51_objects(connection: &Connection) -> Result<(), DurableStoreError> {
-    let exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema
-             WHERE type='index' AND name='conference_join_grants_expiry')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| map_sqlite_error(&error))?;
-    if !exists {
-        return Err(DurableStoreError::Corrupt);
+    for name in [
+        "conference_join_grants_expiry",
+        "conference_join_grants_pending_redaction",
+    ] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+                 WHERE type='index' AND name=?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if !exists {
+            return Err(DurableStoreError::Corrupt);
+        }
     }
     Ok(())
 }
@@ -273,7 +284,7 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
                      device_id='expired', revoked=1, redeemed=1
                  WHERE (tenant_id, namespace_present, namespace_id, session_id) IN (
                    SELECT tenant_id, namespace_present, namespace_id, session_id
-                   FROM conference_join_grants
+                   FROM conference_join_grants INDEXED BY conference_join_grants_pending_redaction
                    WHERE expires_at_unix_ms <= ?1
                      AND (integration_id <> 'expired' OR call_id <> 'expired'
                        OR participant_id <> 'expired' OR device_id <> 'expired'
