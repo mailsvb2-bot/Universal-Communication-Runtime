@@ -4,7 +4,7 @@ use ucr_model::{
     AuthorizationRequest, CallId, CallSession, CallSignal, CommandEnvelope, CommunicationIntent,
     ConversationId, ConversationRecord, DeviceDescriptor, DeviceId, ExternalIdentityBinding,
     GroupChange, GroupId, GroupMembership, GroupRecord, IdentityId, IdentityRecord, IntegrationId,
-    IntentId, MessageEnvelope, MessageId, PrincipalRef, ServiceAuditOperationRef,
+    IntentId, MessageEnvelope, MessageId, PrincipalRef, PublicKeyDescriptor, ServiceAuditOperationRef,
     ServiceCredentialId, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
 };
 use ucr_protocol::{
@@ -13,6 +13,7 @@ use ucr_protocol::{
     COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
     CONVERSATION_WRITE_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceipt,
     DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION, DEVICE_REVOKE_PERMISSION,
+    TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
     EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
     GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION, GROUP_READ_PERMISSION,
     IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
@@ -23,6 +24,7 @@ use ucr_protocol::{
     SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND, SERVICE_AUDIT_DEVICE_READ_OPERATION_KIND,
     SERVICE_AUDIT_DEVICE_REGISTER_OPERATION_KIND, SERVICE_AUDIT_DEVICE_REVOKE_OPERATION_KIND,
+    SERVICE_AUDIT_TRUSTED_KEY_PROVISION_OPERATION_KIND, SERVICE_AUDIT_TRUSTED_KEY_READ_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND, SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_GROUP_MANAGE_OPERATION_KIND, SERVICE_AUDIT_GROUP_MEMBERSHIP_READ_OPERATION_KIND,
@@ -43,6 +45,7 @@ use crate::{
     DurableStoreError, ExternalIdentityBindingStore, GroupMessageStore, GroupStore, IdentityStore,
     MessageStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
     ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore, SyncStore,
+    TrustedSigningKeyStore,
 };
 
 /// Transport-neutral Phase-13 ingress for external Service Principal operations.
@@ -1265,5 +1268,85 @@ const fn map_authorized_error(error: AuthorizedMutationError) -> CanonicalError 
     match error {
         AuthorizedMutationError::Authorization(error) => error,
         AuthorizedMutationError::Store(error) => map_store_error(error),
+    }
+}
+
+// The canonical trusted Device public-key owner is deliberately separate from
+// Call/MLS/signaling and from the browser's private endpoint key vault.
+// The Service Principal gate is the same audited owner used by RegisterDevice.
+impl<C, A, S> IntegrationIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore
+        + ServiceQuotaStore
+        + ServiceAuditStore
+        + TrustedSigningKeyStore,
+{
+    /// Provision an independently approved public Device signing key. Private
+    /// seeds never cross this boundary, and only authorized Service Principals
+    /// may request it. The durable canonical Device owner enforces Active state.
+    ///
+    /// # Errors
+    /// Authentication, quota, audit, authorization and storage failure fail closed.
+    pub fn provision_trusted_device_signing_key(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        descriptor: &PublicKeyDescriptor,
+    ) -> Result<PublicKeyDescriptor, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_TRUSTED_KEY_PROVISION_OPERATION_KIND.to_owned(),
+            operation_id: descriptor.key_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .provision_trusted_signing_key(&subject, scope, descriptor)
+            .map_err(map_authorized_error)?;
+        Ok(descriptor.clone())
+    }
+
+    /// Read only the active trusted public key for one canonical Device.
+    /// Never expose private key material or an untrusted in-band SFU key.
+    ///
+    /// # Errors
+    /// Authentication, quota, audit, authorization and storage failure fail closed.
+    pub fn get_active_trusted_device_signing_key(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+    ) -> Result<PublicKeyDescriptor, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_TRUSTED_KEY_READ_OPERATION_KIND.to_owned(),
+            operation_id: device_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                TRUSTED_SIGNING_KEY_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .active_trusted_signing_key(&subject, scope, device_id)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
     }
 }
