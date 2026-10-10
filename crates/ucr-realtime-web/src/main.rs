@@ -300,6 +300,7 @@ struct PublishRequest {
 struct WebRtcRemoteDescriptionRequest {
     #[serde(flatten)]
     session: SessionRequest,
+    offer_id: Option<String>,
     sdp_type: String,
     sdp: String,
 }
@@ -308,6 +309,7 @@ struct WebRtcRemoteDescriptionRequest {
 struct WebRtcIceCandidateRequest {
     #[serde(flatten)]
     session: SessionRequest,
+    offer_id: Option<String>,
     candidate: String,
     sdp_mid: Option<String>,
     sdp_mline_index: Option<u32>,
@@ -1927,6 +1929,7 @@ async fn set_webrtc_remote_description(
         scope: Some(pb_scope(&input.session)),
         call_id: Some(pb_id(&input.session.call)),
         session_id: Some(pb_id(&input.session.session)),
+        offer_id: input.offer_id,
         description: Some(pb::WebRtcDescription {
             sdp_type,
             sdp: input.sdp,
@@ -1980,6 +1983,7 @@ async fn add_webrtc_ice_candidate(
         scope: Some(pb_scope(&input.session)),
         call_id: Some(pb_id(&input.session.call)),
         session_id: Some(pb_id(&input.session.session)),
+        offer_id: input.offer_id,
         candidate: input.candidate,
         sdp_mid: input.sdp_mid,
         sdp_mline_index: input.sdp_mline_index,
