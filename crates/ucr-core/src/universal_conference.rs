@@ -312,6 +312,20 @@ pub trait ConferenceJoinGrantStore: StorageProvider {
         scope: &TenantScope,
         session_id: &SessionId,
     ) -> Result<ConferenceJoinGrantRecord, DurableStoreError>;
+
+    /// Irreversibly expires no-longer-authorizing session grant metadata.
+    ///
+    /// The caller supplies an authoritative clock. Expiry is inclusive: a grant
+    /// cannot be redeemed at or after its expiry. Removing stale metadata
+    /// limits server database disclosure after a completed session; it does
+    /// NOT erase canonical Call, participant, Event, or backup history.
+    ///
+    /// # Errors
+    /// Negative clocks and storage failures must never count as successful pruning.
+    fn prune_expired_conference_join_grants(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<usize, DurableStoreError>;
 }
 
 #[cfg(test)]
