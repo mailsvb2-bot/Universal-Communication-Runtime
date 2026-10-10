@@ -61,6 +61,31 @@ revoked = false;
 localSigner = null;
 await assert.rejects(prepareDevice(deviceBinding), /local device signer is absent/);
 assert.equal(enrollRequests, 1, "missing local signer requires explicit recovery");
+// Interrupted enrollment must reuse the staged signer, never silently create
+// a new key after the server response is lost.
+let stagedRetryCount = 0, approvalAttempt = 0, retryConfirmed = false;
+let stagedRetrySigner: {keyId: string; publicKey: Uint8Array} | null = null;
+const retryDevice = createUcrCanonicalDevicePreparation({
+  async inspect() {return {deviceActive: retryConfirmed, deviceRevoked: false,
+    activeKey: retryConfirmed ? {keyId: "retry-key", publicKey: keyBytes} : null};},
+  async approveNewDevice(_binding, signer) {
+    assert.equal(signer.keyId, "retry-key");
+    if (++approvalAttempt === 1) throw new Error("registration response lost");
+    retryConfirmed = true;
+  },
+}, {
+  async load() {return stagedRetrySigner;},
+  async stageNew() {
+    stagedRetryCount++;
+    stagedRetrySigner = {keyId: "retry-key", publicKey: keyBytes};
+    return stagedRetrySigner;
+  },
+});
+await assert.rejects(retryDevice(deviceBinding), /registration response lost/);
+await retryDevice(deviceBinding);
+assert.equal(stagedRetryCount, 1, "transport retry must not create a second Device signing identity");
+assert.equal(approvalAttempt, 2);
+
 
 const v1 = {
   contractVersion: UCR_ENDPOINT_E2EE_CONTRACT_VERSION,
