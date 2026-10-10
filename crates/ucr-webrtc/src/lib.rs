@@ -920,7 +920,7 @@ async fn handle_live_remote_description(
         return;
     }
     let result = match sessions.get(&session_key(&description.session_id)) {
-        Some(session) if offer_id.as_deref().is_none_or(|id| id != session.offer_id) => {
+        Some(session) if offer_id.as_deref().is_some_and(|id| id != session.offer_id) => {
             Err(WebRtcProviderError::SessionUnavailable)
         }
         Some(session) => {
@@ -943,7 +943,7 @@ async fn handle_live_remote_candidate(
         return;
     }
     let result = match sessions.get(&session_key(&candidate.session_id)) {
-        Some(session) if offer_id.as_deref().is_none_or(|id| id != session.offer_id) => {
+        Some(session) if offer_id.as_deref().is_some_and(|id| id != session.offer_id) => {
             Err(WebRtcProviderError::SessionUnavailable)
         }
         Some(session) => add_engine_remote_candidate(&session.peer_connection, &candidate).await,
