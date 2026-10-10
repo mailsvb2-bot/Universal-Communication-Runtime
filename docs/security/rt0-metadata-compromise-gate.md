@@ -35,12 +35,17 @@ still associate IPs, TURN endpoints, timing, group handles and active sessions.
 
 ## Shipped minimization in this workstream
 
-The existing `ConferenceJoinGrantStore` now explicitly prunes expired
-grant rows, inclusive of expiry, using the same canonical store and existing
-realtime cleanup worker. It removes participant–device–call linkage from that
-one table after a grant cannot authorize a session. The operation is idempotent,
-transactional in SQLite, and never purges unexpired admissions. This is
-**partial metadata reduction**, not the post-call graph-secrecy guarantee.
+The existing `ConferenceJoinGrantStore` now explicitly sanitizes expired
+grant fields, inclusive of expiry, using the same canonical store and the
+existing realtime cleanup worker. It erases participant–device–call and
+integration identifiers from that one row after a grant cannot authorize a
+session, but **retains a revoked/redeemed exact-session tombstone** so replay
+of an accepted IssueJoinGrant cannot recreate an old session credential.
+The bounded cleanup runs no more often than every 30 seconds, overwrites
+at most 4096 rows per pass, is transactional in SQLite and never modifies
+unexpired grants. The persisted session/conference identifiers remain and
+may still correlate with other canonical Events. This is **partial metadata
+reduction**, not the post-call graph-secrecy guarantee.
 The UCR SQLite connection also enforces `PRAGMA secure_delete=ON`,
 so deleted database-page payloads are overwritten instead of left on the
 main-file freelist. This does not erase WAL, backups, filesystem snapshots or
