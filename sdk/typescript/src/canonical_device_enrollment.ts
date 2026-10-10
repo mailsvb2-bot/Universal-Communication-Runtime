@@ -27,6 +27,8 @@ export interface UcrCanonicalDeviceTrust {
 export interface UcrCanonicalDeviceKeyVault {
   load(binding: UcrDeviceEnrollmentBinding): Promise<UcrLocalDeviceSigner | null>;
   stageNew(binding: UcrDeviceEnrollmentBinding): Promise<UcrLocalDeviceSigner>;
+  /** Sign the supplied unpredictable challenge with the existing protected private key. */
+  signChallenge(binding: UcrDeviceEnrollmentBinding, challenge: Uint8Array): Promise<Uint8Array>;
 }
 
 /** Calls the canonical, independently authenticated Device/Trust backend. */
@@ -53,6 +55,34 @@ function validateSigner(value: UcrLocalDeviceSigner | null): asserts value is Uc
   }
 }
 
+async function provePrivateKeyPossession(
+  binding: UcrDeviceEnrollmentBinding,
+  signer: UcrLocalDeviceSigner,
+  vault: UcrCanonicalDeviceKeyVault,
+): Promise<void> {
+  const cryptoProvider = globalThis.crypto;
+  if (!cryptoProvider?.subtle || typeof cryptoProvider.getRandomValues !== "function") {
+    throw new Error("secure Ed25519 verification is unavailable");
+  }
+  const challenge = new Uint8Array(48);
+  cryptoProvider.getRandomValues(challenge);
+  // Challenge binds this operation to the scoped Device; no reusable proof is cached.
+  // Snapshot the independently trusted key before awaiting untrusted vault code.
+  const approvedPublicKey = signer.publicKey.slice();
+  const publicKey = await cryptoProvider.subtle.importKey(
+    "raw", approvedPublicKey as Uint8Array<ArrayBuffer>, {name: "Ed25519"}, false, ["verify"],
+  );
+  const signature = await vault.signChallenge(binding, challenge);
+  if (!(signature instanceof Uint8Array) || signature.length !== 64) {
+    throw new Error("protected Device key possession proof is missing");
+  }
+  if (!await cryptoProvider.subtle.verify(
+    "Ed25519", publicKey, signature as Uint8Array<ArrayBuffer>, challenge,
+  )) {
+    throw new Error("protected Device private key does not match trusted signer");
+  }
+}
+
 function validateBinding(binding: UcrDeviceEnrollmentBinding): void {
   if (!binding?.tenantId || !binding.deviceId || !binding.participantId ||
       !binding.callId || !binding.sessionId) {
@@ -76,7 +106,7 @@ export function createUcrCanonicalDevicePreparation(
   if (!authority || typeof authority.inspect !== "function" ||
       typeof authority.approveNewDevice !== "function" ||
       !vault || typeof vault.load !== "function" ||
-      typeof vault.stageNew !== "function") {
+      typeof vault.stageNew !== "function" || typeof vault.signChallenge !== "function") {
     throw new Error("canonical Device/Trust authority and protected key vault required");
   }
   let pending: Promise<void> = Promise.resolve();
@@ -94,6 +124,7 @@ export function createUcrCanonicalDevicePreparation(
             !equalPublicKeys(existing.publicKey, before.activeKey.publicKey)) {
           throw new Error("local signer differs from active trusted Device key");
         }
+        await provePrivateKeyPossession(item, before.activeKey, vault);
         return;
       }
       if (before.deviceActive) {
@@ -103,6 +134,7 @@ export function createUcrCanonicalDevicePreparation(
       // The canonical server still independently authorizes registration.
       const staged = existing ?? await vault.stageNew(item);
       validateSigner(staged);
+      await provePrivateKeyPossession(item, staged, vault);
       await authority.approveNewDevice(item, staged);
       const after = await authority.inspect(item);
       if (!after?.deviceActive || after.deviceRevoked || !after.activeKey ||
