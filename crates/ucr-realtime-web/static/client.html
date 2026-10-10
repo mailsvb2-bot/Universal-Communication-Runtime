@@ -1328,6 +1328,11 @@ async function restartIce(){
     const response=await api("/v1/realtime/webrtc/restart",body());
     const offer=await response.json();
     ensureCurrent();
+    // ICE restart changes SDP, not ownership of the original WebRTC attempt.
+    // A mismatched fence must not be installed as a new network configuration.
+    if(!offer||offer.offer_id!==startWebRtc.offerId){
+      throw new Error("ICE restart changed immutable WebRTC transport offer identity");
+    }
     pc.setConfiguration(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
     await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
     ensureCurrent();
