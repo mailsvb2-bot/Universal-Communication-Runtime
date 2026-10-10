@@ -46,6 +46,9 @@ pub const SERVICE_AUDIT_GROUP_MESSAGE_READ_OPERATION_KIND: &str = "ucr.group.mes
 pub const SERVICE_AUDIT_DEVICE_REGISTER_OPERATION_KIND: &str = "ucr.device.register";
 pub const SERVICE_AUDIT_DEVICE_READ_OPERATION_KIND: &str = "ucr.device.read";
 pub const SERVICE_AUDIT_DEVICE_REVOKE_OPERATION_KIND: &str = "ucr.device.revoke";
+pub const SERVICE_AUDIT_TRUSTED_KEY_PROVISION_OPERATION_KIND: &str =
+    "ucr.device.trusted_key.provision";
+pub const SERVICE_AUDIT_TRUSTED_KEY_READ_OPERATION_KIND: &str = "ucr.device.trusted_key.read";
 pub const SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND: &str = "ucr.sync.create";
 pub const SERVICE_AUDIT_SYNC_READ_OPERATION_KIND: &str = "ucr.sync.read";
 pub const SERVICE_AUDIT_SYNC_TRANSITION_OPERATION_KIND: &str = "ucr.sync.transition";

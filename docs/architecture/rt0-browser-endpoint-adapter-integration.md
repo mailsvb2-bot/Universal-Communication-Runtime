@@ -175,3 +175,28 @@ concurrent capture revocation, and measured full-HD quality and latency.
 6. On restart, restore the endpoint-owned signer and sealed MLS state. A lost signer requires existing explicit Recovery, never silent self-enrollment from a link.
 
 The host must provide a concrete authenticated enrollment/provisioning endpoint before this can become a standalone user journey. No second cryptographic authority, shadow Device table, persistent telephone directory, server-retained signing seed, or database of phone numbers is introduced by this integration. The existing canonical Device/Trust/Identity persistence remains in use; this is **not** a stateless/no-data product claim.
+
+## Canonical Service Principal Device trust RPC (P0 integration seam)
+
+The versioned `DeviceService` now includes `ProvisionTrustedSigningKey` and
+`GetActiveTrustedSigningKey`. Both reuse the existing `IntegrationIngress`
+Service Principal authentication, quotas, append-only operation audit,
+`AuthorizedDurableRuntime` permissions and the canonical
+`TrustedSigningKeyStore`. Provisioning requires an independently authenticated
+authorized service principal with `ucr.crypto.trusted_signing_key.provision` permission
+(as defined by the canonical permission constant); reading requires its
+`ucr.crypto.trusted_signing_key.read` permission. Active-Device preconditions and conflict/
+revocation semantics remain owned by the existing Device and Trust stores.
+
+These RPCs receive/return ONLY Ed25519 public-key descriptors, never local
+signing seeds, MLS exporters, telephone numbers or endpoint encryption
+snapshots. They are intended for a backend trusted by the owner; **do not
+proxy machine Service Principal secrets directly to the browser**. A distinct
+user-authenticated first-party host/BFF mapping verified users to the existing
+canonical permissions is still needed before standalone self-enrollment.
+The join URL fragment cannot act as device-registration authority.
+
+This addition introduces no new database, identity/cryptography owner or
+telephone lookup directory. Canonical durable Device/Trust state continues
+to live in the existing reference stores. Passing gRPC conformance does not
+prove two physical Device E2EE audio/video or TURN/NAT interoperability.

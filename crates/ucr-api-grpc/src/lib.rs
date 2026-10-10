@@ -12,7 +12,7 @@ use ucr_core::{
     MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES, MessageStore, RouteCandidate, ServiceAuditStore,
     ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
     ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore, SyncStore, SyncTransition,
-    TransportFailureDisposition, TransportProvider,
+    TransportFailureDisposition, TransportProvider, TrustedSigningKeyStore,
 };
 use ucr_group_mls::{
     MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS, MAX_MLS_KEY_PACKAGE_BYTES,
@@ -30,13 +30,13 @@ use ucr_model::{
     GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
     GroupMemberState, GroupMembership, GroupOwnership, GroupPermission, GroupRecord, GroupRole,
     IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
-    IntentConstraints, IntentId, KeyId, MessageCryptoMetadata, MessageEnvelope, MessageId,
-    MessageRelation, MessageRelationKind, MessageSignature, NamespaceId, OpaqueId, OriginRef,
-    PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion,
-    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, ServiceAuditOperationRef,
-    ServiceCredentialId, SessionId, StoreForwardId, StoreForwardJob, StoreForwardPolicy,
-    SyncCheckpoint, SyncLinkKind, SyncMode, SyncSelection, SyncSession, SyncState, TenantId,
-    TenantScope,
+    IntentConstraints, IntentId, KeyId, KeyPurpose, MessageCryptoMetadata, MessageEnvelope,
+    MessageId, MessageRelation, MessageRelationKind, MessageSignature, NamespaceId, OpaqueId,
+    OriginRef, PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion,
+    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, PublicKeyDescriptor,
+    ServiceAuditOperationRef, ServiceCredentialId, SessionId, StoreForwardId, StoreForwardJob,
+    StoreForwardPolicy, SyncCheckpoint, SyncLinkKind, SyncMode, SyncSelection, SyncSession,
+    SyncState, TenantId, TenantScope,
 };
 use ucr_protocol::{
     AcknowledgementEnvelope, CanonicalError, CanonicalErrorCode, CommandReceipt,
@@ -1113,6 +1113,7 @@ where
         + ServiceQuotaStore
         + ServiceAuditStore
         + DeviceLifecycleStore
+        + TrustedSigningKeyStore
         + 'static,
 {
     pb::device_service_server::DeviceServiceServer::new(service)
@@ -1129,6 +1130,7 @@ where
         + ServiceQuotaStore
         + ServiceAuditStore
         + DeviceLifecycleStore
+        + TrustedSigningKeyStore
         + 'static,
 {
     async fn register_device(
@@ -1181,6 +1183,89 @@ where
                 Err(error) => pb::device_get_response::Result::Error(pb_error(error)),
             }),
         }))
+    }
+
+    async fn provision_trusted_signing_key(
+        &self,
+        request: Request<pb::DeviceProvisionTrustedSigningKeyRequest>,
+    ) -> Result<Response<pb::DeviceProvisionTrustedSigningKeyResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let scope = body
+            .scope
+            .ok_or_else(invalid_argument)
+            .and_then(decode_scope);
+        let descriptor = body
+            .signing_key
+            .ok_or_else(invalid_argument)
+            .and_then(decode_public_key_descriptor);
+        let result = match (credentials, scope, descriptor) {
+            (Ok((credential_id, secret)), Ok(scope), Ok(descriptor)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .provision_trusted_device_signing_key(
+                        &scope,
+                        &credential_id,
+                        &secret,
+                        &scope,
+                        &descriptor,
+                    )
+                    .map(|key| pb_public_key_descriptor(&key))
+            }
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        };
+        Ok(Response::new(
+            pb::DeviceProvisionTrustedSigningKeyResponse {
+                result: Some(match result {
+                    Ok(key) => {
+                        pb::device_provision_trusted_signing_key_response::Result::SigningKey(key)
+                    }
+                    Err(error) => pb::device_provision_trusted_signing_key_response::Result::Error(
+                        pb_error(error),
+                    ),
+                }),
+            },
+        ))
+    }
+
+    async fn get_active_trusted_signing_key(
+        &self,
+        request: Request<pb::DeviceGetActiveTrustedSigningKeyRequest>,
+    ) -> Result<Response<pb::DeviceGetActiveTrustedSigningKeyResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let scope = body
+            .scope
+            .ok_or_else(invalid_argument)
+            .and_then(decode_scope);
+        let device_id = decode_opaque(body.device_id).map(DeviceId::from_opaque);
+        let result = match (credentials, scope, device_id) {
+            (Ok((credential_id, secret)), Ok(scope), Ok(device_id)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_active_trusted_device_signing_key(
+                        &scope,
+                        &credential_id,
+                        &secret,
+                        &scope,
+                        &device_id,
+                    )
+                    .map(|key| pb_public_key_descriptor(&key))
+            }
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        };
+        Ok(Response::new(
+            pb::DeviceGetActiveTrustedSigningKeyResponse {
+                result: Some(match result {
+                    Ok(key) => {
+                        pb::device_get_active_trusted_signing_key_response::Result::SigningKey(key)
+                    }
+                    Err(error) => {
+                        pb::device_get_active_trusted_signing_key_response::Result::Error(pb_error(
+                            error,
+                        ))
+                    }
+                }),
+            },
+        ))
     }
 
     async fn revoke_device(
@@ -2994,6 +3079,40 @@ fn decode_device_ref(value: pb::DeviceRef) -> Result<DeviceRef, CanonicalError> 
     })
 }
 
+fn decode_public_key_descriptor(
+    value: pb::PublicKeyDescriptor,
+) -> Result<PublicKeyDescriptor, CanonicalError> {
+    let purpose = match pb::KeyPurpose::try_from(value.purpose).map_err(|_| invalid_argument())? {
+        pb::KeyPurpose::Signing => KeyPurpose::Signing,
+        pb::KeyPurpose::KeyAgreement => KeyPurpose::KeyAgreement,
+        pb::KeyPurpose::Unspecified => return Err(invalid_argument()),
+    };
+    Ok(PublicKeyDescriptor {
+        key_id: KeyId::from_opaque(decode_opaque(value.key_id)?),
+        device_id: DeviceId::from_opaque(decode_opaque(value.device_id)?),
+        purpose,
+        algorithm_id: value.algorithm_id,
+        algorithm_version: value.algorithm_version,
+        key_format_version: value.key_format_version,
+        public_key: value.public_key,
+    })
+}
+
+fn pb_public_key_descriptor(value: &PublicKeyDescriptor) -> pb::PublicKeyDescriptor {
+    pb::PublicKeyDescriptor {
+        key_id: Some(pb_opaque(value.key_id.as_opaque())),
+        device_id: Some(pb_opaque(value.device_id.as_opaque())),
+        purpose: match value.purpose {
+            KeyPurpose::Signing => pb::KeyPurpose::Signing as i32,
+            KeyPurpose::KeyAgreement => pb::KeyPurpose::KeyAgreement as i32,
+        },
+        algorithm_id: value.algorithm_id.clone(),
+        algorithm_version: value.algorithm_version,
+        key_format_version: value.key_format_version,
+        public_key: value.public_key.clone(),
+    }
+}
+
 fn decode_device_descriptor(
     value: pb::DeviceDescriptor,
 ) -> Result<DeviceDescriptor, CanonicalError> {
@@ -4076,16 +4195,17 @@ mod tests {
         EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, EXTERNAL_MESSAGE_ID_LIMIT,
         EXTERNAL_MESSAGE_MAPPING_LIMIT, GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION,
         GROUP_READ_PERMISSION, IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION,
-        MAX_COMMAND_PAYLOAD_LEN, MAX_EVENT_INTEGRITY_METADATA_LEN, MAX_EVENT_PAYLOAD_LEN,
-        MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN, MAX_INTENT_POLICY_VALUE_LEN,
-        MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS,
-        MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_READ_PERMISSION,
-        MESSAGE_RELATION_LIMIT, MESSAGE_WRITE_PERMISSION,
-        SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND,
+        KEY_FORMAT_VERSION, MAX_COMMAND_PAYLOAD_LEN, MAX_EVENT_INTEGRITY_METADATA_LEN,
+        MAX_EVENT_PAYLOAD_LEN, MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN,
+        MAX_INTENT_POLICY_VALUE_LEN, MAX_INTENT_TRANSPORT_CONSTRAINTS,
+        MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS, MESSAGE_ATTACHMENT_LIMIT,
+        MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_READ_PERMISSION, MESSAGE_RELATION_LIMIT,
+        MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND,
         SERVICE_AUDIT_STORE_FORWARD_ENQUEUE_OPERATION_KIND,
         SERVICE_AUDIT_STORE_FORWARD_READ_OPERATION_KIND, SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND,
         SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN, STORE_FORWARD_READ_PERMISSION,
         STORE_FORWARD_WRITE_PERMISSION, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
+        TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
         validate_communication_intent, validate_event, validate_message,
     };
     use ucr_storage_memory::MemoryLocalStore;
@@ -5263,6 +5383,72 @@ mod tests {
         }
     }
 
+    // Public gRPC end-to-end Device→canonical trusted key provisioning/read.
+    // The Service Principal credential, quota/audit and exact permissions are
+    // reused; neither signing seed nor phone identity appears in these RPCs.
+    async fn provision_and_read_trusted_device_key(
+        devices: &mut TestDeviceClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+    ) {
+        let wire_key = pb::PublicKeyDescriptor {
+            key_id: Some(pb_id("trusted-device-key-grpc")),
+            device_id: Some(pb_id("device-multi-grpc")),
+            purpose: pb::KeyPurpose::Signing as i32,
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            key_format_version: KEY_FORMAT_VERSION,
+            public_key: vec![7; 32],
+        };
+        for _ in 0..2 {
+            // An identical retry cannot create a second trusted-key owner.
+            let mut provision = Request::new(pb::DeviceProvisionTrustedSigningKeyRequest {
+                scope: Some(wire_scope()),
+                signing_key: Some(wire_key.clone()),
+            });
+            attach_service_credential(&mut provision, credential_id, secret);
+            let answer = devices
+                .provision_trusted_signing_key(provision)
+                .await
+                .expect("ProvisionTrustedSigningKey transport")
+                .into_inner();
+            match answer.result.expect("ProvisionTrustedSigningKey result") {
+                pb::device_provision_trusted_signing_key_response::Result::SigningKey(value) => {
+                    assert_eq!(value.public_key, vec![7; 32]);
+                    assert_eq!(
+                        value.device_id.expect("trusted device ID").value,
+                        b"device-multi-grpc"
+                    );
+                }
+                pb::device_provision_trusted_signing_key_response::Result::Error(error) => {
+                    panic!("canonical trusted key provisioning denied: {}", error.code);
+                }
+            }
+        }
+        let mut read = Request::new(pb::DeviceGetActiveTrustedSigningKeyRequest {
+            scope: Some(wire_scope()),
+            device_id: Some(pb_id("device-multi-grpc")),
+        });
+        attach_service_credential(&mut read, credential_id, secret);
+        let current = devices
+            .get_active_trusted_signing_key(read)
+            .await
+            .expect("GetActiveTrustedSigningKey transport")
+            .into_inner();
+        match current.result.expect("GetActiveTrustedSigningKey result") {
+            pb::device_get_active_trusted_signing_key_response::Result::SigningKey(key) => {
+                assert_eq!(
+                    key.key_id.expect("key id").value,
+                    b"trusted-device-key-grpc"
+                );
+                assert_eq!(key.public_key, vec![7; 32]);
+            }
+            pb::device_get_active_trusted_signing_key_response::Result::Error(error) => {
+                panic!("canonical active key read denied: {}", error.code)
+            }
+        }
+    }
+
     async fn create_and_read_sync_session(
         sync: &mut TestSyncClient,
         credential_id: &ucr_model::ServiceCredentialId,
@@ -5439,6 +5625,8 @@ mod tests {
             DEVICE_REGISTER_PERMISSION,
             DEVICE_READ_PERMISSION,
             DEVICE_REVOKE_PERMISSION,
+            TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+            TRUSTED_SIGNING_KEY_READ_PERMISSION,
             SYNC_WRITE_PERMISSION,
             SYNC_READ_PERMISSION,
         ];
@@ -5447,6 +5635,7 @@ mod tests {
             multidevice_clients_and_server(Arc::clone(&store)).await;
 
         register_and_read_multidevice(&mut devices, &credential_id, &secret).await;
+        provision_and_read_trusted_device_key(&mut devices, &credential_id, &secret).await;
         create_and_read_sync_session(&mut sync, &credential_id, &secret).await;
         assert_sync_create_audit(&store);
         transition_checkpoint_and_read_sync(&mut sync, &credential_id, &secret).await;
