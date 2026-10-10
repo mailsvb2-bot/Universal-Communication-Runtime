@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { generateKeyPairSync, sign, webcrypto } from "node:crypto";
 import { runInNewContext } from "node:vm";
 
 import {
@@ -28,7 +29,11 @@ import {
 
 // Real first/repeat-login orchestration over externally authenticated canonical
 // Device/Trust and endpoint-owned key vault; never create a second key owner.
-const keyBytes = new Uint8Array(32).fill(9);
+const testDeviceKeyPair = generateKeyPairSync("ed25519");
+const keyBytes = new Uint8Array(testDeviceKeyPair.publicKey.export({format:"der", type:"spki"}).subarray(-32));
+if (!globalThis.crypto) Object.defineProperty(globalThis, "crypto", {value: webcrypto});
+const signDeviceChallenge = async (_binding: unknown, challenge: Uint8Array) =>
+  new Uint8Array(sign(null, challenge, testDeviceKeyPair.privateKey));
 const deviceBinding = {tenantId: "tenant", namespaceId: null, deviceId: "device",
   participantId: "user", callId: "call", sessionId: "session"};
 let enrolled = false, revoked = false, localSigner: {keyId: string; publicKey: Uint8Array} | null = null;
@@ -41,6 +46,7 @@ const prepareDevice = createUcrCanonicalDevicePreparation({
     enrollRequests++; enrolled = true;
   },
 }, {
+  signChallenge: signDeviceChallenge,
   async load() {return localSigner;},
   async stageNew() {stagedKeys++; localSigner = {keyId: "key-1", publicKey: keyBytes};
     return localSigner;},
@@ -74,6 +80,7 @@ const retryDevice = createUcrCanonicalDevicePreparation({
     retryConfirmed = true;
   },
 }, {
+  signChallenge: signDeviceChallenge,
   async load() {return stagedRetrySigner;},
   async stageNew() {
     stagedRetryCount++;
