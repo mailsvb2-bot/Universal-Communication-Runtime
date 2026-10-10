@@ -194,6 +194,14 @@ servers. The same local signer is restored after a page reload. Signer proof
 uses real Ed25519, and the short-lived seed passed to a preauthorized
 Rust/WASM media bridge is zeroed after use with a canonical trust recheck.
 
+The `createUcrFirstPartyCallEntry(host, vault)` coordinator is also exported:
+one click resumes an **independently authenticated** canonical user/Device,
+prepares and proves the Device signer **without a Call**, asks the canonical
+backend to issue its Device-bound signed Join fragment, and revalidates the
+same Device after grant issuance to catch concurrent revocation. A double
+click shares one pending operation. The coordinator is not a BFF or a new
+identity owner; it cannot issue a cryptographically trusted grant itself.
+
 **Limitations and release gates:** IndexedDB/WebCrypto are not a TPM,
 hardware-backed keystore, browser-origin compromise defense or cross-device
 recovery. The existing auth owner must still independently approve
