@@ -536,6 +536,9 @@ const devicePrepareCode = browser.slice(
   browser.indexOf("async function join(){"),
 );
 assert.ok(devicePrepareCode.startsWith("async function prepareCanonicalDeviceAfterJoin("));
+assert.match(devicePrepareCode, /ucrCanonicalDeviceAuthority/);
+assert.match(devicePrepareCode, /ucrProtectedDeviceKeyVault/);
+assert.match(devicePrepareCode, /createUcrCanonicalDevicePreparation/);
 let canonicalDevicePreparations = 0;
 const devicePrepareCtx: Record<string, any> = {
   claims: {tenant_id: "tenant", namespace_id: null, device_id: "device",
