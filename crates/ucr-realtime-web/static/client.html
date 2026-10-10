@@ -1241,7 +1241,15 @@ async function startWebRtc(forceMedia=false){
     }
     throw error;
   }
-  const pc=new RTCPeerConnection(rtcConfig);
+  let pc;
+  try{
+    pc=new RTCPeerConnection(rtcConfig);
+  }catch(error){
+    // The server allocated an offer, but the browser rejected peer creation.
+    // No local peer owns that offer; release the server session for retry.
+    if(sessionActive&&!peer)await closeServerPeer();
+    throw error;
+  }
   peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
   const ensureOwnedPeer=()=>{
     ensureCurrent();
