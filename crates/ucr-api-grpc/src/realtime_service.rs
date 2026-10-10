@@ -429,10 +429,11 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .await
     }
 
-    /// Removes session grant identifiers after their authorization expires.
+    /// Sanitizes expired participant/Device/Call associations but retains the
+    /// exact session replay tombstone after their authorization expires.
     ///
-    /// This reuses the canonical ConferenceJoinGrantStore; it does not alter
-    /// the Call/Event lifecycle or promise that all metadata is gone.
+    /// Reuses the canonical ConferenceJoinGrantStore; Call/Event history
+    /// and unrelated server metadata are not erased.
     ///
     /// # Errors
     /// Returns an explicit store error on unavailable/corrupt persistence.
