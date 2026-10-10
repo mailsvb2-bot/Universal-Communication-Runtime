@@ -67,13 +67,15 @@ async function provePrivateKeyPossession(
   const challenge = new Uint8Array(48);
   cryptoProvider.getRandomValues(challenge);
   // Challenge binds this operation to the scoped Device; no reusable proof is cached.
+  // Snapshot the independently trusted key before awaiting untrusted vault code.
+  const approvedPublicKey = signer.publicKey.slice();
+  const publicKey = await cryptoProvider.subtle.importKey(
+    "raw", approvedPublicKey as Uint8Array<ArrayBuffer>, {name: "Ed25519"}, false, ["verify"],
+  );
   const signature = await vault.signChallenge(binding, challenge);
   if (!(signature instanceof Uint8Array) || signature.length !== 64) {
     throw new Error("protected Device key possession proof is missing");
   }
-  const publicKey = await cryptoProvider.subtle.importKey(
-    "raw", signer.publicKey as Uint8Array<ArrayBuffer>, {name: "Ed25519"}, false, ["verify"],
-  );
   if (!await cryptoProvider.subtle.verify(
     "Ed25519", publicKey, signature as Uint8Array<ArrayBuffer>, challenge,
   )) {
@@ -122,7 +124,7 @@ export function createUcrCanonicalDevicePreparation(
             !equalPublicKeys(existing.publicKey, before.activeKey.publicKey)) {
           throw new Error("local signer differs from active trusted Device key");
         }
-        await provePrivateKeyPossession(item, existing, vault);
+        await provePrivateKeyPossession(item, before.activeKey, vault);
         return;
       }
       if (before.deviceActive) {
