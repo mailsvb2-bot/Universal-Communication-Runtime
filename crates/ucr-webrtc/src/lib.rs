@@ -131,6 +131,12 @@ pub trait WebRtcProvider: fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns bounded provider failures.
     fn close_session(&self, session_id: &SessionId) -> Result<(), WebRtcProviderError>;
+
+    /// Closes only the transport attempt identified by its original offer.
+    /// A delayed close must not tear down a subsequent attempt for the same session.
+    fn close_session_if_offer_matches(&self, _session_id: &SessionId, _offer_id: &str) -> Result<(), WebRtcProviderError> {
+        Err(WebRtcProviderError::SessionUnavailable)
+    }
 }
 
 pub const MIN_TURN_CREDENTIAL_TTL_SECONDS: u32 = 30;
@@ -376,6 +382,7 @@ enum LiveWebRtcCommand {
     },
     Close {
         session_id: SessionId,
+        offer_id: Option<String>,
         deadline: Instant,
         reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
     },
@@ -612,8 +619,16 @@ impl WebRtcProvider for LiveWebRtcProvider {
     fn close_session(&self, session_id: &SessionId) -> Result<(), WebRtcProviderError> {
         self.request(|reply, deadline| LiveWebRtcCommand::Close {
             session_id: session_id.clone(),
+            offer_id: None,
             deadline,
             reply,
+        })
+    }
+
+    fn close_session_if_offer_matches(&self, session_id: &SessionId, offer_id: &str) -> Result<(), WebRtcProviderError> {
+        if offer_id.is_empty() || offer_id.len() > 64 {return Err(WebRtcProviderError::SessionUnavailable);}
+        self.request(|reply, deadline| LiveWebRtcCommand::Close {
+            session_id: session_id.clone(), offer_id: Some(offer_id.to_owned()), deadline, reply,
         })
     }
 }
@@ -631,6 +646,7 @@ fn validate_live_config(config: &WebRtcSessionConfig) -> Result<(), WebRtcProvid
 }
 
 struct LiveWebRtcSession {
+    offer_id: String,
     peer_connection: Arc<RTCPeerConnection>,
     e2ee_channel: Option<LiveWebRtcE2eeChannel>,
 }
@@ -702,10 +718,8 @@ async fn run_live_webrtc_worker(
                 handle_live_send_e2ee(&mut sessions, session_id, *envelope, deadline, reply).await;
             }
             LiveWebRtcCommand::Close {
-                session_id,
-                deadline,
-                reply,
-            } => handle_live_close(&mut sessions, session_id, deadline, reply).await,
+                session_id, offer_id, deadline, reply,
+            } => handle_live_close(&mut sessions, session_id, offer_id, deadline, reply).await,
         }
     }
     commands.close();
@@ -743,6 +757,8 @@ async fn handle_live_create(
                 return;
             }
             let peer_connection = Arc::clone(&session.peer_connection);
+            let mut session = session;
+            session.offer_id = webrtc_offer_id(&description.sdp);
             sessions.insert(key.clone(), session);
             if reply.send(Ok(description)).is_err() {
                 sessions.remove(&key);
@@ -832,6 +848,7 @@ async fn handle_live_send_e2ee(
 async fn handle_live_close(
     sessions: &mut HashMap<String, LiveWebRtcSession>,
     session_id: SessionId,
+    offer_id: Option<String>,
     deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
 ) {
@@ -839,7 +856,14 @@ async fn handle_live_close(
         let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
         return;
     }
-    let result = match sessions.remove(&session_key(&session_id)) {
+    let key = session_key(&session_id);
+    if let Some(expected) = offer_id.as_deref() {
+        if sessions.get(&key).is_none_or(|current| current.offer_id != expected) {
+            let _ = reply.send(Err(WebRtcProviderError::SessionUnavailable));
+            return;
+        }
+    }
+    let result = match sessions.remove(&key) {
         Some(session) => session
             .peer_connection
             .close()
@@ -848,6 +872,13 @@ async fn handle_live_close(
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
     let _ = reply.send(result);
+}
+
+/// Stable opaque identifier derived from the server's unique original SDP offer.
+/// It is a fencing value, not a bearer credential or an authorization grant.
+pub fn webrtc_offer_id(sdp: &str) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    URL_SAFE_NO_PAD.encode(openssl::sha::sha256(sdp.as_bytes()))
 }
 
 fn command_expired(deadline: Instant) -> bool {
