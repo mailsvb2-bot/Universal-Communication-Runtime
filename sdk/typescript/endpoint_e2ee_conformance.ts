@@ -890,6 +890,38 @@ runInNewContext(startCode + "\nthis.start = startWebRtc;", constructorCtx);
 await assert.rejects(constructorCtx.start(), /browser peer unavailable/);
 assert.equal(constructorCloses, 1, "failed peer construction must retire its server offer");
 
+// Session-scoped close must finish before a later start allocates a new offer.
+let releaseOrphanClose: () => void = () => {};
+let orphanCloseEntered: () => void = () => {};
+const orphanCloseGate = new Promise<void>(resolve => {releaseOrphanClose = resolve;});
+const orphanCloseStarted = new Promise<void>(resolve => {orphanCloseEntered = resolve;});
+let serializedOffers = 0, serializedCloses = 0;
+const serializedCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
+  peer: null, navigator: {onLine: true},
+  ui: {privacyMode: {value: "secure"}},
+  requireCanonicalMediaHostReady() {}, body: () => ({}),
+  rtcNetworkConfiguration: () => ({}),
+  api: async () => {serializedOffers++; return {json: async () => ({ice_servers: []})};},
+  ensureLocalMedia: async () => {},
+  closeServerPeer: async () => {
+    serializedCloses++;
+    if(serializedCloses===1){orphanCloseEntered();await orphanCloseGate;}
+  },
+  RTCPeerConnection: class {constructor() {throw new Error("peer constructor refused");}},
+};
+runInNewContext(startCode + "\nthis.start = startWebRtc;", serializedCtx);
+const firstOrphanStart = serializedCtx.start();
+await orphanCloseStarted;
+const secondOrphanStart = serializedCtx.start();
+await Promise.resolve();
+assert.equal(serializedOffers, 1, "replacement offer must wait for orphan cleanup");
+releaseOrphanClose();
+await assert.rejects(firstOrphanStart, /peer constructor refused/);
+await assert.rejects(secondOrphanStart, /peer constructor refused/);
+assert.equal(serializedOffers, 2, "retry can allocate an offer after cleanup");
+assert.equal(serializedCloses, 2, "each failed attempt cleans up only its own offer");
+
 // Real browser conference admission withdrawal must turn OFF physical
 // camera/microphone capture, not only close the encrypted DataChannel.
 const captureStopCode = browser.slice(
