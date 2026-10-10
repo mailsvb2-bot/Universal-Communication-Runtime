@@ -48,6 +48,12 @@ The reference client invokes `window.ucrPrepareCanonicalDevice(binding)`, when s
 **only after** the realtime server has accepted the authenticated join and
 **before** media admission / physical capture. `binding` includes the exact
 scoped tenant, namespace, call, session, participant and Device identifiers.
+If the authenticated host already exposes `window.ucrCanonicalDeviceAuthority` and
+`window.ucrProtectedDeviceKeyVault`, the reference browser now imports the
+same pinned ESM bundle and composes the preparation callback **automatically**,
+after the server has accepted the join and before media capture. Existing hosts
+may also provide an explicit `window.ucrPrepareCanonicalDevice` override.
+
 The ESM bundle now exports `createUcrCanonicalDevicePreparation(authority, vault)`.
 The host may assign it to `window.ucrPrepareCanonicalDevice`:
 
