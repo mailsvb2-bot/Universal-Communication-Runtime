@@ -1222,12 +1222,26 @@ async function startWebRtc(forceMedia=false){
     }
   };
   requireCanonicalMediaHostReady();
-  await ensureLocalMedia(forceMedia);
-  ensureCurrent();
-  const response=await api("/v1/realtime/webrtc/start",body());
-  const offer=await response.json();
-  ensureCurrent();
-  const pc=new RTCPeerConnection(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
+  // Network/privacy validation precedes browser device permissions.
+  let offer,rtcConfig,serverPeerOpened=false;
+  try{
+    const response=await api("/v1/realtime/webrtc/start",body());
+    serverPeerOpened=true;
+    offer=await response.json();
+    ensureCurrent();
+    rtcConfig=rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value);
+    await ensureLocalMedia(forceMedia);
+    ensureCurrent();
+  }catch(error){
+    // Admission withdrawal invalidates physical capture, not the authenticated
+    // realtime session. Close the server peer even if mediaActive was revoked.
+    // Never send a stale close after a different client peer has taken ownership.
+    if(serverPeerOpened&&sessionActive&&!peer){
+      await closeServerPeer();
+    }
+    throw error;
+  }
+  const pc=new RTCPeerConnection(rtcConfig);
   peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
   const ensureOwnedPeer=()=>{
     ensureCurrent();

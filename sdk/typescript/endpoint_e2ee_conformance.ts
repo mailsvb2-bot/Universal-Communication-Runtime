@@ -793,23 +793,84 @@ const startCode = browser.slice(
 );
 assert.ok(startCode.startsWith("async function startWebRtc("));
 let releaseStartCapture: () => void = () => {};
-const startCaptureGate = new Promise<void>((resolve) => { releaseStartCapture = resolve; });
-let staleServerStarts = 0;
+const startCaptureGate = new Promise<void>(resolve => { releaseStartCapture = resolve; });
+let enterStartCapture: () => void = () => {};
+const startCaptureEntered = new Promise<void>(resolve => { enterStartCapture = resolve; });
+let serverOffers = 0, stalePeerCreates = 0, stalePeerCloses = 0;
 const startCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
-  navigator: {onLine: true},
-  ui: {privacyMode: {value: "secure"}},
-  requireCanonicalMediaHostReady() {},
-  ensureLocalMedia: async () => startCaptureGate,
-  api: async () => { staleServerStarts++; throw new Error("stale server peer opened"); },
+  peer: null,
+  navigator: {onLine: true}, ui: {privacyMode: {value: "secure"}},
+  requireCanonicalMediaHostReady() {}, body: () => ({}),
+  rtcNetworkConfiguration: () => ({}),
+  ensureLocalMedia: async () => {enterStartCapture(); await startCaptureGate;},
+  api: async () => {
+    serverOffers++;
+    return {json: async () => ({ice_servers: [], sdp_type: "offer", sdp: "offer"})};
+  },
+  closeServerPeer: async () => {stalePeerCloses++;},
+  RTCPeerConnection: class {constructor() {stalePeerCreates++;}},
 };
 runInNewContext(startCode + "\nthis.start = startWebRtc;", startCtx);
 const staleStart = startCtx.start();
+await startCaptureEntered;
 startCtx.mediaCaptureGeneration++;
 startCtx.mediaActive = false;
 releaseStartCapture();
 await assert.rejects(staleStart, /cancelled by conference media teardown/);
-assert.equal(staleServerStarts, 0, "late camera permission cannot reopen WebRTC server peer");
+assert.equal(serverOffers, 1, "server offer is validated before device capture");
+assert.equal(stalePeerCreates, 0, "revoked admission cannot create a stale peer");
+assert.equal(stalePeerCloses, 1, "withdrawn admission retires its orphaned server offer");
+// A client peer newly owned by another path must never be closed by stale cleanup.
+let replacementPeerClosed = 0;
+const replacementCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
+  navigator: {onLine: true}, peer: null,
+  ui: {privacyMode: {value: "secure"}},
+  requireCanonicalMediaHostReady() {}, body: () => ({}),
+  rtcNetworkConfiguration: () => ({}),
+  api: async () => ({json: async () => ({ice_servers: []})}),
+  ensureLocalMedia: async () => {
+    replacementCtx.peer = {connectionState: "connected"};
+    replacementCtx.mediaCaptureGeneration++;
+  },
+  closeServerPeer: async () => {replacementPeerClosed++;},
+};
+runInNewContext(startCode + "\nthis.start = startWebRtc;", replacementCtx);
+await assert.rejects(replacementCtx.start(), /cancelled by conference media teardown/);
+assert.equal(replacementPeerClosed, 0, "stale cleanup cannot close newly owned peer");
+
+// A missing TURN relay in private mode must fail before microphone/camera prompts.
+let privateCaptures = 0, privateServerCloses = 0;
+const privateCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
+  peer: null,
+  navigator: {onLine: true}, ui: {privacyMode: {value: "private"}},
+  requireCanonicalMediaHostReady() {}, body: () => ({}),
+  ensureLocalMedia: async () => {privateCaptures++;},
+  api: async () => ({json: async () => ({ice_servers: [], sdp_type: "offer", sdp: "offer"})}),
+  closeServerPeer: async () => {privateServerCloses++;},
+};
+const rtcConfigCode = browser.slice(
+  browser.indexOf("function rtcNetworkConfiguration("),
+  browser.indexOf("async function startWebRtc("),
+);
+runInNewContext(rtcConfigCode + startCode + "\nthis.start = startWebRtc;", privateCtx);
+await assert.rejects(privateCtx.start(), /Higher privacy requires configured TURN relay/);
+assert.equal(privateCaptures, 0, "missing TURN cannot prompt for media");
+assert.equal(privateServerCloses, 1, "failed privacy negotiation closes the server peer");
+
+let rejectedCaptures = 0;
+const rejectedCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
+  navigator: {onLine: true}, ui: {privacyMode: {value: "secure"}},
+  requireCanonicalMediaHostReady() {}, body: () => ({}),
+  ensureLocalMedia: async () => {rejectedCaptures++;},
+  api: async () => {throw new Error("server rejected offer");},
+};
+runInNewContext(startCode + "\nthis.start = startWebRtc;", rejectedCtx);
+await assert.rejects(rejectedCtx.start(), /server rejected offer/);
+assert.equal(rejectedCaptures, 0, "failed signaling cannot prompt for camera or microphone");
 
 // Real browser conference admission withdrawal must turn OFF physical
 // camera/microphone capture, not only close the encrypted DataChannel.
