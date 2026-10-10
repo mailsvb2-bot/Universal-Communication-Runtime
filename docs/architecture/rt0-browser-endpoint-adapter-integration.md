@@ -21,6 +21,28 @@ existing development port 8080, rather than serving a static mock of realtime
 HTTP endpoints. Only the development container uses this non-TLS port; external
 or production ingress needs separately configured and authorized HTTPS.
 
+## Automatic composition when the canonical host already exists
+
+An embedding product that already owns authenticated Device/Call/MLS admission can
+provide its **existing** `UcrCanonicalMediaAdmissionResolver` directly:
+
+```ts
+window.ucrCanonicalMediaAdmissionResolver = resolveFromCanonicalHost;
+```
+
+The reference browser detects this resolver at preflight and the bundled
+reference installer composes `createUcrCanonicalBrowserMediaFactory` automatically.
+The host no longer needs to manually construct and register a second factory.
+The resolver must return independently authorized signing/trust descriptors,
+current group and negotiation bindings, endpoint-owned seed and live revocation
+guards. A missing/incomplete resolver still fails closed before device capture.
+
+**This is not automatic device enrollment or key provisioning.** The UCR reference
+web gateway still has no authenticated first-party route to enroll a device,
+provision/recover a local signing key, and publish its trusted descriptor. Such a
+route must be implemented against the existing canonical Device/Identity/Trust
+owners before an unembedded user can complete a real two-device media call.
+
 ## Required canonical host integration — cannot be replaced with synthetic trust
 
 Before joining the conference, the embedding product must provide:
