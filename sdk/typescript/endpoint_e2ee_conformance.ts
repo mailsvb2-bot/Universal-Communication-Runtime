@@ -989,6 +989,58 @@ capturedResolvers.shift()?.(fakeCapture(capturedTrack()));
 await assert.rejects(trackPermissionPending, /authorization changed/);
 assert.equal(stoppedCaptureTracks, 2, "late individual device grant must stop its track");
 
+// One-click media must not require camera repair/selection before an audio
+// conversation is possible. Exercise the real browser capture function.
+let cameraRequests = 0, voiceFallbackRequests = 0;
+const voiceTrack = capturedTrack();
+const voiceStream = fakeCapture(voiceTrack);
+const fallbackCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 0,
+  localStream: null,
+  navigator: {mediaDevices: {
+    async getUserMedia({audio, video}: {audio: unknown; video: unknown}) {
+      assert.ok(audio, "audio fallback never bypasses media admission");
+      if (video) {
+        cameraRequests++;
+        throw Object.assign(new Error("No camera found"), {name: "NotFoundError"});
+      }
+      voiceFallbackRequests++;
+      return voiceStream;
+    },
+  }},
+  ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null},
+    status: {textContent: ""}},
+  policyAllows: (kind: string) => kind === "audio" || kind === "camera",
+  refreshLocalMediaControls() {},
+  refreshDevices: async () => {},
+  MediaStream: class {},
+  e2eeChannel: null,
+};
+runInNewContext(captureCode + "\nthis.getMedia = ensureLocalMedia;", fallbackCtx);
+assert.equal(await fallbackCtx.getMedia(), voiceStream);
+assert.equal(cameraRequests, 1, "first attempt uses permitted video and audio");
+assert.equal(voiceFallbackRequests, 1, "unavailable camera must trigger audio-only retry");
+assert.match(fallbackCtx.ui.status.textContent, /protected audio call automatically/);
+assert.equal(fallbackCtx.ui.localVideo.srcObject, voiceStream);
+
+let blockedPermissionAttempts = 0;
+const blockedCtx: Record<string, any> = {
+  ...fallbackCtx, localStream: null,
+  navigator: {mediaDevices: {
+    async getUserMedia() {
+      blockedPermissionAttempts++;
+      throw Object.assign(new Error("User denied access"), {name: "NotAllowedError"});
+    },
+  }},
+  ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null},
+    status: {textContent: ""}},
+};
+runInNewContext(captureCode + "\nthis.getMedia = ensureLocalMedia;", blockedCtx);
+await assert.rejects(blockedCtx.getMedia(), /User denied access/);
+assert.equal(blockedPermissionAttempts, 1,
+  "explicit operating-system/browser permission denial must never trigger alternate capture");
+
+
 const startCode = browser.slice(
   browser.indexOf("async function startWebRtc("),
   browser.indexOf("async function restartIce("),
