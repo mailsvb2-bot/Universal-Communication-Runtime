@@ -1233,7 +1233,10 @@ async function startWebRtc(forceMedia=false){
     await ensureLocalMedia(forceMedia);
     ensureCurrent();
   }catch(error){
-    if(serverPeerOpened&&generation===mediaCaptureGeneration&&sessionActive&&mediaActive){
+    // Admission withdrawal invalidates physical capture, not the authenticated
+    // realtime session. Close the server peer even if mediaActive was revoked.
+    // Never send a stale close after a different client peer has taken ownership.
+    if(serverPeerOpened&&sessionActive&&!peer){
       await closeServerPeer();
     }
     throw error;
