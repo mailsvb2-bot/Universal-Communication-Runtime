@@ -963,6 +963,7 @@ async fn create_live_peer_connection(
     match result {
         Ok(description) => Ok((
             LiveWebRtcSession {
+                offer_id: String::new(),
                 peer_connection,
                 e2ee_channel,
             },
