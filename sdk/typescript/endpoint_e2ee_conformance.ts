@@ -168,7 +168,7 @@ assert.deepEqual(decodedChallengeScope(possessionChallenges[3]).slice(5, 7), [nu
   "first-entry device registration must be possible before Call/Session exist");
 // Valid 128-byte opaque identifiers, including escaped JSON/control characters,
 // must remain encodable without a spurious sixfold JSON expansion.
-const controlId = "\\u0000".repeat(128);
+const controlId = String.fromCharCode(0).repeat(128);
 await scopedPossession({
   tenantId: controlId, namespaceId: controlId,
   deviceId: controlId, participantId: controlId,
