@@ -2832,7 +2832,10 @@ mod tests {
         let secure_delete: i64 = connection
             .query_row("PRAGMA secure_delete", [], |row| row.get(0))
             .expect("read secure_delete");
-        assert_eq!(secure_delete, 1, "sensitive SQLite row deletion must zero freed pages");
+        assert_eq!(
+            secure_delete, 1,
+            "sensitive SQLite row deletion must zero freed pages"
+        );
         assert_eq!(
             super::conference_join_grant_store::verify_v51_objects(&connection),
             Ok(())
