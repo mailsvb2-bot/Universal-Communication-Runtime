@@ -108,6 +108,12 @@ pub trait WebRtcProvider: fmt::Debug + Send + Sync {
         config: &WebRtcSessionConfig,
     ) -> Result<WebRtcSessionDescription, WebRtcProviderError>;
 
+    /// Returns the immutable original offer identity for this live transport attempt.
+    /// ICE restart generates a new SDP but keeps this identity until peer replacement.
+    fn session_offer_id(&self, _session_id: &SessionId) -> Result<String, WebRtcProviderError> {
+        Err(WebRtcProviderError::SessionUnavailable)
+    }
+
     /// Applies the remote offer/answer for an existing provider session.
     ///
     /// # Errors
@@ -368,6 +374,11 @@ enum LiveWebRtcCommand {
         deadline: Instant,
         reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
     },
+    GetOfferId {
+        session_id: SessionId,
+        deadline: Instant,
+        reply: std_mpsc::Sender<Result<String, WebRtcProviderError>>,
+    },
     SetRemoteDescription {
         description: WebRtcSessionDescription,
         deadline: Instant,
@@ -596,6 +607,14 @@ impl WebRtcProvider for LiveWebRtcProvider {
         })
     }
 
+    fn session_offer_id(&self, session_id: &SessionId) -> Result<String, WebRtcProviderError> {
+        self.request(|reply, deadline| LiveWebRtcCommand::GetOfferId {
+            session_id: session_id.clone(),
+            deadline,
+            reply,
+        })
+    }
+
     fn set_remote_description(
         &self,
         description: &WebRtcSessionDescription,
@@ -712,6 +731,21 @@ async fn run_live_webrtc_worker(
                 deadline,
                 reply,
             } => handle_live_restart(&sessions, config, deadline, reply).await,
+            LiveWebRtcCommand::GetOfferId {
+                session_id,
+                deadline,
+                reply,
+            } => {
+                let result = if command_expired(deadline) {
+                    Err(WebRtcProviderError::TemporarilyUnavailable)
+                } else {
+                    sessions
+                        .get(&session_key(&session_id))
+                        .map(|session| session.offer_id.clone())
+                        .ok_or(WebRtcProviderError::SessionUnavailable)
+                };
+                let _ = reply.send(result);
+            }
             LiveWebRtcCommand::SetRemoteDescription {
                 description,
                 deadline,
@@ -1586,12 +1620,19 @@ mod tests {
             ice_transport_policy: IceTransportPolicy::All,
         };
         let initial = provider.create_session(&config).expect("initial offer");
+        let offer_id = provider.session_offer_id(&session_id).expect("original offer ID");
+        assert_eq!(offer_id, webrtc_offer_id(&initial.sdp));
         let restarted = provider.restart_session(&config).expect("restart offer");
+        assert_eq!(provider.session_offer_id(&session_id), Ok(offer_id.clone()));
         assert_eq!(restarted.session_id, session_id);
         assert_eq!(restarted.sdp_type, ucr_model::WebRtcSdpType::Offer);
         assert!(restarted.sdp.starts_with("v=0"));
         assert_ne!(initial.sdp, restarted.sdp);
-        assert_eq!(provider.close_session(&session_id), Ok(()));
+        assert_ne!(offer_id, webrtc_offer_id(&restarted.sdp));
+        assert_eq!(
+            provider.close_session_if_offer_matches(&session_id, &offer_id),
+            Ok(())
+        );
     }
 
     #[test]
