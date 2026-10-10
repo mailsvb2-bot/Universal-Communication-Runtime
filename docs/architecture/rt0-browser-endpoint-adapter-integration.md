@@ -153,3 +153,28 @@ A production readiness sign-off requires signed device trust provisioning,
 two independently authorized devices using current MLS/negotiation epoch,
 real audio/video encryption and decryption across the SFU with TURN/NAT,
 concurrent capture revocation, and measured full-HD quality and latency.
+
+## Canonical Service Principal Device trust RPC (P0 integration seam)
+
+The versioned `DeviceService` now includes `ProvisionTrustedSigningKey` and
+`GetActiveTrustedSigningKey`. Both reuse the existing `IntegrationIngress`
+Service Principal authentication, quotas, append-only operation audit,
+`AuthorizedDurableRuntime` permissions and the canonical
+`TrustedSigningKeyStore`. Provisioning requires an independently authenticated
+authorized service principal with `ucr.trusted_signing_key.provision` permission
+(as defined by the canonical permission constant); reading requires its
+canonical trusted-key-read permission. Active-Device preconditions and conflict/
+revocation semantics remain owned by the existing Device and Trust stores.
+
+These RPCs receive/return ONLY Ed25519 public-key descriptors, never local
+signing seeds, MLS exporters, telephone numbers or endpoint encryption
+snapshots. They are intended for a backend trusted by the owner; **do not
+proxy machine Service Principal secrets directly to the browser**. A distinct
+user-authenticated first-party host/BFF mapping verified users to the existing
+canonical permissions is still needed before standalone self-enrollment.
+The join URL fragment cannot act as device-registration authority.
+
+This addition introduces no new database, identity/cryptography owner or
+telephone lookup directory. Canonical durable Device/Trust state continues
+to live in the existing reference stores. Passing gRPC conformance does not
+prove two physical Device E2EE audio/video or TURN/NAT interoperability.
