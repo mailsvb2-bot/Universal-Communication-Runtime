@@ -256,7 +256,7 @@ await prepareFirstEntry(identityOnly);
 assert.equal(firstEntryConfirmed, true);
 if (firstEntryConfirmed) issuedGrants++;
 assert.equal(issuedGrants, 1, "only independently prepared Device can request a canonical grant");
-await assert.rejects(prepareFirstEntry({...identityOnly, callId: "call"}),
+assert.throws(() => prepareFirstEntry({...identityOnly, callId: "call"}),
   /Call and Session must both be supplied or both omitted/);
 
 const v1 = {
