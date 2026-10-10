@@ -156,6 +156,18 @@ assert.deepEqual(decodedChallengeScope(possessionChallenges[3]).slice(5, 7), [nu
   "first-entry device registration must be possible before Call/Session exist");
 await assert.rejects(scopedPossession({...deviceBinding, callId: "A".repeat(1500)}),
   /challenge scope exceeds bounds/);
+// The caller must not switch a Device or Call while a previous possession
+// check is queued (or during the asynchronous signer operation).
+const mutableQueuedBinding = {...deviceBinding};
+const queuedPossession = scopedPossession(mutableQueuedBinding);
+mutableQueuedBinding.deviceId = "attacker-device";
+mutableQueuedBinding.callId = "attacker-call";
+mutableQueuedBinding.sessionId = "attacker-session";
+await queuedPossession;
+assert.equal(decodedChallengeScope(possessionChallenges[4])[3], "device");
+assert.equal(decodedChallengeScope(possessionChallenges[4])[5], "call");
+await assert.rejects(scopedPossession({...deviceBinding, deviceId: 42} as any),
+  /independently authenticated canonical Device identity/);
 
 // Interrupted enrollment must reuse the staged signer, never silently create
 // a new key after the server response is lost.
