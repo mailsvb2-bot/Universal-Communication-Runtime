@@ -1709,25 +1709,32 @@ where
         let token = decode_bearer_token(request.metadata());
         let payload = request.into_inner();
         let offer_id = payload.offer_id;
-        let lookup = decode_realtime_lookup_fields(payload.scope, payload.call_id, payload.session_id);
+        let lookup =
+            decode_realtime_lookup_fields(payload.scope, payload.call_id, payload.session_id);
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => {
                 match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
                     Ok(claims) => {
                         if !offer_id.as_ref().is_some_and(|id| {
-                            id.len() == 43 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                            id.len() == 43
+                                && id.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+                                })
                         }) {
                             return Ok(Response::new(pb::RealtimeCloseWebRtcResponse {
-                                result: Some(pb::realtime_close_web_rtc_response::Result::Error(pb_error(
-                                    CanonicalError::new(CanonicalErrorCode::InvalidArgument),
-                                ))),
+                                result: Some(pb::realtime_close_web_rtc_response::Result::Error(
+                                    pb_error(CanonicalError::new(CanonicalErrorCode::InvalidArgument)),
+                                )),
                             }));
                         }
                         let provider = Arc::clone(&self.webrtc_provider);
                         let close_session_id = claims.session_id.clone();
                         let expected_offer_id = offer_id.expect("validated offer identifier");
                         match tokio::task::spawn_blocking(move || {
-                            provider.close_session_if_offer_matches(&close_session_id, &expected_offer_id)
+                            provider.close_session_if_offer_matches(
+                                &close_session_id,
+                                &expected_offer_id,
+                            )
                         })
                         .await
                         {
