@@ -50,9 +50,7 @@ pub(super) fn create_v34_objects(transaction: &Transaction<'_>) -> Result<(), Du
 
 /// New schema index: bounded expiry sweeps must not scan a growing history of
 /// long-lived replay-prevention tombstones.
-pub(super) fn create_v51_objects(
-    transaction: &Transaction<'_>,
-) -> Result<(), DurableStoreError> {
+pub(super) fn create_v51_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     transaction
         .execute_batch(
             "CREATE INDEX conference_join_grants_expiry
