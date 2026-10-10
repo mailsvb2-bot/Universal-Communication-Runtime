@@ -719,7 +719,8 @@ function requireCanonicalMediaHostReady(){
   const adapter=e2eeAdapter();
   if(adapter){requireCompatibleE2eeAdapter(adapter);return;}
   if(typeof window.ucrInstallAuthorizedMediaEndpoint==="function"||
-     typeof window.ucrCanonicalAuthorizedMediaFactory==="function")return;
+     typeof window.ucrCanonicalAuthorizedMediaFactory==="function"||
+     typeof window.ucrCanonicalMediaAdmissionResolver==="function")return;
   throw new Error("Canonical Device signing/trust integration is unavailable; secure audio/video cannot start");
 }
 function closeE2eeTransport(){
@@ -946,6 +947,7 @@ function prewarmAuthorizedMediaRuntime(){
     return;
   }
   if(typeof window.ucrCanonicalAuthorizedMediaFactory!=="function"&&
+     typeof window.ucrCanonicalMediaAdmissionResolver!=="function"&&
      typeof window.ucrInstallAuthorizedMediaEndpoint!=="function")return;
   Promise.all([loadEndpointWasmModule(),requireAuthorizedMediaInstaller()]).catch(()=>{
     // A failed warmup is not an admission decision. The guarded on-demand
