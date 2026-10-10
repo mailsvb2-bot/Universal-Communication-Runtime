@@ -3201,10 +3201,10 @@ async fn run_realtime_cleanup_worker(
         // is scheduled independently of optional horizontal SFU placement.
         if last_grant_sweep.is_none_or(|last| last.elapsed() >= Duration::from_secs(30)) {
             last_grant_sweep = Some(std::time::Instant::now());
-            if let Ok(now_unix_ms) = runtime_now_unix_ms() {
-                if service.prune_expired_join_grants_at(now_unix_ms).is_err() {
-                    eprintln!("UCR_REALTIME_EXPIRED_GRANT_PRIVACY_CLEANUP_UNAVAILABLE");
-                }
+            if let Ok(now_unix_ms) = runtime_now_unix_ms()
+                && service.prune_expired_join_grants_at(now_unix_ms).is_err()
+            {
+                eprintln!("UCR_REALTIME_EXPIRED_GRANT_PRIVACY_CLEANUP_UNAVAILABLE");
             }
         }
         match service.cleanup_closed_conferences_once().await {
