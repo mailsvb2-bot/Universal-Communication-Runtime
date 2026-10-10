@@ -97,6 +97,13 @@ struct SessionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct WebRtcCloseRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    offer_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct HeartbeatRequest {
     #[serde(flatten)]
     session: SessionRequest,
@@ -354,6 +361,8 @@ struct WebRtcIceServerResponse {
 #[derive(Debug, Serialize)]
 struct WebRtcOfferResponse {
     ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offer_id: Option<String>,
     code: &'static str,
     message: &'static str,
     sdp_type: &'static str,
@@ -595,7 +604,7 @@ async fn handle_post_route(state: &AppState, token: &str, path: &str, body: &[u8
             Ok(input) => restart_webrtc(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/webrtc/close" => match decode_json::<SessionRequest>(body) {
+        "/v1/realtime/webrtc/close" => match decode_json::<WebRtcCloseRequest>(body) {
             Ok(input) => close_webrtc(state, token, input).await,
             Err(error) => error.into_response(),
         },
@@ -1862,6 +1871,7 @@ async fn start_webrtc(state: &AppState, token: &str, input: SessionRequest) -> H
                         message: "WebRTC offer ready",
                         sdp_type,
                         sdp: description.sdp,
+                        offer_id: offer.offer_id,
                         ice_servers: offer
                             .ice_servers
                             .into_iter()
@@ -2036,12 +2046,14 @@ async fn restart_webrtc(state: &AppState, token: &str, input: SessionRequest) ->
     }
 }
 
-async fn close_webrtc(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+async fn close_webrtc(state: &AppState, token: &str, input: WebRtcCloseRequest) -> HttpResponse {
     let mut client = client(state);
+    let session = &input.session;
     let mut request = GrpcRequest::new(pb::RealtimeCloseWebRtcRequest {
-        scope: Some(pb_scope(&input)),
-        call_id: Some(pb_id(&input.call)),
-        session_id: Some(pb_id(&input.session)),
+        scope: Some(pb_scope(session)),
+        call_id: Some(pb_id(&session.call)),
+        session_id: Some(pb_id(&session.session)),
+        offer_id: input.offer_id,
     });
     if let Err(error) = attach_bearer(&mut request, token) {
         return error.into_response();
@@ -2209,6 +2221,7 @@ fn webrtc_offer_response(
             message,
             sdp_type,
             sdp: description.sdp,
+            offer_id: offer.offer_id,
             ice_servers: offer
                 .ice_servers
                 .into_iter()
