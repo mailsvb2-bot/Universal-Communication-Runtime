@@ -4707,6 +4707,37 @@ mod universal_runtime_tests {
         assert_eq!(attendance.code, CanonicalErrorCode::NotFound);
     }
 
+    fn assert_expired_join_grant_is_not_reissued(store: &SqliteLocalStore, issuer: &JoinTokenIssuer) {
+        // A replay of the original accepted issuance command must NEVER
+        // mint a new live bearer after the expired grant's sensitive fields
+        // have been sanitized. Its session tombstone remains authoritative.
+        assert_eq!(
+            ucr_core::ConferenceJoinGrantStore::prune_expired_conference_join_grants(
+                store, 1_300_000
+            ),
+            Ok(1)
+        );
+        let replay = issue_join_grant(
+            store,
+            issuer,
+            IssueJoinGrantInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: b"flow-attendee".to_vec(),
+                ttl_seconds: 300,
+                use_policy: JoinGrantUsePolicy::SingleUse,
+                not_before_unix_ms: None,
+                not_after_unix_ms: None,
+                idempotency_key: "flow-join".to_owned(),
+            },
+            b"flow-join-payload".to_vec(),
+            1_400_000,
+        )
+        .expect_err("expired, already accepted join command must not resurrect access");
+        assert_eq!(replay.code, CanonicalErrorCode::Conflict);
+    }
+
     #[test]
     fn universal_flow_issues_join_grant_after_device_and_runtime_preparation() {
         let db = TestDb::new();
@@ -4808,34 +4839,7 @@ mod universal_runtime_tests {
         assert_eq!(grant.expires_at_unix_ms, 1_300_000);
         assert_eq!(owner.role, ConferenceParticipantRole::Owner);
 
-        // A replay of the original accepted issuance command must NEVER
-        // mint a new live bearer after the expired grant's sensitive fields
-        // have been sanitized. Its session tombstone remains authoritative.
-        assert_eq!(
-            ucr_core::ConferenceJoinGrantStore::prune_expired_conference_join_grants(
-                &store, 1_300_000
-            ),
-            Ok(1)
-        );
-        let replay = issue_join_grant(
-            &store,
-            &issuer,
-            IssueJoinGrantInput {
-                scope: scope(),
-                conference_id: conference().conference_id,
-                integration_id: conference().integration_id,
-                external_user_id: b"flow-attendee".to_vec(),
-                ttl_seconds: 300,
-                use_policy: JoinGrantUsePolicy::SingleUse,
-                not_before_unix_ms: None,
-                not_after_unix_ms: None,
-                idempotency_key: "flow-join".to_owned(),
-            },
-            b"flow-join-payload".to_vec(),
-            1_400_000,
-        )
-        .expect_err("expired, already accepted join command must not resurrect access");
-        assert_eq!(replay.code, CanonicalErrorCode::Conflict);
+        assert_expired_join_grant_is_not_reissued(&store, &issuer);
     }
 
     #[test]
