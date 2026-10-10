@@ -32,8 +32,12 @@ import {
 const testDeviceKeyPair = generateKeyPairSync("ed25519");
 const keyBytes = new Uint8Array(testDeviceKeyPair.publicKey.export({format:"der", type:"spki"}).subarray(-32));
 if (!globalThis.crypto) Object.defineProperty(globalThis, "crypto", {value: webcrypto});
-const signDeviceChallenge = async (_binding: unknown, challenge: Uint8Array) =>
-  new Uint8Array(sign(null, challenge, testDeviceKeyPair.privateKey));
+const signDeviceChallenge = async (binding: unknown, challenge: Uint8Array) => {
+  assert.deepEqual(Object.keys(binding as object).sort(),
+    ["deviceId", "namespaceId", "tenantId"],
+    "permanent Device signer vault must never receive transient Call/Session/participant IDs");
+  return new Uint8Array(sign(null, challenge, testDeviceKeyPair.privateKey));
+};
 const deviceBinding = {tenantId: "tenant", namespaceId: null, deviceId: "device",
   participantId: "user", callId: "call", sessionId: "session"};
 let enrolled = false, revoked = false, localSigner: {keyId: string; publicKey: Uint8Array} | null = null;
@@ -48,13 +52,16 @@ const prepareDevice = createUcrCanonicalDevicePreparation({
 }, {
   signChallenge: signDeviceChallenge,
   async load() {return localSigner;},
-  async stageNew() {stagedKeys++; localSigner = {keyId: "key-1", publicKey: keyBytes};
+  async stageNew(scope) {
+    assert.deepEqual(Object.keys(scope).sort(), ["deviceId", "namespaceId", "tenantId"]);
+    stagedKeys++; localSigner = {keyId: "key-1", publicKey: keyBytes};
     return localSigner;},
 });
 await prepareDevice(deviceBinding);
 assert.equal(enrollRequests, 1);
 assert.equal(stagedKeys, 1);
 await prepareDevice(deviceBinding);
+await prepareDevice({...deviceBinding, callId: "another-call", sessionId: "another-session"});
 assert.equal(enrollRequests, 1, "subsequent login must restore same trusted signer");
 assert.equal(stagedKeys, 1, "no new key when canonical Device is already trusted");
 localSigner = {keyId: "key-1", publicKey: new Uint8Array(32).fill(4)};
