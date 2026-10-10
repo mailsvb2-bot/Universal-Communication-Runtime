@@ -285,7 +285,11 @@ export function createUcrBrowserProtectedDeviceVault(
       const seed = await decryptSeed(key, found);
       try {
         if (!await current()) throw new Error("canonical Device media trust revoked");
-        return await useSeed(seed);
+        const outcome = await useSeed(seed);
+        // A host may revoke the Device while WASM bridge construction awaits.
+        // A stale operation must never be reported as authorized success.
+        if (!await current()) throw new Error("canonical Device media trust revoked");
+        return outcome;
       } finally {seed.fill(0);}
     },
   };
