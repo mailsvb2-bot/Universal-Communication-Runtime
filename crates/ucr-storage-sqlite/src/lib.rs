@@ -658,6 +658,12 @@ fn configure_durability(connection: &Connection) -> Result<(), DurableStoreError
     connection
         .pragma_update(None, "synchronous", "FULL")
         .map_err(|error| map_sqlite_error(&error))?;
+    // Explicitly overwrite deleted payloads in SQLite database pages instead
+    // of leaving recoverable values in the main-file freelist. This is NOT
+    // sufficient for WAL, backups, snapshots or flash forensic erasure.
+    connection
+        .pragma_update(None, "secure_delete", "ON")
+        .map_err(|error| map_sqlite_error(&error))?;
     Ok(())
 }
 fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -2772,6 +2778,11 @@ mod tests {
         let store = SqliteLocalStore::open(db.path()).expect("open store");
         assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         assert_eq!(store.health(), Ok(StorageHealth::Healthy));
+        let connection = store.lock_connection().expect("open");
+        let secure_delete: i64 = connection
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .expect("read secure_delete");
+        assert_eq!(secure_delete, 1, "sensitive SQLite row deletion must zero freed pages");
     }
 
     #[test]
