@@ -2889,7 +2889,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("retained anti-replay rows");
-        assert_eq!(retained, 4_100, "no session id may be reused after redaction");
+        assert_eq!(
+            retained, 4_100,
+            "no session id may be reused after redaction"
+        );
     }
 
     #[test]
