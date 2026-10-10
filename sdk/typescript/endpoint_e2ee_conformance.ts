@@ -140,6 +140,31 @@ await retryDevice(deviceBinding);
 assert.equal(stagedRetryCount, 1, "transport retry must not create a second Device signing identity");
 assert.equal(approvalAttempt, 2);
 
+// A real first registration precedes issuance of any Call/Session join grant.
+// Canonical Device identity is stable and independent of that future grant.
+const identityOnly = {tenantId: "tenant", namespaceId: null, deviceId: "new-device", participantId: "user"};
+let firstEntryConfirmed = false, issuedGrants = 0;
+const prepareFirstEntry = createUcrCanonicalDevicePreparation({
+  async inspect() {return {deviceActive: firstEntryConfirmed, deviceRevoked: false,
+    activeKey: firstEntryConfirmed ? {keyId: "key-1", publicKey: keyBytes.slice()} : null};},
+  async approveNewDevice(binding, signer) {
+    assert.equal(binding.deviceId, "new-device");
+    assert.equal(binding.callId, undefined);
+    assert.equal(binding.sessionId, undefined);
+    assert.equal(signer.keyId, "key-1");
+    firstEntryConfirmed = true;
+  },
+}, {
+  signChallenge: signDeviceChallenge,
+  async load() {return null;},
+  async stageNew() {return {keyId: "key-1", publicKey: keyBytes.slice()};},
+});
+await prepareFirstEntry(identityOnly);
+assert.equal(firstEntryConfirmed, true);
+if (firstEntryConfirmed) issuedGrants++;
+assert.equal(issuedGrants, 1, "only independently prepared Device can request a canonical grant");
+await assert.rejects(prepareFirstEntry({...identityOnly, callId: "call"}),
+  /Call and Session must both be supplied or both omitted/);
 
 const v1 = {
   contractVersion: UCR_ENDPOINT_E2EE_CONTRACT_VERSION,
@@ -583,8 +608,8 @@ assert.doesNotThrow(() => strictAdapterCtx.verifyAdapter({
 
 // Production device preflight: never trigger a camera prompt, signaling, or
 // MLS registration when the canonical trusted Device media host is absent.
-// Enrollment/recovery is host-authorized only after a successful server join.
-// It is not a side effect of opening an unverified signed URL.
+// Enrollment/recovery is independently host-authorized BEFORE using a join
+// URL, and re-validated after joining. The URL itself approves no Device.
 const devicePrepareCode = browser.slice(
   browser.indexOf("async function prepareCanonicalDeviceAfterJoin("),
   browser.indexOf("async function join(){"),
@@ -605,16 +630,28 @@ const devicePrepareCtx: Record<string, any> = {
   requireCanonicalMediaHostReady() {},
 };
 runInNewContext(devicePrepareCode + "\nthis.prepare = prepareCanonicalDeviceAfterJoin;", devicePrepareCtx);
-await devicePrepareCtx.prepare(4);
+devicePrepareCtx.sessionActive = false;
+await devicePrepareCtx.prepare(4, true);
 assert.equal(canonicalDevicePreparations, 1,
-  "authenticated join composes with host Device key enrollment");
+  "independently authenticated Device preparation occurs before realtime join");
+devicePrepareCtx.sessionActive = true;
+await devicePrepareCtx.prepare(4);
+assert.equal(canonicalDevicePreparations, 2,
+  "accepted Join revalidates canonical trust before media capture");
+const joinScript = browser.slice(browser.indexOf("async function join(){"),
+  browser.indexOf("function scheduleEntryRetry(){"));
+const preJoinIndex = joinScript.indexOf("await prepareCanonicalDeviceAfterJoin(generation,true);");
+const serverJoinIndex = joinScript.indexOf('api("/v1/realtime/join"');
+const postJoinIndex = joinScript.indexOf("await prepareCanonicalDeviceAfterJoin(generation);");
+assert.ok(preJoinIndex >= 0 && serverJoinIndex > preJoinIndex && postJoinIndex > serverJoinIndex,
+  "canonical Device is prepared before redeeming the join grant and rechecked afterwards");
 devicePrepareCtx.claims.device_id = null;
 await assert.rejects(devicePrepareCtx.prepare(4), /Canonical Device identifier/);
-assert.equal(canonicalDevicePreparations, 1, "unbound grant cannot register a Device");
+assert.equal(canonicalDevicePreparations, 2, "unbound grant cannot register a Device");
 devicePrepareCtx.claims.device_id = "device";
 devicePrepareCtx.sessionLifecycleGeneration = 5;
 await assert.rejects(devicePrepareCtx.prepare(4), /session retired/);
-assert.equal(canonicalDevicePreparations, 2, "stale enrollment cannot admit media");
+assert.equal(canonicalDevicePreparations, 3, "stale enrollment cannot admit media");
 
 const preflightSnippet = browser.slice(
   browser.indexOf("function requireCanonicalMediaHostReady(){"),
