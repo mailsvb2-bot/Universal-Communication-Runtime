@@ -3193,14 +3193,20 @@ async fn run_realtime_cleanup_worker(
     let mut ticker = tokio::time::interval(DEFAULT_REALTIME_CLEANUP_POLL_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ticker.tick().await;
+    let mut last_grant_sweep: Option<std::time::Instant> = None;
     loop {
         ticker.tick().await;
-        // Prune expired, no-longer-authorizing per-device call invitations
-        // even when the optional horizontal-SFU placement worker is disabled.
-        // Neither diagnostics nor logs receive session, Device, IP or Call IDs.
-        if let Ok(now_unix_ms) = runtime_now_unix_ms() {
-            if service.prune_expired_join_grants_at(now_unix_ms).is_err() {
-                eprintln!("UCR_REALTIME_EXPIRED_GRANT_PRIVACY_CLEANUP_UNAVAILABLE");
+        // The realtime cleanup tick can be every second; an unindexed
+        // persisted grant scan must not run once per tick. Bounded redaction
+        // is scheduled independently of optional horizontal SFU placement.
+        if last_grant_sweep
+            .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
+        {
+            last_grant_sweep = Some(std::time::Instant::now());
+            if let Ok(now_unix_ms) = runtime_now_unix_ms() {
+                if service.prune_expired_join_grants_at(now_unix_ms).is_err() {
+                    eprintln!("UCR_REALTIME_EXPIRED_GRANT_PRIVACY_CLEANUP_UNAVAILABLE");
+                }
             }
         }
         match service.cleanup_closed_conferences_once().await {
