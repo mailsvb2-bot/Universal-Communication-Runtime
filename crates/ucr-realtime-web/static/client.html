@@ -1086,7 +1086,7 @@ function preferredCameraCapture(deviceId){
 // One click should establish an audio conversation even when a user's camera
 // is absent, disconnected, or held by another application. Never reinterpret
 // a permission denial as a recoverable hardware failure.
-async function capturePermittedMedia(audio,video){
+async function capturePermittedMedia(audio,video,isCurrent){
   try{
     return {stream:await navigator.mediaDevices.getUserMedia({audio,video}),audioOnlyFallback:false};
   }catch(error){
@@ -1095,6 +1095,9 @@ async function capturePermittedMedia(audio,video){
          "DevicesNotFoundError","TrackStartError"].includes(error?.name)){
       throw error;
     }
+    // A pending camera permission request may reject after Leave/revocation.
+    // Never start a second device capture after the session loses ownership.
+    if(!isCurrent())throw new Error("Media capture authorization changed while device access was pending");
     // Canonical policy must already authorize audio. No second user action
     // is needed; the same protected media adapter receives an audio-only stream.
     return {stream:await navigator.mediaDevices.getUserMedia({audio,video:false}),audioOnlyFallback:true};
@@ -1112,12 +1115,13 @@ async function ensureLocalMedia(force=false){
   const audio=audioAllowed?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):false;
   const video=cameraAllowed?preferredCameraCapture(ui.camera.value):false;
   const generation=mediaCaptureGeneration;
-  const capture=await capturePermittedMedia(audio,video);
+  const captureCurrent=()=>generation===mediaCaptureGeneration&&sessionActive&&mediaActive&&
+    audioAllowed===policyAllows("audio")&&cameraAllowed===policyAllows("camera")&&!localStream;
+  const capture=await capturePermittedMedia(audio,video,captureCurrent);
   const captured=capture.stream;
   // Permission prompts can outlive Leave, admission withdrawal and a peer
   // replacement. Never publish or retain a track from a stale capture.
-  if(generation!==mediaCaptureGeneration||!sessionActive||!mediaActive||
-     audioAllowed!==policyAllows("audio")||cameraAllowed!==policyAllows("camera")||localStream){
+  if(!captureCurrent()){
     captured.getTracks().forEach(track=>track.stop());
     throw new Error("Media capture authorization changed while device access was pending");
   }
