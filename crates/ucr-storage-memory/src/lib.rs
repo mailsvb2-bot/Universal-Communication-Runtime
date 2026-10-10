@@ -9734,7 +9734,7 @@ mod expired_join_grant_privacy_tests {
             integration_id: IntegrationId::from_opaque(opaque("integration-private")),
             call_id: CallId::from_opaque(opaque("call-sensitive")),
             participant: PrincipalRef {
-                principal_id: PrincipalId::from_opaque(opaque("participant-sensitive")),
+                principal_id: ucr_model::PrincipalId::from_opaque(opaque("participant-sensitive")),
                 kind: PrincipalKind::Person,
             },
             device_id: DeviceId::from_opaque(opaque("device-sensitive")),
