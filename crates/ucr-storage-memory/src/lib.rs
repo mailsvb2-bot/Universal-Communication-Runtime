@@ -9769,7 +9769,10 @@ mod expired_join_grant_privacy_tests {
             .expect("must retain replay-blocking session tombstone");
         assert_eq!(tombstone.call_id.as_opaque().as_str(), "expired");
         assert_eq!(tombstone.device_id.as_opaque().as_str(), "expired");
-        assert_eq!(tombstone.participant.principal_id.as_opaque().as_str(), "expired");
+        assert_eq!(
+            tombstone.participant.principal_id.as_opaque().as_str(),
+            "expired"
+        );
         assert!(tombstone.revoked && tombstone.redeemed);
         assert_eq!(
             store.persist_conference_join_grant(&base),
