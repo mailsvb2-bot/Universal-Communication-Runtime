@@ -4,6 +4,10 @@ import {
   type UcrAuthorizedMediaFactory,
 } from "./authorized_browser_media.ts";
 import type { UcrEndpointE2eeAdapterV1 } from "./endpoint_e2ee.ts";
+import {
+  createUcrCanonicalBrowserMediaFactory,
+  type UcrCanonicalMediaAdmissionResolver,
+} from "./canonical_browser_media_factory.ts";
 
 /**
  * The only entrypoint loaded by the reference browser. Bundled once as ESM.
@@ -19,13 +23,23 @@ import type { UcrEndpointE2eeAdapterV1 } from "./endpoint_e2ee.ts";
  */
 interface UcrReferenceMediaWindow extends Record<string, unknown> {
   ucrCanonicalAuthorizedMediaFactory?: UcrAuthorizedMediaFactory;
+  ucrCanonicalMediaAdmissionResolver?: UcrCanonicalMediaAdmissionResolver;
 }
 
 const target = globalThis as unknown as UcrReferenceMediaWindow;
 const createInstaller = createUcrAuthorizedMediaInstaller(
   target,
   async (bootstrap) => {
-    const factory = target.ucrCanonicalAuthorizedMediaFactory;
+    // The canonical host may expose its existing, authenticated admission
+    // resolver directly. Compose the proven MLS/device/media factory here,
+    // without a separate manual window factory installation step.
+    const existingFactory = target.ucrCanonicalAuthorizedMediaFactory;
+    const resolver = target.ucrCanonicalMediaAdmissionResolver;
+    const factory = typeof existingFactory === "function"
+      ? existingFactory
+      : typeof resolver === "function"
+        ? createUcrCanonicalBrowserMediaFactory(resolver)
+        : null;
     if (typeof factory !== "function") {
       throw new Error(
         "Canonical device media signing/trust authority is not wired; refusing endpoint media",
