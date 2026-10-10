@@ -2704,6 +2704,66 @@ mod tests {
         connection
     }
     #[test]
+    fn expired_join_grant_metadata_is_pruned_from_sqlite_and_stays_deleted() {
+        use ucr_core::ConferenceJoinGrantStore;
+
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open real SQLite schema");
+        {
+            let connection = store.lock_connection().expect("lock");
+            // Minimal fixture for the exact grant table, without constructing
+            // unrelated conference/group participants. This setting applies
+            // only to the isolated test connection.
+            connection
+                .execute_batch("PRAGMA foreign_keys=OFF;")
+                .expect("test fixture");
+            for (session_id, expires_at) in [("expired", 200_i64), ("live", 400_i64)] {
+                connection
+                    .execute(
+                        "INSERT INTO conference_join_grants (
+                          tenant_id, namespace_present, namespace_id, session_id,
+                          conference_id, integration_id, call_id, participant_kind,
+                          participant_id, device_id, issued_at_unix_ms,
+                          not_before_unix_ms, expires_at_unix_ms, use_policy,
+                          revoked, redeemed
+                        ) VALUES ('tenant', 0, '', ?1, 'conference', 'integration',
+                                  'call', 'person', 'participant', 'device',
+                                  100, 100, ?2, 'single_use', 0, 0)",
+                        rusqlite::params![session_id, expires_at],
+                    )
+                    .expect("fixture grant");
+            }
+        }
+        assert_eq!(
+            store.prune_expired_conference_join_grants(-1),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(store.prune_expired_conference_join_grants(199), Ok(0));
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(1));
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(0));
+        drop(store);
+        // Independently inspect actual bytes of the on-disk SQLite database,
+        // rather than reading only an in-process cached projection.
+        let reopened = rusqlite::Connection::open(db.path()).expect("reopen database");
+        let old: i64 = reopened
+            .query_row(
+                "SELECT COUNT(*) FROM conference_join_grants WHERE session_id='expired'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expired count");
+        let live: i64 = reopened
+            .query_row(
+                "SELECT COUNT(*) FROM conference_join_grants WHERE session_id='live'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("active count");
+        assert_eq!(old, 0, "expired session->Device association must not be retained");
+        assert_eq!(live, 1, "valid session admission must not be removed");
+    }
+
+    #[test]
     fn sqlite_store_initializes_schema_and_is_healthy() {
         let db = TestDbPath::new();
         let store = SqliteLocalStore::open(db.path()).expect("open store");
