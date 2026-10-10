@@ -168,7 +168,7 @@ concurrent capture revocation, and measured full-HD quality and latency.
 ## First-entry ordering and no second identity database
 
 1. Independently authenticate the owner with the existing canonical Identity/Device authority (not a realtime fragment).
-2. On the endpoint, stage/reuse one protected Ed25519 signer keyed to the canonical Device, not to a Call, Session, telephone number, or temporary route.
+2. On the endpoint, stage/reuse one protected Ed25519 signer keyed only to the canonical Tenant/Namespace/Device scope. The SDK passes only those three fields to the private-key vault; Call, Session and participant IDs never enter the vault identifier, so a new call cannot silently mint a second signing identity.
 3. Confirm the active canonical trusted public-key descriptor using the existing Device/Trust owner. Protected key possession is challenged locally and trust is re-read after signing; revocation/rotation invalidates the attempt.
 4. Only then request the canonical Conference service to issue the short-lived, device-bound Join URL. The issuer must independently revalidate active Device status and Call/Group policy.
 5. Browser rechecks trust before and after redeeming Join; Rust/WASM MLS state and E2EE media adapter activate only after exact authenticated admission and crypto-epoch checks.
