@@ -110,6 +110,9 @@ pub trait WebRtcProvider: fmt::Debug + Send + Sync {
 
     /// Returns the immutable original offer identity for this live transport attempt.
     /// ICE restart generates a new SDP but keeps this identity until peer replacement.
+    ///
+    /// # Errors
+    /// Returns `SessionUnavailable` if no matching active transport exists.
     fn session_offer_id(&self, _session_id: &SessionId) -> Result<String, WebRtcProviderError> {
         Err(WebRtcProviderError::SessionUnavailable)
     }
@@ -140,6 +143,9 @@ pub trait WebRtcProvider: fmt::Debug + Send + Sync {
 
     /// Closes only the transport attempt identified by its original offer.
     /// A delayed close must not tear down a subsequent attempt for the same session.
+    ///
+    /// # Errors
+    /// Returns `SessionUnavailable` when the active attempt differs or is absent.
     fn close_session_if_offer_matches(
         &self,
         _session_id: &SessionId,
@@ -907,14 +913,13 @@ async fn handle_live_close(
         return;
     }
     let key = session_key(&session_id);
-    if let Some(expected) = offer_id.as_deref() {
-        if sessions
+    if offer_id.as_deref().is_some_and(|expected| {
+        sessions
             .get(&key)
             .is_none_or(|current| current.offer_id != expected)
-        {
-            let _ = reply.send(Err(WebRtcProviderError::SessionUnavailable));
-            return;
-        }
+    }) {
+        let _ = reply.send(Err(WebRtcProviderError::SessionUnavailable));
+        return;
     }
     let result = match sessions.remove(&key) {
         Some(session) => session
@@ -929,6 +934,7 @@ async fn handle_live_close(
 
 /// Stable opaque identifier derived from the server's unique original SDP offer.
 /// It is a fencing value, not a bearer credential or an authorization grant.
+#[must_use]
 pub fn webrtc_offer_id(sdp: &str) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     URL_SAFE_NO_PAD.encode(openssl::sha::sha256(sdp.as_bytes()))
