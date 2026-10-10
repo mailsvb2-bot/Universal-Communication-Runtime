@@ -9683,7 +9683,9 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
         }
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         let before = state.conference_join_grants.len();
-        state.conference_join_grants.retain(|_, grant| grant.expires_at_unix_ms > now_unix_ms);
+        state
+            .conference_join_grants
+            .retain(|_, grant| grant.expires_at_unix_ms > now_unix_ms);
         Ok(before - state.conference_join_grants.len())
     }
 }
