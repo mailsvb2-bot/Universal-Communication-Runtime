@@ -4,8 +4,9 @@ use ucr_model::{
     AuthorizationRequest, CallId, CallSession, CallSignal, CommandEnvelope, CommunicationIntent,
     ConversationId, ConversationRecord, DeviceDescriptor, DeviceId, ExternalIdentityBinding,
     GroupChange, GroupId, GroupMembership, GroupRecord, IdentityId, IdentityRecord, IntegrationId,
-    IntentId, MessageEnvelope, MessageId, PrincipalRef, PublicKeyDescriptor, ServiceAuditOperationRef,
-    ServiceCredentialId, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    IntentId, MessageEnvelope, MessageId, PrincipalRef, PublicKeyDescriptor,
+    ServiceAuditOperationRef, ServiceCredentialId, SessionId, SyncCheckpoint, SyncSession,
+    SyncState, TenantScope,
 };
 use ucr_protocol::{
     AcknowledgementEnvelope, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION,
@@ -13,7 +14,6 @@ use ucr_protocol::{
     COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
     CONVERSATION_WRITE_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceipt,
     DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION, DEVICE_REVOKE_PERMISSION,
-    TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
     EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
     GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION, GROUP_READ_PERMISSION,
     IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
@@ -24,7 +24,6 @@ use ucr_protocol::{
     SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND, SERVICE_AUDIT_DEVICE_READ_OPERATION_KIND,
     SERVICE_AUDIT_DEVICE_REGISTER_OPERATION_KIND, SERVICE_AUDIT_DEVICE_REVOKE_OPERATION_KIND,
-    SERVICE_AUDIT_TRUSTED_KEY_PROVISION_OPERATION_KIND, SERVICE_AUDIT_TRUSTED_KEY_READ_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND, SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_GROUP_MANAGE_OPERATION_KIND, SERVICE_AUDIT_GROUP_MEMBERSHIP_READ_OPERATION_KIND,
@@ -35,8 +34,10 @@ use ucr_protocol::{
     SERVICE_AUDIT_SYNC_CHECKPOINT_READ_OPERATION_KIND,
     SERVICE_AUDIT_SYNC_CHECKPOINT_WRITE_OPERATION_KIND, SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_SYNC_READ_OPERATION_KIND, SERVICE_AUDIT_SYNC_TRANSITION_OPERATION_KIND,
-    SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION, acknowledgement_for, canonical_call_creation,
-    canonical_group_creation,
+    SERVICE_AUDIT_TRUSTED_KEY_PROVISION_OPERATION_KIND,
+    SERVICE_AUDIT_TRUSTED_KEY_READ_OPERATION_KIND, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
+    TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
+    acknowledgement_for, canonical_call_creation, canonical_group_creation,
 };
 
 use crate::{
@@ -1278,10 +1279,7 @@ impl<C, A, S> IntegrationIngress<'_, C, A, S>
 where
     C: ServiceQuotaClock,
     A: AuthorizationEvaluator,
-    S: ServiceCredentialStore
-        + ServiceQuotaStore
-        + ServiceAuditStore
-        + TrustedSigningKeyStore,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + TrustedSigningKeyStore,
 {
     /// Provision an independently approved public Device signing key. Private
     /// seeds never cross this boundary, and only authorized Service Principals
