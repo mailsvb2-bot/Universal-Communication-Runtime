@@ -79,7 +79,7 @@ export function createUcrCanonicalDevicePreparation(
       typeof vault.stageNew !== "function") {
     throw new Error("canonical Device/Trust authority and protected key vault required");
   }
-  let pending: Promise<void> | null = null;
+  let pending: Promise<void> = Promise.resolve();
   return (binding) => {
     const prepare = async (item: UcrDeviceEnrollmentBinding): Promise<void> => {
       validateBinding(item);
@@ -111,10 +111,8 @@ export function createUcrCanonicalDevicePreparation(
         throw new Error("canonical Device trust registration not confirmed");
       }
     };
-    if (pending) return pending.then(() => prepare(binding));
-    const running = prepare(binding);
-    pending = running;
-    void running.finally(() => { if (pending === running) pending = null; }).catch(() => {});
+    const running = pending.then(() => prepare(binding));
+    pending = running.catch(() => {});
     return running;
   };
 }
