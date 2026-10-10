@@ -1547,6 +1547,7 @@ mod tests {
                 SessionId::from_opaque(OpaqueId::new(format!("queued-{index}")).expect("id"));
             match sender.try_send(LiveWebRtcCommand::Close {
                 session_id,
+                offer_id: None,
                 deadline,
                 reply,
             }) {
