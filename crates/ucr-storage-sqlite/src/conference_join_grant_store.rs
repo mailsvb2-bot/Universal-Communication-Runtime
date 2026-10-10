@@ -221,6 +221,30 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         load_grant(&connection, scope, session_id)?.ok_or(DurableStoreError::Corrupt)
     }
+
+    fn prune_expired_conference_join_grants(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<usize, DurableStoreError> {
+        if now_unix_ms < 0 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        // Exact expiry is already enforced by the canonical grant signer.
+        // This removes sensitive participant/device/call bindings once a
+        // grant can no longer authorize *any* realtime session operation.
+        let deleted = transaction
+            .execute(
+                "DELETE FROM conference_join_grants WHERE expires_at_unix_ms <= ?1",
+                params![now_unix_ms],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+        Ok(deleted)
+    }
 }
 
 fn validate_grant(grant: &ConferenceJoinGrantRecord) -> Result<(), DurableStoreError> {
