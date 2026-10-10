@@ -9688,6 +9688,69 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
     }
 }
 
+#[cfg(test)]
+mod expired_join_grant_privacy_tests {
+    use super::*;
+    use ucr_model::TenantId;
+
+    fn opaque(text: &str) -> OpaqueId {
+        OpaqueId::new(text).expect("valid opaque test ID")
+    }
+
+    #[test]
+    fn expired_grants_no_longer_expose_participant_device_or_call_association() {
+        let store = MemoryLocalStore::default();
+        let base = ConferenceJoinGrantRecord {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(opaque("tenant-privacy")),
+                namespace_id: None,
+            },
+            conference_id: GroupId::from_opaque(opaque("conference-private")),
+            integration_id: IntegrationId::from_opaque(opaque("integration-private")),
+            call_id: CallId::from_opaque(opaque("call-sensitive")),
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(opaque("participant-sensitive")),
+                kind: PrincipalKind::Person,
+            },
+            device_id: DeviceId::from_opaque(opaque("device-sensitive")),
+            session_id: SessionId::from_opaque(opaque("expired-session")),
+            issued_at_unix_ms: 100,
+            not_before_unix_ms: 100,
+            expires_at_unix_ms: 200,
+            use_policy: ConferenceJoinGrantUsePolicy::SingleUse,
+            revoked: false,
+            redeemed: false,
+        };
+        assert_eq!(
+            store.persist_conference_join_grant(&base),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let mut valid = base.clone();
+        valid.session_id = SessionId::from_opaque(opaque("future-session"));
+        valid.expires_at_unix_ms = 400;
+        assert_eq!(
+            store.persist_conference_join_grant(&valid),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.prune_expired_conference_join_grants(-1),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(store.prune_expired_conference_join_grants(199), Ok(0));
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(1));
+        assert_eq!(
+            store.conference_join_grant(&base.scope, &base.session_id),
+            Ok(None)
+        );
+        assert_eq!(
+            store.conference_join_grant(&valid.scope, &valid.session_id),
+            Ok(Some(valid))
+        );
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(0));
+        assert_eq!(store.prune_expired_conference_join_grants(400), Ok(1));
+    }
+}
+
 fn validate_memory_join_grant(grant: &ConferenceJoinGrantRecord) -> Result<(), DurableStoreError> {
     if grant.issued_at_unix_ms < 0
         || grant.not_before_unix_ms < grant.issued_at_unix_ms
