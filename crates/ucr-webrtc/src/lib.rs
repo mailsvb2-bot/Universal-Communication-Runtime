@@ -1681,6 +1681,17 @@ mod tests {
             Err(WebRtcProviderError::SessionUnavailable),
             "stale SDP cannot mutate the replacement peer"
         );
+        let stale_ice = WebRtcIceCandidate {
+            session_id: session_id.clone(),
+            candidate: "candidate:1 1 udp 2122260223 192.0.2.1 54400 typ host".to_owned(),
+            sdp_mid: Some("0".to_owned()),
+            sdp_mline_index: Some(0),
+        };
+        assert_eq!(
+            provider.add_remote_candidate_if_offer_matches(&stale_ice, &original_offer_id),
+            Err(WebRtcProviderError::SessionUnavailable),
+            "stale ICE cannot mutate the replacement peer"
+        );
         assert_eq!(
             provider.create_session(&config),
             Err(WebRtcProviderError::Conflict),
