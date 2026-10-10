@@ -799,6 +799,7 @@ const startCaptureEntered = new Promise<void>(resolve => { enterStartCapture = r
 let serverOffers = 0, stalePeerCreates = 0, stalePeerCloses = 0;
 const startCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
+  peer: null,
   navigator: {onLine: true}, ui: {privacyMode: {value: "secure"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
   rtcNetworkConfiguration: () => ({}),
@@ -843,6 +844,7 @@ assert.equal(replacementPeerClosed, 0, "stale cleanup cannot close newly owned p
 let privateCaptures = 0, privateServerCloses = 0;
 const privateCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
+  peer: null,
   navigator: {onLine: true}, ui: {privacyMode: {value: "private"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
   ensureLocalMedia: async () => {privateCaptures++;},
