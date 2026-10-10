@@ -806,7 +806,7 @@ const startCtx: Record<string, any> = {
   ensureLocalMedia: async () => {enterStartCapture(); await startCaptureGate;},
   api: async () => {
     serverOffers++;
-    return {json: async () => ({ice_servers: [], sdp_type: "offer", sdp: "offer"})};
+    return {json: async () => ({ice_servers: [], offer_id: "A".repeat(43), sdp_type: "offer", sdp: "offer"})};
   },
   closeServerPeer: async () => {stalePeerCloses++;},
   RTCPeerConnection: class {constructor() {stalePeerCreates++;}},
@@ -829,7 +829,7 @@ const replacementCtx: Record<string, any> = {
   ui: {privacyMode: {value: "secure"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
   rtcNetworkConfiguration: () => ({}),
-  api: async () => ({json: async () => ({ice_servers: []})}),
+  api: async () => ({json: async () => ({ice_servers: [], offer_id: "A".repeat(43)})}),
   ensureLocalMedia: async () => {
     replacementCtx.peer = {connectionState: "connected"};
     replacementCtx.mediaCaptureGeneration++;
@@ -848,7 +848,7 @@ const privateCtx: Record<string, any> = {
   navigator: {onLine: true}, ui: {privacyMode: {value: "private"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
   ensureLocalMedia: async () => {privateCaptures++;},
-  api: async () => ({json: async () => ({ice_servers: [], sdp_type: "offer", sdp: "offer"})}),
+  api: async () => ({json: async () => ({ice_servers: [], offer_id: "A".repeat(43), sdp_type: "offer", sdp: "offer"})}),
   closeServerPeer: async () => {privateServerCloses++;},
 };
 const rtcConfigCode = browser.slice(
@@ -881,7 +881,7 @@ const constructorCtx: Record<string, any> = {
   ui: {privacyMode: {value: "secure"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
   rtcNetworkConfiguration: () => ({}),
-  api: async () => ({json: async () => ({ice_servers: []})}),
+  api: async () => ({json: async () => ({ice_servers: [], offer_id: "A".repeat(43)})}),
   ensureLocalMedia: async () => {},
   closeServerPeer: async () => {constructorCloses++;},
   RTCPeerConnection: class {constructor() {throw new Error("browser peer unavailable");}},
@@ -902,7 +902,7 @@ const serializedCtx: Record<string, any> = {
   ui: {privacyMode: {value: "secure"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
   rtcNetworkConfiguration: () => ({}),
-  api: async () => {serializedOffers++; return {json: async () => ({ice_servers: []})};},
+  api: async () => {serializedOffers++; return {json: async () => ({ice_servers: [], offer_id: "A".repeat(43)})};},
   ensureLocalMedia: async () => {},
   closeServerPeer: async () => {
     serializedCloses++;
