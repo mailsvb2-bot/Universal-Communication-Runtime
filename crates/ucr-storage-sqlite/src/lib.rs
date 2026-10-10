@@ -2077,7 +2077,10 @@ fn test_remove_v49_objects(connection: &Connection) -> Result<(), rusqlite::Erro
     // A historical-schema fixture must first remove every newer schema
     // object. Otherwise v50->v51 tries to recreate an index left over from
     // the fresh v51 database and fails with an unrelated migration error.
-    connection.execute_batch("DROP INDEX IF EXISTS conference_join_grants_expiry;")?;
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS conference_join_grants_expiry;
+         DROP INDEX IF EXISTS conference_join_grants_pending_redaction;",
+    )?;
     test_restore_v49_mls_transition_shape(connection)?;
     connection.execute_batch(
         "DROP INDEX IF EXISTS group_mls_transition_admissions_device;
@@ -2860,6 +2863,7 @@ mod tests {
             connection
                 .execute_batch(
                     "DROP INDEX conference_join_grants_expiry;
+                     DROP INDEX conference_join_grants_pending_redaction;
                      PRAGMA user_version=50;",
                 )
                 .expect("restore schema 50 fixture");
