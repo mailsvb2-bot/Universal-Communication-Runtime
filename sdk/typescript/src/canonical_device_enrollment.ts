@@ -1,15 +1,18 @@
 /**
- * Transport-neutral bridge for a host's *existing* Device lifecycle, signing
- * key store and protected endpoint key vault. It is not an identity authority.
+ * Transport-neutral bridge for the host's *existing* Device lifecycle,
+ * trusted signing-key owner, and endpoint key vault. This is not an identity
+ * authority and creates no second store or permanent telephone directory.
  * The host must authenticate the user independently of a realtime join URL.
+ * First enrollment belongs BEFORE issuing that URL; Call/Session are optional.
  */
 export interface UcrDeviceEnrollmentBinding {
   readonly tenantId: string;
   readonly namespaceId: string | null;
   readonly deviceId: string;
   readonly participantId: string;
-  readonly callId: string;
-  readonly sessionId: string;
+  /** Optional realtime context. Device trust MUST exist independently of a Call. */
+  readonly callId?: string;
+  readonly sessionId?: string;
 }
 
 export interface UcrLocalDeviceSigner {
@@ -23,12 +26,19 @@ export interface UcrCanonicalDeviceTrust {
   readonly activeKey: UcrLocalDeviceSigner | null;
 }
 
-/** Only the existing device-owned key vault can store and retrieve private material. */
+/** The protected private signer is tied to canonical Device, never Call/Session. */
+export interface UcrDeviceVaultScope {
+  readonly tenantId: string;
+  readonly namespaceId: string | null;
+  readonly deviceId: string;
+}
+
+/** Only the existing endpoint-owned vault may keep the Device signing secret. */
 export interface UcrCanonicalDeviceKeyVault {
-  load(binding: UcrDeviceEnrollmentBinding): Promise<UcrLocalDeviceSigner | null>;
-  stageNew(binding: UcrDeviceEnrollmentBinding): Promise<UcrLocalDeviceSigner>;
+  load(binding: UcrDeviceVaultScope): Promise<UcrLocalDeviceSigner | null>;
+  stageNew(binding: UcrDeviceVaultScope): Promise<UcrLocalDeviceSigner>;
   /** Sign the supplied unpredictable challenge with the existing protected private key. */
-  signChallenge(binding: UcrDeviceEnrollmentBinding, challenge: Uint8Array): Promise<Uint8Array>;
+  signChallenge(binding: UcrDeviceVaultScope, challenge: Uint8Array): Promise<Uint8Array>;
 }
 
 /** Calls the canonical, independently authenticated Device/Trust backend. */
@@ -56,7 +66,7 @@ function validateSigner(value: UcrLocalDeviceSigner | null): asserts value is Uc
 }
 
 async function provePrivateKeyPossession(
-  binding: UcrDeviceEnrollmentBinding,
+  binding: UcrDeviceVaultScope,
   signer: UcrLocalDeviceSigner,
   vault: UcrCanonicalDeviceKeyVault,
 ): Promise<void> {
@@ -84,9 +94,15 @@ async function provePrivateKeyPossession(
 }
 
 function validateBinding(binding: UcrDeviceEnrollmentBinding): void {
-  if (!binding?.tenantId || !binding.deviceId || !binding.participantId ||
-      !binding.callId || !binding.sessionId) {
-    throw new Error("authenticated, device-bound realtime session is required");
+  if (!binding?.tenantId || !binding.deviceId || !binding.participantId) {
+    throw new Error("independently authenticated canonical Device identity is required");
+  }
+  // A new Device must be prepared BEFORE a Call or join URL exists. A caller
+  // may optionally bind a later inspection to an exact call/session pair,
+  // but must not fabricate one to create permanent trust.
+  if ((binding.callId === undefined) !== (binding.sessionId === undefined) ||
+      binding.callId === "" || binding.sessionId === "") {
+    throw new Error("realtime Call and Session must both be supplied or both omitted");
   }
 }
 
@@ -113,18 +129,37 @@ export function createUcrCanonicalDevicePreparation(
   return (binding) => {
     const prepare = async (item: UcrDeviceEnrollmentBinding): Promise<void> => {
       validateBinding(item);
+      // Deliberately omit principal, Call and Session from the private-key
+      // vault key. Those identifiers must never trigger a second signing key.
+      const vaultScope: UcrDeviceVaultScope = Object.freeze({
+        tenantId: item.tenantId, namespaceId: item.namespaceId, deviceId: item.deviceId,
+      });
       const before = await authority.inspect(item);
       if (!before || before.deviceRevoked) {
         throw new Error("canonical Device revoked or trust unavailable");
       }
-      const existing = await vault.load(item);
+      const existing = await vault.load(vaultScope);
       if (before.activeKey) {
+        // The untrusted vault and a mutable authority adapter may share byte
+        // buffers. Snapshot the independently approved descriptor before awaits.
+        const approved = {
+          keyId: before.activeKey.keyId,
+          publicKey: before.activeKey.publicKey.slice(),
+        };
         validateSigner(existing);
-        if (!before.deviceActive || existing.keyId !== before.activeKey.keyId ||
-            !equalPublicKeys(existing.publicKey, before.activeKey.publicKey)) {
+        if (!before.deviceActive || existing.keyId !== approved.keyId ||
+            !equalPublicKeys(existing.publicKey, approved.publicKey)) {
           throw new Error("local signer differs from active trusted Device key");
         }
-        await provePrivateKeyPossession(item, before.activeKey, vault);
+        await provePrivateKeyPossession(vaultScope, approved, vault);
+        // Re-check canonical trust AFTER the asynchronous key operation: a
+        // revoked/rotated Device cannot complete a previously started login.
+        const current = await authority.inspect(item);
+        if (!current?.deviceActive || current.deviceRevoked || !current.activeKey ||
+            current.activeKey.keyId !== approved.keyId ||
+            !equalPublicKeys(current.activeKey.publicKey, approved.publicKey)) {
+          throw new Error("canonical Device trust changed during signing");
+        }
         return;
       }
       if (before.deviceActive) {
@@ -132,14 +167,19 @@ export function createUcrCanonicalDevicePreparation(
       }
       // Reuse a staged but not-yet-approved local signer after transport failure.
       // The canonical server still independently authorizes registration.
-      const staged = existing ?? await vault.stageNew(item);
+      const staged = existing ?? await vault.stageNew(vaultScope);
       validateSigner(staged);
-      await provePrivateKeyPossession(item, staged, vault);
-      await authority.approveNewDevice(item, staged);
+      const pendingSigner = {
+        keyId: staged.keyId,
+        publicKey: staged.publicKey.slice(),
+      };
+      await provePrivateKeyPossession(vaultScope, pendingSigner, vault);
+      // Approve only the snapshot actually proven by the protected signer.
+      await authority.approveNewDevice(item, pendingSigner);
       const after = await authority.inspect(item);
       if (!after?.deviceActive || after.deviceRevoked || !after.activeKey ||
-          after.activeKey.keyId !== staged.keyId ||
-          !equalPublicKeys(after.activeKey.publicKey, staged.publicKey)) {
+          after.activeKey.keyId !== pendingSigner.keyId ||
+          !equalPublicKeys(after.activeKey.publicKey, pendingSigner.publicKey)) {
         throw new Error("canonical Device trust registration not confirmed");
       }
     };
