@@ -2833,6 +2833,37 @@ mod tests {
             .query_row("PRAGMA secure_delete", [], |row| row.get(0))
             .expect("read secure_delete");
         assert_eq!(secure_delete, 1, "sensitive SQLite row deletion must zero freed pages");
+        assert_eq!(
+            super::conference_join_grant_store::verify_v51_objects(&connection),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn v50_to_v51_grant_expiry_index_migration_preserves_existing_store() {
+        let db = TestDbPath::new();
+        let original = SqliteLocalStore::open(db.path()).expect("initialize");
+        assert_eq!(original.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        drop(original);
+
+        // Simulate the immediately preceding canonical schema. A production
+        // migration may ONLY add the index; authorization rows are untouched.
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open old schema");
+            connection
+                .execute_batch(
+                    "DROP INDEX conference_join_grants_expiry;
+                     PRAGMA user_version=50;",
+                )
+                .expect("restore schema 50 fixture");
+        }
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate to v51");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let connection = migrated.lock_connection().expect("lock migrated schema");
+        assert_eq!(
+            super::conference_join_grant_store::verify_v51_objects(&connection),
+            Ok(())
+        );
     }
 
     #[test]
