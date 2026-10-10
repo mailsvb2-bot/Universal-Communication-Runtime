@@ -74,19 +74,35 @@ async function provePrivateKeyPossession(
   if (!cryptoProvider?.subtle || typeof cryptoProvider.getRandomValues !== "function") {
     throw new Error("secure Ed25519 verification is unavailable");
   }
-  // Bind the fresh proof to the independently authorized Device, participant,
-  // and optional realtime session. It must not become a key-vault identifier:
-  // the vault still owns one signer per canonical Device across calls.
-  const scope = new TextEncoder().encode(JSON.stringify([
+  // Domain-separated, unambiguous binary scope. Each field is a 2-byte
+  // big-endian length followed by exact UTF-8 bytes; 0xffff marks absence.
+  // JSON is inappropriate here: escaping valid opaque IDs can expand 6x.
+  // Call/Session never become the permanent Device vault identifier.
+  const fields = [
     "ucr.device-signer-possession.v1", binding.tenantId, binding.namespaceId,
     binding.deviceId, binding.participantId, binding.callId ?? null,
     binding.sessionId ?? null, signer.keyId,
-  ]));
-  if (scope.length > 1024)throw new Error("Device signer challenge scope exceeds bounds");
-  const challenge = new Uint8Array(scope.length + 48);
-  challenge.set(scope);
-  cryptoProvider.getRandomValues(challenge.subarray(scope.length));
-  // Exact-scope proof and random nonce: no reusable possession proof is cached.
+  ];
+  const encoder = new TextEncoder();
+  const parts = fields.map(value => value === null ? null : encoder.encode(value));
+  const byteCount = parts.reduce((n, item) => n + 2 + (item?.length ?? 0), 0);
+  if (byteCount > 1024 || parts.some(item => item !== null && item.length >= 0xffff)) {
+    throw new Error("Device signer challenge scope exceeds bounds");
+  }
+  const challenge = new Uint8Array(byteCount + 48);
+  let offset = 0;
+  for (const part of parts) {
+    const size = part === null ? 0xffff : part.length;
+    challenge[offset++] = size >>> 8;
+    challenge[offset++] = size & 0xff;
+    if (part !== null) {
+      challenge.set(part, offset);
+      offset += part.length;
+    }
+  }
+  cryptoProvider.getRandomValues(challenge.subarray(byteCount));
+  // Only a detached copy enters the callback: a malicious/buggy vault cannot
+  // rewrite the verifier's independently constructed domain or Device scope.
   // Snapshot the independently trusted key before awaiting untrusted vault code.
   const approvedPublicKey = signer.publicKey.slice();
   const publicKey = await cryptoProvider.subtle.importKey(
@@ -96,7 +112,7 @@ async function provePrivateKeyPossession(
     tenantId: binding.tenantId, namespaceId: binding.namespaceId,
     deviceId: binding.deviceId,
   };
-  const signature = await vault.signChallenge(vaultScope, challenge);
+  const signature = await vault.signChallenge(vaultScope, challenge.slice());
   if (!(signature instanceof Uint8Array) || signature.length !== 64) {
     throw new Error("protected Device key possession proof is missing");
   }
