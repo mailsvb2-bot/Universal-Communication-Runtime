@@ -2613,6 +2613,7 @@ mod tests {
                 message: "WebRTC offer ready",
                 sdp_type: "offer",
                 sdp: "v=0\r\n".to_owned(),
+                offer_id: Some("A".repeat(43)),
                 ice_servers: vec![WebRtcIceServerResponse {
                     urls: vec!["turns:turn.example.test:5349?transport=tcp".to_owned()],
                     username: Some("ephemeral".to_owned()),
