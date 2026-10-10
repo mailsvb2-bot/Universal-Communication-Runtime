@@ -1189,6 +1189,28 @@ assert.equal(staleRestartConfigWrites, 0,
   "revoked conference must not install new ICE configuration");
 assert.equal(iceCtx.restarting, false, "aborted ICE restart must release restart guard");
 
+// ICE restart may update SDP, but cannot silently switch the transport's
+// original close fence to an unrelated/replaced WebRTC peer.
+let changedFenceConfigurationWrites = 0;
+const changedFenceCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 3,
+  navigator: {onLine: true}, restarting: false,
+  startWebRtc: {offerId: "A".repeat(43)},
+  peer: {connectionState: "connected", setConfiguration() {changedFenceConfigurationWrites++;}},
+  webrtcRetryTimer: null,
+  ui: {privacyMode: {value: "secure"}, webrtcState: {textContent: ""},
+    status: {textContent: ""}},
+  api: async () => ({json: async () => ({
+    ice_servers: [], offer_id: "B".repeat(43), sdp_type: "offer", sdp: "unowned-restart",
+  })}),
+  body: () => ({}), rtcNetworkConfiguration: () => ({}),
+  clearTimeout() {},
+};
+runInNewContext(restartCode + "\nthis.restart = restartIce;", changedFenceCtx);
+await assert.rejects(changedFenceCtx.restart(), /ICE restart changed immutable WebRTC transport offer identity/);
+assert.equal(changedFenceConfigurationWrites, 0, "wrong-owner ICE restart cannot alter network configuration");
+assert.equal(changedFenceCtx.restarting, false, "rejected ICE restart must release restart guard");
+
 // Execute browser's canonical roster -> per-viewer SFU subscription journey.
 // The VM never supplies a parallel admission owner or a forged roster.
 const rosterCode = browser.slice(
