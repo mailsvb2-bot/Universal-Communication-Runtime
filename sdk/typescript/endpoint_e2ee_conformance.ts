@@ -187,7 +187,7 @@ mutableQueuedBinding.sessionId = "attacker-session";
 await queuedPossession;
 assert.equal(decodedChallengeScope(possessionChallenges[5])[3], "device");
 assert.equal(decodedChallengeScope(possessionChallenges[5])[5], "call");
-assert.throws(() => scopedPossession({...deviceBinding, deviceId: 42} as any),
+await assert.rejects(scopedPossession({...deviceBinding, deviceId: 42} as any),
   /independently authenticated canonical Device identity/);
 
 // A hostile vault receives only a COPY. Mutating it and signing that new value
@@ -256,7 +256,7 @@ await prepareFirstEntry(identityOnly);
 assert.equal(firstEntryConfirmed, true);
 if (firstEntryConfirmed) issuedGrants++;
 assert.equal(issuedGrants, 1, "only independently prepared Device can request a canonical grant");
-assert.throws(() => prepareFirstEntry({...identityOnly, callId: "call"}),
+await assert.rejects(prepareFirstEntry({...identityOnly, callId: "call"}),
   /Call and Session must both be supplied or both omitted/);
 
 const v1 = {
