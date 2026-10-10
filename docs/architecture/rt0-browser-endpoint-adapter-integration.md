@@ -35,7 +35,7 @@ reference installer composes `createUcrCanonicalBrowserMediaFactory` automatical
 The host no longer needs to manually construct and register a second factory.
 The resolver must return independently authorized signing/trust descriptors,
 current group and negotiation bindings, endpoint-owned seed and live revocation
-guards. A missing/incomplete resolver still fails closed before device capture.
+guards. A missing resolver is rejected before device capture. A callable but\nincomplete resolver is rejected during encrypted-media adapter activation,\n**before any E2EE media publication**; browser permission prompts or temporary\nlocal capture can occur before that validation, and teardown must stop them.
 
 **This is not automatic device enrollment or key provisioning.** The UCR reference
 web gateway still has no authenticated first-party route to enroll a device,
