@@ -66,7 +66,7 @@ function validateSigner(value: UcrLocalDeviceSigner | null): asserts value is Uc
 }
 
 async function provePrivateKeyPossession(
-  binding: UcrDeviceVaultScope,
+  binding: UcrDeviceEnrollmentBinding,
   signer: UcrLocalDeviceSigner,
   vault: UcrCanonicalDeviceKeyVault,
 ): Promise<void> {
@@ -74,15 +74,29 @@ async function provePrivateKeyPossession(
   if (!cryptoProvider?.subtle || typeof cryptoProvider.getRandomValues !== "function") {
     throw new Error("secure Ed25519 verification is unavailable");
   }
-  const challenge = new Uint8Array(48);
-  cryptoProvider.getRandomValues(challenge);
-  // Challenge binds this operation to the scoped Device; no reusable proof is cached.
+  // Bind the fresh proof to the independently authorized Device, participant,
+  // and optional realtime session. It must not become a key-vault identifier:
+  // the vault still owns one signer per canonical Device across calls.
+  const scope = new TextEncoder().encode(JSON.stringify([
+    "ucr.device-signer-possession.v1", binding.tenantId, binding.namespaceId,
+    binding.deviceId, binding.participantId, binding.callId ?? null,
+    binding.sessionId ?? null, signer.keyId,
+  ]));
+  if (scope.length > 1024)throw new Error("Device signer challenge scope exceeds bounds");
+  const challenge = new Uint8Array(scope.length + 48);
+  challenge.set(scope);
+  cryptoProvider.getRandomValues(challenge.subarray(scope.length));
+  // Exact-scope proof and random nonce: no reusable possession proof is cached.
   // Snapshot the independently trusted key before awaiting untrusted vault code.
   const approvedPublicKey = signer.publicKey.slice();
   const publicKey = await cryptoProvider.subtle.importKey(
     "raw", approvedPublicKey as Uint8Array<ArrayBuffer>, {name: "Ed25519"}, false, ["verify"],
   );
-  const signature = await vault.signChallenge(binding, challenge);
+  const vaultScope: UcrDeviceVaultScope = {
+    tenantId: binding.tenantId, namespaceId: binding.namespaceId,
+    deviceId: binding.deviceId,
+  };
+  const signature = await vault.signChallenge(vaultScope, challenge);
   if (!(signature instanceof Uint8Array) || signature.length !== 64) {
     throw new Error("protected Device key possession proof is missing");
   }
@@ -151,7 +165,7 @@ export function createUcrCanonicalDevicePreparation(
             !equalPublicKeys(existing.publicKey, approved.publicKey)) {
           throw new Error("local signer differs from active trusted Device key");
         }
-        await provePrivateKeyPossession(vaultScope, approved, vault);
+        await provePrivateKeyPossession(item, approved, vault);
         // Re-check canonical trust AFTER the asynchronous key operation: a
         // revoked/rotated Device cannot complete a previously started login.
         const current = await authority.inspect(item);
@@ -173,7 +187,7 @@ export function createUcrCanonicalDevicePreparation(
         keyId: staged.keyId,
         publicKey: staged.publicKey.slice(),
       };
-      await provePrivateKeyPossession(vaultScope, pendingSigner, vault);
+      await provePrivateKeyPossession(item, pendingSigner, vault);
       // Approve only the snapshot actually proven by the protected signer.
       await authority.approveNewDevice(item, pendingSigner);
       const after = await authority.inspect(item);
