@@ -2759,7 +2759,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("active count");
-        assert_eq!(old, 0, "expired session->Device association must not be retained");
+        assert_eq!(
+            old, 0,
+            "expired session->Device association must not be retained"
+        );
         assert_eq!(live, 1, "valid session admission must not be removed");
     }
 
