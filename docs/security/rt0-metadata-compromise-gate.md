@@ -25,6 +25,12 @@ deleting one table makes calls anonymous.
 - `conference_join_grants`: durable exact session/call/participant/device link
 - `events`: durable `ucr.conference.attendance.*` payload, actor, source
   Device and correlation; integration attendance can include external IDs
+- `accepted_commands`: durable original `ucr.conference.join.issue.v1` and
+  `ucr.conference.join.revoke.v1` request payloads, potentially containing
+  external participant identifiers and conference affiliation **even after
+  their join-grant rows are sanitized**. This is an independent privacy blocker.
+  Do not silently truncate the idempotency journal; design explicit bounded
+  retention / non-identifying replay commitments within the canonical owner.
 - `universal_conference_participants`, `group_memberships` and
   `group_mls_transition_admissions`: durable roster/membership evidence
 
