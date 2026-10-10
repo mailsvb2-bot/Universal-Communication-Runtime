@@ -42,6 +42,25 @@ local capture can occur before this validation; leave, revocation and adapter
 failure must stop all active capture tracks. Mere function presence is not a
 claim that canonical admission is already valid.
 
+### Post-authentication Device preparation hook
+
+The reference client invokes `window.ucrPrepareCanonicalDevice(binding)`, when supplied,
+**only after** the realtime server has accepted the authenticated join and
+**before** media admission / physical capture. `binding` includes the exact
+scoped tenant, namespace, call, session, participant and Device identifiers.
+The callback is an integration seam for the host's existing Device lifecycle,
+trusted signing-key provisioning and endpoint secure key vault. It should
+idempotently check or register an authorized Device, recover the already owned
+local signing seed on later joins, independently confirm the *active* trusted
+public-key descriptor and reject revoked/mismatched key state. It must never
+interpret the URL grant as permanent identity enrollment approval.
+
+A missing hook does not invent keys or bypass trust: the downstream canonical
+media resolver still enforces full signing/MLS admission. A supplied hook is
+awaited before media capture, and a stale join lifecycle is rejected after its
+completion. The hook is **not** yet a first-party registration implementation;
+the host must supply its authenticated backend and device-key vault.
+
 **This is not automatic device enrollment or key provisioning.** The UCR reference
 web gateway still has no authenticated first-party route to enroll a device,
 provision/recover a local signing key, and publish its trusted descriptor. Such a
