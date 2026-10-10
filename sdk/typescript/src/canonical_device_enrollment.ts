@@ -1,15 +1,18 @@
 /**
- * Transport-neutral bridge for a host's *existing* Device lifecycle, signing
- * key store and protected endpoint key vault. It is not an identity authority.
+ * Transport-neutral bridge for the host's *existing* Device lifecycle,
+ * trusted signing-key owner, and endpoint key vault. This is not an identity
+ * authority and creates no second store or permanent telephone directory.
  * The host must authenticate the user independently of a realtime join URL.
+ * First enrollment belongs BEFORE issuing that URL; Call/Session are optional.
  */
 export interface UcrDeviceEnrollmentBinding {
   readonly tenantId: string;
   readonly namespaceId: string | null;
   readonly deviceId: string;
   readonly participantId: string;
-  readonly callId: string;
-  readonly sessionId: string;
+  /** Optional realtime context. Device trust MUST exist independently of a Call. */
+  readonly callId?: string;
+  readonly sessionId?: string;
 }
 
 export interface UcrLocalDeviceSigner {
@@ -84,9 +87,15 @@ async function provePrivateKeyPossession(
 }
 
 function validateBinding(binding: UcrDeviceEnrollmentBinding): void {
-  if (!binding?.tenantId || !binding.deviceId || !binding.participantId ||
-      !binding.callId || !binding.sessionId) {
-    throw new Error("authenticated, device-bound realtime session is required");
+  if (!binding?.tenantId || !binding.deviceId || !binding.participantId) {
+    throw new Error("independently authenticated canonical Device identity is required");
+  }
+  // A new Device must be prepared BEFORE a Call or join URL exists. A caller
+  // may optionally bind a later inspection to an exact call/session pair,
+  // but must not fabricate one to create permanent trust.
+  if ((binding.callId === undefined) !== (binding.sessionId === undefined) ||
+      binding.callId === "" || binding.sessionId === "") {
+    throw new Error("realtime Call and Session must both be supplied or both omitted");
   }
 }
 
