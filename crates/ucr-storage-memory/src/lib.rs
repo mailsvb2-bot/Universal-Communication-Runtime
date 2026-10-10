@@ -9682,11 +9682,34 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
             return Err(DurableStoreError::InvalidRecord);
         }
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        let before = state.conference_join_grants.len();
-        state
-            .conference_join_grants
-            .retain(|_, grant| grant.expires_at_unix_ms > now_unix_ms);
-        Ok(before - state.conference_join_grants.len())
+        // Preserve the exact session ID as an irreversible authorization
+        // tombstone. Deleting it would allow idempotent command replay to
+        // issue the same credential again with a fresh expiry.
+        let hidden = OpaqueId::new("expired").map_err(|_| DurableStoreError::Internal)?;
+        let mut sanitized = 0;
+        for grant in state.conference_join_grants.values_mut() {
+            if grant.expires_at_unix_ms > now_unix_ms
+                || (grant.revoked
+                    && grant.redeemed
+                    && grant.call_id.as_opaque() == &hidden
+                    && grant.device_id.as_opaque() == &hidden
+                    && grant.participant.principal_id.as_opaque() == &hidden
+                    && grant.integration_id.as_opaque() == &hidden)
+            {
+                continue;
+            }
+            grant.call_id = CallId::from_opaque(hidden.clone());
+            grant.integration_id = IntegrationId::from_opaque(hidden.clone());
+            grant.participant = PrincipalRef {
+                principal_id: PrincipalId::from_opaque(hidden.clone()),
+                kind: PrincipalKind::Person,
+            };
+            grant.device_id = DeviceId::from_opaque(hidden.clone());
+            grant.revoked = true;
+            grant.redeemed = true;
+            sanitized += 1;
+        }
+        Ok(sanitized)
     }
 }
 
@@ -9740,9 +9763,18 @@ mod expired_join_grant_privacy_tests {
         );
         assert_eq!(store.prune_expired_conference_join_grants(199), Ok(0));
         assert_eq!(store.prune_expired_conference_join_grants(200), Ok(1));
+        let tombstone = store
+            .conference_join_grant(&base.scope, &base.session_id)
+            .expect("read")
+            .expect("must retain replay-blocking session tombstone");
+        assert_eq!(tombstone.call_id.as_opaque().as_str(), "expired");
+        assert_eq!(tombstone.device_id.as_opaque().as_str(), "expired");
+        assert_eq!(tombstone.participant.principal_id.as_opaque().as_str(), "expired");
+        assert!(tombstone.revoked && tombstone.redeemed);
         assert_eq!(
-            store.conference_join_grant(&base.scope, &base.session_id),
-            Ok(None)
+            store.persist_conference_join_grant(&base),
+            Err(DurableStoreError::Conflict),
+            "same session may never be issued again after metadata sanitization"
         );
         assert_eq!(
             store.conference_join_grant(&valid.scope, &valid.session_id),
