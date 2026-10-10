@@ -9673,6 +9673,19 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
         grant.redeemed = true;
         Ok(grant.clone())
     }
+
+    fn prune_expired_conference_join_grants(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<usize, DurableStoreError> {
+        if now_unix_ms < 0 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let before = state.conference_join_grants.len();
+        state.conference_join_grants.retain(|_, grant| grant.expires_at_unix_ms > now_unix_ms);
+        Ok(before - state.conference_join_grants.len())
+    }
 }
 
 fn validate_memory_join_grant(grant: &ConferenceJoinGrantRecord) -> Result<(), DurableStoreError> {
