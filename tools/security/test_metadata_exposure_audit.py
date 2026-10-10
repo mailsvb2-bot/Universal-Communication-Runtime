@@ -15,6 +15,7 @@ from metadata_exposure_audit import collect_counts
 def schema(connection: sqlite3.Connection) -> None:
     connection.executescript("""
         CREATE TABLE calls (id TEXT);
+        CREATE TABLE accepted_commands (command_type TEXT, payload BLOB);
         CREATE TABLE call_participants (id TEXT);
         CREATE TABLE call_signals (id TEXT);
         CREATE TABLE conference_join_grants (id TEXT);
@@ -41,10 +42,16 @@ class MetadataExposureAuditTest(unittest.TestCase):
                 "INSERT INTO events VALUES (?, ?)",
                 ("ucr.conference.attendance.joined.v1", b"encrypted-or-sensitive-payload"),
             )
+            connection.execute(
+                "INSERT INTO accepted_commands VALUES (?, ?)",
+                ("ucr.conference.join.issue.v1", b"original-sensitive-external-user-id"),
+            )
             counts = collect_counts(connection)
             self.assertEqual(counts["calls"], 1)
             self.assertEqual(counts["conference_join_grants"], 1)
             self.assertEqual(counts["attendance_events"], 1)
+            self.assertEqual(counts["conference_commands"], 1)
+            self.assertNotIn("original-sensitive-external-user-id", repr(counts))
             self.assertNotIn("private-call-id", repr(counts))
             self.assertNotIn("sensitive-device-to-call", repr(counts))
 
