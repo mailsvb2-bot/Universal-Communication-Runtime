@@ -1664,11 +1664,14 @@ where
                                         let ice_servers = config.ice_servers.clone();
                                         let provider = Arc::clone(&self.webrtc_provider);
                                         match tokio::task::spawn_blocking(move || {
-                                            provider.restart_session(&config)
+                                            let description = provider.restart_session(&config)?;
+                                            let offer_id = provider.session_offer_id(&config.session_id)?;
+                                            Ok::<_, WebRtcProviderError>((description, offer_id))
                                         })
                                         .await
                                         {
-                                            Ok(Ok(description)) => Ok(pb::RealtimeWebRtcOffer {
+                                            Ok(Ok((description, offer_id))) => Ok(pb::RealtimeWebRtcOffer {
+                                                offer_id: Some(offer_id),
                                                 description: Some(pb_webrtc_description(
                                                     &description,
                                                 )),
