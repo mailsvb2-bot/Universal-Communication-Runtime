@@ -872,6 +872,24 @@ runInNewContext(startCode + "\nthis.start = startWebRtc;", rejectedCtx);
 await assert.rejects(rejectedCtx.start(), /server rejected offer/);
 assert.equal(rejectedCaptures, 0, "failed signaling cannot prompt for camera or microphone");
 
+// An authorized offer with an unusable local browser peer must not poison
+// the next attempt with a lingering server session.
+let constructorCloses = 0;
+const constructorCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
+  peer: null, navigator: {onLine: true},
+  ui: {privacyMode: {value: "secure"}},
+  requireCanonicalMediaHostReady() {}, body: () => ({}),
+  rtcNetworkConfiguration: () => ({}),
+  api: async () => ({json: async () => ({ice_servers: []})}),
+  ensureLocalMedia: async () => {},
+  closeServerPeer: async () => {constructorCloses++;},
+  RTCPeerConnection: class {constructor() {throw new Error("browser peer unavailable");}},
+};
+runInNewContext(startCode + "\nthis.start = startWebRtc;", constructorCtx);
+await assert.rejects(constructorCtx.start(), /browser peer unavailable/);
+assert.equal(constructorCloses, 1, "failed peer construction must retire its server offer");
+
 // Real browser conference admission withdrawal must turn OFF physical
 // camera/microphone capture, not only close the encrypted DataChannel.
 const captureStopCode = browser.slice(
