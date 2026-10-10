@@ -108,8 +108,15 @@ async function provePrivateKeyPossession(
 }
 
 function validateBinding(binding: UcrDeviceEnrollmentBinding): void {
-  if (!binding?.tenantId || !binding.deviceId || !binding.participantId) {
+  if (!binding || typeof binding.tenantId !== "string" || !binding.tenantId ||
+      typeof binding.deviceId !== "string" || !binding.deviceId ||
+      typeof binding.participantId !== "string" || !binding.participantId ||
+      !(binding.namespaceId === null || typeof binding.namespaceId === "string")) {
     throw new Error("independently authenticated canonical Device identity is required");
+  }
+  if ((binding.callId !== undefined && typeof binding.callId !== "string") ||
+      (binding.sessionId !== undefined && typeof binding.sessionId !== "string")) {
+    throw new Error("invalid realtime Call/Session context");
   }
   // A new Device must be prepared BEFORE a Call or join URL exists. A caller
   // may optionally bind a later inspection to an exact call/session pair,
@@ -141,6 +148,18 @@ export function createUcrCanonicalDevicePreparation(
   }
   let pending: Promise<void> = Promise.resolve();
   return (binding) => {
+    // Capture the exact authorized scope BEFORE queuing an async operation.
+    // Mutable caller objects must not change Device, participant or Call during
+    // a pending authority lookup or hardware-backed signing prompt.
+    validateBinding(binding);
+    const request: UcrDeviceEnrollmentBinding = Object.freeze({
+      tenantId: binding.tenantId,
+      namespaceId: binding.namespaceId,
+      deviceId: binding.deviceId,
+      participantId: binding.participantId,
+      ...(binding.callId === undefined ? {} :
+        {callId: binding.callId, sessionId: binding.sessionId}),
+    });
     const prepare = async (item: UcrDeviceEnrollmentBinding): Promise<void> => {
       validateBinding(item);
       // Deliberately omit principal, Call and Session from the private-key
@@ -197,7 +216,7 @@ export function createUcrCanonicalDevicePreparation(
         throw new Error("canonical Device trust registration not confirmed");
       }
     };
-    const running = pending.then(() => prepare(binding));
+    const running = pending.then(() => prepare(request));
     pending = running.catch(() => {});
     return running;
   };
