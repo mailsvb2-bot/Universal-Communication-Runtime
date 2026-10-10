@@ -48,6 +48,28 @@ The reference client invokes `window.ucrPrepareCanonicalDevice(binding)`, when s
 **only after** the realtime server has accepted the authenticated join and
 **before** media admission / physical capture. `binding` includes the exact
 scoped tenant, namespace, call, session, participant and Device identifiers.
+The ESM bundle now exports `createUcrCanonicalDevicePreparation(authority, vault)`.
+The host may assign it to `window.ucrPrepareCanonicalDevice`:
+
+```ts
+import {
+  createUcrCanonicalDevicePreparation,
+} from "./endpoint-media/reference_browser_media_installer.js";
+
+window.ucrPrepareCanonicalDevice = createUcrCanonicalDevicePreparation(
+  authenticatedCanonicalDeviceAuthority,
+  existingProtectedDeviceKeyVault,
+);
+```
+
+The preparation implementation performs an authenticated canonical trust read,
+reuses the existing locally protected signer on subsequent joins, refuses
+revocation/key mismatch, and requires a second canonical trust read after
+first registration before admitting the new signer. If an approval request
+fails after a signer was staged, a retry reuses the staged signer rather than
+minting a different identity. A lost local signer for an active registered
+Device fails closed and requires the canonical explicit recovery workflow.
+
 The callback is an integration seam for the host's existing Device lifecycle,
 trusted signing-key provisioning and endpoint secure key vault. It should
 idempotently check or register an authorized Device, recover the already owned
