@@ -1678,6 +1678,16 @@ mod tests {
         let replacement = provider.create_session(&config).expect("replacement peer");
         assert_ne!(webrtc_offer_id(&replacement.sdp), original_offer_id);
         assert_eq!(
+            provider.set_remote_description_if_offer_matches(&replacement, &original_offer_id),
+            Err(WebRtcProviderError::SessionUnavailable),
+            "stale SDP cannot mutate the replacement peer"
+        );
+        assert_eq!(
+            provider.create_session(&config),
+            Err(WebRtcProviderError::Conflict),
+            "rejected stale SDP must preserve the replacement peer"
+        );
+        assert_eq!(
             provider.close_session_if_offer_matches(&session_id, &original_offer_id),
             Err(WebRtcProviderError::SessionUnavailable),
             "late old close cannot delete replacement session"
