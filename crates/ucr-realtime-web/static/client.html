@@ -1460,7 +1460,22 @@ async function heartbeat(){
 // and trusted signer through its authenticated canonical owners. A join grant
 // alone must never act as permanent device-registration authority.
 async function prepareCanonicalDeviceAfterJoin(generation){
-  const prepare=window.ucrPrepareCanonicalDevice;
+  let prepare=window.ucrPrepareCanonicalDevice;
+  // Compose the existing authenticated host Device/Trust and endpoint-owned
+  // secure key vault automatically. Only the host can grant registration.
+  if(typeof prepare!=="function"&&window.ucrCanonicalDeviceAuthority&&
+     window.ucrProtectedDeviceKeyVault){
+    const module=await import("./endpoint-media/reference_browser_media_installer.js");
+    if(generation!==sessionLifecycleGeneration||!sessionActive){
+      throw new Error("Device enrollment completed after conference session retired");
+    }
+    if(typeof module.createUcrCanonicalDevicePreparation!=="function"){
+      throw new Error("Canonical Device enrollment runtime unavailable");
+    }
+    prepare=module.createUcrCanonicalDevicePreparation(
+      window.ucrCanonicalDeviceAuthority,window.ucrProtectedDeviceKeyVault);
+    window.ucrPrepareCanonicalDevice=prepare;
+  }
   if(typeof prepare!=="function")return;
   if(!claims.device_id)throw new Error("Canonical Device identifier is required for trusted enrollment");
   await prepare(Object.freeze({
