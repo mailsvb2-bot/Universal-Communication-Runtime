@@ -436,10 +436,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     ///
     /// # Errors
     /// Returns an explicit store error on unavailable/corrupt persistence.
-    pub fn prune_expired_join_grants_at(
-        &self,
-        now_unix_ms: i64,
-    ) -> Result<usize, CanonicalError>
+    pub fn prune_expired_join_grants_at(&self, now_unix_ms: i64) -> Result<usize, CanonicalError>
     where
         S: ConferenceJoinGrantStore,
     {
