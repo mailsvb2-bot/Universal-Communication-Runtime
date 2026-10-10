@@ -3195,6 +3195,14 @@ async fn run_realtime_cleanup_worker(
     ticker.tick().await;
     loop {
         ticker.tick().await;
+        // Prune expired, no-longer-authorizing per-device call invitations
+        // even when the optional horizontal-SFU placement worker is disabled.
+        // Neither diagnostics nor logs receive session, Device, IP or Call IDs.
+        if let Ok(now_unix_ms) = runtime_now_unix_ms() {
+            if service.prune_expired_join_grants_at(now_unix_ms).is_err() {
+                eprintln!("UCR_REALTIME_EXPIRED_GRANT_PRIVACY_CLEANUP_UNAVAILABLE");
+            }
+        }
         match service.cleanup_closed_conferences_once().await {
             Ok(sweep) => {
                 if sweep.closed_calls > 0
