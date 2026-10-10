@@ -161,9 +161,9 @@ The versioned `DeviceService` now includes `ProvisionTrustedSigningKey` and
 Service Principal authentication, quotas, append-only operation audit,
 `AuthorizedDurableRuntime` permissions and the canonical
 `TrustedSigningKeyStore`. Provisioning requires an independently authenticated
-authorized service principal with `ucr.trusted_signing_key.provision` permission
+authorized service principal with `ucr.crypto.trusted_signing_key.provision` permission
 (as defined by the canonical permission constant); reading requires its
-canonical trusted-key-read permission. Active-Device preconditions and conflict/
+`ucr.crypto.trusted_signing_key.read` permission. Active-Device preconditions and conflict/
 revocation semantics remain owned by the existing Device and Trust stores.
 
 These RPCs receive/return ONLY Ed25519 public-key descriptors, never local
