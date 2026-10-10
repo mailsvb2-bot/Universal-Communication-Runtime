@@ -87,6 +87,47 @@ const rejectKeySwap = createUcrCanonicalDevicePreparation({
 await assert.rejects(rejectKeySwap(deviceBinding), /private key does not match trusted signer/);
 assert.equal(tamperedLocal.keyId, "tampered");
 
+ // An otherwise valid signer must not be admitted after its canonical Device
+ // is revoked during the asynchronous hardware/vault signature operation.
+ let revokeDuringProof = false;
+ const rejectLateRevocation = createUcrCanonicalDevicePreparation({
+   async inspect() {return {deviceActive: !revokeDuringProof, deviceRevoked: revokeDuringProof,
+     activeKey: {keyId: "key-1", publicKey: keyBytes}};},
+   async approveNewDevice() {throw new Error("unexpected approval");},
+ }, {
+   async load() {return {keyId: "key-1", publicKey: keyBytes};},
+   async stageNew() {throw new Error("unexpected staging");},
+   async signChallenge(_binding, challenge) {
+     revokeDuringProof = true;
+     return new Uint8Array(sign(null, challenge, testDeviceKeyPair.privateKey));
+   },
+ });
+ await assert.rejects(rejectLateRevocation(deviceBinding), /trust changed during signer verification/);
+ // A signature challenge must be fresh AND scoped to the concrete Device/Call
+ // rather than only proving possession of an unrelated reusable key.
+ const challengeScopes: Uint8Array[] = [];
+ const scopedProof = createUcrCanonicalDevicePreparation({
+   async inspect() {return {deviceActive: true, deviceRevoked: false,
+     activeKey: {keyId: "key-1", publicKey: keyBytes}};},
+   async approveNewDevice() {throw new Error("unexpected approval");},
+ }, {
+   async load() {return {keyId: "key-1", publicKey: keyBytes};},
+   async stageNew() {throw new Error("unexpected staging");},
+   async signChallenge(_binding, challenge) {
+     challengeScopes.push(challenge.slice());
+     return new Uint8Array(sign(null, challenge, testDeviceKeyPair.privateKey));
+   },
+ });
+ await scopedProof(deviceBinding);
+ await scopedProof({...deviceBinding, deviceId:"different-device"});
+ assert.notDeepEqual(challengeScopes[0], challengeScopes[1]);
+ const challengePrefixA = new TextDecoder().decode(challengeScopes[0].subarray(0,challengeScopes[0].length-48));
+ const challengePrefixB = new TextDecoder().decode(challengeScopes[1].subarray(0,challengeScopes[1].length-48));
+ assert.match(challengePrefixA, /ucr.device-signer-possession.v1/);
+ assert.match(challengePrefixA, /"device"/);
+ assert.match(challengePrefixB, /"different-device"/);
+
+
 // Interrupted enrollment must reuse the staged signer, never silently create
 // a new key after the server response is lost.
 let stagedRetryCount = 0, approvalAttempt = 0, retryConfirmed = false;
