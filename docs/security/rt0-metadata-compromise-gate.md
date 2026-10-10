@@ -41,8 +41,11 @@ realtime cleanup worker. It removes participant–device–call linkage from tha
 one table after a grant cannot authorize a session. The operation is idempotent,
 transactional in SQLite, and never purges unexpired admissions. This is
 **partial metadata reduction**, not the post-call graph-secrecy guarantee.
-SQLite delete does not securely erase WAL, backups, filesystem snapshots or
-historical flash blocks; do not advertise cryptographic deletion.
+The UCR SQLite connection also enforces `PRAGMA secure_delete=ON`,
+so deleted database-page payloads are overwritten instead of left on the
+main-file freelist. This does not erase WAL, backups, filesystem snapshots or
+historical flash blocks; do not advertise cryptographic deletion. The setting
+may impose additional write I/O and requires operational performance review.
 
 `tools/security/metadata_exposure_audit.py --strict path/to/ucr.sqlite3`
 is a read-only, aggregate-only, fail-closed diagnostic to measure *indexed*
