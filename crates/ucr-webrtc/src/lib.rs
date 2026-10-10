@@ -1529,7 +1529,31 @@ mod tests {
         assert!(offer.sdp.starts_with("v=0"));
         assert!(offer.sdp.contains("m=audio"));
         assert!(offer.sdp.contains("m=video"));
-        assert_eq!(provider.close_session(&session_id), Ok(()));
+        let original_offer_id = webrtc_offer_id(&offer.sdp);
+        assert_eq!(
+            provider.close_session_if_offer_matches(&session_id, "old-attempt"),
+            Err(WebRtcProviderError::SessionUnavailable)
+        );
+        assert_eq!(
+            provider.create_session(&config),
+            Err(WebRtcProviderError::Conflict),
+            "stale close must preserve the current peer"
+        );
+        assert_eq!(
+            provider.close_session_if_offer_matches(&session_id, &original_offer_id),
+            Ok(())
+        );
+        let replacement = provider.create_session(&config).expect("replacement peer");
+        assert_ne!(webrtc_offer_id(&replacement.sdp), original_offer_id);
+        assert_eq!(
+            provider.close_session_if_offer_matches(&session_id, &original_offer_id),
+            Err(WebRtcProviderError::SessionUnavailable),
+            "late old close cannot delete replacement session"
+        );
+        assert_eq!(
+            provider.close_session_if_offer_matches(&session_id, &webrtc_offer_id(&replacement.sdp)),
+            Ok(())
+        );
         assert_eq!(
             provider.close_session(&session_id),
             Err(WebRtcProviderError::SessionUnavailable)
