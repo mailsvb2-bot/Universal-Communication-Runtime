@@ -242,7 +242,9 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
                 params![now_unix_ms],
             )
             .map_err(|error| map_sqlite_error(&error))?;
-        transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
         Ok(deleted)
     }
 }
