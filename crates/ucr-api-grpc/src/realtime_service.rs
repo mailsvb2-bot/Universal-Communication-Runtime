@@ -1524,7 +1524,10 @@ where
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let offer_id = body.offer_id.clone().filter(|id| {
-            id.len() == 43 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            id.len() == 43
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
         });
         let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
         let description = body
@@ -1535,7 +1538,9 @@ where
             (Ok(token), Ok((scope, call_id, session_id)), Ok(description)) => {
                 match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
                     Ok(claims) => {
-                        let offer_id = offer_id.ok_or_else(|| Status::invalid_argument("missing transport offer identity"))?;
+                        let offer_id = offer_id.ok_or_else(|| {
+                            Status::invalid_argument("missing transport offer identity")
+                        })?;
                         let description = WebRtcSessionDescription {
                             session_id: claims.session_id.clone(),
                             sdp_type: description.0,
@@ -1543,7 +1548,8 @@ where
                         };
                         let provider = Arc::clone(&self.webrtc_provider);
                         match tokio::task::spawn_blocking(move || {
-                            provider.set_remote_description_if_offer_matches(&description, &offer_id)
+                            provider
+                                .set_remote_description_if_offer_matches(&description, &offer_id)
                         })
                         .await
                         {
@@ -1582,14 +1588,19 @@ where
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let offer_id = body.offer_id.clone().filter(|id| {
-            id.len() == 43 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            id.len() == 43
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
         });
         let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => {
                 match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
                     Ok(claims) => {
-                        let offer_id = offer_id.ok_or_else(|| Status::invalid_argument("missing transport offer identity"))?;
+                        let offer_id = offer_id.ok_or_else(|| {
+                            Status::invalid_argument("missing transport offer identity")
+                        })?;
                         let mline_index = body
                             .sdp_mline_index
                             .map(u16::try_from)
@@ -1605,7 +1616,9 @@ where
                                 };
                                 let provider = Arc::clone(&self.webrtc_provider);
                                 match tokio::task::spawn_blocking(move || {
-                                    provider.add_remote_candidate_if_offer_matches(&candidate, &offer_id)
+                                    provider.add_remote_candidate_if_offer_matches(
+                                        &candidate, &offer_id,
+                                    )
                                 })
                                 .await
                                 {
