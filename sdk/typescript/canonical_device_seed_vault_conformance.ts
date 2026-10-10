@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {createUcrFirstPartyCallEntry} from "./src/canonical_first_party_call_entry.ts";
 import {webcrypto} from "node:crypto";
 
 import {
@@ -84,4 +85,55 @@ const stored = state.get(key)!;
 state.set(key, {...stored, encryptedSeed: stored.encryptedSeed.map(() => 0)});
 await assert.rejects(restored.signChallenge(device, challenge));
 assert.equal(writes, 2, "corruption cannot create replacement key");
+
+// Independent user authorization MUST happen BEFORE signer staging, which
+// MUST happen BEFORE the server signs a device-bound Call/Session join grant.
+const canonicalScope = {tenantId:"first-party",namespaceId:null,deviceId:"owned-device",
+  participantId:"authenticated-person"};
+let active = false, revoked = false, firstEntryAuth = 0, grants = 0;
+let registered: {keyId:string;publicKey:Uint8Array} | null = null;
+let revokeDuringGrant = false, mismatchDevice = false;
+const host = {
+  async resumeAuthenticatedDevice() {
+    firstEntryAuth++;
+    return {...canonicalScope};
+  },
+  async inspect() {
+    return {deviceActive:active, deviceRevoked:revoked,
+      activeKey:active && registered ? {...registered,publicKey:registered.publicKey.slice()} : null};
+  },
+  async approveNewDevice(_binding: unknown, key: {keyId:string;publicKey:Uint8Array}) {
+    registered = {keyId:key.keyId,publicKey:key.publicKey.slice()};
+    active = true;
+  },
+  async issueSignedDeviceJoin(binding: typeof canonicalScope) {
+    assert.equal(binding.deviceId, canonicalScope.deviceId);
+    assert.ok(active && registered && !revoked, "server may not issue for untrusted Device");
+    grants++;
+    if (revokeDuringGrant)revoked = true;
+    return {...binding,deviceId:mismatchDevice?"other-device":binding.deviceId,
+      callId:"call",sessionId:"session",joinFragment:"#ucr_join=server-signed-opaque"};
+  },
+};
+const launch = createUcrFirstPartyCallEntry(host, createUcrBrowserProtectedDeviceVault(durableStore));
+const [firstGrant, duplicate] = await Promise.all([launch(), launch()]);
+assert.equal(firstGrant.joinFragment, "#ucr_join=server-signed-opaque");
+assert.deepEqual(firstGrant, duplicate);
+assert.equal(grants, 1, "two clicks cannot issue duplicate parallel joins");
+assert.equal(firstEntryAuth, 1);
+const returning = await launch();
+assert.equal(returning.deviceId, canonicalScope.deviceId);
+assert.equal(grants, 2, "repeat login preserves signing identity but issues fresh grant");
+const identityAfter = await createUcrBrowserProtectedDeviceVault(durableStore).load(canonicalScope);
+assert.equal(identityAfter?.keyId, registered?.keyId);
+revokeDuringGrant = true;
+await assert.rejects(launch(), /Device revoked or trust unavailable/);
+assert.equal(grants, 3, "grant may be issued but must never be consumed after revocation");
+revoked = false;
+revokeDuringGrant = false;
+mismatchDevice = true;
+await assert.rejects(launch(), /join grant differs from prepared Device/);
+mismatchDevice = false;
+console.log("UCR_FIRST_PARTY_DEVICE_TO_GRANT_SEQUENCE_OK");
+
 console.log("UCR_CANONICAL_DEVICE_SEED_VAULT_CONFORMANCE_OK");
