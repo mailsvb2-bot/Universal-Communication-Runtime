@@ -2710,7 +2710,7 @@ mod tests {
         connection
     }
     #[test]
-    fn expired_join_grant_metadata_is_pruned_from_sqlite_and_stays_deleted() {
+    fn expired_join_grant_metadata_is_scrubbed_in_sqlite_and_stays_revoked() {
         use ucr_core::ConferenceJoinGrantStore;
 
         let db = TestDbPath::new();
@@ -2765,9 +2765,36 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("active count");
+        assert_eq!(old, 1, "expired session ID tombstone must be retained");
+        let sanitized: (String, String, String, String, i64, i64) = reopened
+            .query_row(
+                "SELECT call_id, integration_id, participant_id, device_id,
+                        revoked, redeemed
+                 FROM conference_join_grants WHERE session_id='expired'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("sanitized durable tombstone");
         assert_eq!(
-            old, 0,
-            "expired session->Device association must not be retained"
+            sanitized,
+            (
+                "expired".into(),
+                "expired".into(),
+                "expired".into(),
+                "expired".into(),
+                1,
+                1,
+            ),
+            "retained tombstone must not reveal original Call/Device/participant"
         );
         assert_eq!(live, 1, "valid session admission must not be removed");
     }
