@@ -4707,7 +4707,10 @@ mod universal_runtime_tests {
         assert_eq!(attendance.code, CanonicalErrorCode::NotFound);
     }
 
-    fn assert_expired_join_grant_is_not_reissued(store: &SqliteLocalStore, issuer: &JoinTokenIssuer) {
+    fn assert_expired_join_grant_is_not_reissued(
+        store: &SqliteLocalStore,
+        issuer: &JoinTokenIssuer,
+    ) {
         // A replay of the original accepted issuance command must NEVER
         // mint a new live bearer after the expired grant's sensitive fields
         // have been sanitized. Its session tombstone remains authoritative.
