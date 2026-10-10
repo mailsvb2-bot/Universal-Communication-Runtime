@@ -130,6 +130,7 @@ fn sqlite_v44_migrates_to_v45_without_inventing_attachment_state() {
                 "PRAGMA foreign_keys=OFF;
                  -- Remove newer objects when constructing the v44 fixture.
                  DROP INDEX IF EXISTS conference_join_grants_expiry;
+                 DROP INDEX IF EXISTS conference_join_grants_pending_redaction;
                  DROP INDEX IF EXISTS group_mls_transition_admissions_device;
                  DROP TABLE IF EXISTS group_mls_transition_admissions;
                  DROP INDEX IF EXISTS recording_provider_ready_recovery;
