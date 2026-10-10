@@ -416,6 +416,7 @@ message RealtimeStartWebRtcRequest {
 message RealtimeWebRtcOffer {
   WebRtcDescription description = 1;
   repeated WebRtcIceServer ice_servers = 2;
+  optional string offer_id = 3; // Fences stale closes; not an authentication token.
 }
 
 message RealtimeStartWebRtcResponse {
@@ -472,6 +473,7 @@ message RealtimeCloseWebRtcRequest {
   TenantScope scope = 1;
   OpaqueId call_id = 2;
   OpaqueId session_id = 3;
+  optional string offer_id = 4; // Required for browser transport attempt cleanup.
 }
 
 message RealtimeCloseWebRtcResponse {

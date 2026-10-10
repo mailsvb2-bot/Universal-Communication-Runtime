@@ -806,7 +806,7 @@ const startCtx: Record<string, any> = {
   ensureLocalMedia: async () => {enterStartCapture(); await startCaptureGate;},
   api: async () => {
     serverOffers++;
-    return {json: async () => ({ice_servers: [], sdp_type: "offer", sdp: "offer"})};
+    return {json: async () => ({ice_servers: [], offer_id: "A".repeat(43), sdp_type: "offer", sdp: "offer"})};
   },
   closeServerPeer: async () => {stalePeerCloses++;},
   RTCPeerConnection: class {constructor() {stalePeerCreates++;}},
@@ -829,7 +829,7 @@ const replacementCtx: Record<string, any> = {
   ui: {privacyMode: {value: "secure"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
   rtcNetworkConfiguration: () => ({}),
-  api: async () => ({json: async () => ({ice_servers: []})}),
+  api: async () => ({json: async () => ({ice_servers: [], offer_id: "A".repeat(43)})}),
   ensureLocalMedia: async () => {
     replacementCtx.peer = {connectionState: "connected"};
     replacementCtx.mediaCaptureGeneration++;
@@ -848,7 +848,7 @@ const privateCtx: Record<string, any> = {
   navigator: {onLine: true}, ui: {privacyMode: {value: "private"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
   ensureLocalMedia: async () => {privateCaptures++;},
-  api: async () => ({json: async () => ({ice_servers: [], sdp_type: "offer", sdp: "offer"})}),
+  api: async () => ({json: async () => ({ice_servers: [], offer_id: "A".repeat(43), sdp_type: "offer", sdp: "offer"})}),
   closeServerPeer: async () => {privateServerCloses++;},
 };
 const rtcConfigCode = browser.slice(
@@ -881,7 +881,7 @@ const constructorCtx: Record<string, any> = {
   ui: {privacyMode: {value: "secure"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
   rtcNetworkConfiguration: () => ({}),
-  api: async () => ({json: async () => ({ice_servers: []})}),
+  api: async () => ({json: async () => ({ice_servers: [], offer_id: "A".repeat(43)})}),
   ensureLocalMedia: async () => {},
   closeServerPeer: async () => {constructorCloses++;},
   RTCPeerConnection: class {constructor() {throw new Error("browser peer unavailable");}},
@@ -902,7 +902,7 @@ const serializedCtx: Record<string, any> = {
   ui: {privacyMode: {value: "secure"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
   rtcNetworkConfiguration: () => ({}),
-  api: async () => {serializedOffers++; return {json: async () => ({ice_servers: []})};},
+  api: async () => {serializedOffers++; return {json: async () => ({ice_servers: [], offer_id: "A".repeat(43)})};},
   ensureLocalMedia: async () => {},
   closeServerPeer: async () => {
     serializedCloses++;
@@ -921,6 +921,39 @@ await assert.rejects(firstOrphanStart, /peer constructor refused/);
 await assert.rejects(secondOrphanStart, /peer constructor refused/);
 assert.equal(serializedOffers, 2, "retry can allocate an offer after cleanup");
 assert.equal(serializedCloses, 2, "each failed attempt cleans up only its own offer");
+
+// A delayed HTTP close must be fenced by the offer that initiated it; its
+// response cannot clear ownership of a newer transport attempt.
+const browserCloseCode = browser.slice(
+  browser.indexOf("async function closeServerPeer("),
+  browser.indexOf("function scheduleWebRtcRetry("),
+);
+let releaseFencedClose: () => void = () => {};
+let enteredFencedClose: () => void = () => {};
+const fencedCloseGate = new Promise<void>(resolve => {releaseFencedClose = resolve;});
+const fencedCloseEntered = new Promise<void>(resolve => {enteredFencedClose = resolve;});
+const observedFencedCloses: string[] = [];
+const fencedCtx: Record<string, any> = {
+  sessionActive: true,
+  startWebRtc: Object.assign(() => {}, {offerId: "A".repeat(43)}),
+  body: () => ({session_id: "session"}),
+  api: async (_route: string, payload: any) => {
+    observedFencedCloses.push(payload.offer_id);
+    if(observedFencedCloses.length===1){enteredFencedClose();await fencedCloseGate;}
+  },
+};
+runInNewContext(browserCloseCode + "\nthis.closeOffer = closeServerPeer;", fencedCtx);
+const oldCloseInFlight = fencedCtx.closeOffer();
+await fencedCloseEntered;
+fencedCtx.startWebRtc.offerId = "B".repeat(43);
+releaseFencedClose();
+await oldCloseInFlight;
+assert.equal(fencedCtx.startWebRtc.offerId, "B".repeat(43), "stale response must preserve new offer");
+await fencedCtx.closeOffer();
+assert.deepEqual(observedFencedCloses, ["A".repeat(43), "B".repeat(43)]);
+assert.equal(fencedCtx.startWebRtc.offerId, null, "owner clears only after its own close");
+await fencedCtx.closeOffer();
+assert.equal(observedFencedCloses.length, 2, "no unfenced session-wide close");
 
 // Real browser conference admission withdrawal must turn OFF physical
 // camera/microphone capture, not only close the encrypted DataChannel.
@@ -1102,7 +1135,7 @@ const negotiationCtx: Record<string, any> = {
   ensureLocalMedia: async () => ({}),
   api: async (path: string) => {
     if(path.endsWith("/webrtc/start"))return {json: async () => ({
-      ice_servers: [], sdp_type: "offer", sdp: "remote-offer",
+      ice_servers: [], offer_id: "A".repeat(43), sdp_type: "offer", sdp: "remote-offer",
     })};
     staleRemoteDescriptionPosts++;
     return {ok: true};
@@ -1110,6 +1143,7 @@ const negotiationCtx: Record<string, any> = {
   body: () => ({}), rtcNetworkConfiguration: () => ({}),
   RTCPeerConnection: NegotiationPeer, MediaStream: class {},
   webrtcRetryTimer: null, e2eeChannel: null, scheduleWebRtcRetry() {},
+  closeServerPeer: async () => {throw new Error("unexpected orphan close during SDP test");},
 };
 runInNewContext(startCode + "\nthis.start = startWebRtc;", negotiationCtx);
 const blockedNegotiation = negotiationCtx.start();
@@ -1155,6 +1189,28 @@ await assert.rejects(staleIce, /ICE restart cancelled by conference media teardo
 assert.equal(staleRestartConfigWrites, 0,
   "revoked conference must not install new ICE configuration");
 assert.equal(iceCtx.restarting, false, "aborted ICE restart must release restart guard");
+
+// ICE restart may update SDP, but cannot silently switch the transport's
+// original close fence to an unrelated/replaced WebRTC peer.
+let changedFenceConfigurationWrites = 0;
+const changedFenceCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 3,
+  navigator: {onLine: true}, restarting: false,
+  startWebRtc: {offerId: "A".repeat(43)},
+  peer: {connectionState: "connected", setConfiguration() {changedFenceConfigurationWrites++;}},
+  webrtcRetryTimer: null,
+  ui: {privacyMode: {value: "secure"}, webrtcState: {textContent: ""},
+    status: {textContent: ""}},
+  api: async () => ({json: async () => ({
+    ice_servers: [], offer_id: "B".repeat(43), sdp_type: "offer", sdp: "unowned-restart",
+  })}),
+  body: () => ({}), rtcNetworkConfiguration: () => ({}),
+  clearTimeout() {},
+};
+runInNewContext(restartCode + "\nthis.restart = restartIce;", changedFenceCtx);
+await assert.rejects(changedFenceCtx.restart(), /ICE restart changed immutable WebRTC transport offer identity/);
+assert.equal(changedFenceConfigurationWrites, 0, "wrong-owner ICE restart cannot alter network configuration");
+assert.equal(changedFenceCtx.restarting, false, "rejected ICE restart must release restart guard");
 
 // Execute browser's canonical roster -> per-viewer SFU subscription journey.
 // The VM never supplies a parallel admission owner or a forged roster.
