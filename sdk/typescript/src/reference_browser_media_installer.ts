@@ -69,3 +69,8 @@ export { createUcrCanonicalDevicePreparation } from "./canonical_device_enrollme
 // Browser-local Device-only signing seed vault in the existing IndexedDB store.
 // It never grants canonical Device trust or acts as a second authority.
 export { createUcrBrowserProtectedDeviceVault } from "./canonical_device_seed_vault.ts";
+
+// First-party one-click coordinator: independently authenticate a user BEFORE
+// local Device signer preparation and BEFORE the canonical signed join grant.
+// The real first-party authenticated BFF must still be supplied by UCR.
+export { createUcrFirstPartyCallEntry } from "./canonical_first_party_call_entry.ts";
