@@ -187,7 +187,7 @@ mutableQueuedBinding.sessionId = "attacker-session";
 await queuedPossession;
 assert.equal(decodedChallengeScope(possessionChallenges[5])[3], "device");
 assert.equal(decodedChallengeScope(possessionChallenges[5])[5], "call");
-await assert.rejects(scopedPossession({...deviceBinding, deviceId: 42} as any),
+assert.throws(() => scopedPossession({...deviceBinding, deviceId: 42} as any),
   /independently authenticated canonical Device identity/);
 
 // A hostile vault receives only a COPY. Mutating it and signing that new value
