@@ -1023,6 +1023,37 @@ assert.equal(voiceFallbackRequests, 1, "unavailable camera must trigger audio-on
 assert.match(fallbackCtx.ui.status.textContent, /protected audio call automatically/);
 assert.equal(fallbackCtx.ui.localVideo.srcObject, voiceStream);
 
+// A delayed camera failure after Leave/revocation must NOT request the mic.
+// This tests the real capture helper across the initial async permission gap.
+let rejectPendingCamera: (error: Error) => void = () => {};
+let lateCaptureAttempts = 0;
+const lateFallbackCtx: Record<string, any> = {
+  ...fallbackCtx,
+  localStream: null,
+  mediaCaptureGeneration: 0,
+  sessionActive: true,
+  mediaActive: true,
+  navigator: {mediaDevices: {
+    getUserMedia() {
+      lateCaptureAttempts++;
+      if (lateCaptureAttempts !== 1)throw new Error("post-Leave microphone capture attempted");
+      return new Promise((_resolve, reject) => {rejectPendingCamera = reject;});
+    },
+  }},
+  ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null},
+    status: {textContent: ""}},
+};
+runInNewContext(captureCode + "\\nthis.getMedia = ensureLocalMedia;", lateFallbackCtx);
+const cameraPermissionPending = lateFallbackCtx.getMedia();
+assert.equal(lateCaptureAttempts, 1);
+lateFallbackCtx.mediaCaptureGeneration++;
+lateFallbackCtx.mediaActive = false;
+lateFallbackCtx.sessionActive = false;
+rejectPendingCamera(Object.assign(new Error("Camera no longer accessible"), {name: "NotReadableError"}));
+await assert.rejects(cameraPermissionPending, /authorization changed/);
+assert.equal(lateCaptureAttempts, 1, "revoked admission must not trigger a second OS permission prompt");
+assert.equal(lateFallbackCtx.localStream, null);
+
 let blockedPermissionAttempts = 0;
 const blockedCtx: Record<string, any> = {
   ...fallbackCtx, localStream: null,
