@@ -133,7 +133,10 @@ fn dispatcher_delivers_over_real_public_https_and_acks() {
             other => panic!("public HTTPS delivery failed closed: {other:?}"),
         }
     }
-    assert!(delivered, "public HTTPS must reach a verified successful delivery");
+    assert!(
+        delivered,
+        "public HTTPS must reach a verified successful delivery"
+    );
     assert_eq!(
         dispatcher.dispatch_once(&scope, &subscription_id),
         Ok(WebhookDispatchOutcome::Idle)
