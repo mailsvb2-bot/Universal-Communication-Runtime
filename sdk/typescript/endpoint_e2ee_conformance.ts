@@ -780,6 +780,11 @@ const acceptedJoinCtx: Record<string, any> = {
     join: {disabled: false}, leave: {disabled: true},
     privacyMode: {disabled: false}, expires: {textContent: ""}},
   requireCanonicalMediaHostReady() {}, prewarmAuthorizedMediaRuntime() {},
+  prepareCanonicalDeviceAfterJoin: async (_generation: number, beforeJoin = false) => {
+    // This fixture models an already trusted Device: prepare prior to Join,
+    // then revalidate it after server admission before MLS policy activation.
+    assert.equal(typeof beforeJoin, "boolean");
+  },
   api: async () => ({json: async () => ({ok: true, admission_state: "admitted"})}),
   body: () => ({}),
   applyMediaPolicy: async () => {throw new Error("MLS activation refused");},
