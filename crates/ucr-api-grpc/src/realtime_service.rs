@@ -1481,6 +1481,7 @@ where
                                         .await
                                         {
                                             Ok(Ok(description)) => Ok(pb::RealtimeWebRtcOffer {
+                                                offer_id: Some(ucr_webrtc::webrtc_offer_id(&description.sdp)),
                                                 description: Some(pb_webrtc_description(
                                                     &description,
                                                 )),
@@ -1706,7 +1707,9 @@ where
         request: Request<pb::RealtimeCloseWebRtcRequest>,
     ) -> Result<Response<pb::RealtimeCloseWebRtcResponse>, Status> {
         let token = decode_bearer_token(request.metadata());
-        let lookup = decode_realtime_lookup(request.into_inner());
+        let payload = request.into_inner();
+        let offer_id = payload.offer_id;
+        let lookup = decode_realtime_lookup_fields(payload.scope, payload.call_id, payload.session_id);
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => {
                 match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
@@ -1714,7 +1717,10 @@ where
                         let provider = Arc::clone(&self.webrtc_provider);
                         let close_session_id = claims.session_id.clone();
                         match tokio::task::spawn_blocking(move || {
-                            provider.close_session(&close_session_id)
+                            match offer_id {
+                                Some(id) => provider.close_session_if_offer_matches(&close_session_id, &id),
+                                None => provider.close_session(&close_session_id),
+                            }
                         })
                         .await
                         {
