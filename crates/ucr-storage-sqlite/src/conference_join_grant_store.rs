@@ -48,6 +48,34 @@ pub(super) fn create_v34_objects(transaction: &Transaction<'_>) -> Result<(), Du
         .map_err(|error| map_schema_change_error(&error))
 }
 
+/// New schema index: bounded expiry sweeps must not scan a growing history of
+/// long-lived replay-prevention tombstones.
+pub(super) fn create_v51_objects(
+    transaction: &Transaction<'_>,
+) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(
+            "CREATE INDEX conference_join_grants_expiry
+             ON conference_join_grants(expires_at_unix_ms);",
+        )
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn verify_v51_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+             WHERE type='index' AND name='conference_join_grants_expiry')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if !exists {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
+}
+
 pub(super) fn verify_schema_v34(connection: &Connection) -> Result<(), DurableStoreError> {
     super::recording_store::verify_schema_v33(connection)?;
     verify_v34_objects(connection)
