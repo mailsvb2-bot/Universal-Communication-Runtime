@@ -339,10 +339,11 @@ pub use service_control::{
     SERVICE_AUDIT_SYNC_CHECKPOINT_READ_OPERATION_KIND,
     SERVICE_AUDIT_SYNC_CHECKPOINT_WRITE_OPERATION_KIND, SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_SYNC_READ_OPERATION_KIND, SERVICE_AUDIT_SYNC_TRANSITION_OPERATION_KIND,
-    ServiceControlValidationError, service_audit_hash, service_request_rate_class,
-    validate_service_audit_operation_ref, validate_service_audit_record,
-    validate_service_quota_policy, validate_service_rate_limit_policy,
-    validate_service_resource_quota_policy,
+    SERVICE_AUDIT_TRUSTED_KEY_PROVISION_OPERATION_KIND,
+    SERVICE_AUDIT_TRUSTED_KEY_READ_OPERATION_KIND, ServiceControlValidationError,
+    service_audit_hash, service_request_rate_class, validate_service_audit_operation_ref,
+    validate_service_audit_record, validate_service_quota_policy,
+    validate_service_rate_limit_policy, validate_service_resource_quota_policy,
 };
 pub use sfu::{
     MAX_SFU_FORWARD_WIRE_BYTES, SFU_FORWARD_WIRE_MAGIC, SFU_FORWARD_WIRE_V1,
