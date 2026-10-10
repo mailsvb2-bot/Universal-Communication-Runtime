@@ -30,13 +30,13 @@ use ucr_model::{
     GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
     GroupMemberState, GroupMembership, GroupOwnership, GroupPermission, GroupRecord, GroupRole,
     IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
-    IntentConstraints, IntentId, KeyId, KeyPurpose, MessageCryptoMetadata, MessageEnvelope, MessageId,
-    MessageRelation, MessageRelationKind, MessageSignature, NamespaceId, OpaqueId, OriginRef,
-    PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion,
-    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, PublicKeyDescriptor, ServiceAuditOperationRef,
-    ServiceCredentialId, SessionId, StoreForwardId, StoreForwardJob, StoreForwardPolicy,
-    SyncCheckpoint, SyncLinkKind, SyncMode, SyncSelection, SyncSession, SyncState, TenantId,
-    TenantScope,
+    IntentConstraints, IntentId, KeyId, KeyPurpose, MessageCryptoMetadata, MessageEnvelope,
+    MessageId, MessageRelation, MessageRelationKind, MessageSignature, NamespaceId, OpaqueId,
+    OriginRef, PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion,
+    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, PublicKeyDescriptor,
+    ServiceAuditOperationRef, ServiceCredentialId, SessionId, StoreForwardId, StoreForwardJob,
+    StoreForwardPolicy, SyncCheckpoint, SyncLinkKind, SyncMode, SyncSelection, SyncSession,
+    SyncState, TenantId, TenantScope,
 };
 use ucr_protocol::{
     AcknowledgementEnvelope, CanonicalError, CanonicalErrorCode, CommandReceipt,
@@ -1191,7 +1191,10 @@ where
     ) -> Result<Response<pb::DeviceProvisionTrustedSigningKeyResponse>, Status> {
         let credentials = decode_credentials(request.metadata());
         let body = request.into_inner();
-        let scope = body.scope.ok_or_else(invalid_argument).and_then(decode_scope);
+        let scope = body
+            .scope
+            .ok_or_else(invalid_argument)
+            .and_then(decode_scope);
         let descriptor = body
             .signing_key
             .ok_or_else(invalid_argument)
@@ -1200,20 +1203,28 @@ where
             (Ok((credential_id, secret)), Ok(scope), Ok(descriptor)) => {
                 IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
                     .provision_trusted_device_signing_key(
-                        &scope, &credential_id, &secret, &scope, &descriptor,
+                        &scope,
+                        &credential_id,
+                        &secret,
+                        &scope,
+                        &descriptor,
                     )
                     .map(|key| pb_public_key_descriptor(&key))
             }
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
         };
-        Ok(Response::new(pb::DeviceProvisionTrustedSigningKeyResponse {
-            result: Some(match result {
-                Ok(key) => pb::device_provision_trusted_signing_key_response::Result::SigningKey(key),
-                Err(error) => pb::device_provision_trusted_signing_key_response::Result::Error(
-                    pb_error(error),
-                ),
-            }),
-        }))
+        Ok(Response::new(
+            pb::DeviceProvisionTrustedSigningKeyResponse {
+                result: Some(match result {
+                    Ok(key) => {
+                        pb::device_provision_trusted_signing_key_response::Result::SigningKey(key)
+                    }
+                    Err(error) => pb::device_provision_trusted_signing_key_response::Result::Error(
+                        pb_error(error),
+                    ),
+                }),
+            },
+        ))
     }
 
     async fn get_active_trusted_signing_key(
@@ -1222,26 +1233,39 @@ where
     ) -> Result<Response<pb::DeviceGetActiveTrustedSigningKeyResponse>, Status> {
         let credentials = decode_credentials(request.metadata());
         let body = request.into_inner();
-        let scope = body.scope.ok_or_else(invalid_argument).and_then(decode_scope);
+        let scope = body
+            .scope
+            .ok_or_else(invalid_argument)
+            .and_then(decode_scope);
         let device_id = decode_opaque(body.device_id).map(DeviceId::from_opaque);
         let result = match (credentials, scope, device_id) {
             (Ok((credential_id, secret)), Ok(scope), Ok(device_id)) => {
                 IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
                     .get_active_trusted_device_signing_key(
-                        &scope, &credential_id, &secret, &scope, &device_id,
+                        &scope,
+                        &credential_id,
+                        &secret,
+                        &scope,
+                        &device_id,
                     )
                     .map(|key| pb_public_key_descriptor(&key))
             }
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
         };
-        Ok(Response::new(pb::DeviceGetActiveTrustedSigningKeyResponse {
-            result: Some(match result {
-                Ok(key) => pb::device_get_active_trusted_signing_key_response::Result::SigningKey(key),
-                Err(error) => pb::device_get_active_trusted_signing_key_response::Result::Error(
-                    pb_error(error),
-                ),
-            }),
-        }))
+        Ok(Response::new(
+            pb::DeviceGetActiveTrustedSigningKeyResponse {
+                result: Some(match result {
+                    Ok(key) => {
+                        pb::device_get_active_trusted_signing_key_response::Result::SigningKey(key)
+                    }
+                    Err(error) => {
+                        pb::device_get_active_trusted_signing_key_response::Result::Error(pb_error(
+                            error,
+                        ))
+                    }
+                }),
+            },
+        ))
     }
 
     async fn revoke_device(
@@ -4166,23 +4190,22 @@ mod tests {
         COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
         CONVERSATION_WRITE_PERMISSION, DEFAULT_MAX_PAYLOAD_LEN, DEVICE_READ_PERMISSION,
         DEVICE_REGISTER_PERMISSION, DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION,
-        TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
-        KEY_FORMAT_VERSION,
         EVENT_CONSUME_PERMISSION, EVENT_DEAD_LETTER_READ_PERMISSION, EVENT_REPLAY_PERMISSION,
         EVENT_SUBSCRIBE_PERMISSION, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
         EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, EXTERNAL_MESSAGE_ID_LIMIT,
         EXTERNAL_MESSAGE_MAPPING_LIMIT, GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION,
         GROUP_READ_PERMISSION, IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION,
-        MAX_COMMAND_PAYLOAD_LEN, MAX_EVENT_INTEGRITY_METADATA_LEN, MAX_EVENT_PAYLOAD_LEN,
-        MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN, MAX_INTENT_POLICY_VALUE_LEN,
-        MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS,
-        MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_READ_PERMISSION,
-        MESSAGE_RELATION_LIMIT, MESSAGE_WRITE_PERMISSION,
-        SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND,
+        KEY_FORMAT_VERSION, MAX_COMMAND_PAYLOAD_LEN, MAX_EVENT_INTEGRITY_METADATA_LEN,
+        MAX_EVENT_PAYLOAD_LEN, MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN,
+        MAX_INTENT_POLICY_VALUE_LEN, MAX_INTENT_TRANSPORT_CONSTRAINTS,
+        MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS, MESSAGE_ATTACHMENT_LIMIT,
+        MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_READ_PERMISSION, MESSAGE_RELATION_LIMIT,
+        MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND,
         SERVICE_AUDIT_STORE_FORWARD_ENQUEUE_OPERATION_KIND,
         SERVICE_AUDIT_STORE_FORWARD_READ_OPERATION_KIND, SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND,
         SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN, STORE_FORWARD_READ_PERMISSION,
         STORE_FORWARD_WRITE_PERMISSION, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
+        TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
         validate_communication_intent, validate_event, validate_message,
     };
     use ucr_storage_memory::MemoryLocalStore;
@@ -5392,7 +5415,10 @@ mod tests {
             match answer.result.expect("ProvisionTrustedSigningKey result") {
                 pb::device_provision_trusted_signing_key_response::Result::SigningKey(value) => {
                     assert_eq!(value.public_key, vec![7; 32]);
-                    assert_eq!(value.device_id.expect("trusted device ID").value, b"device-multi-grpc");
+                    assert_eq!(
+                        value.device_id.expect("trusted device ID").value,
+                        b"device-multi-grpc"
+                    );
                 }
                 pb::device_provision_trusted_signing_key_response::Result::Error(error) => {
                     panic!("canonical trusted key provisioning denied: {}", error.code);
@@ -5411,7 +5437,10 @@ mod tests {
             .into_inner();
         match current.result.expect("GetActiveTrustedSigningKey result") {
             pb::device_get_active_trusted_signing_key_response::Result::SigningKey(key) => {
-                assert_eq!(key.key_id.expect("key id").value, b"trusted-device-key-grpc");
+                assert_eq!(
+                    key.key_id.expect("key id").value,
+                    b"trusted-device-key-grpc"
+                );
                 assert_eq!(key.public_key, vec![7; 32]);
             }
             pb::device_get_active_trusted_signing_key_response::Result::Error(error) => {
