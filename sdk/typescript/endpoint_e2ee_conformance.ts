@@ -67,6 +67,26 @@ revoked = false;
 localSigner = null;
 await assert.rejects(prepareDevice(deviceBinding), /local device signer is absent/);
 assert.equal(enrollRequests, 1, "missing local signer requires explicit recovery");
+// A compromised vault cannot swap the mutable trusted key while signing is awaited.
+const foreignKey = generateKeyPairSync("ed25519");
+const foreignPublic = new Uint8Array(foreignKey.publicKey.export({format:"der", type:"spki"}).subarray(-32));
+const mutableTrusted = keyBytes.slice();
+let tamperedLocal: {keyId: string; publicKey: Uint8Array} = {keyId: "tampered", publicKey: mutableTrusted};
+const rejectKeySwap = createUcrCanonicalDevicePreparation({
+  async inspect() {return {deviceActive: true, deviceRevoked: false,
+    activeKey: {keyId: "tampered", publicKey: mutableTrusted}};},
+  async approveNewDevice() {throw new Error("unexpected approval");},
+}, {
+  async load() {return tamperedLocal;},
+  async stageNew() {throw new Error("unexpected staging");},
+  async signChallenge(_binding, challenge) {
+    mutableTrusted.set(foreignPublic);
+    return new Uint8Array(sign(null, challenge, foreignKey.privateKey));
+  },
+});
+await assert.rejects(rejectKeySwap(deviceBinding), /private key does not match trusted signer/);
+assert.equal(tamperedLocal.keyId, "tampered");
+
 // Interrupted enrollment must reuse the staged signer, never silently create
 // a new key after the server response is lost.
 let stagedRetryCount = 0, approvalAttempt = 0, retryConfirmed = false;
