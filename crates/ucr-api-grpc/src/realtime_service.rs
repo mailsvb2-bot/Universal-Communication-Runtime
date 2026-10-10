@@ -432,7 +432,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     /// Sanitizes expired participant/Device/Call associations but retains the
     /// exact session replay tombstone after their authorization expires.
     ///
-    /// Reuses the canonical ConferenceJoinGrantStore; Call/Event history
+    /// Reuses the canonical `ConferenceJoinGrantStore`; Call/Event history
     /// and unrelated server metadata are not erased.
     ///
     /// # Errors
