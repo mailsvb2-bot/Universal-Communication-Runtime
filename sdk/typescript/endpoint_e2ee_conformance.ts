@@ -819,7 +819,25 @@ releaseStartCapture();
 await assert.rejects(staleStart, /cancelled by conference media teardown/);
 assert.equal(serverOffers, 1, "server offer is validated before device capture");
 assert.equal(stalePeerCreates, 0, "revoked admission cannot create a stale peer");
-assert.equal(stalePeerCloses, 0, "revoked generation cannot close a newer server peer");
+assert.equal(stalePeerCloses, 1, "withdrawn admission retires its orphaned server offer");
+// A client peer newly owned by another path must never be closed by stale cleanup.
+let replacementPeerClosed = 0;
+const replacementCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
+  navigator: {onLine: true}, peer: null,
+  ui: {privacyMode: {value: "secure"}},
+  requireCanonicalMediaHostReady() {}, body: () => ({}),
+  rtcNetworkConfiguration: () => ({}),
+  api: async () => ({json: async () => ({ice_servers: []})}),
+  ensureLocalMedia: async () => {
+    replacementCtx.peer = {connectionState: "connected"};
+    replacementCtx.mediaCaptureGeneration++;
+  },
+  closeServerPeer: async () => {replacementPeerClosed++;},
+};
+runInNewContext(startCode + "\nthis.start = startWebRtc;", replacementCtx);
+await assert.rejects(replacementCtx.start(), /cancelled by conference media teardown/);
+assert.equal(replacementPeerClosed, 0, "stale cleanup cannot close newly owned peer");
 
 // A missing TURN relay in private mode must fail before microphone/camera prompts.
 let privateCaptures = 0, privateServerCloses = 0;
