@@ -19,11 +19,73 @@ import {
   ucrVideoEncodingTarget,
 } from "./src/browser_webcodecs_media.ts";
 import { createUcrCanonicalBrowserMediaFactory } from "./src/canonical_browser_media_factory.ts";
+import { createUcrCanonicalDevicePreparation } from "./src/canonical_device_enrollment.ts";
 import { encodeSfuForwardEnvelopeWire } from "./src/sfu_forward_wire.ts";
 import {
   UcrChameleonReceiveHandover,
   type UcrEncryptedReceivePath,
 } from "./src/chameleon_receive_handover.ts";
+
+// Real first/repeat-login orchestration over externally authenticated canonical
+// Device/Trust and endpoint-owned key vault; never create a second key owner.
+const keyBytes = new Uint8Array(32).fill(9);
+const deviceBinding = {tenantId: "tenant", namespaceId: null, deviceId: "device",
+  participantId: "user", callId: "call", sessionId: "session"};
+let enrolled = false, revoked = false, localSigner: {keyId: string; publicKey: Uint8Array} | null = null;
+let enrollRequests = 0, stagedKeys = 0;
+const prepareDevice = createUcrCanonicalDevicePreparation({
+  async inspect() {return {deviceActive: enrolled, deviceRevoked: revoked,
+    activeKey: enrolled ? {keyId: "key-1", publicKey: keyBytes} : null};},
+  async approveNewDevice(_binding, signer) {
+    assert.equal(signer.keyId, "key-1");
+    enrollRequests++; enrolled = true;
+  },
+}, {
+  async load() {return localSigner;},
+  async stageNew() {stagedKeys++; localSigner = {keyId: "key-1", publicKey: keyBytes};
+    return localSigner;},
+});
+await prepareDevice(deviceBinding);
+assert.equal(enrollRequests, 1);
+assert.equal(stagedKeys, 1);
+await prepareDevice(deviceBinding);
+assert.equal(enrollRequests, 1, "subsequent login must restore same trusted signer");
+assert.equal(stagedKeys, 1, "no new key when canonical Device is already trusted");
+localSigner = {keyId: "key-1", publicKey: new Uint8Array(32).fill(4)};
+await assert.rejects(prepareDevice(deviceBinding), /local signer differs/);
+assert.equal(enrollRequests, 1, "mismatched local signer must never re-register trust");
+localSigner = {keyId: "key-1", publicKey: keyBytes};
+revoked = true;
+await assert.rejects(prepareDevice(deviceBinding), /Device revoked/);
+revoked = false;
+localSigner = null;
+await assert.rejects(prepareDevice(deviceBinding), /local device signer is absent/);
+assert.equal(enrollRequests, 1, "missing local signer requires explicit recovery");
+// Interrupted enrollment must reuse the staged signer, never silently create
+// a new key after the server response is lost.
+let stagedRetryCount = 0, approvalAttempt = 0, retryConfirmed = false;
+let stagedRetrySigner: {keyId: string; publicKey: Uint8Array} | null = null;
+const retryDevice = createUcrCanonicalDevicePreparation({
+  async inspect() {return {deviceActive: retryConfirmed, deviceRevoked: false,
+    activeKey: retryConfirmed ? {keyId: "retry-key", publicKey: keyBytes} : null};},
+  async approveNewDevice(_binding, signer) {
+    assert.equal(signer.keyId, "retry-key");
+    if (++approvalAttempt === 1) throw new Error("registration response lost");
+    retryConfirmed = true;
+  },
+}, {
+  async load() {return stagedRetrySigner;},
+  async stageNew() {
+    stagedRetryCount++;
+    stagedRetrySigner = {keyId: "retry-key", publicKey: keyBytes};
+    return stagedRetrySigner;
+  },
+});
+await assert.rejects(retryDevice(deviceBinding), /registration response lost/);
+await retryDevice(deviceBinding);
+assert.equal(stagedRetryCount, 1, "transport retry must not create a second Device signing identity");
+assert.equal(approvalAttempt, 2);
+
 
 const v1 = {
   contractVersion: UCR_ENDPOINT_E2EE_CONTRACT_VERSION,
@@ -467,6 +529,39 @@ assert.doesNotThrow(() => strictAdapterCtx.verifyAdapter({
 
 // Production device preflight: never trigger a camera prompt, signaling, or
 // MLS registration when the canonical trusted Device media host is absent.
+// Enrollment/recovery is host-authorized only after a successful server join.
+// It is not a side effect of opening an unverified signed URL.
+const devicePrepareCode = browser.slice(
+  browser.indexOf("async function prepareCanonicalDeviceAfterJoin("),
+  browser.indexOf("async function join(){"),
+);
+assert.ok(devicePrepareCode.startsWith("async function prepareCanonicalDeviceAfterJoin("));
+assert.match(devicePrepareCode, /ucrCanonicalDeviceAuthority/);
+assert.match(devicePrepareCode, /ucrProtectedDeviceKeyVault/);
+assert.match(devicePrepareCode, /createUcrCanonicalDevicePreparation/);
+let canonicalDevicePreparations = 0;
+const devicePrepareCtx: Record<string, any> = {
+  claims: {tenant_id: "tenant", namespace_id: null, device_id: "device",
+    participant_id: "member", call_id: "call", session_id: "session"},
+  sessionLifecycleGeneration: 4, sessionActive: true,
+  window: {ucrPrepareCanonicalDevice: async (binding: any) => {
+    assert.equal(binding.deviceId, "device");
+    canonicalDevicePreparations++;
+  }},
+  requireCanonicalMediaHostReady() {},
+};
+runInNewContext(devicePrepareCode + "\nthis.prepare = prepareCanonicalDeviceAfterJoin;", devicePrepareCtx);
+await devicePrepareCtx.prepare(4);
+assert.equal(canonicalDevicePreparations, 1,
+  "authenticated join composes with host Device key enrollment");
+devicePrepareCtx.claims.device_id = null;
+await assert.rejects(devicePrepareCtx.prepare(4), /Canonical Device identifier/);
+assert.equal(canonicalDevicePreparations, 1, "unbound grant cannot register a Device");
+devicePrepareCtx.claims.device_id = "device";
+devicePrepareCtx.sessionLifecycleGeneration = 5;
+await assert.rejects(devicePrepareCtx.prepare(4), /session retired/);
+assert.equal(canonicalDevicePreparations, 2, "stale enrollment cannot admit media");
+
 const preflightSnippet = browser.slice(
   browser.indexOf("function requireCanonicalMediaHostReady(){"),
   browser.indexOf("function closeE2eeTransport(){"),
@@ -483,6 +578,10 @@ preflightCtx.window.ucrCanonicalAuthorizedMediaFactory = () => ({});
 assert.doesNotThrow(() => preflightCtx.preflight(),
   "registered host authority allows capture to proceed to real E2EE validation");
 delete preflightCtx.window.ucrCanonicalAuthorizedMediaFactory;
+preflightCtx.window.ucrCanonicalMediaAdmissionResolver = async () => ({});
+assert.doesNotThrow(() => preflightCtx.preflight(),
+  "existing canonical host admission resolver is recognized without manual factory registration");
+delete preflightCtx.window.ucrCanonicalMediaAdmissionResolver;
 preflightCtx.window.ucrInstallAuthorizedMediaEndpoint = () => ({});
 assert.doesNotThrow(() => preflightCtx.preflight(),
   "custom canonical host installer is permitted only under later strict E2EE checks");

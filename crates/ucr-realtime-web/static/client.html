@@ -719,7 +719,8 @@ function requireCanonicalMediaHostReady(){
   const adapter=e2eeAdapter();
   if(adapter){requireCompatibleE2eeAdapter(adapter);return;}
   if(typeof window.ucrInstallAuthorizedMediaEndpoint==="function"||
-     typeof window.ucrCanonicalAuthorizedMediaFactory==="function")return;
+     typeof window.ucrCanonicalAuthorizedMediaFactory==="function"||
+     typeof window.ucrCanonicalMediaAdmissionResolver==="function")return;
   throw new Error("Canonical Device signing/trust integration is unavailable; secure audio/video cannot start");
 }
 function closeE2eeTransport(){
@@ -946,6 +947,7 @@ function prewarmAuthorizedMediaRuntime(){
     return;
   }
   if(typeof window.ucrCanonicalAuthorizedMediaFactory!=="function"&&
+     typeof window.ucrCanonicalMediaAdmissionResolver!=="function"&&
      typeof window.ucrInstallAuthorizedMediaEndpoint!=="function")return;
   Promise.all([loadEndpointWasmModule(),requireAuthorizedMediaInstaller()]).catch(()=>{
     // A failed warmup is not an admission decision. The guarded on-demand
@@ -1454,6 +1456,43 @@ async function heartbeat(){
     if(current())throw error;
   }
 }
+// An embedding host may idempotently enroll or restore the *existing* Device
+// and trusted signer through its authenticated canonical owners. A join grant
+// alone must never act as permanent device-registration authority.
+async function prepareCanonicalDeviceAfterJoin(generation){
+  let prepare=window.ucrPrepareCanonicalDevice;
+  // Compose the existing authenticated host Device/Trust and endpoint-owned
+  // secure key vault automatically. Only the host can grant registration.
+  if(typeof prepare!=="function"&&window.ucrCanonicalDeviceAuthority&&
+     window.ucrProtectedDeviceKeyVault){
+    const module=await import("./endpoint-media/reference_browser_media_installer.js");
+    if(generation!==sessionLifecycleGeneration||!sessionActive){
+      throw new Error("Device enrollment completed after conference session retired");
+    }
+    if(typeof module.createUcrCanonicalDevicePreparation!=="function"){
+      throw new Error("Canonical Device enrollment runtime unavailable");
+    }
+    prepare=module.createUcrCanonicalDevicePreparation(
+      window.ucrCanonicalDeviceAuthority,window.ucrProtectedDeviceKeyVault);
+    window.ucrPrepareCanonicalDevice=prepare;
+  }
+  if(typeof prepare!=="function")return;
+  if(!claims.device_id)throw new Error("Canonical Device identifier is required for trusted enrollment");
+  await prepare(Object.freeze({
+    tenantId:claims.tenant_id,
+    namespaceId:claims.namespace_id??null,
+    deviceId:claims.device_id,
+    participantId:claims.participant_id,
+    callId:claims.call_id,
+    sessionId:claims.session_id
+  }));
+  if(generation!==sessionLifecycleGeneration||!sessionActive){
+    throw new Error("Device enrollment completed after conference session retired");
+  }
+  // Enrollment success is not proof of signing authority. The independently
+  // authorized media resolver validates device key, MLS epoch and revocation.
+  requireCanonicalMediaHostReady();
+}
 async function join(){
   if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
   // A signed join URL alone does not provision an authorized media signer.
@@ -1473,6 +1512,10 @@ async function join(){
     if(generation!==sessionLifecycleGeneration)return;
     if(!data.ok)throw new Error(data.message||"Join rejected");
     sessionActive=true;ui.leave.disabled=false;ui.privacyMode.disabled=true;
+    // Complete approved enrollment/recovery before media admission can prompt
+    // for camera/microphone. This is not authorized by the URL alone.
+    await prepareCanonicalDeviceAfterJoin(generation);
+    if(generation!==sessionLifecycleGeneration)return;
     await applyMediaPolicy(data.media_policy);
     if(generation!==sessionLifecycleGeneration)return;
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();

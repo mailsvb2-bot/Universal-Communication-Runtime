@@ -21,6 +21,80 @@ existing development port 8080, rather than serving a static mock of realtime
 HTTP endpoints. Only the development container uses this non-TLS port; external
 or production ingress needs separately configured and authorized HTTPS.
 
+## Automatic composition when the canonical host already exists
+
+An embedding product that already owns authenticated Device/Call/MLS admission can
+provide its **existing** `UcrCanonicalMediaAdmissionResolver` directly:
+
+```ts
+window.ucrCanonicalMediaAdmissionResolver = resolveFromCanonicalHost;
+```
+
+The reference browser detects this resolver at preflight and the bundled
+reference installer composes `createUcrCanonicalBrowserMediaFactory` automatically.
+The host no longer needs to manually construct and register a second factory.
+The resolver must return independently authorized signing/trust descriptors,
+current group and negotiation bindings, endpoint-owned seed and live revocation
+guards. A missing resolver is rejected before device capture. A callable but
+incomplete resolver is rejected during encrypted-media adapter activation,
+**before any E2EE media publication**. Camera/microphone permission prompts and
+local capture can occur before this validation; leave, revocation and adapter
+failure must stop all active capture tracks. Mere function presence is not a
+claim that canonical admission is already valid.
+
+### Post-authentication Device preparation hook
+
+The reference client invokes `window.ucrPrepareCanonicalDevice(binding)`, when supplied,
+**only after** the realtime server has accepted the authenticated join and
+**before** media admission / physical capture. `binding` includes the exact
+scoped tenant, namespace, call, session, participant and Device identifiers.
+If the authenticated host already exposes `window.ucrCanonicalDeviceAuthority` and
+`window.ucrProtectedDeviceKeyVault`, the reference browser now imports the
+same pinned ESM bundle and composes the preparation callback **automatically**,
+after the server has accepted the join and before media capture. Existing hosts
+may also provide an explicit `window.ucrPrepareCanonicalDevice` override.
+
+The ESM bundle now exports `createUcrCanonicalDevicePreparation(authority, vault)`.
+The host may assign it to `window.ucrPrepareCanonicalDevice`:
+
+```ts
+import {
+  createUcrCanonicalDevicePreparation,
+} from "./endpoint-media/reference_browser_media_installer.js";
+
+window.ucrPrepareCanonicalDevice = createUcrCanonicalDevicePreparation(
+  authenticatedCanonicalDeviceAuthority,
+  existingProtectedDeviceKeyVault,
+);
+```
+
+The preparation implementation performs an authenticated canonical trust read,
+reuses the existing locally protected signer on subsequent joins, refuses
+revocation/key mismatch, and requires a second canonical trust read after
+first registration before admitting the new signer. If an approval request
+fails after a signer was staged, a retry reuses the staged signer rather than
+minting a different identity. A lost local signer for an active registered
+Device fails closed and requires the canonical explicit recovery workflow.
+
+The callback is an integration seam for the host's existing Device lifecycle,
+trusted signing-key provisioning and endpoint secure key vault. It should
+idempotently check or register an authorized Device, recover the already owned
+local signing seed on later joins, independently confirm the *active* trusted
+public-key descriptor and reject revoked/mismatched key state. It must never
+interpret the URL grant as permanent identity enrollment approval.
+
+A missing hook does not invent keys or bypass trust: the downstream canonical
+media resolver still enforces full signing/MLS admission. A supplied hook is
+awaited before media capture, and a stale join lifecycle is rejected after its
+completion. The hook is **not** yet a first-party registration implementation;
+the host must supply its authenticated backend and device-key vault.
+
+**This is not automatic device enrollment or key provisioning.** The UCR reference
+web gateway still has no authenticated first-party route to enroll a device,
+provision/recover a local signing key, and publish its trusted descriptor. Such a
+route must be implemented against the existing canonical Device/Identity/Trust
+owners before an unembedded user can complete a real two-device media call.
+
 ## Required canonical host integration — cannot be replaced with synthetic trust
 
 Before joining the conference, the embedding product must provide:
