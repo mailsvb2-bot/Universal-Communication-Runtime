@@ -121,6 +121,42 @@ for (const changed of ["revoked", "rotated"] as const) {
   assert.equal(registrations, 0);
 }
 
+// The fresh Ed25519 challenge must bind the same Device and the specific
+// participant/session without creating call-scoped private signing keys.
+const possessionChallenges: Uint8Array[] = [];
+const scopedPossession = createUcrCanonicalDevicePreparation({
+  async inspect() {return {deviceActive: true, deviceRevoked: false,
+    activeKey: {keyId: "key-1", publicKey: keyBytes.slice()}};},
+  async approveNewDevice() {throw new Error("unexpected registration");},
+}, {
+  async load() {return {keyId: "key-1", publicKey: keyBytes.slice()};},
+  async stageNew() {throw new Error("unexpected key creation");},
+  async signChallenge(vaultScope, challenge) {
+    assert.deepEqual(Object.keys(vaultScope).sort(), ["deviceId", "namespaceId", "tenantId"]);
+    possessionChallenges.push(challenge.slice());
+    return new Uint8Array(sign(null, challenge, testDeviceKeyPair.privateKey));
+  },
+});
+await scopedPossession(deviceBinding);
+await scopedPossession({...deviceBinding, deviceId: "different-device"});
+await scopedPossession({...deviceBinding, callId: "new-call", sessionId: "new-session"});
+const decodedChallengeScope = (challenge: Uint8Array) => JSON.parse(
+  new TextDecoder().decode(challenge.subarray(0, challenge.length - 48)),
+);
+assert.deepEqual(decodedChallengeScope(possessionChallenges[0]), [
+  "ucr.device-signer-possession.v1", "tenant", null, "device", "user",
+  "call", "session", "key-1",
+]);
+assert.equal(decodedChallengeScope(possessionChallenges[1])[3], "different-device");
+assert.equal(decodedChallengeScope(possessionChallenges[2])[5], "new-call");
+assert.notDeepEqual(possessionChallenges[0], possessionChallenges[1]);
+await scopedPossession({tenantId: "tenant", namespaceId: null,
+  deviceId: "device", participantId: "user"});
+assert.deepEqual(decodedChallengeScope(possessionChallenges[3]).slice(5, 7), [null, null],
+  "first-entry device registration must be possible before Call/Session exist");
+await assert.rejects(scopedPossession({...deviceBinding, callId: "A".repeat(1500)}),
+  /challenge scope exceeds bounds/);
+
 // Interrupted enrollment must reuse the staged signer, never silently create
 // a new key after the server response is lost.
 let stagedRetryCount = 0, approvalAttempt = 0, retryConfirmed = false;
