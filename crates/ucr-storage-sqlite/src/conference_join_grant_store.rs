@@ -233,19 +233,34 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        // Exact expiry is already enforced by the canonical grant signer.
-        // This removes sensitive participant/device/call bindings once a
-        // grant can no longer authorize *any* realtime session operation.
-        let deleted = transaction
+        // Expired grants cannot authorize realtime activity, but their
+        // original exact session IDs MUST remain to prevent an idempotent
+        // IssueJoinGrant replay from minting a fresh, valid credential.
+        // Sanitize identity-bearing fields in the same canonical table;
+        // preserve the irreversible revoked/redeemed tombstone.
+        // The bounded batch limits time holding the canonical store mutex.
+        let sanitized = transaction
             .execute(
-                "DELETE FROM conference_join_grants WHERE expires_at_unix_ms <= ?1",
+                "UPDATE conference_join_grants
+                 SET integration_id='expired', call_id='expired',
+                     participant_kind='person', participant_id='expired',
+                     device_id='expired', revoked=1, redeemed=1
+                 WHERE (tenant_id, namespace_present, namespace_id, session_id) IN (
+                   SELECT tenant_id, namespace_present, namespace_id, session_id
+                   FROM conference_join_grants
+                   WHERE expires_at_unix_ms <= ?1
+                     AND (integration_id <> 'expired' OR call_id <> 'expired'
+                       OR participant_id <> 'expired' OR device_id <> 'expired'
+                       OR revoked=0 OR redeemed=0)
+                   LIMIT 4096
+                 )",
                 params![now_unix_ms],
             )
             .map_err(|error| map_sqlite_error(&error))?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
-        Ok(deleted)
+        Ok(sanitized)
     }
 }
 
