@@ -1212,7 +1212,18 @@ function rtcNetworkConfiguration(iceServers,mode){
   if(mode==="private"&&!hasTurn)throw new Error("Higher privacy requires configured TURN relay; refusing direct network fallback");
   return {iceServers,iceTransportPolicy:mode==="private"?"relay":"all",bundlePolicy:"max-bundle"};
 }
+// Serialize complete offer ownership, including asynchronous orphan cleanup.
+// A close RPC is session-scoped and must finish before another start creates
+// a replacement offer for that same participant.
 async function startWebRtc(forceMedia=false){
+  const preceding=startWebRtc.pending||Promise.resolve();
+  let release;
+  startWebRtc.pending=new Promise(resolve=>{release=resolve;});
+  await preceding;
+  try{return await startWebRtcOnce(forceMedia);}
+  finally{release();}
+}
+async function startWebRtcOnce(forceMedia=false){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
   if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
   const generation=mediaCaptureGeneration;
@@ -1241,7 +1252,15 @@ async function startWebRtc(forceMedia=false){
     }
     throw error;
   }
-  const pc=new RTCPeerConnection(rtcConfig);
+  let pc;
+  try{
+    pc=new RTCPeerConnection(rtcConfig);
+  }catch(error){
+    // The server allocated an offer, but the browser rejected peer creation.
+    // No local peer owns that offer; release the server session for retry.
+    if(sessionActive&&!peer)await closeServerPeer();
+    throw error;
+  }
   peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
   const ensureOwnedPeer=()=>{
     ensureCurrent();
