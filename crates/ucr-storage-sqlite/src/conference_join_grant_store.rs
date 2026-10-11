@@ -93,10 +93,9 @@ pub(super) fn verify_schema_v34(connection: &Connection) -> Result<(), DurableSt
 }
 
 pub(super) fn verify_v34_objects(connection: &Connection) -> Result<(), DurableStoreError> {
-    verify_table_columns(
-        connection,
-        "conference_join_grants",
-        &[
+    // v34..v50 have the original shape. v51 adds an explicit redaction bit;
+    // silently accepting a missing bit could re-expose previously scrubbed IDs.
+    let mut columns = vec![
             ("tenant_id", "TEXT", 1, 1),
             ("namespace_present", "INTEGER", 1, 2),
             ("namespace_id", "TEXT", 1, 3),
@@ -113,8 +112,11 @@ pub(super) fn verify_v34_objects(connection: &Connection) -> Result<(), DurableS
             ("use_policy", "TEXT", 1, 0),
             ("revoked", "INTEGER", 1, 0),
             ("redeemed", "INTEGER", 1, 0),
-        ],
-    )?;
+    ];
+    if super::read_schema_version(connection)? >= 51 {
+        columns.push(("metadata_redacted", "INTEGER", 1, 0));
+    }
+    verify_table_columns(connection, "conference_join_grants", &columns)?;
     let index_exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name=?1)",
