@@ -1075,6 +1075,89 @@ capturedResolvers.shift()?.(fakeCapture(capturedTrack()));
 await assert.rejects(trackPermissionPending, /authorization changed/);
 assert.equal(stoppedCaptureTracks, 2, "late individual device grant must stop its track");
 
+// One-click media must not require camera repair/selection before an audio
+// conversation is possible. Exercise the real browser capture function.
+let cameraRequests = 0, voiceFallbackRequests = 0;
+const voiceTrack = capturedTrack();
+const voiceStream = fakeCapture(voiceTrack);
+const fallbackCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 0,
+  localStream: null,
+  navigator: {mediaDevices: {
+    async getUserMedia({audio, video}: {audio: unknown; video: unknown}) {
+      assert.ok(audio, "audio fallback never bypasses media admission");
+      if (video) {
+        cameraRequests++;
+        throw Object.assign(new Error("No camera found"), {name: "NotFoundError"});
+      }
+      voiceFallbackRequests++;
+      return voiceStream;
+    },
+  }},
+  ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null},
+    status: {textContent: ""}},
+  policyAllows: (kind: string) => kind === "audio" || kind === "camera",
+  refreshLocalMediaControls() {},
+  refreshDevices: async () => {},
+  MediaStream: class {},
+  e2eeChannel: null,
+};
+runInNewContext(captureCode + "\nthis.getMedia = ensureLocalMedia;", fallbackCtx);
+assert.equal(await fallbackCtx.getMedia(), voiceStream);
+assert.equal(cameraRequests, 1, "first attempt uses permitted video and audio");
+assert.equal(voiceFallbackRequests, 1, "unavailable camera must trigger audio-only retry");
+assert.match(fallbackCtx.ui.status.textContent, /protected audio call automatically/);
+assert.equal(fallbackCtx.ui.localVideo.srcObject, voiceStream);
+
+// A delayed camera failure after Leave/revocation must NOT request the mic.
+// This tests the real capture helper across the initial async permission gap.
+let rejectPendingCamera: (error: Error) => void = () => {};
+let lateCaptureAttempts = 0;
+const lateFallbackCtx: Record<string, any> = {
+  ...fallbackCtx,
+  localStream: null,
+  mediaCaptureGeneration: 0,
+  sessionActive: true,
+  mediaActive: true,
+  navigator: {mediaDevices: {
+    getUserMedia() {
+      lateCaptureAttempts++;
+      if (lateCaptureAttempts !== 1)throw new Error("post-Leave microphone capture attempted");
+      return new Promise((_resolve, reject) => {rejectPendingCamera = reject;});
+    },
+  }},
+  ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null},
+    status: {textContent: ""}},
+};
+runInNewContext(captureCode + "\nthis.getMedia = ensureLocalMedia;", lateFallbackCtx);
+const cameraPermissionPending = lateFallbackCtx.getMedia();
+assert.equal(lateCaptureAttempts, 1);
+lateFallbackCtx.mediaCaptureGeneration++;
+lateFallbackCtx.mediaActive = false;
+lateFallbackCtx.sessionActive = false;
+rejectPendingCamera(Object.assign(new Error("Camera no longer accessible"), {name: "NotReadableError"}));
+await assert.rejects(cameraPermissionPending, /authorization changed/);
+assert.equal(lateCaptureAttempts, 1, "revoked admission must not trigger a second OS permission prompt");
+assert.equal(lateFallbackCtx.localStream, null);
+
+let blockedPermissionAttempts = 0;
+const blockedCtx: Record<string, any> = {
+  ...fallbackCtx, localStream: null,
+  navigator: {mediaDevices: {
+    async getUserMedia() {
+      blockedPermissionAttempts++;
+      throw Object.assign(new Error("User denied access"), {name: "NotAllowedError"});
+    },
+  }},
+  ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null},
+    status: {textContent: ""}},
+};
+runInNewContext(captureCode + "\nthis.getMedia = ensureLocalMedia;", blockedCtx);
+await assert.rejects(blockedCtx.getMedia(), /User denied access/);
+assert.equal(blockedPermissionAttempts, 1,
+  "explicit operating-system/browser permission denial must never trigger alternate capture");
+
+
 const startCode = browser.slice(
   browser.indexOf("async function startWebRtc("),
   browser.indexOf("async function restartIce("),
