@@ -66,17 +66,49 @@ await restored.withAuthorizedSeed(device, async () => true, async seed => {
   seedView = seed;
   assert.equal(seed.length, 32);
   assert.ok(seed.some(byte => byte !== 0), "WASM signer seed must be live in callback");
-});
+}, () => {throw new Error("successful seed use must never roll back");});
 assert.ok(seedView?.every(byte => byte === 0), "media callback seed zeroized");
 await assert.rejects(
-  restored.withAuthorizedSeed(device, async () => false, async () => {}),
-  /independent canonical Device media trust required/,
+  restored.withAuthorizedSeed(device, async () => false, async () => {}, () => {}),
+  /independent canonical Device media trust and revoke hook required/,
 );
 let count = 0;
 await assert.rejects(
-  restored.withAuthorizedSeed(device, async () => ++count === 1, async () => {}),
+  restored.withAuthorizedSeed(device, async () => ++count === 1, async () => {}, () => {}),
   /canonical Device media trust revoked/,
 );
+
+// A revoked Device must tear down a partially-installed media bridge,
+// not merely reject the promise and leave the bridge active in WASM.
+let authChecks = 0, mediaActive = false, rollbackCalls = 0;
+await assert.rejects(
+  restored.withAuthorizedSeed(
+    device,
+    async () => ++authChecks <= 2,
+    async () => {mediaActive = true; return "installed media bridge";},
+    async () => {mediaActive = false; rollbackCalls++;},
+  ),
+  /canonical Device media trust revoked/,
+);
+assert.equal(mediaActive, false, "revoked Device must not leave active media side effect");
+assert.equal(rollbackCalls, 1, "revoked Device must tear down installed media bridge");
+let threwRollback = 0;
+await assert.rejects(
+  restored.withAuthorizedSeed(
+    device, async () => true,
+    async () => {mediaActive = true; throw new Error("bridge construction failed");},
+    () => {mediaActive = false; threwRollback++;},
+  ),
+  /bridge construction failed/,
+);
+assert.equal(mediaActive, false);
+assert.equal(threwRollback, 1);
+await assert.rejects(
+  (restored.withAuthorizedSeed as any)(device, async () => true,
+    async () => {mediaActive = true;}),
+  /revoke hook required/,
+);
+assert.equal(mediaActive, false, "no side effects when mandatory rollback is absent");
 
 // A corrupted encrypted record must NOT silently regenerate or reauthorize.
 const key = [...state.keys()].find(k => k.includes('"device"'));
@@ -93,12 +125,19 @@ const canonicalScope = {tenantId:"first-party",namespaceId:null,deviceId:"owned-
 let active = false, revoked = false, firstEntryAuth = 0, grants = 0;
 let registered: {keyId:string;publicKey:Uint8Array} | null = null;
 let revokeDuringGrant = false, mismatchDevice = false;
+let mutateGrantAtRecheck = false;
+let latestIssuedGrant: {deviceId:string;joinFragment:string} | null = null;
 const host = {
   async resumeAuthenticatedDevice() {
     firstEntryAuth++;
     return {...canonicalScope};
   },
   async inspect() {
+    if (mutateGrantAtRecheck && latestIssuedGrant) {
+      latestIssuedGrant.deviceId = "mutated-after-issue";
+      latestIssuedGrant.joinFragment = "#ucr_join=unchecked-mutable-replacement";
+      mutateGrantAtRecheck = false;
+    }
     return {deviceActive:active, deviceRevoked:revoked,
       activeKey:active && registered ? {...registered,publicKey:registered.publicKey.slice()} : null};
   },
@@ -111,8 +150,10 @@ const host = {
     assert.ok(active && registered && !revoked, "server may not issue for untrusted Device");
     grants++;
     if (revokeDuringGrant)revoked = true;
-    return {...binding,deviceId:mismatchDevice?"other-device":binding.deviceId,
+    const issued = {...binding,deviceId:mismatchDevice?"other-device":binding.deviceId,
       callId:"call",sessionId:"session",joinFragment:"#ucr_join=server-signed-opaque"};
+    latestIssuedGrant = issued;
+    return issued;
   },
 };
 const launch = createUcrFirstPartyCallEntry(host, createUcrBrowserProtectedDeviceVault(durableStore));
@@ -121,9 +162,14 @@ assert.equal(firstGrant.joinFragment, "#ucr_join=server-signed-opaque");
 assert.deepEqual(firstGrant, duplicate);
 assert.equal(grants, 1, "two clicks cannot issue duplicate parallel joins");
 assert.equal(firstEntryAuth, 1);
+mutateGrantAtRecheck = true;
 const returning = await launch();
 assert.equal(returning.deviceId, canonicalScope.deviceId);
+assert.equal(returning.joinFragment, "#ucr_join=server-signed-opaque",
+  "grant must remain exactly what was validated before async trust recheck");
 assert.equal(grants, 2, "repeat login preserves signing identity but issues fresh grant");
+assert.equal(latestIssuedGrant?.deviceId, "mutated-after-issue",
+  "test must actually mutate the host-owned grant object");
 const identityAfter = await createUcrBrowserProtectedDeviceVault(durableStore).load(canonicalScope);
 assert.equal(identityAfter?.keyId, registered?.keyId);
 revokeDuringGrant = true;
