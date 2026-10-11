@@ -341,13 +341,13 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         self
     }
 
-    async fn sfu_placement_transition_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        self.sfu_placement_lifecycle.as_ref()?;
-        Some(
-            Arc::clone(&self.sfu_placement_transition)
-                .lock_owned()
-                .await,
-        )
+    // Serialize Join, terminal Leave and grant revocation even when SFU
+    // placement management is disabled. Otherwise old reusable grants can
+    // reconnect between a Leave's generation check and its revocation.
+    async fn sfu_placement_transition_guard(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.sfu_placement_transition)
+            .lock_owned()
+            .await
     }
 
     async fn ensure_sfu_call_placement(
@@ -385,8 +385,27 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         &self,
         claims: RealtimeSessionClaims,
         now_unix_ms: i64,
-    ) -> Result<RealtimeJoinOutcome, CanonicalError> {
+    ) -> Result<RealtimeJoinOutcome, CanonicalError>
+    where
+        S: ConferenceJoinGrantStore,
+    {
         let _guard = self.sfu_placement_transition_guard().await;
+        // Redemption can precede this mutex. Recheck the SAME canonical
+        // grant owner inside the gate, before resurrecting a retired session.
+        if let Some(record) = self
+            .store
+            .conference_join_grant(&claims.scope, &claims.session_id)
+            .map_err(map_store_error)?
+        {
+            require_durable_grant_matches_claims(&record, &claims)?;
+            if record.revoked {
+                return Err(map_join_token_error(JoinTokenError::Revoked));
+            }
+        } else {
+            self.join_issuer
+                .validate_live_claims(&claims, now_unix_ms)
+                .map_err(map_join_token_error)?;
+        }
         self.ensure_sfu_call_placement(&claims).await?;
         match self.registry.join(claims.clone(), now_unix_ms) {
             Ok(outcome) => Ok(outcome),
@@ -405,8 +424,37 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         claims: &RealtimeSessionClaims,
         now_unix_ms: i64,
         expected_session_sequence: u64,
-    ) -> Result<(AttendanceTransition, Result<(), CanonicalError>), CanonicalError> {
+    ) -> Result<(AttendanceTransition, Result<(), CanonicalError>), CanonicalError>
+    where
+        S: ConferenceJoinGrantStore,
+    {
         let _guard = self.sfu_placement_transition_guard().await;
+        // A stale Leave must not revoke a valid, newer connection grant.
+        // The check, canonical revocation, and registry retirement share
+        // the same Join/Leave gate, preventing a reset to sequence 1 (ABA).
+        if expected_session_sequence == 0
+            || self
+                .registry
+                .heartbeat(claims, now_unix_ms)
+                .map_err(map_registry_error)?
+                != expected_session_sequence
+        {
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
+        if let Some(record) = self
+            .store
+            .conference_join_grant(&claims.scope, &claims.session_id)
+            .map_err(map_store_error)?
+        {
+            require_durable_grant_matches_claims(&record, claims)?;
+            self.store
+                .revoke_conference_join_grant(&claims.scope, &claims.session_id)
+                .map_err(map_store_error)?;
+        } else {
+            self.join_issuer
+                .revoke(&claims.scope, &claims.session_id)
+                .map_err(map_join_token_error)?;
+        }
         let transition = self
             .registry
             .leave_if_sequence(claims, expected_session_sequence, now_unix_ms)
