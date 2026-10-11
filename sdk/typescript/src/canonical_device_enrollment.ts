@@ -134,10 +134,23 @@ export function createUcrCanonicalDevicePreparation(
       const vaultScope: UcrDeviceVaultScope = Object.freeze({
         tenantId: item.tenantId, namespaceId: item.namespaceId, deviceId: item.deviceId,
       });
-      const before = await authority.inspect(item);
-      if (!before || before.deviceRevoked) {
+      const inspected = await authority.inspect(item);
+      if (!inspected || inspected.deviceRevoked) {
         throw new Error("canonical Device revoked or trust unavailable");
       }
+      // Snapshot the trust state before awaiting the endpoint vault. Host
+      // implementations may reuse/mutate inspection objects concurrently;
+      // a deleted active key must never switch a post-grant check to enrollment.
+      const before: UcrCanonicalDeviceTrust = {
+        deviceActive: inspected.deviceActive,
+        deviceRevoked: inspected.deviceRevoked,
+        activeKey: inspected.activeKey
+          ? {
+              keyId: inspected.activeKey.keyId,
+              publicKey: inspected.activeKey.publicKey.slice(),
+            }
+          : null,
+      };
       // Once a Call/Session grant has been issued, trust revalidation MUST
       // never turn missing server trust into an enrollment operation. Losing
       // the record is an authorization loss, not consent to re-register.
@@ -170,6 +183,11 @@ export function createUcrCanonicalDevicePreparation(
       }
       if (before.deviceActive) {
         throw new Error("existing Device requires independently approved key recovery");
+      }
+      // The post-issuance path MUST remain inspection-only even if a host
+      // mutates shared state while the private vault is being loaded.
+      if (requireExistingTrust) {
+        throw new Error("canonical Device revoked or trust unavailable");
       }
       // Reuse a staged but not-yet-approved local signer after transport failure.
       // The canonical server still independently authorizes registration.
