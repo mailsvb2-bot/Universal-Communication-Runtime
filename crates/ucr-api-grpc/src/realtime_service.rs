@@ -4257,7 +4257,10 @@ mod sfu_placement_lifecycle_tests {
             .conference_join_grant(&active.scope, &active.session_id)
             .expect("canonical read")
             .expect("durable record");
-        assert!(saved.revoked, "canonical owner must retain revocation tombstone");
+        assert!(
+            saved.revoked,
+            "canonical owner must retain revocation tombstone"
+        );
         assert_eq!(registry.active_session_count(), 0);
         assert_eq!(
             service
