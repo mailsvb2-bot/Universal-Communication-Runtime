@@ -96,22 +96,22 @@ pub(super) fn verify_v34_objects(connection: &Connection) -> Result<(), DurableS
     // v34..v50 have the original shape. v51 adds an explicit redaction bit;
     // silently accepting a missing bit could re-expose previously scrubbed IDs.
     let mut columns = vec![
-            ("tenant_id", "TEXT", 1, 1),
-            ("namespace_present", "INTEGER", 1, 2),
-            ("namespace_id", "TEXT", 1, 3),
-            ("session_id", "TEXT", 1, 4),
-            ("conference_id", "TEXT", 1, 0),
-            ("integration_id", "TEXT", 1, 0),
-            ("call_id", "TEXT", 1, 0),
-            ("participant_kind", "TEXT", 1, 0),
-            ("participant_id", "TEXT", 1, 0),
-            ("device_id", "TEXT", 1, 0),
-            ("issued_at_unix_ms", "INTEGER", 1, 0),
-            ("not_before_unix_ms", "INTEGER", 1, 0),
-            ("expires_at_unix_ms", "INTEGER", 1, 0),
-            ("use_policy", "TEXT", 1, 0),
-            ("revoked", "INTEGER", 1, 0),
-            ("redeemed", "INTEGER", 1, 0),
+        ("tenant_id", "TEXT", 1, 1),
+        ("namespace_present", "INTEGER", 1, 2),
+        ("namespace_id", "TEXT", 1, 3),
+        ("session_id", "TEXT", 1, 4),
+        ("conference_id", "TEXT", 1, 0),
+        ("integration_id", "TEXT", 1, 0),
+        ("call_id", "TEXT", 1, 0),
+        ("participant_kind", "TEXT", 1, 0),
+        ("participant_id", "TEXT", 1, 0),
+        ("device_id", "TEXT", 1, 0),
+        ("issued_at_unix_ms", "INTEGER", 1, 0),
+        ("not_before_unix_ms", "INTEGER", 1, 0),
+        ("expires_at_unix_ms", "INTEGER", 1, 0),
+        ("use_policy", "TEXT", 1, 0),
+        ("revoked", "INTEGER", 1, 0),
+        ("redeemed", "INTEGER", 1, 0),
     ];
     if super::read_schema_version(connection)? >= 51 {
         columns.push(("metadata_redacted", "INTEGER", 1, 0));
