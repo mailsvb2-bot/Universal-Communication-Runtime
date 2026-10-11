@@ -245,6 +245,47 @@ assert.equal(reapprovalsDuringVaultLoad, 0,
 assert.equal(mutableTrust.deviceActive, false);
 assert.equal(mutableTrust.activeKey, null);
 
+// A real revocation or competing Device registration may occur WHILE the
+// local endpoint proves possession of its staged signing key. The earlier
+// canonical inspect is no longer authoritative when signing completes.
+// Neither case may invoke remote approveNewDevice and restore revoked trust.
+for (const race of ["revoked", "other-device-registered"] as const) {
+  const freshScope = {tenantId:"first-party",namespaceId:null,
+    deviceId:`pending-${race}`,participantId:"authenticated-person"};
+  const localVault = createUcrBrowserProtectedDeviceVault(durableStore);
+  let raceState: "unregistered" | "revoked" | "other-device-registered" = "unregistered";
+  let racingApprovals = 0;
+  const racingVault = {
+    load: (scope: UcrDeviceVaultScope) => localVault.load(scope),
+    stageNew: (scope: UcrDeviceVaultScope) => localVault.stageNew(scope),
+    async signChallenge(scope: UcrDeviceVaultScope, challenge: Uint8Array) {
+      const proof = await localVault.signChallenge(scope, challenge);
+      raceState = race;
+      return proof;
+    },
+  };
+  const racingAuthority = {
+    async inspect() {
+      if (raceState === "revoked") {
+        return {deviceActive:false,deviceRevoked:true,activeKey:null};
+      }
+      if (raceState === "other-device-registered") {
+        return {deviceActive:true,deviceRevoked:false,
+          activeKey:{keyId:"other-key",publicKey:new Uint8Array(32).fill(9)}};
+      }
+      return {deviceActive:false,deviceRevoked:false,activeKey:null};
+    },
+    async approveNewDevice() {racingApprovals++;},
+  };
+  const prepareRacing = createUcrCanonicalDevicePreparation(racingAuthority, racingVault);
+  await assert.rejects(
+    prepareRacing(freshScope), /canonical Device trust changed before registration/,
+    `a Device ${race} while signing must not be registered`,
+  );
+  assert.equal(racingApprovals, 0,
+    `racy signer approval must not overwrite ${race} canonical trust`);
+}
+
 console.log("UCR_FIRST_PARTY_DEVICE_TO_GRANT_SEQUENCE_OK");
 
 console.log("UCR_CANONICAL_DEVICE_SEED_VAULT_CONFORMANCE_OK");
