@@ -1645,8 +1645,10 @@ async function leave(){
   ui.privacyMode.disabled=false;
   sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
-  if(wasActive&&leavingClaims){try{await api("/v1/realtime/leave",leavingClaims);}catch(_){}}
+  // The remote Leave is best effort: a hung control-plane request must not
+  // strand the browser on a disabled Join button after all capture has stopped.
   if(leaveGeneration===sessionLifecycleGeneration){ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;}
+  if(wasActive&&leavingClaims)void api("/v1/realtime/leave",leavingClaims).catch(()=>{});
 }
 function scheduleWaitingRoom(){
   const delay=claims.not_before-Date.now();
