@@ -128,10 +128,13 @@ Every future migration must be deterministic, versioned, preserve unsynced/durab
 
 ### Schema v51: bounded expired-grant redaction
 
-Schema v51 migrates v50 atomically by adding only the
-`conference_join_grants_expiry` index to the existing canonical
-`conference_join_grants` owner; it does not create a second Identity, phone,
-Device, session or authorization store. The retention operation preserves the
+Schema v51 migrates v50 atomically by adding the
+`conference_join_grants_expiry` index, an explicit `metadata_redacted` bit
+and a partial `conference_join_grants_pending_redaction` index to the
+existing canonical `conference_join_grants` owner. The marker is mandatory:
+an exact valid opaque ID can literally equal the display sentinel `expired`,
+so equality with that literal is not evidence of completed redaction.
+No second Identity, phone, Device, session or authorization store is created. The retention operation preserves the
 exact session-id and expiry as a rejected authorization tombstone while
 overwriting the expired Call, participant, Device and integration references.
 The stored conference ID and session ID remain security/metadata disclosures;
