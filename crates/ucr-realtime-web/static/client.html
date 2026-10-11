@@ -1519,7 +1519,7 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
     participantId:claims.participant_id,
     callId:claims.call_id,
     sessionId:claims.session_id
-  }));
+  }),!beforeJoin);
   if(!current()){
     throw new Error("Device enrollment completed after conference session retired");
   }

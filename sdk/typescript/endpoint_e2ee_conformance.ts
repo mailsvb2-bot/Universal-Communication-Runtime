@@ -712,12 +712,18 @@ assert.match(devicePrepareCode, /ucrCanonicalDeviceAuthority/);
 assert.match(devicePrepareCode, /ucrProtectedDeviceKeyVault/);
 assert.match(devicePrepareCode, /createUcrCanonicalDevicePreparation/);
 let canonicalDevicePreparations = 0;
+const canonicalPreparationModes: boolean[] = [];
+let canonicalTrustDeleted = false;
 const devicePrepareCtx: Record<string, any> = {
   claims: {tenant_id: "tenant", namespace_id: null, device_id: "device",
     participant_id: "member", call_id: "call", session_id: "session"},
   sessionLifecycleGeneration: 4, sessionActive: true,
-  window: {ucrPrepareCanonicalDevice: async (binding: any) => {
+  window: {ucrPrepareCanonicalDevice: async (binding: any, requireExistingTrust = false) => {
     assert.equal(binding.deviceId, "device");
+    canonicalPreparationModes.push(requireExistingTrust);
+    if (requireExistingTrust && canonicalTrustDeleted) {
+      throw new Error("canonical Device trust lost after signed Join");
+    }
     canonicalDevicePreparations++;
   }},
   requireCanonicalMediaHostReady() {},
@@ -731,6 +737,13 @@ devicePrepareCtx.sessionActive = true;
 await devicePrepareCtx.prepare(4);
 assert.equal(canonicalDevicePreparations, 2,
   "accepted Join revalidates canonical trust before media capture");
+assert.deepEqual(canonicalPreparationModes, [false, true],
+  "only post-Join revalidation must forbid Device re-enrollment");
+canonicalTrustDeleted = true;
+await assert.rejects(devicePrepareCtx.prepare(4), /trust lost after signed Join/);
+assert.equal(canonicalDevicePreparations, 2,
+  "withdrawn canonical trust must not silently re-enroll after Join");
+canonicalTrustDeleted = false;
 const joinScript = browser.slice(browser.indexOf("async function join(){"),
   browser.indexOf("function scheduleEntryRetry(){"));
 const preJoinIndex = joinScript.indexOf("await prepareCanonicalDeviceAfterJoin(generation,true);");
