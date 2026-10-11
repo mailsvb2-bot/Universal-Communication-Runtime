@@ -125,6 +125,7 @@ const canonicalScope = {tenantId:"first-party",namespaceId:null,deviceId:"owned-
 let active = false, revoked = false, firstEntryAuth = 0, grants = 0;
 let registered: {keyId:string;publicKey:Uint8Array} | null = null;
 let revokeDuringGrant = false, mismatchDevice = false;
+let deleteTrustDuringGrant = false, approvalCalls = 0;
 let mutateGrantAtRecheck = false;
 let latestIssuedGrant: {deviceId:string;joinFragment:string} | null = null;
 const host = {
@@ -146,6 +147,7 @@ const host = {
       activeKey:active && registered ? {...registered,publicKey:registered.publicKey.slice()} : null};
   },
   async approveNewDevice(_binding: unknown, key: {keyId:string;publicKey:Uint8Array}) {
+    approvalCalls++;
     registered = {keyId:key.keyId,publicKey:key.publicKey.slice()};
     active = true;
   },
@@ -154,6 +156,7 @@ const host = {
     assert.ok(active && registered && !revoked, "server may not issue for untrusted Device");
     grants++;
     if (revokeDuringGrant)revoked = true;
+    if (deleteTrustDuringGrant) {active = false; registered = null;}
     const issued = {...binding,deviceId:mismatchDevice?"other-device":binding.deviceId,
       callId:"call",sessionId:"session",joinFragment:"#ucr_join=server-signed-opaque"};
     latestIssuedGrant = issued;
@@ -184,6 +187,21 @@ revokeDuringGrant = false;
 mismatchDevice = true;
 await assert.rejects(launch(), /join grant differs from prepared Device/);
 mismatchDevice = false;
+
+// A trust record deleted after issuance MUST NOT be recreated by the
+// post-grant check. The local signer still exists, but registration is
+// forbidden at this stage even for a previously approved Device.
+const approvalsBeforeDeletion = approvalCalls;
+const grantsBeforeDeletion = grants;
+deleteTrustDuringGrant = true;
+await assert.rejects(launch(), /canonical Device revoked or trust unavailable/);
+assert.equal(grants, grantsBeforeDeletion + 1,
+  "test must simulate loss of trust after the canonical grant was issued");
+assert.equal(active, false);
+assert.equal(registered, null);
+assert.equal(approvalCalls, approvalsBeforeDeletion,
+  "a deleted canonical trust entry must never be silently re-enrolled");
+deleteTrustDuringGrant = false;
 console.log("UCR_FIRST_PARTY_DEVICE_TO_GRANT_SEQUENCE_OK");
 
 console.log("UCR_CANONICAL_DEVICE_SEED_VAULT_CONFORMANCE_OK");
