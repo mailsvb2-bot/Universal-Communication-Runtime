@@ -54,8 +54,16 @@ the exact scoped tenant, namespace, call, session, participant and Device identi
 If the authenticated host already exposes `window.ucrCanonicalDeviceAuthority` and
 `window.ucrProtectedDeviceKeyVault`, the reference browser now imports the
 same pinned ESM bundle and composes the preparation callback **automatically**,
-before the server redeems the join grant and then again before media capture. Existing hosts
-may also provide an explicit `window.ucrPrepareCanonicalDevice` override.
+before the server redeems the join grant and then again before media capture. Existing hosts may provide an explicit `window.ucrPrepareCanonicalDevice`
+override for FIRST enrollment before Join. The override is never invoked after
+the signed Join is accepted, because a legacy one-argument callback could
+silently ignore the inspection-only flag and re-register revoked trust.
+For post-Join verification the independently authenticated host MUST also
+expose `window.ucrCanonicalDeviceAuthority` and the matching protected
+signer vault; the browser composes the canonical verification directly, with
+`requireExistingTrust=true`. If no such authority exists the accepted Join
+is safely terminated before media capture. This is a deliberate fail-closed
+contract change for older hosts that only provided an opaque enrollment hook.
 
 The ESM bundle now exports `createUcrCanonicalDevicePreparation(authority, vault)`.
 The host may assign it to `window.ucrPrepareCanonicalDevice`:

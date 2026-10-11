@@ -1488,10 +1488,19 @@ async function heartbeat(){
 async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
   const current=()=>generation===sessionLifecycleGeneration&&
     (beforeJoin?!sessionActive:sessionActive);
+  // Never invoke host enrollment code after Leave / session retirement.
+  if(!current())throw new Error("Device enrollment completed after conference session retired");
+  if(!claims.device_id)throw new Error("Canonical Device identifier is required for trusted enrollment");
   let prepare=window.ucrPrepareCanonicalDevice;
-  // Compose the existing authenticated host Device/Trust and endpoint-owned
-  // secure key vault automatically. Only the host can grant registration.
-  if(typeof prepare!=="function"&&window.ucrCanonicalDeviceAuthority){
+  const authority=window.ucrCanonicalDeviceAuthority;
+  // A legacy explicit one-argument hook may REGISTER a Device and silently
+  // ignore requireExistingTrust. It is allowed ONLY before Join. Once the
+  // server accepted Join, inspection must use the canonical authenticated
+  // authority and never invoke a caller-supplied enrollment override.
+  if(!beforeJoin&&!authority){
+    throw new Error("Authenticated canonical Device/Trust authority required after Join");
+  }
+  if(authority&&(!beforeJoin||typeof prepare!=="function")){
     // The host must provide independently authenticated Device/Trust
     // authority. Only the local protected signer is provided by UCR itself.
     // Never create canonical Device trust from a realtime join fragment.
@@ -1507,11 +1516,12 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
       window.ucrProtectedDeviceKeyVault=module.createUcrBrowserProtectedDeviceVault();
     }
     prepare=module.createUcrCanonicalDevicePreparation(
-      window.ucrCanonicalDeviceAuthority,window.ucrProtectedDeviceKeyVault);
-    window.ucrPrepareCanonicalDevice=prepare;
+      authority,window.ucrProtectedDeviceKeyVault);
+    // Preserve explicit pre-Join enrollment, but post-Join ALWAYS use the
+    // independently authenticated, inspection-only canonical preparation.
+    if(beforeJoin)window.ucrPrepareCanonicalDevice=prepare;
   }
   if(typeof prepare!=="function")return;
-  if(!claims.device_id)throw new Error("Canonical Device identifier is required for trusted enrollment");
   await prepare(Object.freeze({
     tenantId:claims.tenant_id,
     namespaceId:claims.namespace_id??null,

@@ -712,18 +712,14 @@ assert.match(devicePrepareCode, /ucrCanonicalDeviceAuthority/);
 assert.match(devicePrepareCode, /ucrProtectedDeviceKeyVault/);
 assert.match(devicePrepareCode, /createUcrCanonicalDevicePreparation/);
 let canonicalDevicePreparations = 0;
-const canonicalPreparationModes: boolean[] = [];
-let canonicalTrustDeleted = false;
+// Deliberately use the legacy ONE-argument enrollment override. It ignores
+// a second requireExistingTrust argument and must NEVER run after Join.
 const devicePrepareCtx: Record<string, any> = {
   claims: {tenant_id: "tenant", namespace_id: null, device_id: "device",
     participant_id: "member", call_id: "call", session_id: "session"},
   sessionLifecycleGeneration: 4, sessionActive: true,
-  window: {ucrPrepareCanonicalDevice: async (binding: any, requireExistingTrust = false) => {
+  window: {ucrPrepareCanonicalDevice: async (binding: any) => {
     assert.equal(binding.deviceId, "device");
-    canonicalPreparationModes.push(requireExistingTrust);
-    if (requireExistingTrust && canonicalTrustDeleted) {
-      throw new Error("canonical Device trust lost after signed Join");
-    }
     canonicalDevicePreparations++;
   }},
   requireCanonicalMediaHostReady() {},
@@ -732,18 +728,14 @@ runInNewContext(devicePrepareCode + "\nthis.prepare = prepareCanonicalDeviceAfte
 devicePrepareCtx.sessionActive = false;
 await devicePrepareCtx.prepare(4, true);
 assert.equal(canonicalDevicePreparations, 1,
-  "independently authenticated Device preparation occurs before realtime join");
+  "legacy enrollment override is allowed before signed Join");
 devicePrepareCtx.sessionActive = true;
-await devicePrepareCtx.prepare(4);
-assert.equal(canonicalDevicePreparations, 2,
-  "accepted Join revalidates canonical trust before media capture");
-assert.deepEqual(canonicalPreparationModes, [false, true],
-  "only post-Join revalidation must forbid Device re-enrollment");
-canonicalTrustDeleted = true;
-await assert.rejects(devicePrepareCtx.prepare(4), /trust lost after signed Join/);
-assert.equal(canonicalDevicePreparations, 2,
-  "withdrawn canonical trust must not silently re-enroll after Join");
-canonicalTrustDeleted = false;
+await assert.rejects(devicePrepareCtx.prepare(4), /authenticated canonical Device\\/Trust authority required after Join/i);
+assert.equal(canonicalDevicePreparations, 1,
+  "a legacy one-argument enrollment hook cannot be called after Join");
+assert.match(devicePrepareCode, /authority&&\\(!beforeJoin\\|\\|typeof prepare!==/,
+// Reference client must bypass the explicit hook after Join even if supplied.
+  "the canonical post-Join path must not select a mutable enrollment override");
 const joinScript = browser.slice(browser.indexOf("async function join(){"),
   browser.indexOf("function scheduleEntryRetry(){"));
 const preJoinIndex = joinScript.indexOf("await prepareCanonicalDeviceAfterJoin(generation,true);");
@@ -753,11 +745,11 @@ assert.ok(preJoinIndex >= 0 && serverJoinIndex > preJoinIndex && postJoinIndex >
   "canonical Device is prepared before redeeming the join grant and rechecked afterwards");
 devicePrepareCtx.claims.device_id = null;
 await assert.rejects(devicePrepareCtx.prepare(4), /Canonical Device identifier/);
-assert.equal(canonicalDevicePreparations, 2, "unbound grant cannot register a Device");
+assert.equal(canonicalDevicePreparations, 1, "unbound grant cannot register a Device");
 devicePrepareCtx.claims.device_id = "device";
 devicePrepareCtx.sessionLifecycleGeneration = 5;
 await assert.rejects(devicePrepareCtx.prepare(4), /session retired/);
-assert.equal(canonicalDevicePreparations, 3, "stale enrollment cannot admit media");
+assert.equal(canonicalDevicePreparations, 1, "stale enrollment must not invoke host callbacks");
 
 const preflightSnippet = browser.slice(
   browser.indexOf("function requireCanonicalMediaHostReady(){"),
