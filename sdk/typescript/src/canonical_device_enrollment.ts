@@ -243,6 +243,17 @@ export function createUcrCanonicalDevicePreparation(
         publicKey: staged.publicKey.slice(),
       };
       await provePrivateKeyPossession(item, pendingSigner, vault);
+      // Key generation and Ed25519 possession proof are asynchronous. A
+      // canonical Device can be revoked or registered by a different
+      // authorized principal while signing is in flight. Re-inspect its
+      // existing owner BEFORE asking to approve our local public descriptor.
+      // The backend approveNewDevice MUST additionally enforce the same
+      // revocation and atomic conflict preconditions at commit time.
+      const beforeApproval = await authority.inspect(item);
+      if (!beforeApproval || beforeApproval.deviceRevoked ||
+          beforeApproval.deviceActive || beforeApproval.activeKey) {
+        throw new Error("canonical Device trust changed before registration");
+      }
       // Approve only the snapshot actually proven by the protected signer.
       await authority.approveNewDevice(item, pendingSigner);
       const after = await authority.inspect(item);
