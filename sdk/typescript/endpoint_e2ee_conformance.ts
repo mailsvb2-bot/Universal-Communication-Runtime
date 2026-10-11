@@ -1428,6 +1428,9 @@ const staleRejectedHeartbeat = admissionCtx.heartbeat();
 admissionCtx.sessionLifecycleGeneration++;
 rejectLateHeartbeat?.(new Error("heartbeat_rejected"));
 await staleRejectedHeartbeat;
+// A retired heartbeat belongs to the previous lifecycle; Leave resets the
+// in-flight latch before a fresh session can perform authorization.
+admissionCtx.heartbeatInFlight = false;
 admissionCtx.api = async () => {throw new Error("heartbeat_rejected");};
 await assert.rejects(admissionCtx.heartbeat(), /heartbeat_rejected/,
   "current heartbeat denial must still propagate to revocation handler");
