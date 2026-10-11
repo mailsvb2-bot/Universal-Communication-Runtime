@@ -915,6 +915,7 @@ injected.remove();
   const previousSetTimeout = window.setTimeout;
   const previousClaims = claims;
   const previousSignedGrantRetired = signedGrantRetired;
+  const previousActiveSessionSequence = activeSessionSequence;
   const previousE2eeEndpoint = window.ucrE2eeEndpoint;
   const deferred = () => {
     let resolve, reject;
@@ -932,6 +933,7 @@ injected.remove();
   };
   const oldHeartbeat = deferred(), oldLeave = deferred(), oldClose = deferred();
   let heartbeatCalls = 0, watchdog = null, closeOffer = null, joinCalls = 0;
+  let oldLeaveSequence = null, offlineLeaveSequence = null;
   try {
     claims = {tenant_id:"test-tenant",namespace_id:"test-namespace",
       call_id:"test-call",session_id:"test-session",not_before:0};
@@ -952,10 +954,14 @@ injected.remove();
         closeOffer = payload.offer_id;
         return oldClose.promise;
       }
-      if (path === "/v1/realtime/leave") return oldLeave.promise;
+      if (path === "/v1/realtime/leave") {
+        oldLeaveSequence = payload.expected_session_sequence;
+        return oldLeave.promise;
+      }
       throw new Error("Unexpected HTTP path: " + path);
     };
     signedGrantRetired = false;
+    activeSessionSequence = 1;
     sessionLifecycleGeneration++;
     sessionActive = true;mediaActive = true;
     heartbeatInFlight = false;
@@ -979,11 +985,13 @@ injected.remove();
     }
     check(events.includes("peer:watchdog"), "watchdog left WebRTC peer open");
     check(closeOffer === "A".repeat(43), "old owned WebRTC offer not closed");
+    check(oldLeaveSequence === 1, "retired Leave missing original server generation");
 
     // Emulate a separate, independently issued signed grant with a new
     // canonical session identity, not reuse of the retired grant.
     signedGrantRetired = false;
     claims = {...claims,session_id:"fresh-server-issued-session"};
+    activeSessionSequence = 2;
     // The old Leave and close requests remain pending during new admission.
     // They must not erase the new peer's identity or overwrite its UI.
     sessionLifecycleGeneration++;
@@ -1012,13 +1020,17 @@ injected.remove();
         closeOffer = payload.offer_id;
         return {ok:true};
       }
-      if (path === "/v1/realtime/leave") return {ok:true};
+      if (path === "/v1/realtime/leave") {
+        offlineLeaveSequence = payload.expected_session_sequence;
+        return {ok:true};
+      }
       throw new Error("Unexpected offline HTTP path: " + path);
     };
     capture("offline");
     screenShareBusy = true;
     window.dispatchEvent(new Event("offline"));
     check(!sessionActive && !mediaActive, "offline retained media authorization");
+    check(offlineLeaveSequence === 2, "offline Leave did not use new Join generation");
     for (const name of ["microphone","camera","screen"]) {
       check(events.includes("stop:offline:" + name), "offline kept " + name + " capturing");
     }
@@ -1056,12 +1068,14 @@ injected.remove();
       localCaptureStopped:true,screenCaptureStopped:true,
       ownedPeerClosed:true,staleLeaveJoinGuarded:true,
       offlineStopped:true,onlineDidNotReauthorize:true,
-      lateE2eeCleanupGuarded:true,currentE2eeCleanupReported:true};
+      lateE2eeCleanupGuarded:true,currentE2eeCleanupReported:true,
+      sequenceFencedLeave:true};
   } finally {
     api = previousApi;
     window.setTimeout = previousSetTimeout;
     claims = previousClaims;
     signedGrantRetired = previousSignedGrantRetired;
+    activeSessionSequence = previousActiveSessionSequence;
     if (previousE2eeEndpoint === undefined) delete window.ucrE2eeEndpoint;
     else window.ucrE2eeEndpoint = previousE2eeEndpoint;
     screenShareBusy = false;
