@@ -1923,16 +1923,14 @@ mod tests {
             "unfenced external Leave must fail closed"
         );
         assert_eq!(
-            registry.leave_if_sequence(
-                &claims,
-                first.transition.session_sequence,
-                18_004
-            ),
+            registry.leave_if_sequence(&claims, first.transition.session_sequence, 18_004),
             Err(RealtimeRegistryError::ClaimMismatch),
             "a delayed old Leave must not close a reconnected session"
         );
         assert_eq!(
-            registry.heartbeat(&claims, 18_005).expect("new session still active"),
+            registry
+                .heartbeat(&claims, 18_005)
+                .expect("new session still active"),
             second.transition.session_sequence
         );
         assert_eq!(registry.active_session_count(), 1);
