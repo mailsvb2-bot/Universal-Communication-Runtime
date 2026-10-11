@@ -866,6 +866,7 @@ let acceptedJoinCleanup = 0;
 let acceptedJoinHeartbeats = 0;
 const acceptedJoinCtx: Record<string, any> = {
   claims: {not_before: 0}, sessionLifecycleGeneration: 0,
+  signedGrantRetired: false, activeSessionSequence: 0,
   sessionActive: false, mediaActive: false, heartbeatTimer: null,
   ui: {state: {textContent: ""}, status: {textContent: ""},
     join: {disabled: false}, leave: {disabled: true},
@@ -876,7 +877,8 @@ const acceptedJoinCtx: Record<string, any> = {
     // then revalidate it after server admission before MLS policy activation.
     assert.equal(typeof beforeJoin, "boolean");
   },
-  api: async () => ({json: async () => ({ok: true, admission_state: "admitted"})}),
+  api: async () => ({json: async () => ({ok: true, admission_state: "admitted",
+    session_sequence: 1})}),
   body: () => ({}),
   applyMediaPolicy: async () => {throw new Error("MLS activation refused");},
   setInterval: () => {acceptedJoinHeartbeats++;return 1;},
