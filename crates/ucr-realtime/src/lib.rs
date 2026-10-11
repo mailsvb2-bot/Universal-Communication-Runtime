@@ -1900,6 +1900,51 @@ mod tests {
     }
 
     #[test]
+    fn delayed_leave_cannot_retire_a_new_connection_generation() {
+        let registry = RealtimeSessionRegistry::new(8, 4);
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("leave-fence-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("leave-fence-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let first = registry.join(claims.clone(), 18_001).expect("first join");
+        let second = registry.join(claims.clone(), 18_002).expect("reconnect");
+        assert!(second.transition.session_sequence > first.transition.session_sequence);
+
+        assert_eq!(
+            registry.leave_if_sequence(&claims, 0, 18_003),
+            Err(RealtimeRegistryError::ClaimMismatch),
+            "unfenced external Leave must fail closed"
+        );
+        assert_eq!(
+            registry.leave_if_sequence(
+                &claims,
+                first.transition.session_sequence,
+                18_004
+            ),
+            Err(RealtimeRegistryError::ClaimMismatch),
+            "a delayed old Leave must not close a reconnected session"
+        );
+        assert_eq!(
+            registry.heartbeat(&claims, 18_005).expect("new session still active"),
+            second.transition.session_sequence
+        );
+        assert_eq!(registry.active_session_count(), 1);
+
+        let retired = registry
+            .leave_if_sequence(&claims, second.transition.session_sequence, 18_006)
+            .expect("current Leave");
+        assert_eq!(retired.kind, AttendanceTransitionKind::Left);
+        assert_eq!(registry.active_session_count(), 0);
+    }
+
+    #[test]
     fn e2ee_egress_lookup_returns_only_exact_active_recipient_sessions() {
         let registry = RealtimeSessionRegistry::default();
         let alice = issuer()
