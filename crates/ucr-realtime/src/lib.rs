@@ -1370,13 +1370,44 @@ impl RealtimeSessionRegistry {
         }))
     }
 
-    /// Removes the exact session and returns its durable-attendance transition data.
+    /// Removes an exact session for internal rollback and lifecycle cleanup.
+    ///
+    /// An external network Leave must use `leave_if_sequence`, because an
+    /// earlier connection's delayed Leave must never retire a new Join.
     ///
     /// # Errors
-    /// Fails for claim mismatch, missing session, unavailable state, or sequence overflow.
+    /// Fails for mismatch, missing session, unavailable state, or overflow.
     pub fn leave(
         &self,
         claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<AttendanceTransition, RealtimeRegistryError> {
+        self.leave_matching_sequence(claims, None, now_unix_ms)
+    }
+
+    /// Retires only the connection generation established by the matching Join.
+    ///
+    /// The sequence comparison and removal happen under the same registry lock,
+    /// so a stale external Leave cannot remove an intervening reconnect.
+    ///
+    /// # Errors
+    /// Fails closed for a zero/stale sequence or absent/mismatched session.
+    pub fn leave_if_sequence(
+        &self,
+        claims: &RealtimeSessionClaims,
+        expected_session_sequence: u64,
+        now_unix_ms: i64,
+    ) -> Result<AttendanceTransition, RealtimeRegistryError> {
+        if expected_session_sequence == 0 {
+            return Err(RealtimeRegistryError::ClaimMismatch);
+        }
+        self.leave_matching_sequence(claims, Some(expected_session_sequence), now_unix_ms)
+    }
+
+    fn leave_matching_sequence(
+        &self,
+        claims: &RealtimeSessionClaims,
+        expected_session_sequence: Option<u64>,
         now_unix_ms: i64,
     ) -> Result<AttendanceTransition, RealtimeRegistryError> {
         let mut entries = self
@@ -1387,18 +1418,20 @@ impl RealtimeSessionRegistry {
             .iter()
             .position(|entry| same_session(entry, claims))
             .ok_or(RealtimeRegistryError::SessionUnavailable)?;
-        if entries[index].claims != *claims {
+        if entries[index].claims != *claims
+            || expected_session_sequence.is_some_and(|sequence| entries[index].sequence != sequence)
+        {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
-        let entry = entries.remove(index);
-        let sequence = entry
+        let next_sequence = entries[index]
             .sequence
             .checked_add(1)
             .ok_or(RealtimeRegistryError::SequenceOverflow)?;
+        entries.remove(index);
         Ok(AttendanceTransition {
             kind: AttendanceTransitionKind::Left,
             claims: claims.clone(),
-            session_sequence: sequence,
+            session_sequence: next_sequence,
             occurred_at_unix_ms: now_unix_ms,
         })
     }
