@@ -1364,7 +1364,8 @@ const admissionUi: Record<string, any> = {
 const admissionCtx: Record<string, any> = {
   ui: admissionUi, claims: {not_before: 0}, sessionActive: true,
   mediaActive: true, mediaCaptureGeneration: 0, sessionLifecycleGeneration: 0,
-  heartbeatRequestGeneration: 0,
+  heartbeatRequestGeneration: 0, heartbeatInFlight: false, heartbeatWatchdog: null,
+  HEARTBEAT_AUTH_TIMEOUT_MS: 12000, setTimeout: () => 1,
   requireCanonicalMediaHostReady() {},
   endpointMlsInvalidationGeneration: 0, endpointMlsBootstrapAbort: null,
   endpointMlsState: null, endpointMlsGroupId: null, window: {},
@@ -1431,25 +1432,22 @@ admissionCtx.api = async () => {throw new Error("heartbeat_rejected");};
 await assert.rejects(admissionCtx.heartbeat(), /heartbeat_rejected/,
   "current heartbeat denial must still propagate to revocation handler");
 
-// Older heartbeat must not overwrite a newer admission decision even if both
-// were authorized when they started and the HTTP responses arrive reordered.
+// Single-in-flight: repeated timer ticks cannot overlap an unverified heartbeat.
 const pendingHeartbeatResponses: Array<(value: any) => void> = [];
 admissionCtx.sessionActive = true;
 admissionCtx.api = async () => new Promise(resolve => {
   pendingHeartbeatResponses.push(resolve);
 });
 const olderHeartbeat = admissionCtx.heartbeat();
-const newerHeartbeat = admissionCtx.heartbeat();
-assert.equal(pendingHeartbeatResponses.length, 2);
-pendingHeartbeatResponses[1]({json: async () =>
-  ({admission_state: "waiting_room", media_policy: null})});
-await newerHeartbeat;
-const afterNewest = policyApplications;
+const ignoredConcurrentHeartbeat = admissionCtx.heartbeat();
+assert.equal(pendingHeartbeatResponses.length, 1,
+  "heartbeat must allow at most one in-flight authorization request");
+await ignoredConcurrentHeartbeat;
 pendingHeartbeatResponses[0]({json: async () =>
-  ({admission_state: "admitted", media_policy: null})});
+  ({admission_state: "waiting_room", media_policy: null})});
 await olderHeartbeat;
-assert.equal(policyApplications, afterNewest, "older heartbeat cannot override newer policy");
-assert.equal(admissionCtx.mediaActive, false, "late admission must remain withdrawn");
+assert.equal(admissionCtx.mediaActive, false,
+  "completed heartbeat must preserve withdrawn admission");
 
 // An already authorized join response can arrive after navigation/Leave.
 // It must not create a new active session or start microphone capture.
