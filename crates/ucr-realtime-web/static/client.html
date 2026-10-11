@@ -1209,13 +1209,13 @@ function teardownPeer(){
   if(peer){peer.onicecandidate=null;peer.ontrack=null;peer.ondatachannel=null;peer.onconnectionstatechange=null;peer.close();peer=null;}
   remoteStream=null;ui.remoteVideo.srcObject=null;ui.webrtcState.textContent="Idle";
 }
-async function closeServerPeer(keepalive=false){
+async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims=null){
   // Only an offer's owner can retire that attempt. An absent token must not
   // issue a session-wide close that could erase a new peer in another tab.
-  const offerId=startWebRtc.offerId;
-  if(!sessionActive||!offerId)return;
+  const offerId=retiredOfferId||startWebRtc.offerId;
+  if((!sessionActive&&!retiredOfferId)||!offerId)return;
   try{
-    await api("/v1/realtime/webrtc/close",{...body(),offer_id:offerId},undefined,keepalive);
+    await api("/v1/realtime/webrtc/close",{...(retiredClaims||body()),offer_id:offerId},undefined,keepalive);
     if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
   }catch(_){}
 }
@@ -1621,6 +1621,7 @@ async function endUnverifiedMedia(generation,message){
 async function leave(){
   const wasActive=sessionActive;
   const leavingClaims=wasActive?body():null;
+  const leavingOfferId=startWebRtc.offerId;
   sessionActive=false; // Revoke local authority before any awaited cleanup.
   // Invalidate late joins, heartbeats and permission prompts synchronously.
   ++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;mediaActive=false;
@@ -1634,7 +1635,7 @@ async function leave(){
   stopLocalCapture();
   // Stop screen tracks synchronously, even if remote cleanup never resolves.
   if(screenStream){screenStream.getTracks().forEach(track=>track.stop());screenStream=null;setScreenUi(false);}
-  void closeServerPeer().catch(()=>{});
+  if(leavingOfferId&&leavingClaims)void closeServerPeer(false,leavingOfferId,leavingClaims).catch(()=>{});
   ui.privacyMode.disabled=false;
   sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
