@@ -919,6 +919,7 @@ const protectedAdapter = {
 };
 const lifecycleCtx: Record<string, any> = {
   window: {},
+  sessionLifecycleGeneration: 0,
   e2eeActivationGeneration: 0,
   e2eeChannel: lifecycleChannel,
   e2eeAdapterReady: false,
