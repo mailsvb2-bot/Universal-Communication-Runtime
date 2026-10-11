@@ -9694,6 +9694,7 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
                     && grant.call_id.as_opaque() == &hidden
                     && grant.device_id.as_opaque() == &hidden
                     && grant.participant.principal_id.as_opaque() == &hidden
+                    && grant.participant.kind == PrincipalKind::Person
                     && grant.integration_id.as_opaque() == &hidden)
             {
                 continue;
