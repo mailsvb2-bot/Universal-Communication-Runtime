@@ -873,6 +873,135 @@ const done = arguments[arguments.length - 1];
         if full_hd_codec_probe.get("supported") and not full_hd_codec_probe.get("verified"):
             raise RuntimeError(f"Full HD codec encode/decode failed: {full_hd_codec_probe!r}")
 
+
+        # Execute the production page's real heartbeat/Leave/offline handlers in
+        # each desktop WebDriver browser. Only media tracks and HTTP are mocked:
+        # no device permissions, signed grants, or remote server are involved.
+        heartbeat_revocation_browser = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+(async () => {
+  const previousApi = api;
+  const previousSetTimeout = window.setTimeout;
+  const previousClaims = claims;
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise(r => {resolve = r;});
+    return {promise, resolve};
+  };
+  const check = (ok, detail) => {if (!ok) throw new Error(detail);};
+  const events = [];
+  const track = name => ({stop() {events.push("stop:" + name);}});
+  const capture = label => {
+    const tracks = [track(label + ":microphone"), track(label + ":camera")];
+    localStream = {getTracks: () => tracks};
+    screenStream = {getTracks: () => [track(label + ":screen")]};
+    peer = {close() {events.push("peer:" + label);}};
+  };
+  const oldHeartbeat = deferred(), oldLeave = deferred(), oldClose = deferred();
+  let heartbeatCalls = 0, watchdog = null, closeOffer = null;
+  try {
+    claims = {tenant_id:"test-tenant",namespace_id:"test-namespace",
+      call_id:"test-call",session_id:"test-session",not_before:0};
+    window.setTimeout = function(fn, delay, ...args) {
+      if (delay === HEARTBEAT_AUTH_TIMEOUT_MS) {
+        watchdog = {fire: () => fn(...args), delay};
+        return 999999;
+      }
+      return previousSetTimeout.call(window, fn, delay, ...args);
+    };
+    api = async (path, payload) => {
+      if (path === "/v1/realtime/heartbeat") {
+        heartbeatCalls++;
+        return oldHeartbeat.promise;
+      }
+      if (path === "/v1/realtime/webrtc/close") {
+        closeOffer = payload.offer_id;
+        return oldClose.promise;
+      }
+      if (path === "/v1/realtime/leave") return oldLeave.promise;
+      throw new Error("Unexpected HTTP path: " + path);
+    };
+    sessionLifecycleGeneration++;
+    sessionActive = true;mediaActive = true;
+    heartbeatInFlight = false;
+    startWebRtc.offerId = "A".repeat(43);
+    capture("watchdog");
+    const pendingHeartbeat = heartbeat();
+    await heartbeat(); // A second tick must not create another request.
+    check(heartbeatCalls === 1, "overlapping heartbeat HTTP requests");
+    check(watchdog?.delay === 12000, "missing bounded 12-second watchdog");
+    watchdog.fire(); // Deterministically simulate a stalled HTTP authorization.
+    check(!sessionActive && !mediaActive, "watchdog did not revoke session");
+    for (const name of ["microphone","camera","screen"]) {
+      check(events.includes("stop:watchdog:" + name), "watchdog kept " + name + " capturing");
+    }
+    check(events.includes("peer:watchdog"), "watchdog left WebRTC peer open");
+    check(closeOffer === "A".repeat(43), "old owned WebRTC offer not closed");
+
+    // The old Leave and close requests remain pending while a new Join starts.
+    // They must not erase the new peer's identity or overwrite its UI.
+    sessionLifecycleGeneration++;
+    sessionActive = true;mediaActive = true;
+    startWebRtc.offerId = "B".repeat(43);
+    ui.state.textContent = "New joined";
+    ui.status.textContent = "New session active";
+    ui.join.disabled = true;
+    oldClose.resolve({ok:true});
+    oldLeave.resolve({ok:true});
+    oldHeartbeat.resolve({json: async () => ({
+      admission_state:"admitted",media_policy:null
+    })});
+    await pendingHeartbeat;
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    check(startWebRtc.offerId === "B".repeat(43), "old close erased new offer");
+    check(sessionActive && mediaActive, "stale heartbeat revoked new session");
+    check(ui.state.textContent === "New joined" &&
+      ui.status.textContent === "New session active" && ui.join.disabled,
+      "late Leave overwrote new Join UI");
+
+    // Dispatch the browser's actual offline event, including a busy screen
+    // capture. Local tracks and the peer must stop before HTTP completes.
+    api = async (path, payload) => {
+      if (path === "/v1/realtime/webrtc/close") {
+        closeOffer = payload.offer_id;
+        return {ok:true};
+      }
+      if (path === "/v1/realtime/leave") return {ok:true};
+      throw new Error("Unexpected offline HTTP path: " + path);
+    };
+    capture("offline");
+    screenShareBusy = true;
+    window.dispatchEvent(new Event("offline"));
+    check(!sessionActive && !mediaActive, "offline retained media authorization");
+    for (const name of ["microphone","camera","screen"]) {
+      check(events.includes("stop:offline:" + name), "offline kept " + name + " capturing");
+    }
+    check(events.includes("peer:offline"), "offline left WebRTC peer open");
+    window.dispatchEvent(new Event("online"));
+    check(!sessionActive, "online silently reauthorized revoked session");
+    return {ok:true,heartbeatCalls,watchdogMs:watchdog.delay,
+      localCaptureStopped:true,screenCaptureStopped:true,
+      ownedPeerClosed:true,staleLeaveJoinGuarded:true,
+      offlineStopped:true,onlineDidNotReauthorize:true};
+  } finally {
+    api = previousApi;
+    window.setTimeout = previousSetTimeout;
+    claims = previousClaims;
+    screenShareBusy = false;
+    sessionActive = false;mediaActive = false;
+    startWebRtc.offerId = null;
+  }
+})().then(done).catch(error => done({ok:false,error:String(error)}));
+""",
+        )
+        if not isinstance(heartbeat_revocation_browser, dict) or not heartbeat_revocation_browser.get("ok"):
+            raise RuntimeError(
+                f"{args.browser} failed heartbeat/offline browser regression: "
+                f"{heartbeat_revocation_browser!r}"
+            )
+
         branding_failures = []
         if probe.get("brandName") != "UCR Browser Probe":
             branding_failures.append("brandName")
@@ -940,6 +1069,7 @@ const done = arguments[arguments.length - 1];
             failures.append(f"endpointWrappingKeyVault:{vault_after!r}")
         evidence = {
             "schema": "ucr.browser-compatibility.v1",
+            "heartbeat_revocation_browser": heartbeat_revocation_browser,
             "browser_requested": args.browser,
             "browser_name": reported.get("browserName"),
             "browser_version": reported.get("browserVersion"),
