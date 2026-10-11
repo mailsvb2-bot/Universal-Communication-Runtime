@@ -404,11 +404,12 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         &self,
         claims: &RealtimeSessionClaims,
         now_unix_ms: i64,
+        expected_session_sequence: u64,
     ) -> Result<(AttendanceTransition, Result<(), CanonicalError>), CanonicalError> {
         let _guard = self.sfu_placement_transition_guard().await;
         let transition = self
             .registry
-            .leave(claims, now_unix_ms)
+            .leave_if_sequence(claims, expected_session_sequence, now_unix_ms)
             .map_err(map_registry_error)?;
         let placement_cleanup = self
             .release_sfu_call_placement_if_inactive(claims, now_unix_ms)
@@ -602,7 +603,9 @@ where
                         let _ = self.rollback_realtime_join(&claims, now).await;
                         return Err(error);
                     }
-                    Ok(pb_realtime_session(&claims, admission, media_policy))
+                    Ok(pb_realtime_session(
+                        &claims, admission, media_policy, outcome.transition.session_sequence,
+                    ))
                 }
                 .await
             }
@@ -675,7 +678,9 @@ where
         request: Request<pb::RealtimeLeaveRequest>,
     ) -> Result<Response<pb::RealtimeLeaveResponse>, Status> {
         let token = decode_bearer_token(request.metadata());
-        let lookup = decode_realtime_lookup(request.into_inner());
+        let input = request.into_inner();
+        let expected_session_sequence = input.expected_session_sequence;
+        let lookup = decode_realtime_lookup_fields(input.scope, input.call_id, input.session_id);
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => {
                 async {
@@ -683,7 +688,7 @@ where
                         self.authenticated_claims(&token, &scope, &call_id, &session_id)?;
                     let now = self.now()?;
                     let (transition, placement_cleanup) = self
-                        .leave_realtime_session_with_sfu_placement(&claims, now)
+                        .leave_realtime_session_with_sfu_placement(&claims, now, expected_session_sequence)
                         .await?;
                     self.append_attendance(&transition)?;
                     conference_runtime(self)
@@ -3197,6 +3202,7 @@ fn pb_realtime_session(
     claims: &RealtimeSessionClaims,
     admission: pb::RealtimeAdmissionState,
     media_policy: Option<EffectiveRealtimeMediaPolicy>,
+    session_sequence: u64,
 ) -> pb::RealtimeSession {
     pb::RealtimeSession {
         scope: Some(pb_scope(&claims.scope)),
@@ -3211,6 +3217,7 @@ fn pb_realtime_session(
         heartbeat_interval_ms: REALTIME_HEARTBEAT_INTERVAL_MS,
         admission_state: admission as i32,
         media_policy: media_policy.map(pb_realtime_media_policy),
+        session_sequence,
     }
 }
 
