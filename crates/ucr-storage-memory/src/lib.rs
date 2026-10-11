@@ -9821,6 +9821,33 @@ mod expired_join_grant_privacy_tests {
         assert_eq!(cleaned.participant.kind, PrincipalKind::Person);
         assert!(cleaned.revoked && cleaned.redeemed);
         assert_eq!(store.prune_expired_conference_join_grants(500), Ok(0));
+
+        // Even a *Person* with every opaque association literally "expired"
+        // must be processed once and only once: content equality cannot
+        // stand in for a durable redaction-state bit.
+        let mut already_looking_redacted = colliding.clone();
+        already_looking_redacted.session_id =
+            SessionId::from_opaque(opaque("person-literal-expired"));
+        already_looking_redacted.participant.kind = PrincipalKind::Person;
+        already_looking_redacted.expires_at_unix_ms = 600;
+        assert_eq!(
+            store.persist_conference_join_grant(&already_looking_redacted),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        store
+            .redeem_conference_join_grant(
+                &already_looking_redacted.scope,
+                &already_looking_redacted.session_id,
+            )
+            .expect("redeem Person grant");
+        store
+            .revoke_conference_join_grant(
+                &already_looking_redacted.scope,
+                &already_looking_redacted.session_id,
+            )
+            .expect("revoke Person grant");
+        assert_eq!(store.prune_expired_conference_join_grants(600), Ok(1));
+        assert_eq!(store.prune_expired_conference_join_grants(600), Ok(0));
     }
 }
 
