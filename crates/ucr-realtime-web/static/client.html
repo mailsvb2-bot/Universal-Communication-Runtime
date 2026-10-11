@@ -736,6 +736,12 @@ function closeE2eeTransport(){
     ui.remoteVideo.classList.remove("hidden");
   }
   ++e2eeActivationGeneration;
+  // A retired adapter must never change the UI of a newly joined session.
+  const teardownLifecycle=sessionLifecycleGeneration;
+  const teardownActivation=e2eeActivationGeneration;
+  const teardownStillCurrent=()=>sessionActive&&
+    teardownLifecycle===sessionLifecycleGeneration&&
+    teardownActivation===e2eeActivationGeneration;
   ui.screenToggle.disabled=true;
   if(screenStream){
     const current=screenStream;screenStream=null;setScreenUi(false);
@@ -747,10 +753,10 @@ function closeE2eeTransport(){
       // stop() retires crypto immediately, but media cleanup can reject later.
       // Observe the Promise so failed device teardown never becomes an unhandled error.
       Promise.resolve(adapter.stop()).catch(()=>{
-        if(sessionActive)ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
+        if(teardownStillCurrent())ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
       });
     }catch(_){
-      if(sessionActive)ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
+      if(teardownStillCurrent())ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
     }
   }
   // The canonical bridge revokes permanently on stop. Never reuse a retired
