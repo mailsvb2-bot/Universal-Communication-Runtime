@@ -9786,6 +9786,36 @@ mod expired_join_grant_privacy_tests {
         );
         assert_eq!(store.prune_expired_conference_join_grants(200), Ok(0));
         assert_eq!(store.prune_expired_conference_join_grants(400), Ok(1));
+
+        // Legal opaque IDs may literally be "expired". An already revoked
+        // and redeemed record is not necessarily sanitized: the principal
+        // kind can still expose the real class of participant.
+        let marker = opaque("expired");
+        let mut colliding = base.clone();
+        colliding.session_id = SessionId::from_opaque(opaque("literal-collision-session"));
+        colliding.integration_id = IntegrationId::from_opaque(marker.clone());
+        colliding.call_id = CallId::from_opaque(marker.clone());
+        colliding.participant = PrincipalRef {
+            principal_id: ucr_model::PrincipalId::from_opaque(marker.clone()),
+            kind: PrincipalKind::ServiceAccount,
+        };
+        colliding.device_id = DeviceId::from_opaque(marker);
+        colliding.expires_at_unix_ms = 500;
+        assert_eq!(
+            store.persist_conference_join_grant(&colliding),
+            Ok(DurableRecordStatus::Persisted),
+        );
+        store.redeem_conference_join_grant(&colliding.scope, &colliding.session_id)
+            .expect("mark redeemed");
+        store.revoke_conference_join_grant(&colliding.scope, &colliding.session_id)
+            .expect("mark revoked");
+        assert_eq!(store.prune_expired_conference_join_grants(500), Ok(1));
+        let cleaned = store.conference_join_grant(&colliding.scope, &colliding.session_id)
+            .expect("read")
+            .expect("replay tombstone remains");
+        assert_eq!(cleaned.participant.kind, PrincipalKind::Person);
+        assert!(cleaned.revoked && cleaned.redeemed);
+        assert_eq!(store.prune_expired_conference_join_grants(500), Ok(0));
     }
 }
 
