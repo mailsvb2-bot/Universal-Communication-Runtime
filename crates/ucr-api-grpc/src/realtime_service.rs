@@ -4110,7 +4110,7 @@ mod sfu_placement_lifecycle_tests {
         );
         // With NO optional SFU placement owner, Join/Leave still serialize.
         let binding = claims("placeholder", "reusable-device");
-        let issued = issuer
+        let granted = issuer
             .issue(
                 binding.scope.clone(),
                 binding.call_id.clone(),
@@ -4120,7 +4120,7 @@ mod sfu_placement_lifecycle_tests {
                 1_000,
             )
             .expect("issue existing reusable grant");
-        let active = issued.claims;
+        let active = granted.claims;
         let first = service
             .admit_realtime_session_with_sfu_placement(active.clone(), 1_001)
             .await
@@ -4148,7 +4148,7 @@ mod sfu_placement_lifecycle_tests {
             issuer.validate_live_claims(&active, 1_003).is_ok(),
             "stale Leave must not revoke live grant"
         );
-        service
+        let (_, placement_cleanup) = service
             .leave_realtime_session_with_sfu_placement(
                 &active,
                 1_004,
@@ -4156,6 +4156,7 @@ mod sfu_placement_lifecycle_tests {
             )
             .await
             .expect("terminal Leave revokes grant");
+        placement_cleanup.expect("terminal placement cleanup");
         assert_eq!(registry.active_session_count(), 0);
         assert_eq!(
             issuer.validate_live_claims(&active, 1_005),
@@ -4210,7 +4211,7 @@ mod sfu_placement_lifecycle_tests {
             Arc::new(ConferenceRuntimeState::new()),
         );
         let binding = claims("durable-placeholder", "durable-device");
-        let issued = issuer
+        let granted = issuer
             .issue(
                 binding.scope,
                 binding.call_id,
@@ -4220,7 +4221,7 @@ mod sfu_placement_lifecycle_tests {
                 1_000,
             )
             .expect("canonical issue");
-        let active = issued.claims;
+        let active = granted.claims;
         store
             .persist_conference_join_grant(&ConferenceJoinGrantRecord {
                 scope: active.scope.clone(),
@@ -4245,7 +4246,7 @@ mod sfu_placement_lifecycle_tests {
             .admit_realtime_session_with_sfu_placement(active.clone(), 1_001)
             .await
             .expect("admit existing durable grant");
-        service
+        let (_, placement_cleanup) = service
             .leave_realtime_session_with_sfu_placement(
                 &active,
                 1_002,
@@ -4253,6 +4254,7 @@ mod sfu_placement_lifecycle_tests {
             )
             .await
             .expect("revoke and close durable grant");
+        placement_cleanup.expect("durable grant placement cleanup");
         let saved = store
             .conference_join_grant(&active.scope, &active.session_id)
             .expect("canonical read")
