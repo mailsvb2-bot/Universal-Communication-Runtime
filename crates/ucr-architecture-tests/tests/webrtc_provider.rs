@@ -174,10 +174,10 @@ fn browser_screen_sharing_stays_endpoint_only_and_privacy_first() {
         .expect("leave function close")
         .0;
     let local_screen_stop = leave
-        .find("await stopScreenShare(false)")
+        .find("screenStream.getTracks().forEach(track=>track.stop())")
         .expect("leave stops local screen capture");
     let server_close = leave
-        .find("await closeServerPeer()")
+        .find("closeServerPeer(false,leavingOfferId,leavingClaims)")
         .expect("leave requests server peer close");
     assert!(local_screen_stop < server_close);
 
