@@ -1366,7 +1366,7 @@ const admissionCtx: Record<string, any> = {
   ui: admissionUi, claims: {not_before: 0}, sessionActive: true,
   mediaActive: true, mediaCaptureGeneration: 0, sessionLifecycleGeneration: 0,
   heartbeatRequestGeneration: 0, heartbeatInFlight: false, heartbeatWatchdog: null,
-  signedGrantRetired: false,
+  signedGrantRetired: false, activeSessionSequence: 1,
   HEARTBEAT_AUTH_TIMEOUT_MS: 12000, setTimeout: () => 1,
   requireCanonicalMediaHostReady() {},
   endpointMlsInvalidationGeneration: 0, endpointMlsBootstrapAbort: null,
