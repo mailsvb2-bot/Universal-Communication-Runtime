@@ -2079,7 +2079,8 @@ fn test_remove_v49_objects(connection: &Connection) -> Result<(), rusqlite::Erro
     // the fresh v51 database and fails with an unrelated migration error.
     connection.execute_batch(
         "DROP INDEX IF EXISTS conference_join_grants_expiry;
-         DROP INDEX IF EXISTS conference_join_grants_pending_redaction;",
+         DROP INDEX IF EXISTS conference_join_grants_pending_redaction;
+         ALTER TABLE conference_join_grants DROP COLUMN metadata_redacted;",
     )?;
     test_restore_v49_mls_transition_shape(connection)?;
     connection.execute_batch(

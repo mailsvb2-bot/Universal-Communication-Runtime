@@ -9787,6 +9787,14 @@ mod expired_join_grant_privacy_tests {
         assert_eq!(store.prune_expired_conference_join_grants(200), Ok(0));
         assert_eq!(store.prune_expired_conference_join_grants(400), Ok(1));
 
+        assert_literal_expired_identifiers_still_redact(&store, &base);
+    }
+    // Legitimate opaque identifiers may equal the old redaction marker.
+    // The explicit redaction ledger, rather than string equality, owns state.
+    fn assert_literal_expired_identifiers_still_redact(
+        store: &MemoryLocalStore,
+        base: &ConferenceJoinGrantRecord,
+    ) {
         // Legal opaque IDs may literally be "expired". An already revoked
         // and redeemed record is not necessarily sanitized: the principal
         // kind can still expose the real class of participant.
@@ -9847,6 +9855,7 @@ mod expired_join_grant_privacy_tests {
         assert_eq!(store.prune_expired_conference_join_grants(600), Ok(1));
         assert_eq!(store.prune_expired_conference_join_grants(600), Ok(0));
     }
+
 }
 
 fn validate_memory_join_grant(grant: &ConferenceJoinGrantRecord) -> Result<(), DurableStoreError> {

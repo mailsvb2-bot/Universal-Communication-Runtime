@@ -3108,13 +3108,9 @@ where
         .conference_join_grant(&input.scope, &session_id)
         .map_err(map_store_error)?
     {
-        require_replayable_join_grant_context(
-            &existing,
-            &input.conference_id,
-            &input.integration_id,
-            now_unix_ms,
-        )?;
-        return pb_join_grant_from_record(issuer, &existing);
+        return replay_existing_join_grant(
+            issuer, &existing, &input.conference_id, &input.integration_id, now_unix_ms,
+        );
     }
 
     let conference = store
@@ -3191,16 +3187,25 @@ where
                 .conference_join_grant(&input.scope, &record.session_id)
                 .map_err(map_store_error)?
                 .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
-            require_replayable_join_grant_context(
-                &existing,
-                &record.conference_id,
-                &record.integration_id,
-                now_unix_ms,
-            )?;
-            pb_join_grant_from_record(issuer, &existing)
+            replay_existing_join_grant(
+                issuer, &existing, &record.conference_id, &record.integration_id, now_unix_ms,
+            )
         }
         Err(error) => Err(map_store_error(error)),
     }
+}
+
+fn replay_existing_join_grant(
+    issuer: &JoinTokenIssuer,
+    existing: &ConferenceJoinGrantRecord,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+    now_unix_ms: i64,
+) -> Result<pb::ConferenceJoinGrant, CanonicalError> {
+    require_replayable_join_grant_context(
+        existing, conference_id, integration_id, now_unix_ms,
+    )?;
+    pb_join_grant_from_record(issuer, existing)
 }
 
 fn durable_join_use_policy(value: RealtimeJoinGrantUsePolicy) -> ConferenceJoinGrantUsePolicy {
