@@ -9695,9 +9695,7 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
             ..
         } = &mut *state;
         for (key, grant) in conference_join_grants.iter_mut() {
-            if grant.expires_at_unix_ms > now_unix_ms
-                || redacted_join_grants.contains(key)
-            {
+            if grant.expires_at_unix_ms > now_unix_ms || redacted_join_grants.contains(key) {
                 continue;
             }
             grant.call_id = CallId::from_opaque(hidden.clone());
