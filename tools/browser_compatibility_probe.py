@@ -914,6 +914,7 @@ injected.remove();
   const previousApi = api;
   const previousSetTimeout = window.setTimeout;
   const previousClaims = claims;
+  const previousSignedGrantRetired = signedGrantRetired;
   const previousE2eeEndpoint = window.ucrE2eeEndpoint;
   const deferred = () => {
     let resolve, reject;
@@ -930,7 +931,7 @@ injected.remove();
     peer = {close() {events.push("peer:" + label);}};
   };
   const oldHeartbeat = deferred(), oldLeave = deferred(), oldClose = deferred();
-  let heartbeatCalls = 0, watchdog = null, closeOffer = null;
+  let heartbeatCalls = 0, watchdog = null, closeOffer = null, joinCalls = 0;
   try {
     claims = {tenant_id:"test-tenant",namespace_id:"test-namespace",
       call_id:"test-call",session_id:"test-session",not_before:0};
@@ -942,6 +943,7 @@ injected.remove();
       return previousSetTimeout.call(window, fn, delay, ...args);
     };
     api = async (path, payload) => {
+      if (path === "/v1/realtime/join") {joinCalls++; throw new Error("Retired grant tried to Join");}
       if (path === "/v1/realtime/heartbeat") {
         heartbeatCalls++;
         return oldHeartbeat.promise;
@@ -953,6 +955,7 @@ injected.remove();
       if (path === "/v1/realtime/leave") return oldLeave.promise;
       throw new Error("Unexpected HTTP path: " + path);
     };
+    signedGrantRetired = false;
     sessionLifecycleGeneration++;
     sessionActive = true;mediaActive = true;
     heartbeatInFlight = false;
@@ -965,14 +968,23 @@ injected.remove();
     check(watchdog?.delay === 12000, "missing bounded 12-second watchdog");
     watchdog.fire(); // Deterministically simulate a stalled HTTP authorization.
     check(!sessionActive && !mediaActive, "watchdog did not revoke session");
-    check(ui.join.disabled === false, "hung remote Leave kept Join disabled");
+    check(signedGrantRetired && ui.join.disabled,
+      "retired signed grant must block same-token Join despite hung Leave");
+    await join();
+    check(ui.join.disabled && ui.status.textContent.includes("fresh authorized call link"),
+      "retired signed grant did not reject rejoin");
+    check(joinCalls === 0, "retired session grant issued a second server Join");
     for (const name of ["microphone","camera","screen"]) {
       check(events.includes("stop:watchdog:" + name), "watchdog kept " + name + " capturing");
     }
     check(events.includes("peer:watchdog"), "watchdog left WebRTC peer open");
     check(closeOffer === "A".repeat(43), "old owned WebRTC offer not closed");
 
-    // The old Leave and close requests remain pending while a new Join starts.
+    // Emulate a separate, independently issued signed grant with a new
+    // canonical session identity, not reuse of the retired grant.
+    signedGrantRetired = false;
+    claims = {...claims,session_id:"fresh-server-issued-session"};
+    // The old Leave and close requests remain pending during new admission.
     // They must not erase the new peer's identity or overwrite its UI.
     sessionLifecycleGeneration++;
     sessionActive = true;mediaActive = true;
@@ -1013,6 +1025,8 @@ injected.remove();
     check(events.includes("peer:offline"), "offline left WebRTC peer open");
     window.dispatchEvent(new Event("online"));
     check(!sessionActive, "online silently reauthorized revoked session");
+    check(signedGrantRetired && ui.join.disabled,
+      "offline termination must retire the consumed signed grant");
 
     // A retiring E2EE adapter may reject its asynchronous stop after a fresh
     // Join has replaced the old session. Its error must not corrupt the UI.
@@ -1047,6 +1061,7 @@ injected.remove();
     api = previousApi;
     window.setTimeout = previousSetTimeout;
     claims = previousClaims;
+    signedGrantRetired = previousSignedGrantRetired;
     if (previousE2eeEndpoint === undefined) delete window.ucrE2eeEndpoint;
     else window.ucrE2eeEndpoint = previousE2eeEndpoint;
     screenShareBusy = false;
