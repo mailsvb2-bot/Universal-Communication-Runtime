@@ -914,10 +914,11 @@ injected.remove();
   const previousApi = api;
   const previousSetTimeout = window.setTimeout;
   const previousClaims = claims;
+  const previousE2eeEndpoint = window.ucrE2eeEndpoint;
   const deferred = () => {
-    let resolve;
-    const promise = new Promise(r => {resolve = r;});
-    return {promise, resolve};
+    let resolve, reject;
+    const promise = new Promise((res, rej) => {resolve = res; reject = rej;});
+    return {promise, resolve, reject};
   };
   const check = (ok, detail) => {if (!ok) throw new Error(detail);};
   const events = [];
@@ -1010,14 +1011,42 @@ injected.remove();
     check(events.includes("peer:offline"), "offline left WebRTC peer open");
     window.dispatchEvent(new Event("online"));
     check(!sessionActive, "online silently reauthorized revoked session");
+
+    // A retiring E2EE adapter may reject its asynchronous stop after a fresh
+    // Join has replaced the old session. Its error must not corrupt the UI.
+    const retiredAdapterStop = deferred();
+    window.ucrE2eeEndpoint = {stop: () => retiredAdapterStop.promise};
+    sessionLifecycleGeneration++;
+    sessionActive = true;
+    closeE2eeTransport();
+    sessionLifecycleGeneration++;
+    sessionActive = true;
+    ui.status.textContent = "New encrypted session active";
+    retiredAdapterStop.reject(new Error("retired adapter stop failed"));
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    check(ui.status.textContent === "New encrypted session active",
+      "late E2EE teardown error overwrote newly joined session");
+
+    // A cleanup failure belonging to the current live session must still be
+    // reported, rather than suppressed by the lifecycle guard.
+    window.ucrE2eeEndpoint = {stop() {throw new Error("active adapter stop failed");}};
+    sessionLifecycleGeneration++;
+    sessionActive = true;
+    ui.status.textContent = "Active encrypted session";
+    closeE2eeTransport();
+    check(ui.status.textContent === "Encrypted media cleanup failed; rejoin required.",
+      "current E2EE teardown error was hidden");
     return {ok:true,heartbeatCalls,watchdogMs:watchdog.delay,
       localCaptureStopped:true,screenCaptureStopped:true,
       ownedPeerClosed:true,staleLeaveJoinGuarded:true,
-      offlineStopped:true,onlineDidNotReauthorize:true};
+      offlineStopped:true,onlineDidNotReauthorize:true,
+      lateE2eeCleanupGuarded:true,currentE2eeCleanupReported:true};
   } finally {
     api = previousApi;
     window.setTimeout = previousSetTimeout;
     claims = previousClaims;
+    if (previousE2eeEndpoint === undefined) delete window.ucrE2eeEndpoint;
+    else window.ucrE2eeEndpoint = previousE2eeEndpoint;
     screenShareBusy = false;
     sessionActive = false;mediaActive = false;
     startWebRtc.offerId = null;
