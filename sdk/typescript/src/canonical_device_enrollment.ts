@@ -250,10 +250,21 @@ export function createUcrCanonicalDevicePreparation(
       // The backend approveNewDevice MUST additionally enforce the same
       // revocation and atomic conflict preconditions at commit time.
       const beforeApproval = await authority.inspect(item);
+      // Other tabs sharing the existing local IndexedDB signer may have
+      // completed canonical approval while this tab was signing. That is a
+      // legitimate idempotent success ONLY for the exact proven public key.
+      // Never reapprove a revoked Device, an inconsistent trust record, or a
+      // different Device signer. Approval itself must still be atomic on the
+      // canonical backend: this extra endpoint read cannot replace its CAS.
+      const approvedSameSigner = !!beforeApproval?.deviceActive &&
+        !beforeApproval.deviceRevoked && !!beforeApproval.activeKey &&
+        beforeApproval.activeKey.keyId === pendingSigner.keyId &&
+        equalPublicKeys(beforeApproval.activeKey.publicKey, pendingSigner.publicKey);
       if (!beforeApproval || beforeApproval.deviceRevoked ||
-          beforeApproval.deviceActive || beforeApproval.activeKey) {
+          ((beforeApproval.deviceActive || beforeApproval.activeKey) && !approvedSameSigner)) {
         throw new Error("canonical Device trust changed before registration");
       }
+      if (approvedSameSigner) return;
       // Approve only the snapshot actually proven by the protected signer.
       await authority.approveNewDevice(item, pendingSigner);
       const after = await authority.inspect(item);
