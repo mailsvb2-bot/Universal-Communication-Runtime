@@ -109,9 +109,33 @@ fn dispatcher_delivers_over_real_public_https_and_acks() {
     let clock = SystemEventDeliveryClock;
     let dispatcher = EventWebhookDispatcher::new(&clock, &store, &sink);
 
-    assert_eq!(
-        dispatcher.dispatch_once(&scope, &subscription_id),
-        Ok(WebhookDispatchOutcome::Delivered)
+    // A real Internet delivery can time out on a single TLS attempt. Exercise
+    // the existing canonical retry/backoff owner rather than falsely equating
+    // one transient network failure with a permanent delivery regression.
+    // Every attempt still uses actual public HTTPS, signed payload, and the
+    // same durable event cursor. If all provider attempts fail, this stays RED.
+    let mut delivered = false;
+    for _ in 0..12 {
+        match dispatcher
+            .dispatch_once(&scope, &subscription_id)
+            .expect("canonical webhook dispatch")
+        {
+            WebhookDispatchOutcome::Delivered => {
+                delivered = true;
+                break;
+            }
+            WebhookDispatchOutcome::RetryScheduled => {}
+            WebhookDispatchOutcome::RetryAfter { retry_after_ms } => {
+                std::thread::sleep(Duration::from_millis(
+                    retry_after_ms.saturating_add(25).min(5_000),
+                ));
+            }
+            other => panic!("public HTTPS delivery failed closed: {other:?}"),
+        }
+    }
+    assert!(
+        delivered,
+        "public HTTPS must reach a verified successful delivery"
     );
     assert_eq!(
         dispatcher.dispatch_once(&scope, &subscription_id),
