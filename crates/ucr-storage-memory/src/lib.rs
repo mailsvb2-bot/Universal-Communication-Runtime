@@ -9855,7 +9855,6 @@ mod expired_join_grant_privacy_tests {
         assert_eq!(store.prune_expired_conference_join_grants(600), Ok(1));
         assert_eq!(store.prune_expired_conference_join_grants(600), Ok(0));
     }
-
 }
 
 fn validate_memory_join_grant(grant: &ConferenceJoinGrantRecord) -> Result<(), DurableStoreError> {
