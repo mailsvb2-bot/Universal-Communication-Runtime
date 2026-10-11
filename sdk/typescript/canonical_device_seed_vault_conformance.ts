@@ -245,6 +245,93 @@ assert.equal(reapprovalsDuringVaultLoad, 0,
 assert.equal(mutableTrust.deviceActive, false);
 assert.equal(mutableTrust.activeKey, null);
 
+// A real revocation or competing Device registration may occur WHILE the
+// local endpoint proves possession of its staged signing key. The earlier
+// canonical inspect is no longer authoritative when signing completes.
+// Neither case may invoke remote approveNewDevice and restore revoked trust.
+for (const race of ["revoked", "other-device-registered"] as const) {
+  const freshScope = {tenantId:"first-party",namespaceId:null,
+    deviceId:`pending-${race}`,participantId:"authenticated-person"};
+  const localVault = createUcrBrowserProtectedDeviceVault(durableStore);
+  let raceState: "unregistered" | "revoked" | "other-device-registered" = "unregistered";
+  let racingApprovals = 0;
+  const racingVault = {
+    load: (scope: UcrDeviceVaultScope) => localVault.load(scope),
+    stageNew: (scope: UcrDeviceVaultScope) => localVault.stageNew(scope),
+    async signChallenge(scope: UcrDeviceVaultScope, challenge: Uint8Array) {
+      const proof = await localVault.signChallenge(scope, challenge);
+      raceState = race;
+      return proof;
+    },
+  };
+  const racingAuthority = {
+    async inspect() {
+      if (raceState === "revoked") {
+        return {deviceActive:false,deviceRevoked:true,activeKey:null};
+      }
+      if (raceState === "other-device-registered") {
+        return {deviceActive:true,deviceRevoked:false,
+          activeKey:{keyId:"other-key",publicKey:new Uint8Array(32).fill(9)}};
+      }
+      return {deviceActive:false,deviceRevoked:false,activeKey:null};
+    },
+    async approveNewDevice() {racingApprovals++;},
+  };
+  const prepareRacing = createUcrCanonicalDevicePreparation(racingAuthority, racingVault);
+  await assert.rejects(
+    prepareRacing(freshScope), /canonical Device trust changed before registration/,
+    `a Device ${race} while signing must not be registered`,
+  );
+  assert.equal(racingApprovals, 0,
+    `racy signer approval must not overwrite ${race} canonical trust`);
+}
+
+// Cross-tab first entry: the existing IndexedDB store gives both tabs the
+// SAME staged Ed25519 signer, but one tab may finish approval while the other
+// is performing its proof. The late tab must accept the matching *canonical*
+// active key without trying to approve it again.
+const simultaneousScope = {tenantId:"first-party",namespaceId:null,
+  deviceId:"shared-cross-tab-device",participantId:"authenticated-person"};
+const sharedSignerVault = createUcrBrowserProtectedDeviceVault(durableStore);
+let approvedCrossTabSigner: {keyId:string;publicKey:Uint8Array} | null = null;
+let crossTabApprovals = 0;
+const crossTabAuthority = {
+  async inspect() {
+    return {
+      deviceActive: approvedCrossTabSigner !== null,
+      deviceRevoked: false,
+      activeKey: approvedCrossTabSigner
+        ? {keyId: approvedCrossTabSigner.keyId,publicKey:approvedCrossTabSigner.publicKey.slice()}
+        : null,
+    };
+  },
+  async approveNewDevice(_binding: unknown, signer: {keyId:string;publicKey:Uint8Array}) {
+    crossTabApprovals++;
+    assert.equal(approvedCrossTabSigner, null, "duplicate canonical approval must never happen");
+    approvedCrossTabSigner = {keyId:signer.keyId,publicKey:signer.publicKey.slice()};
+  },
+};
+const winningTab = createUcrCanonicalDevicePreparation(crossTabAuthority, sharedSignerVault);
+let winnerStarted = false;
+const delayedTabVault = {
+  load: (scope: UcrDeviceVaultScope) => sharedSignerVault.load(scope),
+  stageNew: (scope: UcrDeviceVaultScope) => sharedSignerVault.stageNew(scope),
+  async signChallenge(scope: UcrDeviceVaultScope, challenge: Uint8Array) {
+    const signature = await sharedSignerVault.signChallenge(scope, challenge);
+    if (!winnerStarted) {
+      winnerStarted = true;
+      await winningTab(simultaneousScope);
+    }
+    return signature;
+  },
+};
+const lateTab = createUcrCanonicalDevicePreparation(crossTabAuthority, delayedTabVault);
+await lateTab(simultaneousScope);
+assert.equal(winnerStarted, true, "the competing tab must finish during the first tab's proof");
+assert.equal(crossTabApprovals, 1, "matching concurrent signer requires only ONE approval");
+assert.equal((await sharedSignerVault.load(simultaneousScope))?.keyId,
+  approvedCrossTabSigner?.keyId, "the winning canonical key must be the shared local signer");
+
 console.log("UCR_FIRST_PARTY_DEVICE_TO_GRANT_SEQUENCE_OK");
 
 console.log("UCR_CANONICAL_DEVICE_SEED_VAULT_CONFORMANCE_OK");
