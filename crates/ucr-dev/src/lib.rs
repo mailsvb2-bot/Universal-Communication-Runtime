@@ -1865,18 +1865,17 @@ async fn join_and_leave_dev_realtime(
         .await
         .map_err(|error| format!("self-check JoinRealtime: {error}"))?
         .into_inner();
-    require_result(
-        matches!(
-            joined.result,
-            Some(pb::realtime_join_response::Result::Session(_))
-        ),
-        "JoinRealtime",
-    )?;
+    let session_sequence = match joined.result {
+        Some(pb::realtime_join_response::Result::Session(session)) => session.session_sequence,
+        _ => return Err("self-check JoinRealtime rejected".to_owned()),
+    };
+    require_result(session_sequence > 0, "JoinRealtime session generation")?;
 
     let mut leave = Request::new(pb::RealtimeLeaveRequest {
         scope: Some(pb_scope(&env.scope)),
         call_id: Some(call_id),
         session_id: Some(session_id.clone()),
+        expected_session_sequence: session_sequence,
     });
     attach_realtime_bearer(&mut leave, token)?;
     let left = realtime
