@@ -3285,7 +3285,7 @@ where
         + CommandAcceptanceStore
         + GroupCallLookupStore,
 {
-    accept_integration_mutation(
+    let accepted = accept_integration_mutation_receipt(
         store,
         scope,
         integration_id,
@@ -3298,6 +3298,18 @@ where
         .conference_join_grant(scope, session_id)
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    // An exact duplicate of a previously accepted revoke may arrive after
+    // sensitive grant fields are scrubbed. The canonical accepted command
+    // authenticates scope/integration/payload; the still-durable session and
+    // conference tombstone prove that the requested terminal state exists.
+    // An initial request must still pass the unredacted context checks.
+    if accepted.duplicate
+        && record.conference_id == *conference_id
+        && record.revoked
+        && record.redeemed
+    {
+        return Ok(());
+    }
     require_join_grant_context(&record, conference_id, integration_id)?;
     if !store
         .call_belongs_to_group(scope, conference_id, &record.call_id)
@@ -4753,6 +4765,20 @@ mod universal_runtime_tests {
         )
         .expect_err("expired original grant is not replayable");
         assert_eq!(before_cleanup.code, CanonicalErrorCode::Conflict);
+        // The same accepted revoke must acknowledge a retry AFTER metadata
+        // minimization without reopening authorization or losing idempotency.
+        let original_revoke = || {
+            super::revoke_join_grant(
+                store,
+                &scope(),
+                &conference().conference_id,
+                &conference().integration_id,
+                session_id,
+                "flow-revoke-late-retry",
+                b"flow-revoke-late-retry-payload".to_vec(),
+            )
+        };
+        original_revoke().expect("original revocation");
         // A replay of the original accepted issuance command must NEVER
         // mint a new live bearer after the expired grant's sensitive fields
         // have been sanitized. Its session tombstone remains authoritative.
@@ -4778,6 +4804,7 @@ mod universal_runtime_tests {
         )
         .expect_err("valid opaque ID redaction collision must reject replay");
         assert_eq!(collision.code, CanonicalErrorCode::Conflict);
+        original_revoke().expect("identical revoked grant retry after redaction");
         let replay = issue_join_grant(
             store,
             issuer,
