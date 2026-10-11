@@ -44,18 +44,31 @@ claim that canonical admission is already valid.
 
 ### Independently authenticated Device preparation (before and after Join)
 
-The reference client now invokes `window.ucrPrepareCanonicalDevice(binding)`, when supplied,
-**before redeeming** the signed realtime join grant, then invokes it again
-**after** the server has accepted Join and **before** media capture.
-Both invocations require the host's independently authenticated canonical
-Device/Trust backend. The join fragment itself is never registration authority.
-The second check refuses trust revoked or rotated during join. The binding carries
-the exact scoped tenant, namespace, call, session, participant and Device identifiers.
-If the authenticated host already exposes `window.ucrCanonicalDeviceAuthority` and
-`window.ucrProtectedDeviceKeyVault`, the reference browser now imports the
-same pinned ESM bundle and composes the preparation callback **automatically**,
-before the server redeems the join grant and then again before media capture. Existing hosts
-may also provide an explicit `window.ucrPrepareCanonicalDevice` override.
+The reference client may invoke the host's explicit
+`window.ucrPrepareCanonicalDevice(binding)` hook **only before** redeeming the
+signed realtime join grant. The hook must use independent first-party
+authentication; the join fragment itself never authorizes registration.
+After the server accepts Join and **before** media capture, the reference client
+MUST validate already-active Device trust through
+`window.ucrCanonicalDeviceAuthority`, never through the possibly registering
+explicit hook. The canonical verifier uses `requireExistingTrust=true`,
+so it can neither create nor re-enroll a Device if trust was deleted or revoked
+during Join. Both steps bind tenant, namespace, participant, Device, Call and
+session to existing canonical owners.
+
+If `window.ucrCanonicalDeviceAuthority` is available, the browser loads its
+same-origin pinned ESM bundle and composes
+`createUcrCanonicalDevicePreparation` with
+`window.ucrProtectedDeviceKeyVault`, creating the latter in its existing
+encrypted IndexedDB vault if the host did not supply it. An explicit enrollment
+hook remains allowed for the **pre-Join** step only; it is *never invoked*
+after the signed Join is accepted, because a legacy one-argument callback could
+silently ignore the inspection-only flag. Hosts supplying such an override MUST
+also expose their independently authenticated canonical Device/Trust authority
+(and compatible protected signer vault). Missing authority or trust fails closed,
+terminating the accepted session before media capture. This is a deliberate
+fail-closed integration-contract change for older hosts relying solely on
+opaque enrollment callbacks.
 
 The ESM bundle now exports `createUcrCanonicalDevicePreparation(authority, vault)`.
 The host may assign it to `window.ucrPrepareCanonicalDevice`:
@@ -175,6 +188,42 @@ concurrent capture revocation, and measured full-HD quality and latency.
 6. On restart, restore the endpoint-owned signer and sealed MLS state. A lost signer requires existing explicit Recovery, never silent self-enrollment from a link.
 
 The host must provide a concrete authenticated enrollment/provisioning endpoint before this can become a standalone user journey. No second cryptographic authority, shadow Device table, persistent telephone directory, server-retained signing seed, or database of phone numbers is introduced by this integration. The existing canonical Device/Trust/Identity persistence remains in use; this is **not** a stateless/no-data product claim.
+
+## Browser-local protected Device signer (implemented, not user authentication)
+
+The reference browser now builds the endpoint-owned `UcrCanonicalDeviceKeyVault`
+automatically when — and **only when** — an independently authenticated
+`window.ucrCanonicalDeviceAuthority` exists. The vault lives in the
+**existing** `ucr-endpoint-state-v1` IndexedDB database,
+`wrapping-key-vault` object store; its key is the canonical
+tenant/namespace/Device tuple, **not** Call, Session, telephone or participant.
+A device signer is staged with an atomic IndexedDB `add`: concurrent tabs
+cannot silently rotate the original signer.
+
+Only the 32-byte Ed25519 public descriptor and its key ID may be supplied for
+canonical trusted-key registration. The private signing seed is AES-GCM
+encrypted using an unextractable browser `CryptoKey`, and not sent to UCR
+servers. The same local signer is restored after a page reload. Signer proof
+uses real Ed25519, and the short-lived seed passed to a preauthorized
+Rust/WASM media bridge is zeroed after use with a canonical trust recheck.
+
+The `createUcrFirstPartyCallEntry(host, vault)` coordinator is also exported:
+one click resumes an **independently authenticated** canonical user/Device,
+prepares and proves the Device signer **without a Call**, asks the canonical
+backend to issue its Device-bound signed Join fragment, and revalidates the
+same Device after grant issuance to catch concurrent revocation. A double
+click shares one pending operation. The coordinator is not a BFF or a new
+identity owner; it cannot issue a cryptographically trusted grant itself.
+
+**Limitations and release gates:** IndexedDB/WebCrypto are not a TPM,
+hardware-backed keystore, browser-origin compromise defense or cross-device
+recovery. The existing auth owner must still independently approve
+registration; the grant fragment cannot authorize its own signer. The
+first-party user-authenticated backend/BFF to register Identity and Device
+before granting a Call, active negotiation bindings, two actual Device media
+streams over TURN/NAT, and on-device A/V measurements are **not implemented**
+by this vault and remain open under issue #274. A protected local key is not
+a permission to start sending media.
 
 ## Canonical Service Principal Device trust RPC (P0 integration seam)
 

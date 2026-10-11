@@ -712,6 +712,8 @@ assert.match(devicePrepareCode, /ucrCanonicalDeviceAuthority/);
 assert.match(devicePrepareCode, /ucrProtectedDeviceKeyVault/);
 assert.match(devicePrepareCode, /createUcrCanonicalDevicePreparation/);
 let canonicalDevicePreparations = 0;
+// Deliberately use the legacy ONE-argument enrollment override. It ignores
+// a second requireExistingTrust argument and must NEVER run after Join.
 const devicePrepareCtx: Record<string, any> = {
   claims: {tenant_id: "tenant", namespace_id: null, device_id: "device",
     participant_id: "member", call_id: "call", session_id: "session"},
@@ -726,11 +728,13 @@ runInNewContext(devicePrepareCode + "\nthis.prepare = prepareCanonicalDeviceAfte
 devicePrepareCtx.sessionActive = false;
 await devicePrepareCtx.prepare(4, true);
 assert.equal(canonicalDevicePreparations, 1,
-  "independently authenticated Device preparation occurs before realtime join");
+  "legacy enrollment override is allowed before signed Join");
 devicePrepareCtx.sessionActive = true;
-await devicePrepareCtx.prepare(4);
-assert.equal(canonicalDevicePreparations, 2,
-  "accepted Join revalidates canonical trust before media capture");
+await assert.rejects(devicePrepareCtx.prepare(4), /authenticated canonical Device.Trust authority required after Join/i);
+assert.equal(canonicalDevicePreparations, 1,
+  "a legacy one-argument enrollment hook cannot be called after Join");
+assert.ok(devicePrepareCode.includes('if(authority&&(!beforeJoin||typeof prepare!=="function"))'),
+  "the canonical post-Join path must not select a mutable enrollment override");
 const joinScript = browser.slice(browser.indexOf("async function join(){"),
   browser.indexOf("function scheduleEntryRetry(){"));
 const preJoinIndex = joinScript.indexOf("await prepareCanonicalDeviceAfterJoin(generation,true);");
@@ -740,11 +744,11 @@ assert.ok(preJoinIndex >= 0 && serverJoinIndex > preJoinIndex && postJoinIndex >
   "canonical Device is prepared before redeeming the join grant and rechecked afterwards");
 devicePrepareCtx.claims.device_id = null;
 await assert.rejects(devicePrepareCtx.prepare(4), /Canonical Device identifier/);
-assert.equal(canonicalDevicePreparations, 2, "unbound grant cannot register a Device");
+assert.equal(canonicalDevicePreparations, 1, "unbound grant cannot register a Device");
 devicePrepareCtx.claims.device_id = "device";
 devicePrepareCtx.sessionLifecycleGeneration = 5;
 await assert.rejects(devicePrepareCtx.prepare(4), /session retired/);
-assert.equal(canonicalDevicePreparations, 3, "stale enrollment cannot admit media");
+assert.equal(canonicalDevicePreparations, 1, "stale enrollment must not invoke host callbacks");
 
 const preflightSnippet = browser.slice(
   browser.indexOf("function requireCanonicalMediaHostReady(){"),

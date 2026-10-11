@@ -485,8 +485,54 @@ Promise.resolve()
             [persistence_key],
         )
 
+        # Exercise the real browser's existing IndexedDB object store and
+        # WebCrypto: a Device signer MUST survive page reload without minting
+        # another private key or requiring a Call/Session-scoped vault key.
+        probe_device_id = f"browser-device-signer-{args.browser}"
+        signer_initial = execute_async(
+            base,
+            """
+const done=arguments[arguments.length-1], deviceId=arguments[0];
+(async()=>{
+ const mod=await import("./endpoint-media/reference_browser_media_installer.js");
+ const vault=mod.createUcrBrowserProtectedDeviceVault();
+ const scope={tenantId:"browser-probe",namespaceId:null,deviceId};
+ const first=await vault.stageNew(scope);
+ const challenge=crypto.getRandomValues(new Uint8Array(64));
+ const sig=await vault.signChallenge(scope,challenge);
+ const key=await crypto.subtle.importKey("raw",first.publicKey,{name:"Ed25519"},false,["verify"]);
+ const ok=await crypto.subtle.verify("Ed25519",key,sig,challenge);
+ done({ok,keyId:first.keyId});
+})().catch(e=>done({ok:false,error:String(e)}));
+""",
+            [probe_device_id],
+        )
+        if not isinstance(signer_initial, dict) or signer_initial.get("ok") is not True:
+            raise RuntimeError(f"protected Device key staging failed: {signer_initial!r}")
+
         request_json("POST", f"{base}/refresh", {})
         time.sleep(0.5)
+
+        signer_restored = execute_async(
+            base,
+            """
+const done=arguments[arguments.length-1], deviceId=arguments[0], expected=arguments[1];
+(async()=>{
+ const mod=await import("./endpoint-media/reference_browser_media_installer.js");
+ const vault=mod.createUcrBrowserProtectedDeviceVault();
+ const scope={tenantId:"browser-probe",namespaceId:null,deviceId};
+ const restored=await vault.load(scope);
+ if(!restored||restored.keyId!==expected)throw Error("Device signer changed on restart");
+ const challenge=crypto.getRandomValues(new Uint8Array(64));
+ const sig=await vault.signChallenge(scope,challenge);
+ const key=await crypto.subtle.importKey("raw",restored.publicKey,{name:"Ed25519"},false,["verify"]);
+ done({ok:await crypto.subtle.verify("Ed25519",key,sig,challenge)});
+})().catch(e=>done({ok:false,error:String(e)}));
+""",
+            [probe_device_id, signer_initial["keyId"]],
+        )
+        if not isinstance(signer_restored, dict) or signer_restored.get("ok") is not True:
+            raise RuntimeError(f"protected Device key restoration failed: {signer_restored!r}")
 
         persistence_read = execute_async(
             base,

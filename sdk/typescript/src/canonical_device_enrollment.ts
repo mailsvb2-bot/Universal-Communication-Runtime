@@ -155,7 +155,7 @@ function validateBinding(binding: UcrDeviceEnrollmentBinding): void {
 export function createUcrCanonicalDevicePreparation(
   authority: UcrCanonicalDeviceEnrollmentAuthority,
   vault: UcrCanonicalDeviceKeyVault,
-): (binding: UcrDeviceEnrollmentBinding) => Promise<void> {
+): (binding: UcrDeviceEnrollmentBinding, requireExistingTrust?: boolean) => Promise<void> {
   if (!authority || typeof authority.inspect !== "function" ||
       typeof authority.approveNewDevice !== "function" ||
       !vault || typeof vault.load !== "function" ||
@@ -163,7 +163,7 @@ export function createUcrCanonicalDevicePreparation(
     throw new Error("canonical Device/Trust authority and protected key vault required");
   }
   let pending: Promise<void> = Promise.resolve();
-  return async (binding) => {
+  return async (binding, requireExistingTrust = false) => {
     // Capture the exact authorized scope BEFORE queuing an async operation.
     // Mutable caller objects must not change Device, participant or Call during
     // a pending authority lookup or hardware-backed signing prompt.
@@ -183,8 +183,23 @@ export function createUcrCanonicalDevicePreparation(
       const vaultScope: UcrDeviceVaultScope = Object.freeze({
         tenantId: item.tenantId, namespaceId: item.namespaceId, deviceId: item.deviceId,
       });
-      const before = await authority.inspect(item);
-      if (!before || before.deviceRevoked) {
+      const inspected = await authority.inspect(item);
+      if (!inspected || inspected.deviceRevoked) {
+        throw new Error("canonical Device revoked or trust unavailable");
+      }
+      // Snapshot the exact trusted descriptor before awaiting the local vault.
+      // An authority adapter may reuse and mutate its original trust object.
+      const before: UcrCanonicalDeviceTrust = {
+        deviceActive: inspected.deviceActive,
+        deviceRevoked: inspected.deviceRevoked,
+        activeKey: inspected.activeKey
+          ? {
+              keyId: inspected.activeKey.keyId,
+              publicKey: inspected.activeKey.publicKey.slice(),
+            }
+          : null,
+      };
+      if (requireExistingTrust && (!before.deviceActive || !before.activeKey)) {
         throw new Error("canonical Device revoked or trust unavailable");
       }
       const existing = await vault.load(vaultScope);
@@ -213,6 +228,11 @@ export function createUcrCanonicalDevicePreparation(
       }
       if (before.deviceActive) {
         throw new Error("existing Device requires independently approved key recovery");
+      }
+      // After issuance the Device is inspection-only. No queued or mutated
+      // local vault state may turn this check into implicit re-enrollment.
+      if (requireExistingTrust) {
+        throw new Error("canonical Device revoked or trust unavailable");
       }
       // Reuse a staged but not-yet-approved local signer after transport failure.
       // The canonical server still independently authorizes registration.
