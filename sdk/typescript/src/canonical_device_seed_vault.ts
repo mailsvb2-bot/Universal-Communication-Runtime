@@ -184,14 +184,18 @@ export function createUcrIndexedDbDeviceSignerStore(): UcrLocalSignerRecordStore
 }
 
 export interface UcrProtectedDeviceSeedVault extends UcrCanonicalDeviceKeyVault {
-  /** A trusted canonical media resolver must revalidate authority before and
-   * after unsealing the same Device key used for Ed25519 trust preparation.
-   * The seed is zeroed immediately after the callback, never returned as state.
+  /** The seed is handed to an independently authorized bridge initializer
+   * only for the duration of this operation. The REQUIRED revoke callback
+   * must invalidate any partially created/installed bridge if initialization
+   * throws or trust is withdrawn while the asynchronous initializer runs.
+   * Active media still requires its own live, synchronous isCurrent guard.
+   * The callback must be idempotent and must never reauthorize.
    */
   withAuthorizedSeed<T>(
     scope: UcrDeviceVaultScope,
     current: () => Promise<boolean>,
     useSeed: (seed: Uint8Array) => Promise<T>,
+    revokeOnFailure: () => void | Promise<void>,
   ): Promise<T>;
 }
 
@@ -274,22 +278,32 @@ export function createUcrBrowserProtectedDeviceVault(
         encoded.fill(0);
       }
     },
-    async withAuthorizedSeed(scope, current, useSeed) {
+    async withAuthorizedSeed(scope, current, useSeed, revokeOnFailure) {
       if (typeof current !== "function" || typeof useSeed !== "function" ||
-          !await current()) {
-        throw new Error("independent canonical Device media trust required");
+          typeof revokeOnFailure !== "function" || !await current()) {
+        throw new Error("independent canonical Device media trust and revoke hook required");
       }
       const key = validateScope(scope);
       const found = await loadRecord(key);
       if (!found) throw new Error("protected Device signer is missing");
       const seed = await decryptSeed(key, found);
       try {
-        if (!await current()) throw new Error("canonical Device media trust revoked");
-        const outcome = await useSeed(seed);
-        // A host may revoke the Device while WASM bridge construction awaits.
-        // A stale operation must never be reported as authorized success.
-        if (!await current()) throw new Error("canonical Device media trust revoked");
-        return outcome;
+        try {
+          if (!await current()) throw new Error("canonical Device media trust revoked");
+          const outcome = await useSeed(seed);
+          // An initializer can already have installed a Rust/WASM bridge.
+          // A rejected promise alone does not revoke its side effects.
+          if (!await current()) throw new Error("canonical Device media trust revoked");
+          return outcome;
+        } catch (error) {
+          try {
+            await revokeOnFailure();
+          } catch (rollbackError) {
+            throw new AggregateError([error, rollbackError],
+              "Device media bridge revocation failed after authorization error");
+          }
+          throw error;
+        }
       } finally {seed.fill(0);}
     },
   };
