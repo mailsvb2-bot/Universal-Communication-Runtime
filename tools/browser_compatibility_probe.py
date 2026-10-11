@@ -957,6 +957,7 @@ injected.remove();
     sessionActive = true;mediaActive = true;
     heartbeatInFlight = false;
     startWebRtc.offerId = "A".repeat(43);
+    ui.join.disabled = true;
     capture("watchdog");
     const pendingHeartbeat = heartbeat();
     await heartbeat(); // A second tick must not create another request.
@@ -964,6 +965,7 @@ injected.remove();
     check(watchdog?.delay === 12000, "missing bounded 12-second watchdog");
     watchdog.fire(); // Deterministically simulate a stalled HTTP authorization.
     check(!sessionActive && !mediaActive, "watchdog did not revoke session");
+    check(ui.join.disabled === false, "hung remote Leave kept Join disabled");
     for (const name of ["microphone","camera","screen"]) {
       check(events.includes("stop:watchdog:" + name), "watchdog kept " + name + " capturing");
     }
