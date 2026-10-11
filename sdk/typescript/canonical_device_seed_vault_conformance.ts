@@ -132,8 +132,12 @@ const host = {
     firstEntryAuth++;
     return {...canonicalScope};
   },
-  async inspect() {
-    if (mutateGrantAtRecheck && latestIssuedGrant) {
+  async inspect(binding: {callId?: string; sessionId?: string}) {
+    // Only mutate the *newly issued* grant at its post-issuance trust check.
+    // The first inspect belongs to the previous login/Device preflight and
+    // must not consume this adversarial race injection.
+    if (mutateGrantAtRecheck && binding.callId === "call" &&
+        binding.sessionId === "session" && latestIssuedGrant) {
       latestIssuedGrant.deviceId = "mutated-after-issue";
       latestIssuedGrant.joinFragment = "#ucr_join=unchecked-mutable-replacement";
       mutateGrantAtRecheck = false;
