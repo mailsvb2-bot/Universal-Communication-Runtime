@@ -843,6 +843,7 @@ assert.ok(preflightJoinSnippet.startsWith("async function join(){"));
 let unauthorizedJoinRequests = 0;
 const preflightJoinCtx: Record<string, any> = {
   claims: {not_before: 0}, sessionLifecycleGeneration: 0,
+  signedGrantRetired: false,
   ui: {state: {textContent: ""}, status: {textContent: ""},
     join: {disabled: false}},
   requireCanonicalMediaHostReady: preflightCtx.preflight,
