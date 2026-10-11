@@ -399,6 +399,13 @@ impl From<pb::RealtimeMediaPolicy> for BrowserMediaPolicyResponse {
     }
 }
 
+#[derive(Default)]
+struct RealtimeResponseState {
+    admission_state: Option<&'static str>,
+    media_policy: Option<BrowserMediaPolicyResponse>,
+    session_sequence: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 struct ApiResponse {
     ok: bool,
@@ -743,9 +750,11 @@ async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpRespo
                     Some(session.expires_at_unix_ms),
                     Some(session.heartbeat_interval_ms),
                     None,
-                    admission_state_name(session.admission_state),
-                    media_policy,
-                    Some(session.session_sequence),
+                    RealtimeResponseState {
+                        admission_state: admission_state_name(session.admission_state),
+                        media_policy,
+                        session_sequence: Some(session.session_sequence),
+                    },
                 )
             }
             Some(pb::realtime_join_response::Result::Error(error)) => join_error(&error),
@@ -798,9 +807,11 @@ async fn heartbeat(state: &AppState, token: &str, input: HeartbeatRequest) -> Ht
                         None,
                         None,
                         None,
-                        admission_state_name(response.admission_state),
-                        media_policy,
-                        None,
+                        RealtimeResponseState {
+                            admission_state: admission_state_name(response.admission_state),
+                            media_policy,
+                            ..RealtimeResponseState::default()
+                        },
                     )
                 }
                 Some(pb::realtime_heartbeat_response::Result::Error(_)) | None => api_error(
@@ -2337,9 +2348,7 @@ fn api_ok(
         expires_at_unix_ms,
         heartbeat_interval_ms,
         accepted_recipient_count,
-        None,
-        None,
-        None,
+        RealtimeResponseState::default(),
     )
 }
 
@@ -2349,9 +2358,7 @@ fn api_ok_with_realtime_state(
     expires_at_unix_ms: Option<i64>,
     heartbeat_interval_ms: Option<u64>,
     accepted_recipient_count: Option<u32>,
-    admission_state: Option<&'static str>,
-    media_policy: Option<BrowserMediaPolicyResponse>,
-    session_sequence: Option<u64>,
+    realtime_state: RealtimeResponseState,
 ) -> HttpResponse {
     json_response(
         StatusCode::OK,
@@ -2362,9 +2369,9 @@ fn api_ok_with_realtime_state(
             expires_at_unix_ms,
             heartbeat_interval_ms,
             accepted_recipient_count,
-            session_sequence,
-            admission_state,
-            media_policy,
+            session_sequence: realtime_state.session_sequence,
+            admission_state: realtime_state.admission_state,
+            media_policy: realtime_state.media_policy,
         },
     )
 }
