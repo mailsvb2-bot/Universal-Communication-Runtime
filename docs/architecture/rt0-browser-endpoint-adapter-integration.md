@@ -44,26 +44,31 @@ claim that canonical admission is already valid.
 
 ### Independently authenticated Device preparation (before and after Join)
 
-The reference client now invokes `window.ucrPrepareCanonicalDevice(binding)`, when supplied,
-**before redeeming** the signed realtime join grant, then invokes it again
-**after** the server has accepted Join and **before** media capture.
-Both invocations require the host's independently authenticated canonical
-Device/Trust backend. The join fragment itself is never registration authority.
-The second check refuses trust revoked or rotated during join. The binding carries
-the exact scoped tenant, namespace, call, session, participant and Device identifiers.
-If the authenticated host already exposes `window.ucrCanonicalDeviceAuthority` and
-`window.ucrProtectedDeviceKeyVault`, the reference browser now imports the
-same pinned ESM bundle and composes the preparation callback **automatically**,
-before the server redeems the join grant and then again before media capture. Existing hosts may provide an explicit `window.ucrPrepareCanonicalDevice`
-override for FIRST enrollment before Join. The override is never invoked after
-the signed Join is accepted, because a legacy one-argument callback could
-silently ignore the inspection-only flag and re-register revoked trust.
-For post-Join verification the independently authenticated host MUST also
-expose `window.ucrCanonicalDeviceAuthority` and the matching protected
-signer vault; the browser composes the canonical verification directly, with
-`requireExistingTrust=true`. If no such authority exists the accepted Join
-is safely terminated before media capture. This is a deliberate fail-closed
-contract change for older hosts that only provided an opaque enrollment hook.
+The reference client may invoke the host's explicit
+`window.ucrPrepareCanonicalDevice(binding)` hook **only before** redeeming the
+signed realtime join grant. The hook must use independent first-party
+authentication; the join fragment itself never authorizes registration.
+After the server accepts Join and **before** media capture, the reference client
+MUST validate already-active Device trust through
+`window.ucrCanonicalDeviceAuthority`, never through the possibly registering
+explicit hook. The canonical verifier uses `requireExistingTrust=true`,
+so it can neither create nor re-enroll a Device if trust was deleted or revoked
+during Join. Both steps bind tenant, namespace, participant, Device, Call and
+session to existing canonical owners.
+
+If `window.ucrCanonicalDeviceAuthority` is available, the browser loads its
+same-origin pinned ESM bundle and composes
+`createUcrCanonicalDevicePreparation` with
+`window.ucrProtectedDeviceKeyVault`, creating the latter in its existing
+encrypted IndexedDB vault if the host did not supply it. An explicit enrollment
+hook remains allowed for the **pre-Join** step only; it is *never invoked*
+after the signed Join is accepted, because a legacy one-argument callback could
+silently ignore the inspection-only flag. Hosts supplying such an override MUST
+also expose their independently authenticated canonical Device/Trust authority
+(and compatible protected signer vault). Missing authority or trust fails closed,
+terminating the accepted session before media capture. This is a deliberate
+fail-closed integration-contract change for older hosts relying solely on
+opaque enrollment callbacks.
 
 The ESM bundle now exports `createUcrCanonicalDevicePreparation(authority, vault)`.
 The host may assign it to `window.ucrPrepareCanonicalDevice`:
