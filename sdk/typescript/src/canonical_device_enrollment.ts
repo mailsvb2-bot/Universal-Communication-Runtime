@@ -66,7 +66,7 @@ function validateSigner(value: UcrLocalDeviceSigner | null): asserts value is Uc
 }
 
 async function provePrivateKeyPossession(
-  binding: UcrDeviceVaultScope,
+  binding: UcrDeviceEnrollmentBinding,
   signer: UcrLocalDeviceSigner,
   vault: UcrCanonicalDeviceKeyVault,
 ): Promise<void> {
@@ -74,15 +74,45 @@ async function provePrivateKeyPossession(
   if (!cryptoProvider?.subtle || typeof cryptoProvider.getRandomValues !== "function") {
     throw new Error("secure Ed25519 verification is unavailable");
   }
-  const challenge = new Uint8Array(48);
-  cryptoProvider.getRandomValues(challenge);
-  // Challenge binds this operation to the scoped Device; no reusable proof is cached.
+  // Domain-separated, unambiguous binary scope. Each field is a 2-byte
+  // big-endian length followed by exact UTF-8 bytes; 0xffff marks absence.
+  // JSON is inappropriate here: escaping valid opaque IDs can expand 6x.
+  // Call/Session never become the permanent Device vault identifier.
+  const fields = [
+    "ucr.device-signer-possession.v1", binding.tenantId, binding.namespaceId,
+    binding.deviceId, binding.participantId, binding.callId ?? null,
+    binding.sessionId ?? null, signer.keyId,
+  ];
+  const encoder = new TextEncoder();
+  const parts = fields.map(value => value === null ? null : encoder.encode(value));
+  const byteCount = parts.reduce((n, item) => n + 2 + (item?.length ?? 0), 0);
+  if (byteCount > 1024 || parts.some(item => item !== null && item.length >= 0xffff)) {
+    throw new Error("Device signer challenge scope exceeds bounds");
+  }
+  const challenge = new Uint8Array(byteCount + 48);
+  let offset = 0;
+  for (const part of parts) {
+    const size = part === null ? 0xffff : part.length;
+    challenge[offset++] = size >>> 8;
+    challenge[offset++] = size & 0xff;
+    if (part !== null) {
+      challenge.set(part, offset);
+      offset += part.length;
+    }
+  }
+  cryptoProvider.getRandomValues(challenge.subarray(byteCount));
+  // Only a detached copy enters the callback: a malicious/buggy vault cannot
+  // rewrite the verifier's independently constructed domain or Device scope.
   // Snapshot the independently trusted key before awaiting untrusted vault code.
   const approvedPublicKey = signer.publicKey.slice();
   const publicKey = await cryptoProvider.subtle.importKey(
     "raw", approvedPublicKey as Uint8Array<ArrayBuffer>, {name: "Ed25519"}, false, ["verify"],
   );
-  const signature = await vault.signChallenge(binding, challenge);
+  const vaultScope: UcrDeviceVaultScope = {
+    tenantId: binding.tenantId, namespaceId: binding.namespaceId,
+    deviceId: binding.deviceId,
+  };
+  const signature = await vault.signChallenge(vaultScope, challenge.slice());
   if (!(signature instanceof Uint8Array) || signature.length !== 64) {
     throw new Error("protected Device key possession proof is missing");
   }
@@ -94,8 +124,15 @@ async function provePrivateKeyPossession(
 }
 
 function validateBinding(binding: UcrDeviceEnrollmentBinding): void {
-  if (!binding?.tenantId || !binding.deviceId || !binding.participantId) {
+  if (!binding || typeof binding.tenantId !== "string" || !binding.tenantId ||
+      typeof binding.deviceId !== "string" || !binding.deviceId ||
+      typeof binding.participantId !== "string" || !binding.participantId ||
+      !(binding.namespaceId === null || typeof binding.namespaceId === "string")) {
     throw new Error("independently authenticated canonical Device identity is required");
+  }
+  if ((binding.callId !== undefined && typeof binding.callId !== "string") ||
+      (binding.sessionId !== undefined && typeof binding.sessionId !== "string")) {
+    throw new Error("invalid realtime Call/Session context");
   }
   // A new Device must be prepared BEFORE a Call or join URL exists. A caller
   // may optionally bind a later inspection to an exact call/session pair,
@@ -126,7 +163,19 @@ export function createUcrCanonicalDevicePreparation(
     throw new Error("canonical Device/Trust authority and protected key vault required");
   }
   let pending: Promise<void> = Promise.resolve();
-  return (binding, requireExistingTrust = false) => {
+  return async (binding, requireExistingTrust = false) => {
+    // Capture the exact authorized scope BEFORE queuing an async operation.
+    // Mutable caller objects must not change Device, participant or Call during
+    // a pending authority lookup or hardware-backed signing prompt.
+    validateBinding(binding);
+    const request: UcrDeviceEnrollmentBinding = Object.freeze({
+      tenantId: binding.tenantId,
+      namespaceId: binding.namespaceId,
+      deviceId: binding.deviceId,
+      participantId: binding.participantId,
+      ...(binding.callId === undefined ? {} :
+        {callId: binding.callId, sessionId: binding.sessionId}),
+    });
     const prepare = async (item: UcrDeviceEnrollmentBinding): Promise<void> => {
       validateBinding(item);
       // Deliberately omit principal, Call and Session from the private-key
@@ -138,9 +187,8 @@ export function createUcrCanonicalDevicePreparation(
       if (!inspected || inspected.deviceRevoked) {
         throw new Error("canonical Device revoked or trust unavailable");
       }
-      // Snapshot the trust state before awaiting the endpoint vault. Host
-      // implementations may reuse/mutate inspection objects concurrently;
-      // a deleted active key must never switch a post-grant check to enrollment.
+      // Snapshot the exact trusted descriptor before awaiting the local vault.
+      // An authority adapter may reuse and mutate its original trust object.
       const before: UcrCanonicalDeviceTrust = {
         deviceActive: inspected.deviceActive,
         deviceRevoked: inspected.deviceRevoked,
@@ -151,9 +199,6 @@ export function createUcrCanonicalDevicePreparation(
             }
           : null,
       };
-      // Once a Call/Session grant has been issued, trust revalidation MUST
-      // never turn missing server trust into an enrollment operation. Losing
-      // the record is an authorization loss, not consent to re-register.
       if (requireExistingTrust && (!before.deviceActive || !before.activeKey)) {
         throw new Error("canonical Device revoked or trust unavailable");
       }
@@ -170,7 +215,7 @@ export function createUcrCanonicalDevicePreparation(
             !equalPublicKeys(existing.publicKey, approved.publicKey)) {
           throw new Error("local signer differs from active trusted Device key");
         }
-        await provePrivateKeyPossession(vaultScope, approved, vault);
+        await provePrivateKeyPossession(item, approved, vault);
         // Re-check canonical trust AFTER the asynchronous key operation: a
         // revoked/rotated Device cannot complete a previously started login.
         const current = await authority.inspect(item);
@@ -184,8 +229,8 @@ export function createUcrCanonicalDevicePreparation(
       if (before.deviceActive) {
         throw new Error("existing Device requires independently approved key recovery");
       }
-      // The post-issuance path MUST remain inspection-only even if a host
-      // mutates shared state while the private vault is being loaded.
+      // After issuance the Device is inspection-only. No queued or mutated
+      // local vault state may turn this check into implicit re-enrollment.
       if (requireExistingTrust) {
         throw new Error("canonical Device revoked or trust unavailable");
       }
@@ -197,7 +242,7 @@ export function createUcrCanonicalDevicePreparation(
         keyId: staged.keyId,
         publicKey: staged.publicKey.slice(),
       };
-      await provePrivateKeyPossession(vaultScope, pendingSigner, vault);
+      await provePrivateKeyPossession(item, pendingSigner, vault);
       // Approve only the snapshot actually proven by the protected signer.
       await authority.approveNewDevice(item, pendingSigner);
       const after = await authority.inspect(item);
@@ -207,7 +252,7 @@ export function createUcrCanonicalDevicePreparation(
         throw new Error("canonical Device trust registration not confirmed");
       }
     };
-    const running = pending.then(() => prepare(binding));
+    const running = pending.then(() => prepare(request));
     pending = running.catch(() => {});
     return running;
   };
