@@ -604,7 +604,10 @@ where
                         return Err(error);
                     }
                     Ok(pb_realtime_session(
-                        &claims, admission, media_policy, outcome.transition.session_sequence,
+                        &claims,
+                        admission,
+                        media_policy,
+                        outcome.transition.session_sequence,
                     ))
                 }
                 .await
@@ -688,7 +691,11 @@ where
                         self.authenticated_claims(&token, &scope, &call_id, &session_id)?;
                     let now = self.now()?;
                     let (transition, placement_cleanup) = self
-                        .leave_realtime_session_with_sfu_placement(&claims, now, expected_session_sequence)
+                        .leave_realtime_session_with_sfu_placement(
+                            &claims,
+                            now,
+                            expected_session_sequence,
+                        )
                         .await?;
                     self.append_attendance(&transition)?;
                     conference_runtime(self)
