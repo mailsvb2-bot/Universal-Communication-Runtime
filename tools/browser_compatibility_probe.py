@@ -881,6 +881,35 @@ const done = arguments[arguments.length - 1];
             base,
             """
 const done = arguments[arguments.length - 1];
+const pageScript = arguments[0];
+// Gecko WebDriver uses an isolated JS realm. Inject into the page realm so
+// the regression exercises the actual client.html lexical state/functions.
+const output = document.createElement("div");
+output.id = "__ucr_regression_result";
+output.hidden = true;
+document.body.appendChild(output);
+let finished = false;
+const finish = value => {
+  if (finished) return;
+  finished = true;
+  observer.disconnect();
+  output.remove();
+  done(value);
+};
+const observer = new MutationObserver(() => {
+  const value = output.getAttribute("data-result");
+  if (value !== null) {
+    try { finish(JSON.parse(value)); }
+    catch (error) { finish({ok:false,error:String(error)}); }
+  }
+});
+observer.observe(output, {attributes:true,attributeFilter:["data-result"]});
+const injected = document.createElement("script");
+injected.textContent = pageScript;
+document.documentElement.appendChild(injected);
+injected.remove();
+""",
+            ["""
 (async () => {
   const previousApi = api;
   const previousSetTimeout = window.setTimeout;
@@ -993,8 +1022,14 @@ const done = arguments[arguments.length - 1];
     sessionActive = false;mediaActive = false;
     startWebRtc.offerId = null;
   }
-})().then(done).catch(error => done({ok:false,error:String(error)}));
-""",
+})().then(result => {
+  document.getElementById("__ucr_regression_result").setAttribute(
+    "data-result", JSON.stringify(result));
+}).catch(error => {
+  document.getElementById("__ucr_regression_result").setAttribute(
+    "data-result", JSON.stringify({ok:false,error:String(error)}));
+});
+"""],
         )
         if not isinstance(heartbeat_revocation_browser, dict) or not heartbeat_revocation_browser.get("ok"):
             raise RuntimeError(
