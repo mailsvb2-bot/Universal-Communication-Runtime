@@ -118,7 +118,7 @@ function validateBinding(binding: UcrDeviceEnrollmentBinding): void {
 export function createUcrCanonicalDevicePreparation(
   authority: UcrCanonicalDeviceEnrollmentAuthority,
   vault: UcrCanonicalDeviceKeyVault,
-): (binding: UcrDeviceEnrollmentBinding) => Promise<void> {
+): (binding: UcrDeviceEnrollmentBinding, requireExistingTrust?: boolean) => Promise<void> {
   if (!authority || typeof authority.inspect !== "function" ||
       typeof authority.approveNewDevice !== "function" ||
       !vault || typeof vault.load !== "function" ||
@@ -126,7 +126,7 @@ export function createUcrCanonicalDevicePreparation(
     throw new Error("canonical Device/Trust authority and protected key vault required");
   }
   let pending: Promise<void> = Promise.resolve();
-  return (binding) => {
+  return (binding, requireExistingTrust = false) => {
     const prepare = async (item: UcrDeviceEnrollmentBinding): Promise<void> => {
       validateBinding(item);
       // Deliberately omit principal, Call and Session from the private-key
@@ -136,6 +136,12 @@ export function createUcrCanonicalDevicePreparation(
       });
       const before = await authority.inspect(item);
       if (!before || before.deviceRevoked) {
+        throw new Error("canonical Device revoked or trust unavailable");
+      }
+      // Once a Call/Session grant has been issued, trust revalidation MUST
+      // never turn missing server trust into an enrollment operation. Losing
+      // the record is an authorization loss, not consent to re-register.
+      if (requireExistingTrust && (!before.deviceActive || !before.activeKey)) {
         throw new Error("canonical Device revoked or trust unavailable");
       }
       const existing = await vault.load(vaultScope);
