@@ -43,6 +43,8 @@ The existing SQLite reference in crates/ucr-storage-sqlite/src/call_store.rs def
 
 The durable participants-to-Call relationship can reveal an interaction graph **if deployed centrally with records retained**. E2EE content protection does not hide these relations by itself.
 
+IMPORTANT: crates/ucr-runtime/src/lib.rs constructs ProductionRuntime around SqliteLocalStore, and crates/ucr-runtime/src/main.rs requires a --database path for the production runtime command. Hence the standard UCR production binary can persist this graph on the machine where it is deployed. This is confirmed source behavior, not a claim that any particular remote deployment is active.
+
 spec/local-storage.md and spec/metadata-visibility.md define classifications and intended trust boundaries. They are not deployment evidence.
 
 | Claim | Status |
