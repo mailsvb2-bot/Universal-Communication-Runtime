@@ -1569,7 +1569,7 @@ async function join(){
     if(generation!==sessionLifecycleGeneration)return;
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
-    heartbeatTimer=setInterval(()=>{heartbeat().catch(async e=>{if(e.code==="heartbeat_rejected"){await leave();ui.state.textContent="Access ended";ui.status.textContent="Conference access ended by host or server policy.";return;}ui.status.textContent="Heartbeat failed: "+e.message;});},interval);
+    heartbeatTimer=setInterval(()=>{const generation=sessionLifecycleGeneration;heartbeat().catch(async e=>{if(!sessionActive||generation!==sessionLifecycleGeneration)return;/* A missing authorization response cannot renew the media lease. */await leave();ui.state.textContent="Access ended";ui.status.textContent=e.code==="heartbeat_rejected"?"Conference access ended by host or server policy.":"Conference authorization could not be verified; media capture stopped.";});},interval);
     await applyAdmissionState(data.admission_state);
   }catch(e){
     if(generation!==sessionLifecycleGeneration)return;
@@ -2022,7 +2022,7 @@ ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);
 if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="function"){
   navigator.mediaDevices.addEventListener("devicechange",()=>{handleMediaDeviceChange();});
 }
-window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
+window.addEventListener("offline",()=>{if(sessionActive){void leave().then(()=>{ui.state.textContent="Access ended";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable; capture stopped until fresh authorization.";}).catch(()=>{retireEndpointMlsState();teardownPeer();stopLocalCapture();if(screenStream){screenStream.getTracks().forEach(track=>track.stop());screenStream=null;}});}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
 window.addEventListener("pagehide",()=>{++sessionLifecycleGeneration;++mediaCaptureGeneration;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
