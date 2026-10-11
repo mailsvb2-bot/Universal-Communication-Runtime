@@ -730,11 +730,10 @@ await devicePrepareCtx.prepare(4, true);
 assert.equal(canonicalDevicePreparations, 1,
   "legacy enrollment override is allowed before signed Join");
 devicePrepareCtx.sessionActive = true;
-await assert.rejects(devicePrepareCtx.prepare(4), /authenticated canonical Device\\/Trust authority required after Join/i);
+await assert.rejects(devicePrepareCtx.prepare(4), /authenticated canonical Device.Trust authority required after Join/i);
 assert.equal(canonicalDevicePreparations, 1,
   "a legacy one-argument enrollment hook cannot be called after Join");
-assert.match(devicePrepareCode, /authority&&\\(!beforeJoin\\|\\|typeof prepare!==/,
-// Reference client must bypass the explicit hook after Join even if supplied.
+assert.ok(devicePrepareCode.includes('if(authority&&(!beforeJoin||typeof prepare!=="function"))'),
   "the canonical post-Join path must not select a mutable enrollment override");
 const joinScript = browser.slice(browser.indexOf("async function join(){"),
   browser.indexOf("function scheduleEntryRetry(){"));
