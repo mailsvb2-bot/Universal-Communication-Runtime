@@ -104,7 +104,7 @@ let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGenera
 let heartbeatInFlight=false,heartbeatWatchdog=null;
 // This signed session grant is retired after any accepted session leaves.
 // Rejoining must start with a newly issued canonical Call/Session grant.
-let signedGrantRetired=false;
+let signedGrantRetired=false,activeSessionSequence=0;
 const HEARTBEAT_AUTH_TIMEOUT_MS=12000;
 let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
 let receiveRosterGeneration=0,receiveRosterInFlight=false,receiveSubscriptionFingerprint=null;
@@ -1484,7 +1484,7 @@ async function heartbeat(){
   const current=()=>sessionActive&&generation===sessionLifecycleGeneration&&
     request===heartbeatRequestGeneration;
   try{
-    const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
+    const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:activeSessionSequence});
     if(!current())return;
     const data=await r.json();
     if(!current())return;
@@ -1589,6 +1589,9 @@ async function join(){
     const r=await api("/v1/realtime/join",body());const data=await r.json();
     if(generation!==sessionLifecycleGeneration)return;
     if(!data.ok)throw new Error(data.message||"Join rejected");
+    if(!Number.isSafeInteger(data.session_sequence)||data.session_sequence<=0)
+      throw new Error("Join was not bound to a valid canonical session generation");
+    activeSessionSequence=data.session_sequence;
     sessionActive=true;ui.leave.disabled=false;ui.privacyMode.disabled=true;
     // Complete approved enrollment/recovery before media admission can prompt
     // for camera/microphone. This is not authorized by the URL alone.
@@ -1637,10 +1640,12 @@ async function endUnverifiedMedia(generation,message){
 async function leave(){
   const wasActive=sessionActive;
   const leavingClaims=wasActive?body():null;
+  const leavingSequence=activeSessionSequence;
   const leavingOfferId=startWebRtc.offerId;
   // A late Leave from this grant must never compete with another Join using
   // the same session identity. Only the first-party host can issue a new grant.
   if(wasActive)signedGrantRetired=true;
+  activeSessionSequence=0;
   sessionActive=false; // Revoke local authority before any awaited cleanup.
   // Invalidate late joins, heartbeats and permission prompts synchronously.
   ++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;mediaActive=false;
@@ -1667,7 +1672,8 @@ async function leave(){
       "Conference session closed.";
     ui.join.disabled=signedGrantRetired;
   }
-  if(wasActive&&leavingClaims)void api("/v1/realtime/leave",leavingClaims).catch(()=>{});
+  if(wasActive&&leavingClaims&&leavingSequence>0)
+    void api("/v1/realtime/leave",{...leavingClaims,expected_session_sequence:leavingSequence}).catch(()=>{});
 }
 function scheduleWaitingRoom(){
   if(signedGrantRetired){ui.join.disabled=true;return true;}
@@ -2080,7 +2086,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){const generation=sessionLifecycleGeneration;ui.webrtcState.textContent="Offline";void endUnverifiedMedia(generation,"Network unavailable; capture stopped until fresh authorization.");}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
-window.addEventListener("pagehide",()=>{if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("pagehide",()=>{const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>
