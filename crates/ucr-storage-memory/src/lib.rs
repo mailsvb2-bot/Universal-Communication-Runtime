@@ -9805,12 +9805,15 @@ mod expired_join_grant_privacy_tests {
             store.persist_conference_join_grant(&colliding),
             Ok(DurableRecordStatus::Persisted),
         );
-        store.redeem_conference_join_grant(&colliding.scope, &colliding.session_id)
+        store
+            .redeem_conference_join_grant(&colliding.scope, &colliding.session_id)
             .expect("mark redeemed");
-        store.revoke_conference_join_grant(&colliding.scope, &colliding.session_id)
+        store
+            .revoke_conference_join_grant(&colliding.scope, &colliding.session_id)
             .expect("mark revoked");
         assert_eq!(store.prune_expired_conference_join_grants(500), Ok(1));
-        let cleaned = store.conference_join_grant(&colliding.scope, &colliding.session_id)
+        let cleaned = store
+            .conference_join_grant(&colliding.scope, &colliding.session_id)
             .expect("read")
             .expect("replay tombstone remains");
         assert_eq!(cleaned.participant.kind, PrincipalKind::Person);
