@@ -121,6 +121,92 @@ for (const changed of ["revoked", "rotated"] as const) {
   assert.equal(registrations, 0);
 }
 
+// The fresh Ed25519 challenge must bind the same Device and the specific
+// participant/session without creating call-scoped private signing keys.
+const possessionChallenges: Uint8Array[] = [];
+const scopedPossession = createUcrCanonicalDevicePreparation({
+  async inspect() {return {deviceActive: true, deviceRevoked: false,
+    activeKey: {keyId: "key-1", publicKey: keyBytes.slice()}};},
+  async approveNewDevice() {throw new Error("unexpected registration");},
+}, {
+  async load() {return {keyId: "key-1", publicKey: keyBytes.slice()};},
+  async stageNew() {throw new Error("unexpected key creation");},
+  async signChallenge(vaultScope, challenge) {
+    assert.deepEqual(Object.keys(vaultScope).sort(), ["deviceId", "namespaceId", "tenantId"]);
+    possessionChallenges.push(challenge.slice());
+    return new Uint8Array(sign(null, challenge, testDeviceKeyPair.privateKey));
+  },
+});
+await scopedPossession(deviceBinding);
+await scopedPossession({...deviceBinding, deviceId: "different-device"});
+await scopedPossession({...deviceBinding, callId: "new-call", sessionId: "new-session"});
+const decodedChallengeScope = (challenge: Uint8Array): Array<string | null> => {
+  const bytes = challenge.subarray(0, challenge.length - 48);
+  let offset = 0;
+  const values: Array<string | null> = [];
+  for (let i = 0; i < 8; i++) {
+    assert.ok(offset + 2 <= bytes.length, "missing challenge field length");
+    const length = bytes[offset++] * 256 + bytes[offset++];
+    if (length === 0xffff) {values.push(null); continue;}
+    assert.ok(offset + length <= bytes.length, "truncated challenge scope");
+    values.push(new TextDecoder().decode(bytes.subarray(offset, offset + length)));
+    offset += length;
+  }
+  assert.equal(offset, bytes.length, "no extra unsigned scope metadata");
+  return values;
+};
+assert.deepEqual(decodedChallengeScope(possessionChallenges[0]), [
+  "ucr.device-signer-possession.v1", "tenant", null, "device", "user",
+  "call", "session", "key-1",
+]);
+assert.equal(decodedChallengeScope(possessionChallenges[1])[3], "different-device");
+assert.equal(decodedChallengeScope(possessionChallenges[2])[5], "new-call");
+assert.notDeepEqual(possessionChallenges[0], possessionChallenges[1]);
+await scopedPossession({tenantId: "tenant", namespaceId: null,
+  deviceId: "device", participantId: "user"});
+assert.deepEqual(decodedChallengeScope(possessionChallenges[3]).slice(5, 7), [null, null],
+  "first-entry device registration must be possible before Call/Session exist");
+// Valid 128-byte opaque identifiers, including escaped JSON/control characters,
+// must remain encodable without a spurious sixfold JSON expansion.
+const controlId = String.fromCharCode(0).repeat(128);
+await scopedPossession({
+  tenantId: controlId, namespaceId: controlId,
+  deviceId: controlId, participantId: controlId,
+  callId: controlId, sessionId: controlId,
+});
+assert.equal(decodedChallengeScope(possessionChallenges[4])[3], controlId);
+await assert.rejects(scopedPossession({...deviceBinding, callId: "A".repeat(1500)}),
+  /challenge scope exceeds bounds/);
+// The caller must not switch a Device or Call while a previous possession
+// check is queued (or during the asynchronous signer operation).
+const mutableQueuedBinding = {...deviceBinding};
+const queuedPossession = scopedPossession(mutableQueuedBinding);
+mutableQueuedBinding.deviceId = "attacker-device";
+mutableQueuedBinding.callId = "attacker-call";
+mutableQueuedBinding.sessionId = "attacker-session";
+await queuedPossession;
+assert.equal(decodedChallengeScope(possessionChallenges[5])[3], "device");
+assert.equal(decodedChallengeScope(possessionChallenges[5])[5], "call");
+await assert.rejects(scopedPossession({...deviceBinding, deviceId: 42} as any),
+  /independently authenticated canonical Device identity/);
+
+// A hostile vault receives only a COPY. Mutating it and signing that new value
+// must not satisfy the original canonical Device-bound verifier challenge.
+const rejectChallengeMutation = createUcrCanonicalDevicePreparation({
+  async inspect() {return {deviceActive: true, deviceRevoked: false,
+    activeKey: {keyId: "key-1", publicKey: keyBytes.slice()}};},
+  async approveNewDevice() {throw new Error("unexpected approval");},
+}, {
+  async load() {return {keyId: "key-1", publicKey: keyBytes.slice()};},
+  async stageNew() {throw new Error("unexpected key creation");},
+  async signChallenge(_scope, challenge) {
+    challenge.fill(0);
+    return new Uint8Array(sign(null, challenge, testDeviceKeyPair.privateKey));
+  },
+});
+await assert.rejects(rejectChallengeMutation(deviceBinding),
+  /private key does not match trusted signer/);
+
 // Interrupted enrollment must reuse the staged signer, never silently create
 // a new key after the server response is lost.
 let stagedRetryCount = 0, approvalAttempt = 0, retryConfirmed = false;
@@ -988,6 +1074,89 @@ mediaCtx.localStream = null;
 capturedResolvers.shift()?.(fakeCapture(capturedTrack()));
 await assert.rejects(trackPermissionPending, /authorization changed/);
 assert.equal(stoppedCaptureTracks, 2, "late individual device grant must stop its track");
+
+// One-click media must not require camera repair/selection before an audio
+// conversation is possible. Exercise the real browser capture function.
+let cameraRequests = 0, voiceFallbackRequests = 0;
+const voiceTrack = capturedTrack();
+const voiceStream = fakeCapture(voiceTrack);
+const fallbackCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 0,
+  localStream: null,
+  navigator: {mediaDevices: {
+    async getUserMedia({audio, video}: {audio: unknown; video: unknown}) {
+      assert.ok(audio, "audio fallback never bypasses media admission");
+      if (video) {
+        cameraRequests++;
+        throw Object.assign(new Error("No camera found"), {name: "NotFoundError"});
+      }
+      voiceFallbackRequests++;
+      return voiceStream;
+    },
+  }},
+  ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null},
+    status: {textContent: ""}},
+  policyAllows: (kind: string) => kind === "audio" || kind === "camera",
+  refreshLocalMediaControls() {},
+  refreshDevices: async () => {},
+  MediaStream: class {},
+  e2eeChannel: null,
+};
+runInNewContext(captureCode + "\nthis.getMedia = ensureLocalMedia;", fallbackCtx);
+assert.equal(await fallbackCtx.getMedia(), voiceStream);
+assert.equal(cameraRequests, 1, "first attempt uses permitted video and audio");
+assert.equal(voiceFallbackRequests, 1, "unavailable camera must trigger audio-only retry");
+assert.match(fallbackCtx.ui.status.textContent, /protected audio call automatically/);
+assert.equal(fallbackCtx.ui.localVideo.srcObject, voiceStream);
+
+// A delayed camera failure after Leave/revocation must NOT request the mic.
+// This tests the real capture helper across the initial async permission gap.
+let rejectPendingCamera: (error: Error) => void = () => {};
+let lateCaptureAttempts = 0;
+const lateFallbackCtx: Record<string, any> = {
+  ...fallbackCtx,
+  localStream: null,
+  mediaCaptureGeneration: 0,
+  sessionActive: true,
+  mediaActive: true,
+  navigator: {mediaDevices: {
+    getUserMedia() {
+      lateCaptureAttempts++;
+      if (lateCaptureAttempts !== 1)throw new Error("post-Leave microphone capture attempted");
+      return new Promise((_resolve, reject) => {rejectPendingCamera = reject;});
+    },
+  }},
+  ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null},
+    status: {textContent: ""}},
+};
+runInNewContext(captureCode + "\nthis.getMedia = ensureLocalMedia;", lateFallbackCtx);
+const cameraPermissionPending = lateFallbackCtx.getMedia();
+assert.equal(lateCaptureAttempts, 1);
+lateFallbackCtx.mediaCaptureGeneration++;
+lateFallbackCtx.mediaActive = false;
+lateFallbackCtx.sessionActive = false;
+rejectPendingCamera(Object.assign(new Error("Camera no longer accessible"), {name: "NotReadableError"}));
+await assert.rejects(cameraPermissionPending, /authorization changed/);
+assert.equal(lateCaptureAttempts, 1, "revoked admission must not trigger a second OS permission prompt");
+assert.equal(lateFallbackCtx.localStream, null);
+
+let blockedPermissionAttempts = 0;
+const blockedCtx: Record<string, any> = {
+  ...fallbackCtx, localStream: null,
+  navigator: {mediaDevices: {
+    async getUserMedia() {
+      blockedPermissionAttempts++;
+      throw Object.assign(new Error("User denied access"), {name: "NotAllowedError"});
+    },
+  }},
+  ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null},
+    status: {textContent: ""}},
+};
+runInNewContext(captureCode + "\nthis.getMedia = ensureLocalMedia;", blockedCtx);
+await assert.rejects(blockedCtx.getMedia(), /User denied access/);
+assert.equal(blockedPermissionAttempts, 1,
+  "explicit operating-system/browser permission denial must never trigger alternate capture");
+
 
 const startCode = browser.slice(
   browser.indexOf("async function startWebRtc("),
