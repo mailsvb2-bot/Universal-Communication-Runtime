@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {createUcrFirstPartyCallEntry} from "./src/canonical_first_party_call_entry.ts";
+import {createUcrCanonicalDevicePreparation} from "./src/canonical_device_enrollment.ts";
 import {webcrypto} from "node:crypto";
 
 import {
@@ -202,6 +203,45 @@ assert.equal(registered, null);
 assert.equal(approvalCalls, approvalsBeforeDeletion,
   "a deleted canonical trust entry must never be silently re-enrolled");
 deleteTrustDuringGrant = false;
+
+// Race: the host may hand out a mutable trust record and delete its key
+// while the endpoint vault loads. Post-grant validation may not convert that
+// deleted trust into implicit re-enrollment even after its initial check passed.
+const approvedForRace = identityAfter;
+assert.ok(approvedForRace);
+const mutableTrust: {
+  deviceActive: boolean;
+  deviceRevoked: boolean;
+  activeKey: {keyId: string; publicKey: Uint8Array} | null;
+} = {
+  deviceActive: true, deviceRevoked: false,
+  activeKey: {keyId: approvedForRace.keyId, publicKey: approvedForRace.publicKey.slice()},
+};
+const stableVault = createUcrBrowserProtectedDeviceVault(durableStore);
+let reapprovalsDuringVaultLoad = 0;
+const mutationVault = {
+  load: async (scope: typeof canonicalScope) => {
+    const signer = await stableVault.load(scope);
+    mutableTrust.deviceActive = false;
+    mutableTrust.activeKey = null;
+    return signer;
+  },
+  stageNew: (scope: typeof canonicalScope) => stableVault.stageNew(scope),
+  signChallenge: (scope: typeof canonicalScope, challenge: Uint8Array) =>
+    stableVault.signChallenge(scope, challenge),
+};
+const preparation = createUcrCanonicalDevicePreparation({
+  async inspect() {return mutableTrust;},
+  async approveNewDevice() {reapprovalsDuringVaultLoad++;},
+}, mutationVault);
+await assert.rejects(
+  preparation(canonicalScope, true), /canonical Device trust changed during signing|canonical Device revoked or trust unavailable/,
+);
+assert.equal(reapprovalsDuringVaultLoad, 0,
+  "mutable trust deletion during vault.load must not re-enroll after issuance");
+assert.equal(mutableTrust.deviceActive, false);
+assert.equal(mutableTrust.activeKey, null);
+
 console.log("UCR_FIRST_PARTY_DEVICE_TO_GRANT_SEQUENCE_OK");
 
 console.log("UCR_CANONICAL_DEVICE_SEED_VAULT_CONFORMANCE_OK");
