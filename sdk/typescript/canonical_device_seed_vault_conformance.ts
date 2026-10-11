@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import {createUcrFirstPartyCallEntry} from "./src/canonical_first_party_call_entry.ts";
-import {createUcrCanonicalDevicePreparation} from "./src/canonical_device_enrollment.ts";
+import {
+  createUcrCanonicalDevicePreparation,
+  type UcrDeviceVaultScope,
+} from "./src/canonical_device_enrollment.ts";
 import {webcrypto} from "node:crypto";
 
 import {
@@ -220,14 +223,14 @@ const mutableTrust: {
 const stableVault = createUcrBrowserProtectedDeviceVault(durableStore);
 let reapprovalsDuringVaultLoad = 0;
 const mutationVault = {
-  load: async (scope: typeof canonicalScope) => {
+  load: async (scope: UcrDeviceVaultScope) => {
     const signer = await stableVault.load(scope);
     mutableTrust.deviceActive = false;
     mutableTrust.activeKey = null;
     return signer;
   },
-  stageNew: (scope: typeof canonicalScope) => stableVault.stageNew(scope),
-  signChallenge: (scope: typeof canonicalScope, challenge: Uint8Array) =>
+  stageNew: (scope: UcrDeviceVaultScope) => stableVault.stageNew(scope),
+  signChallenge: (scope: UcrDeviceVaultScope, challenge: Uint8Array) =>
     stableVault.signChallenge(scope, challenge),
 };
 const preparation = createUcrCanonicalDevicePreparation({
