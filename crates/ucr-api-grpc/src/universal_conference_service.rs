@@ -3109,7 +3109,10 @@ where
         .map_err(map_store_error)?
     {
         require_replayable_join_grant_context(
-            &existing, &input.conference_id, &input.integration_id, now_unix_ms,
+            &existing,
+            &input.conference_id,
+            &input.integration_id,
+            now_unix_ms,
         )?;
         return pb_join_grant_from_record(issuer, &existing);
     }
@@ -3189,7 +3192,10 @@ where
                 .map_err(map_store_error)?
                 .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
             require_replayable_join_grant_context(
-                &existing, &record.conference_id, &record.integration_id, now_unix_ms,
+                &existing,
+                &record.conference_id,
+                &record.integration_id,
+                now_unix_ms,
             )?;
             pb_join_grant_from_record(issuer, &existing)
         }
@@ -4735,13 +4741,17 @@ mod universal_runtime_tests {
         // Deny expired accepted command replay before cleanup and after
         // the original metadata has been redacted. This is based on the
         // immutable expiry, never a user-controlled opaque ID sentinel.
-        let originally_issued = ucr_core::ConferenceJoinGrantStore::conference_join_grant(
-            store, &scope(), session_id,
-        ).expect("original grant store read").expect("original grant");
+        let originally_issued =
+            ucr_core::ConferenceJoinGrantStore::conference_join_grant(store, &scope(), session_id)
+                .expect("original grant store read")
+                .expect("original grant");
         let before_cleanup = super::require_replayable_join_grant_context(
-            &originally_issued, &conference().conference_id,
-            &conference().integration_id, 1_400_000,
-        ).expect_err("expired original grant is not replayable");
+            &originally_issued,
+            &conference().conference_id,
+            &conference().integration_id,
+            1_400_000,
+        )
+        .expect_err("expired original grant is not replayable");
         assert_eq!(before_cleanup.code, CanonicalErrorCode::Conflict);
         // A replay of the original accepted issuance command must NEVER
         // mint a new live bearer after the expired grant's sensitive fields
@@ -4752,16 +4762,21 @@ mod universal_runtime_tests {
             ),
             Ok(1)
         );
-        let tombstone = ucr_core::ConferenceJoinGrantStore::conference_join_grant(
-            store, &scope(), session_id,
-        ).expect("read redacted grant").expect("durable replay tombstone");
+        let tombstone =
+            ucr_core::ConferenceJoinGrantStore::conference_join_grant(store, &scope(), session_id)
+                .expect("read redacted grant")
+                .expect("durable replay tombstone");
         assert_eq!(tombstone.integration_id.as_opaque().as_str(), "expired");
         // The redaction literal is itself a legal IntegrationId. Matching it
         // must NEVER make a terminal grant replayable or sign a response.
         let colliding = IntegrationId::from_opaque(oid("expired"));
         let collision = super::require_replayable_join_grant_context(
-            &tombstone, &conference().conference_id, &colliding, 1_400_000,
-        ).expect_err("valid opaque ID redaction collision must reject replay");
+            &tombstone,
+            &conference().conference_id,
+            &colliding,
+            1_400_000,
+        )
+        .expect_err("valid opaque ID redaction collision must reject replay");
         assert_eq!(collision.code, CanonicalErrorCode::Conflict);
         let replay = issue_join_grant(
             store,
