@@ -4191,6 +4191,82 @@ mod sfu_placement_lifecycle_tests {
     }
 
     #[tokio::test]
+    async fn terminal_leave_revokes_the_existing_durable_join_grant() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([11_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("issuer"),
+        );
+        let store = Arc::new(ucr_storage_memory::MemoryLocalStore::default());
+        let service = GrpcRealtimeService::new(
+            Arc::new(()),
+            Arc::new(()),
+            Arc::clone(&store),
+            Arc::clone(&issuer),
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+        );
+        let binding = claims("durable-placeholder", "durable-device");
+        let issued = issuer
+            .issue(
+                binding.scope,
+                binding.call_id,
+                binding.participant,
+                binding.device_id,
+                300,
+                1_000,
+            )
+            .expect("canonical issue");
+        let active = issued.claims;
+        store
+            .persist_conference_join_grant(&ConferenceJoinGrantRecord {
+                scope: active.scope.clone(),
+                conference_id: GroupId::from_opaque(id("durable-conference")),
+                integration_id: ucr_model::IntegrationId::from_opaque(id("durable-integration")),
+                call_id: active.call_id.clone(),
+                participant: active.participant.clone(),
+                device_id: active.device_id.clone().expect("bound device"),
+                session_id: active.session_id.clone(),
+                issued_at_unix_ms: active.issued_at_unix_ms,
+                not_before_unix_ms: active.not_before_unix_ms,
+                expires_at_unix_ms: active.expires_at_unix_ms,
+                use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+                revoked: false,
+                redeemed: true,
+            })
+            .expect("persist in existing canonical grant store");
+        let joined = service
+            .admit_realtime_session_with_sfu_placement(active.clone(), 1_001)
+            .await
+            .expect("admit existing durable grant");
+        service
+            .leave_realtime_session_with_sfu_placement(
+                &active,
+                1_002,
+                joined.transition.session_sequence,
+            )
+            .await
+            .expect("revoke and close durable grant");
+        let saved = store
+            .conference_join_grant(&active.scope, &active.session_id)
+            .expect("canonical read")
+            .expect("durable record");
+        assert!(saved.revoked, "canonical owner must retain revocation tombstone");
+        assert_eq!(registry.active_session_count(), 0);
+        assert_eq!(
+            service
+                .admit_realtime_session_with_sfu_placement(active.clone(), 1_003)
+                .await,
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+            "reused signed grant must not restore an ended session"
+        );
+        assert_eq!(registry.active_session_count(), 0);
+    }
+
+    #[tokio::test]
     async fn call_placement_releases_only_after_last_realtime_session_leaves() {
         let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
         let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
