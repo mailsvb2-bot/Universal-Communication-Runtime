@@ -101,7 +101,9 @@ export function createUcrFirstPartyCallEntry(
     }
     // A concurrent Device revocation or signer rotation after issuance cannot
     // allow a stale join fragment to be consumed by this endpoint.
-    await prepare({...original, callId:issued.callId, sessionId:issued.sessionId});
+    // This is a trust RECHECK after a grant exists, never first enrollment.
+    // Missing/deleted trust cannot silently be reapproved with the old signer.
+    await prepare({...original, callId:issued.callId, sessionId:issued.sessionId}, true);
     return issued;
   };
   return () => {
