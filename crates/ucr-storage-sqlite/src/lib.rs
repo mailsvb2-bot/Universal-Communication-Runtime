@@ -2862,9 +2862,7 @@ mod tests {
                     "EXPLAIN QUERY PLAN SELECT session_id
                      FROM conference_join_grants INDEXED BY conference_join_grants_pending_redaction
                      WHERE expires_at_unix_ms <= 200
-                       AND (integration_id <> 'expired' OR call_id <> 'expired'
-                            OR participant_id <> 'expired' OR device_id <> 'expired'
-                            OR participant_kind <> 'person' OR revoked=0 OR redeemed=0)
+                       AND metadata_redacted=0
                      LIMIT 4096",
                     [],
                     |row| row.get(3),
@@ -2884,7 +2882,7 @@ mod tests {
                 "SELECT COUNT(*) FROM conference_join_grants
                  WHERE revoked=1 AND redeemed=1 AND integration_id='expired'
                    AND call_id='expired' AND participant_id='expired'
-                   AND device_id='expired'",
+                   AND device_id='expired' AND metadata_redacted=1",
                 [],
                 |row| row.get(0),
             )
@@ -2930,6 +2928,7 @@ mod tests {
                 .execute_batch(
                     "DROP INDEX conference_join_grants_expiry;
                      DROP INDEX conference_join_grants_pending_redaction;
+                     ALTER TABLE conference_join_grants DROP COLUMN metadata_redacted;
                      PRAGMA user_version=50;",
                 )
                 .expect("restore schema 50 fixture");
