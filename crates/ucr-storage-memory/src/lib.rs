@@ -232,6 +232,8 @@ struct MemoryState {
     universal_conference_participants:
         HashMap<UniversalConferenceParticipantKey, UniversalConferenceParticipantProfile>,
     conference_join_grants: HashMap<ConferenceJoinGrantKey, ConferenceJoinGrantRecord>,
+    // Exact in-memory redaction state; an OpaqueId may legitimately equal "expired".
+    redacted_join_grants: HashSet<ConferenceJoinGrantKey>,
     recordings: HashMap<RecordingKey, RecordingSession>,
     recording_provider_operations:
         HashMap<RecordingProviderOperationKey, RecordingProviderOperationRecord>,
@@ -9672,6 +9674,186 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
         }
         grant.redeemed = true;
         Ok(grant.clone())
+    }
+
+    fn prune_expired_conference_join_grants(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<usize, DurableStoreError> {
+        if now_unix_ms < 0 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        // Preserve the exact session ID as an irreversible authorization
+        // tombstone. Deleting it would allow idempotent command replay to
+        // issue the same credential again with a fresh expiry.
+        let hidden = OpaqueId::new("expired").map_err(|_| DurableStoreError::Internal)?;
+        let mut sanitized = 0;
+        let MemoryState {
+            conference_join_grants,
+            redacted_join_grants,
+            ..
+        } = &mut *state;
+        for (key, grant) in conference_join_grants.iter_mut() {
+            if grant.expires_at_unix_ms > now_unix_ms || redacted_join_grants.contains(key) {
+                continue;
+            }
+            grant.call_id = CallId::from_opaque(hidden.clone());
+            grant.integration_id = IntegrationId::from_opaque(hidden.clone());
+            grant.participant = PrincipalRef {
+                principal_id: ucr_model::PrincipalId::from_opaque(hidden.clone()),
+                kind: PrincipalKind::Person,
+            };
+            grant.device_id = DeviceId::from_opaque(hidden.clone());
+            grant.revoked = true;
+            grant.redeemed = true;
+            redacted_join_grants.insert(key.clone());
+            sanitized += 1;
+        }
+        Ok(sanitized)
+    }
+}
+
+#[cfg(test)]
+mod expired_join_grant_privacy_tests {
+    use super::*;
+    use ucr_model::{GroupId, TenantId};
+
+    fn opaque(text: &str) -> OpaqueId {
+        OpaqueId::new(text).expect("valid opaque test ID")
+    }
+
+    #[test]
+    fn expired_grants_no_longer_expose_participant_device_or_call_association() {
+        let store = MemoryLocalStore::default();
+        let base = ConferenceJoinGrantRecord {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(opaque("tenant-privacy")),
+                namespace_id: None,
+            },
+            conference_id: GroupId::from_opaque(opaque("conference-private")),
+            integration_id: IntegrationId::from_opaque(opaque("integration-private")),
+            call_id: CallId::from_opaque(opaque("call-sensitive")),
+            participant: PrincipalRef {
+                principal_id: ucr_model::PrincipalId::from_opaque(opaque("participant-sensitive")),
+                kind: PrincipalKind::Person,
+            },
+            device_id: DeviceId::from_opaque(opaque("device-sensitive")),
+            session_id: SessionId::from_opaque(opaque("expired-session")),
+            issued_at_unix_ms: 100,
+            not_before_unix_ms: 100,
+            expires_at_unix_ms: 200,
+            use_policy: ConferenceJoinGrantUsePolicy::SingleUse,
+            revoked: false,
+            redeemed: false,
+        };
+        assert_eq!(
+            store.persist_conference_join_grant(&base),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let mut valid = base.clone();
+        valid.session_id = SessionId::from_opaque(opaque("future-session"));
+        valid.expires_at_unix_ms = 400;
+        assert_eq!(
+            store.persist_conference_join_grant(&valid),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.prune_expired_conference_join_grants(-1),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(store.prune_expired_conference_join_grants(199), Ok(0));
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(1));
+        let tombstone = store
+            .conference_join_grant(&base.scope, &base.session_id)
+            .expect("read")
+            .expect("must retain replay-blocking session tombstone");
+        assert_eq!(tombstone.call_id.as_opaque().as_str(), "expired");
+        assert_eq!(tombstone.device_id.as_opaque().as_str(), "expired");
+        assert_eq!(
+            tombstone.participant.principal_id.as_opaque().as_str(),
+            "expired"
+        );
+        assert!(tombstone.revoked && tombstone.redeemed);
+        assert_eq!(
+            store.persist_conference_join_grant(&base),
+            Err(DurableStoreError::Conflict),
+            "same session may never be issued again after metadata sanitization"
+        );
+        assert_eq!(
+            store.conference_join_grant(&valid.scope, &valid.session_id),
+            Ok(Some(valid))
+        );
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(0));
+        assert_eq!(store.prune_expired_conference_join_grants(400), Ok(1));
+
+        assert_literal_expired_identifiers_still_redact(&store, &base);
+    }
+    // Legitimate opaque identifiers may equal the old redaction marker.
+    // The explicit redaction ledger, rather than string equality, owns state.
+    fn assert_literal_expired_identifiers_still_redact(
+        store: &MemoryLocalStore,
+        base: &ConferenceJoinGrantRecord,
+    ) {
+        // Legal opaque IDs may literally be "expired". An already revoked
+        // and redeemed record is not necessarily sanitized: the principal
+        // kind can still expose the real class of participant.
+        let marker = opaque("expired");
+        let mut colliding = base.clone();
+        colliding.session_id = SessionId::from_opaque(opaque("literal-collision-session"));
+        colliding.integration_id = IntegrationId::from_opaque(marker.clone());
+        colliding.call_id = CallId::from_opaque(marker.clone());
+        colliding.participant = PrincipalRef {
+            principal_id: ucr_model::PrincipalId::from_opaque(marker.clone()),
+            kind: PrincipalKind::ServiceAccount,
+        };
+        colliding.device_id = DeviceId::from_opaque(marker);
+        colliding.expires_at_unix_ms = 500;
+        assert_eq!(
+            store.persist_conference_join_grant(&colliding),
+            Ok(DurableRecordStatus::Persisted),
+        );
+        store
+            .redeem_conference_join_grant(&colliding.scope, &colliding.session_id)
+            .expect("mark redeemed");
+        store
+            .revoke_conference_join_grant(&colliding.scope, &colliding.session_id)
+            .expect("mark revoked");
+        assert_eq!(store.prune_expired_conference_join_grants(500), Ok(1));
+        let cleaned = store
+            .conference_join_grant(&colliding.scope, &colliding.session_id)
+            .expect("read")
+            .expect("replay tombstone remains");
+        assert_eq!(cleaned.participant.kind, PrincipalKind::Person);
+        assert!(cleaned.revoked && cleaned.redeemed);
+        assert_eq!(store.prune_expired_conference_join_grants(500), Ok(0));
+
+        // Even a *Person* with every opaque association literally "expired"
+        // must be processed once and only once: content equality cannot
+        // stand in for a durable redaction-state bit.
+        let mut already_looking_redacted = colliding.clone();
+        already_looking_redacted.session_id =
+            SessionId::from_opaque(opaque("person-literal-expired"));
+        already_looking_redacted.participant.kind = PrincipalKind::Person;
+        already_looking_redacted.expires_at_unix_ms = 600;
+        assert_eq!(
+            store.persist_conference_join_grant(&already_looking_redacted),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        store
+            .redeem_conference_join_grant(
+                &already_looking_redacted.scope,
+                &already_looking_redacted.session_id,
+            )
+            .expect("redeem Person grant");
+        store
+            .revoke_conference_join_grant(
+                &already_looking_redacted.scope,
+                &already_looking_redacted.session_id,
+            )
+            .expect("revoke Person grant");
+        assert_eq!(store.prune_expired_conference_join_grants(600), Ok(1));
+        assert_eq!(store.prune_expired_conference_join_grants(600), Ok(0));
     }
 }
 

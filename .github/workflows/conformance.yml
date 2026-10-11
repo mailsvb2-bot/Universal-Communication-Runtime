@@ -34,6 +34,7 @@ jobs:
             python)
               PYTHONPATH=sdk/python python3 sdk/python/phase41_conformance.py
               PYTHONPATH=sdk/python python3 sdk/python/conference_client_conformance.py
+              python3 -m unittest discover -s tools/security -p 'test_metadata_exposure_audit.py'
               ;;
             typescript)
               node --experimental-strip-types sdk/typescript/phase41_conformance.ts

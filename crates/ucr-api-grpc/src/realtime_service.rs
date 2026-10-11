@@ -429,6 +429,23 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .await
     }
 
+    /// Sanitizes expired participant/Device/Call associations but retains the
+    /// exact session replay tombstone after their authorization expires.
+    ///
+    /// Reuses the canonical `ConferenceJoinGrantStore`; Call/Event history
+    /// and unrelated server metadata are not erased.
+    ///
+    /// # Errors
+    /// Returns an explicit store error on unavailable/corrupt persistence.
+    pub fn prune_expired_join_grants_at(&self, now_unix_ms: i64) -> Result<usize, CanonicalError>
+    where
+        S: ConferenceJoinGrantStore,
+    {
+        self.store
+            .prune_expired_conference_join_grants(now_unix_ms)
+            .map_err(map_store_error)
+    }
+
     /// Sweeps final-session expiry cleanup through the same serialized SFU placement transition.
     ///
     /// This prevents a cleanup release from racing between a fresh join's placement ensure and

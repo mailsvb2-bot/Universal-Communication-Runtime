@@ -27,7 +27,11 @@ fn attachment_resume_reuses_canonical_storage_provider_and_sqlite_owner() {
     assert!(sqlite.contains("const SQLITE_SCHEMA_V47: u32 = 47;"));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V48: u32 = 48;"));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V49: u32 = 49;"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 50;"));
+    // Attachment ownership does not depend on the latest global schema version.
+    // Future migrations must keep this architecture test independent of new
+    // unrelated stores (v51 adds join-grant retention/minimization indexes).
+    assert!(sqlite.contains("const SQLITE_SCHEMA_V50: u32 = 50;"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = "));
     assert!(sqlite.contains("attachment_store::create_v45_objects"));
     assert!(sqlite.contains("migrate_v44_to_v45"));
     assert!(sqlite.contains("migrate_v45_to_v46"));

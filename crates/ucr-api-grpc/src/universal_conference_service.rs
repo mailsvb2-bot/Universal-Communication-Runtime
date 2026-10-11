@@ -3108,8 +3108,13 @@ where
         .conference_join_grant(&input.scope, &session_id)
         .map_err(map_store_error)?
     {
-        require_join_grant_context(&existing, &input.conference_id, &input.integration_id)?;
-        return pb_join_grant_from_record(issuer, &existing);
+        return replay_existing_join_grant(
+            issuer,
+            &existing,
+            &input.conference_id,
+            &input.integration_id,
+            now_unix_ms,
+        );
     }
 
     let conference = store
@@ -3135,20 +3140,7 @@ where
         &participant.participant,
     )?;
 
-    let ttl_ms = i64::from(input.ttl_seconds)
-        .checked_mul(1000)
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
-    let default_expiry = now_unix_ms
-        .checked_add(ttl_ms)
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
-    let requested_expiry = input.not_after_unix_ms.unwrap_or(default_expiry);
-    if input
-        .not_before_unix_ms
-        .is_some_and(|not_before| not_before < opens_at)
-        || closes_at.is_some_and(|close| requested_expiry > close)
-    {
-        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-    }
+    validate_requested_join_window(&input, opens_at, closes_at, now_unix_ms)?;
 
     let signed_grant = issuer
         .issue_with_session_id(
@@ -3186,11 +3178,52 @@ where
                 .conference_join_grant(&input.scope, &record.session_id)
                 .map_err(map_store_error)?
                 .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
-            require_join_grant_context(&existing, &record.conference_id, &record.integration_id)?;
-            pb_join_grant_from_record(issuer, &existing)
+            replay_existing_join_grant(
+                issuer,
+                &existing,
+                &record.conference_id,
+                &record.integration_id,
+                now_unix_ms,
+            )
         }
         Err(error) => Err(map_store_error(error)),
     }
+}
+
+// A grant must never exceed the canonical conference window. Keep the
+// checked-expiry arithmetic identical for initial issuance and future callers.
+fn validate_requested_join_window(
+    input: &IssueJoinGrantInput,
+    opens_at: i64,
+    closes_at: Option<i64>,
+    now_unix_ms: i64,
+) -> Result<(), CanonicalError> {
+    let ttl_ms = i64::from(input.ttl_seconds)
+        .checked_mul(1000)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+    let default_expiry = now_unix_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+    let requested_expiry = input.not_after_unix_ms.unwrap_or(default_expiry);
+    if input
+        .not_before_unix_ms
+        .is_some_and(|not_before| not_before < opens_at)
+        || closes_at.is_some_and(|close| requested_expiry > close)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    Ok(())
+}
+
+fn replay_existing_join_grant(
+    issuer: &JoinTokenIssuer,
+    existing: &ConferenceJoinGrantRecord,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+    now_unix_ms: i64,
+) -> Result<pb::ConferenceJoinGrant, CanonicalError> {
+    require_replayable_join_grant_context(existing, conference_id, integration_id, now_unix_ms)?;
+    pb_join_grant_from_record(issuer, existing)
 }
 
 fn durable_join_use_policy(value: RealtimeJoinGrantUsePolicy) -> ConferenceJoinGrantUsePolicy {
@@ -3204,6 +3237,22 @@ fn realtime_join_use_policy(value: ConferenceJoinGrantUsePolicy) -> RealtimeJoin
     match value {
         ConferenceJoinGrantUsePolicy::SingleUse => RealtimeJoinGrantUsePolicy::SingleUse,
         ConferenceJoinGrantUsePolicy::Reusable => RealtimeJoinGrantUsePolicy::Reusable,
+    }
+}
+
+/// An accepted issuance command cannot mint or return a signed credential
+/// once the original grant has expired. This authorization fact is independent
+/// of opaque ID values (which may legally equal the redaction sentinel).
+fn require_replayable_join_grant_context(
+    record: &ConferenceJoinGrantRecord,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+    now_unix_ms: i64,
+) -> Result<(), CanonicalError> {
+    if record.expires_at_unix_ms <= now_unix_ms {
+        Err(CanonicalError::new(CanonicalErrorCode::Conflict))
+    } else {
+        require_join_grant_context(record, conference_id, integration_id)
     }
 }
 
@@ -3259,7 +3308,7 @@ where
         + CommandAcceptanceStore
         + GroupCallLookupStore,
 {
-    accept_integration_mutation(
+    let accepted = accept_integration_mutation_receipt(
         store,
         scope,
         integration_id,
@@ -3272,6 +3321,18 @@ where
         .conference_join_grant(scope, session_id)
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    // An exact duplicate of a previously accepted revoke may arrive after
+    // sensitive grant fields are scrubbed. The canonical accepted command
+    // authenticates scope/integration/payload; the still-durable session and
+    // conference tombstone prove that the requested terminal state exists.
+    // An initial request must still pass the unredacted context checks.
+    if accepted.duplicate
+        && record.conference_id == *conference_id
+        && record.revoked
+        && record.redeemed
+    {
+        return Ok(());
+    }
     require_join_grant_context(&record, conference_id, integration_id)?;
     if !store
         .call_belongs_to_group(scope, conference_id, &record.call_id)
@@ -4707,6 +4768,87 @@ mod universal_runtime_tests {
         assert_eq!(attendance.code, CanonicalErrorCode::NotFound);
     }
 
+    fn assert_expired_join_grant_is_not_reissued(
+        store: &SqliteLocalStore,
+        issuer: &JoinTokenIssuer,
+        session_id: &ucr_model::SessionId,
+    ) {
+        // Deny expired accepted command replay before cleanup and after
+        // the original metadata has been redacted. This is based on the
+        // immutable expiry, never a user-controlled opaque ID sentinel.
+        let originally_issued =
+            ucr_core::ConferenceJoinGrantStore::conference_join_grant(store, &scope(), session_id)
+                .expect("original grant store read")
+                .expect("original grant");
+        let before_cleanup = super::require_replayable_join_grant_context(
+            &originally_issued,
+            &conference().conference_id,
+            &conference().integration_id,
+            1_400_000,
+        )
+        .expect_err("expired original grant is not replayable");
+        assert_eq!(before_cleanup.code, CanonicalErrorCode::Conflict);
+        // The same accepted revoke must acknowledge a retry AFTER metadata
+        // minimization without reopening authorization or losing idempotency.
+        let original_revoke = || {
+            super::revoke_join_grant(
+                store,
+                &scope(),
+                &conference().conference_id,
+                &conference().integration_id,
+                session_id,
+                "flow-revoke-late-retry",
+                b"flow-revoke-late-retry-payload".to_vec(),
+            )
+        };
+        original_revoke().expect("original revocation");
+        // A replay of the original accepted issuance command must NEVER
+        // mint a new live bearer after the expired grant's sensitive fields
+        // have been sanitized. Its session tombstone remains authoritative.
+        assert_eq!(
+            ucr_core::ConferenceJoinGrantStore::prune_expired_conference_join_grants(
+                store, 1_300_000
+            ),
+            Ok(1)
+        );
+        let tombstone =
+            ucr_core::ConferenceJoinGrantStore::conference_join_grant(store, &scope(), session_id)
+                .expect("read redacted grant")
+                .expect("durable replay tombstone");
+        assert_eq!(tombstone.integration_id.as_opaque().as_str(), "expired");
+        // The redaction literal is itself a legal IntegrationId. Matching it
+        // must NEVER make a terminal grant replayable or sign a response.
+        let colliding = IntegrationId::from_opaque(oid("expired"));
+        let collision = super::require_replayable_join_grant_context(
+            &tombstone,
+            &conference().conference_id,
+            &colliding,
+            1_400_000,
+        )
+        .expect_err("valid opaque ID redaction collision must reject replay");
+        assert_eq!(collision.code, CanonicalErrorCode::Conflict);
+        original_revoke().expect("identical revoked grant retry after redaction");
+        let replay = issue_join_grant(
+            store,
+            issuer,
+            IssueJoinGrantInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: b"flow-attendee".to_vec(),
+                ttl_seconds: 300,
+                use_policy: JoinGrantUsePolicy::SingleUse,
+                not_before_unix_ms: None,
+                not_after_unix_ms: None,
+                idempotency_key: "flow-join".to_owned(),
+            },
+            b"flow-join-payload".to_vec(),
+            1_400_000,
+        )
+        .expect_err("expired, already accepted join command must not resurrect access");
+        assert_eq!(replay.code, CanonicalErrorCode::Conflict);
+    }
+
     #[test]
     fn universal_flow_issues_join_grant_after_device_and_runtime_preparation() {
         let db = TestDb::new();
@@ -4807,6 +4949,8 @@ mod universal_runtime_tests {
         assert!(claims.device_id.is_some());
         assert_eq!(grant.expires_at_unix_ms, 1_300_000);
         assert_eq!(owner.role, ConferenceParticipantRole::Owner);
+
+        assert_expired_join_grant_is_not_reissued(&store, &issuer, &claims.session_id);
     }
 
     #[test]
