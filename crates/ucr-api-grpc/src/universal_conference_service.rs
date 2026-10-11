@@ -3140,20 +3140,7 @@ where
         &participant.participant,
     )?;
 
-    let ttl_ms = i64::from(input.ttl_seconds)
-        .checked_mul(1000)
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
-    let default_expiry = now_unix_ms
-        .checked_add(ttl_ms)
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
-    let requested_expiry = input.not_after_unix_ms.unwrap_or(default_expiry);
-    if input
-        .not_before_unix_ms
-        .is_some_and(|not_before| not_before < opens_at)
-        || closes_at.is_some_and(|close| requested_expiry > close)
-    {
-        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-    }
+    validate_requested_join_window(&input, opens_at, closes_at, now_unix_ms)?;
 
     let signed_grant = issuer
         .issue_with_session_id(
@@ -3201,6 +3188,31 @@ where
         }
         Err(error) => Err(map_store_error(error)),
     }
+}
+
+// A grant must never exceed the canonical conference window. Keep the
+// checked-expiry arithmetic identical for initial issuance and future callers.
+fn validate_requested_join_window(
+    input: &IssueJoinGrantInput,
+    opens_at: i64,
+    closes_at: Option<i64>,
+    now_unix_ms: i64,
+) -> Result<(), CanonicalError> {
+    let ttl_ms = i64::from(input.ttl_seconds)
+        .checked_mul(1000)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+    let default_expiry = now_unix_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+    let requested_expiry = input.not_after_unix_ms.unwrap_or(default_expiry);
+    if input
+        .not_before_unix_ms
+        .is_some_and(|not_before| not_before < opens_at)
+        || closes_at.is_some_and(|close| requested_expiry > close)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    Ok(())
 }
 
 fn replay_existing_join_grant(
