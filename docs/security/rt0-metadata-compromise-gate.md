@@ -49,7 +49,11 @@ session, but **retains a revoked/redeemed exact-session tombstone** so replay
 of an accepted IssueJoinGrant cannot recreate an old session credential.
 The bounded cleanup runs no more often than every 30 seconds, overwrites
 at most 4096 rows per pass, is transactional in SQLite and never modifies
-unexpired grants. The persisted session/conference identifiers remain and
+unexpired grants. SQLite v51 tracks completed redaction with an explicit
+`metadata_redacted` bit and a partial outstanding-work index, not by comparing
+user-controlled opaque identifiers to the literal `expired`. An identical
+accepted revoke can still acknowledge a retry after the row is sanitized.
+The persisted session/conference identifiers remain and
 may still correlate with other canonical Events. This is **partial metadata
 reduction**, not the post-call graph-secrecy guarantee.
 The UCR SQLite connection also enforces `PRAGMA secure_delete=ON`,
