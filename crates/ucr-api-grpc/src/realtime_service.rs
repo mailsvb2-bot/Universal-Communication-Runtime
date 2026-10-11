@@ -4235,9 +4235,12 @@ mod sfu_placement_lifecycle_tests {
                 expires_at_unix_ms: active.expires_at_unix_ms,
                 use_policy: ConferenceJoinGrantUsePolicy::Reusable,
                 revoked: false,
-                redeemed: true,
+                redeemed: false,
             })
             .expect("persist in existing canonical grant store");
+        store
+            .redeem_conference_join_grant(&active.scope, &active.session_id)
+            .expect("redeem authorized grant");
         let joined = service
             .admit_realtime_session_with_sfu_placement(active.clone(), 1_001)
             .await
