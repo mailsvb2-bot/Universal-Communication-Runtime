@@ -60,7 +60,7 @@ pub(super) fn create_v51_objects(transaction: &Transaction<'_>) -> Result<(), Du
              ON conference_join_grants(expires_at_unix_ms)
              WHERE integration_id <> 'expired' OR call_id <> 'expired'
                OR participant_id <> 'expired' OR device_id <> 'expired'
-               OR revoked=0 OR redeemed=0;",
+               OR participant_kind <> 'person' OR revoked=0 OR redeemed=0;",
         )
         .map_err(|error| map_schema_change_error(&error))
 }
@@ -288,7 +288,7 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
                    WHERE expires_at_unix_ms <= ?1
                      AND (integration_id <> 'expired' OR call_id <> 'expired'
                        OR participant_id <> 'expired' OR device_id <> 'expired'
-                       OR revoked=0 OR redeemed=0)
+                       OR participant_kind <> 'person' OR revoked=0 OR redeemed=0)
                    LIMIT 4096
                  )",
                 params![now_unix_ms],
