@@ -232,6 +232,8 @@ struct MemoryState {
     universal_conference_participants:
         HashMap<UniversalConferenceParticipantKey, UniversalConferenceParticipantProfile>,
     conference_join_grants: HashMap<ConferenceJoinGrantKey, ConferenceJoinGrantRecord>,
+    // Exact in-memory redaction state; an OpaqueId may legitimately equal "expired".
+    redacted_join_grants: HashSet<ConferenceJoinGrantKey>,
     recordings: HashMap<RecordingKey, RecordingSession>,
     recording_provider_operations:
         HashMap<RecordingProviderOperationKey, RecordingProviderOperationRecord>,
@@ -9687,15 +9689,14 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
         // issue the same credential again with a fresh expiry.
         let hidden = OpaqueId::new("expired").map_err(|_| DurableStoreError::Internal)?;
         let mut sanitized = 0;
-        for grant in state.conference_join_grants.values_mut() {
+        let MemoryState {
+            conference_join_grants,
+            redacted_join_grants,
+            ..
+        } = &mut *state;
+        for (key, grant) in conference_join_grants.iter_mut() {
             if grant.expires_at_unix_ms > now_unix_ms
-                || (grant.revoked
-                    && grant.redeemed
-                    && grant.call_id.as_opaque() == &hidden
-                    && grant.device_id.as_opaque() == &hidden
-                    && grant.participant.principal_id.as_opaque() == &hidden
-                    && grant.participant.kind == PrincipalKind::Person
-                    && grant.integration_id.as_opaque() == &hidden)
+                || redacted_join_grants.contains(key)
             {
                 continue;
             }
@@ -9708,6 +9709,7 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
             grant.device_id = DeviceId::from_opaque(hidden.clone());
             grant.revoked = true;
             grant.redeemed = true;
+            redacted_join_grants.insert(key.clone());
             sanitized += 1;
         }
         Ok(sanitized)
