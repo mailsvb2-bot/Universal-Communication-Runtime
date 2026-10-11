@@ -48,34 +48,75 @@ pub(super) fn create_v34_objects(transaction: &Transaction<'_>) -> Result<(), Du
         .map_err(|error| map_schema_change_error(&error))
 }
 
+/// New schema index: bounded expiry sweeps must not scan a growing history of
+/// long-lived replay-prevention tombstones.
+pub(super) fn create_v51_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(
+            "ALTER TABLE conference_join_grants
+             ADD COLUMN metadata_redacted INTEGER NOT NULL DEFAULT 0
+             CHECK(metadata_redacted IN (0,1));
+             CREATE INDEX conference_join_grants_expiry
+             ON conference_join_grants(expires_at_unix_ms);
+             -- Explicit state avoids treating legal opaque ID 'expired' as a
+             -- completed redaction. Only unredacted rows appear in this index.
+             CREATE INDEX conference_join_grants_pending_redaction
+             ON conference_join_grants(expires_at_unix_ms)
+             WHERE metadata_redacted=0;",
+        )
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn verify_v51_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    for name in [
+        "conference_join_grants_expiry",
+        "conference_join_grants_pending_redaction",
+    ] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+                 WHERE type='index' AND name=?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if !exists {
+            return Err(DurableStoreError::Corrupt);
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn verify_schema_v34(connection: &Connection) -> Result<(), DurableStoreError> {
     super::recording_store::verify_schema_v33(connection)?;
     verify_v34_objects(connection)
 }
 
 pub(super) fn verify_v34_objects(connection: &Connection) -> Result<(), DurableStoreError> {
-    verify_table_columns(
-        connection,
-        "conference_join_grants",
-        &[
-            ("tenant_id", "TEXT", 1, 1),
-            ("namespace_present", "INTEGER", 1, 2),
-            ("namespace_id", "TEXT", 1, 3),
-            ("session_id", "TEXT", 1, 4),
-            ("conference_id", "TEXT", 1, 0),
-            ("integration_id", "TEXT", 1, 0),
-            ("call_id", "TEXT", 1, 0),
-            ("participant_kind", "TEXT", 1, 0),
-            ("participant_id", "TEXT", 1, 0),
-            ("device_id", "TEXT", 1, 0),
-            ("issued_at_unix_ms", "INTEGER", 1, 0),
-            ("not_before_unix_ms", "INTEGER", 1, 0),
-            ("expires_at_unix_ms", "INTEGER", 1, 0),
-            ("use_policy", "TEXT", 1, 0),
-            ("revoked", "INTEGER", 1, 0),
-            ("redeemed", "INTEGER", 1, 0),
-        ],
-    )?;
+    // v34..v50 have the original shape. v51 adds an explicit redaction bit;
+    // silently accepting a missing bit could re-expose previously scrubbed IDs.
+    let mut columns = vec![
+        ("tenant_id", "TEXT", 1, 1),
+        ("namespace_present", "INTEGER", 1, 2),
+        ("namespace_id", "TEXT", 1, 3),
+        ("session_id", "TEXT", 1, 4),
+        ("conference_id", "TEXT", 1, 0),
+        ("integration_id", "TEXT", 1, 0),
+        ("call_id", "TEXT", 1, 0),
+        ("participant_kind", "TEXT", 1, 0),
+        ("participant_id", "TEXT", 1, 0),
+        ("device_id", "TEXT", 1, 0),
+        ("issued_at_unix_ms", "INTEGER", 1, 0),
+        ("not_before_unix_ms", "INTEGER", 1, 0),
+        ("expires_at_unix_ms", "INTEGER", 1, 0),
+        ("use_policy", "TEXT", 1, 0),
+        ("revoked", "INTEGER", 1, 0),
+        ("redeemed", "INTEGER", 1, 0),
+    ];
+    if super::read_schema_version(connection)? >= 51 {
+        columns.push(("metadata_redacted", "INTEGER", 1, 0));
+    }
+    verify_table_columns(connection, "conference_join_grants", &columns)?;
     let index_exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name=?1)",
@@ -220,6 +261,45 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
         load_grant(&connection, scope, session_id)?.ok_or(DurableStoreError::Corrupt)
+    }
+
+    fn prune_expired_conference_join_grants(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<usize, DurableStoreError> {
+        if now_unix_ms < 0 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        // Expired grants cannot authorize realtime activity, but their
+        // original exact session IDs MUST remain to prevent an idempotent
+        // IssueJoinGrant replay from minting a fresh, valid credential.
+        // Sanitize identity-bearing fields in the same canonical table;
+        // preserve the irreversible revoked/redeemed tombstone.
+        // The bounded batch limits time holding the canonical store mutex.
+        let sanitized = transaction
+            .execute(
+                "UPDATE conference_join_grants
+                 SET integration_id='expired', call_id='expired',
+                     participant_kind='person', participant_id='expired',
+                     device_id='expired', revoked=1, redeemed=1,
+                     metadata_redacted=1
+                 WHERE (tenant_id, namespace_present, namespace_id, session_id) IN (
+                   SELECT tenant_id, namespace_present, namespace_id, session_id
+                   FROM conference_join_grants INDEXED BY conference_join_grants_pending_redaction
+                   WHERE expires_at_unix_ms <= ?1 AND metadata_redacted=0
+                   LIMIT 4096
+                 )",
+                params![now_unix_ms],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(sanitized)
     }
 }
 

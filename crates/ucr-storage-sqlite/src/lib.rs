@@ -105,7 +105,8 @@ const SQLITE_SCHEMA_V46: u32 = 46;
 const SQLITE_SCHEMA_V47: u32 = 47;
 const SQLITE_SCHEMA_V48: u32 = 48;
 const SQLITE_SCHEMA_V49: u32 = 49;
-pub const SQLITE_SCHEMA_VERSION: u32 = 50;
+const SQLITE_SCHEMA_V50: u32 = 50;
+pub const SQLITE_SCHEMA_VERSION: u32 = 51;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -658,6 +659,12 @@ fn configure_durability(connection: &Connection) -> Result<(), DurableStoreError
     connection
         .pragma_update(None, "synchronous", "FULL")
         .map_err(|error| map_sqlite_error(&error))?;
+    // Explicitly overwrite deleted payloads in SQLite database pages instead
+    // of leaving recoverable values in the main-file freelist. This is NOT
+    // sufficient for WAL, backups, snapshots or flash forensic erasure.
+    connection
+        .pragma_update(None, "secure_delete", "ON")
+        .map_err(|error| map_sqlite_error(&error))?;
     Ok(())
 }
 fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -677,7 +684,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v50(connection);
+        return verify_schema_v51(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -737,11 +744,27 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V47 => migrate_v47_to_v48(connection)?,
             SQLITE_SCHEMA_V48 => migrate_v48_to_v49(connection)?,
             SQLITE_SCHEMA_V49 => migrate_v49_to_v50(connection)?,
+            SQLITE_SCHEMA_V50 => migrate_v50_to_v51(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v50(connection)
+    verify_schema_v51(connection)
+}
+
+fn migrate_v50_to_v51(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v50(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    conference_join_grant_store::create_v51_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v51(connection)
 }
 
 fn migrate_v49_to_v50(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -751,7 +774,7 @@ fn migrate_v49_to_v50(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     group_mls_store::create_v50_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V50)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
@@ -802,6 +825,11 @@ fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreErr
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v47(connection)
+}
+
+fn verify_schema_v51(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v50(connection)?;
+    conference_join_grant_store::verify_v51_objects(connection)
 }
 
 fn verify_schema_v50(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -962,6 +990,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     recording_provider_store::create_v48_objects(&transaction)?;
     group_mls_store::create_v49_objects(&transaction)?;
     group_mls_store::create_v50_objects(&transaction)?;
+    conference_join_grant_store::create_v51_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -2045,6 +2074,14 @@ fn test_restore_v49_mls_transition_shape(connection: &Connection) -> Result<(), 
 
 #[cfg(test)]
 fn test_remove_v49_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    // A historical-schema fixture must first remove every newer schema
+    // object. Otherwise v50->v51 tries to recreate an index left over from
+    // the fresh v51 database and fails with an unrelated migration error.
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS conference_join_grants_expiry;
+         DROP INDEX IF EXISTS conference_join_grants_pending_redaction;
+         ALTER TABLE conference_join_grants DROP COLUMN metadata_redacted;",
+    )?;
     test_restore_v49_mls_transition_shape(connection)?;
     connection.execute_batch(
         "DROP INDEX IF EXISTS group_mls_transition_admissions_device;
@@ -2704,11 +2741,206 @@ mod tests {
         connection
     }
     #[test]
+    fn expired_join_grant_metadata_is_scrubbed_in_sqlite_and_stays_revoked() {
+        use ucr_core::ConferenceJoinGrantStore;
+
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open real SQLite schema");
+        {
+            let connection = store.lock_connection().expect("lock");
+            // Minimal fixture for the exact grant table, without constructing
+            // unrelated conference/group participants. This setting applies
+            // only to the isolated test connection.
+            connection
+                .execute_batch("PRAGMA foreign_keys=OFF;")
+                .expect("test fixture");
+            for (session_id, expires_at) in [("expired", 200_i64), ("live", 400_i64)] {
+                connection
+                    .execute(
+                        "INSERT INTO conference_join_grants (
+                          tenant_id, namespace_present, namespace_id, session_id,
+                          conference_id, integration_id, call_id, participant_kind,
+                          participant_id, device_id, issued_at_unix_ms,
+                          not_before_unix_ms, expires_at_unix_ms, use_policy,
+                          revoked, redeemed
+                        ) VALUES ('tenant', 0, '', ?1, 'conference', 'integration',
+                                  'call', 'person', 'participant', 'device',
+                                  100, 100, ?2, 'single_use', 0, 0)",
+                        rusqlite::params![session_id, expires_at],
+                    )
+                    .expect("fixture grant");
+            }
+        }
+        assert_eq!(
+            store.prune_expired_conference_join_grants(-1),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(store.prune_expired_conference_join_grants(199), Ok(0));
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(1));
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(0));
+        drop(store);
+        // Independently inspect actual bytes of the on-disk SQLite database,
+        // rather than reading only an in-process cached projection.
+        let reopened = rusqlite::Connection::open(db.path()).expect("reopen database");
+        let old: i64 = reopened
+            .query_row(
+                "SELECT COUNT(*) FROM conference_join_grants WHERE session_id='expired'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expired count");
+        let live: i64 = reopened
+            .query_row(
+                "SELECT COUNT(*) FROM conference_join_grants WHERE session_id='live'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("active count");
+        assert_eq!(old, 1, "expired session ID tombstone must be retained");
+        let sanitized: (String, String, String, String, i64, i64) = reopened
+            .query_row(
+                "SELECT call_id, integration_id, participant_id, device_id,
+                        revoked, redeemed
+                 FROM conference_join_grants WHERE session_id='expired'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("sanitized durable tombstone");
+        assert_eq!(
+            sanitized,
+            (
+                "expired".into(),
+                "expired".into(),
+                "expired".into(),
+                "expired".into(),
+                1,
+                1,
+            ),
+            "retained tombstone must not reveal original Call/Device/participant"
+        );
+        assert_eq!(live, 1, "valid session admission must not be removed");
+    }
+
+    #[test]
+    fn expired_join_grant_cleanup_is_indexed_bounded_and_drains_backlog() {
+        use ucr_core::ConferenceJoinGrantStore;
+
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open real SQLite");
+        {
+            let connection = store.lock_connection().expect("lock");
+            connection
+                .execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")
+                .expect("fixture transaction");
+            for sequence in 0..4_100 {
+                connection
+                    .execute(
+                        "INSERT INTO conference_join_grants (
+                           tenant_id, namespace_present, namespace_id, session_id,
+                           conference_id, integration_id, call_id, participant_kind,
+                           participant_id, device_id, issued_at_unix_ms,
+                           not_before_unix_ms, expires_at_unix_ms, use_policy,
+                           revoked, redeemed
+                         ) VALUES ('tenant', 0, '', ?1, 'conference', 'integration',
+                                   'call', 'person', 'participant', 'device',
+                                   100, 100, 200, 'single_use', 0, 0)",
+                        [format!("session-{sequence}")],
+                    )
+                    .expect("seed expired grant");
+            }
+            connection.execute_batch("COMMIT;").expect("commit fixture");
+            let plan: String = connection
+                .query_row(
+                    "EXPLAIN QUERY PLAN SELECT session_id
+                     FROM conference_join_grants INDEXED BY conference_join_grants_pending_redaction
+                     WHERE expires_at_unix_ms <= 200
+                       AND metadata_redacted=0
+                     LIMIT 4096",
+                    [],
+                    |row| row.get(3),
+                )
+                .expect("indexed grant expiry planner");
+            assert!(
+                plan.contains("conference_join_grants_pending_redaction"),
+                "must traverse only outstanding redactions, plan: {plan}"
+            );
+        }
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(4096));
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(4));
+        assert_eq!(store.prune_expired_conference_join_grants(200), Ok(0));
+        let connection = store.lock_connection().expect("inspect tombstones");
+        let retained: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM conference_join_grants
+                 WHERE revoked=1 AND redeemed=1 AND integration_id='expired'
+                   AND call_id='expired' AND participant_id='expired'
+                   AND device_id='expired' AND metadata_redacted=1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("retained anti-replay rows");
+        assert_eq!(
+            retained, 4_100,
+            "no session id may be reused after redaction"
+        );
+    }
+
+    #[test]
     fn sqlite_store_initializes_schema_and_is_healthy() {
         let db = TestDbPath::new();
         let store = SqliteLocalStore::open(db.path()).expect("open store");
         assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         assert_eq!(store.health(), Ok(StorageHealth::Healthy));
+        let connection = store.lock_connection().expect("open");
+        let secure_delete: i64 = connection
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .expect("read secure_delete");
+        assert_eq!(
+            secure_delete, 1,
+            "sensitive SQLite row deletion must zero freed pages"
+        );
+        assert_eq!(
+            super::conference_join_grant_store::verify_v51_objects(&connection),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn v50_to_v51_grant_expiry_index_migration_preserves_existing_store() {
+        let db = TestDbPath::new();
+        let original = SqliteLocalStore::open(db.path()).expect("initialize");
+        assert_eq!(original.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        drop(original);
+
+        // Simulate the immediately preceding canonical schema. A production
+        // migration may ONLY add the index; authorization rows are untouched.
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open old schema");
+            connection
+                .execute_batch(
+                    "DROP INDEX conference_join_grants_expiry;
+                     DROP INDEX conference_join_grants_pending_redaction;
+                     ALTER TABLE conference_join_grants DROP COLUMN metadata_redacted;
+                     PRAGMA user_version=50;",
+                )
+                .expect("restore schema 50 fixture");
+        }
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate to v51");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let connection = migrated.lock_connection().expect("lock migrated schema");
+        assert_eq!(
+            super::conference_join_grant_store::verify_v51_objects(&connection),
+            Ok(())
+        );
     }
 
     #[test]

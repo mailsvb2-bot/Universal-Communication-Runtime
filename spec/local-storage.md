@@ -124,3 +124,25 @@ SQLite schema v20 retains the v19 Root Identity owner and adds Event consumer st
 ## Migration and rollback
 
 Every future migration must be deterministic, versioned, preserve unsynced/durable state, and document rollback compatibility. Migration failure must leave the prior committed database valid or fail explicitly; destructive best-effort migration is forbidden.
+
+
+### Schema v51: bounded expired-grant redaction
+
+Schema v51 migrates v50 atomically by adding the
+`conference_join_grants_expiry` index, an explicit `metadata_redacted` bit
+and a partial `conference_join_grants_pending_redaction` index to the
+existing canonical `conference_join_grants` owner. The marker is mandatory:
+an exact valid opaque ID can literally equal the display sentinel `expired`,
+so equality with that literal is not evidence of completed redaction.
+No second Identity, phone, Device, session or authorization store is created. The retention operation preserves the
+exact session-id and expiry as a rejected authorization tombstone while
+overwriting the expired Call, participant, Device and integration references.
+The stored conference ID and session ID remain security/metadata disclosures;
+the wider durable Call/Group/Event history is unchanged. This is metadata
+minimization, not anonymity or total post-call erasure.
+
+SQLite connections enable `secure_delete=ON` to overwrite deleted payloads
+inside the main database freelist. WAL frames, backups, snapshots and network
+traffic can still retain prior values. Only the explicit metadata-compromise
+release gate in `docs/security/rt0-metadata-compromise-gate.md` can authorize
+claims about post-call graph non-disclosure, after real adversarial testing.
