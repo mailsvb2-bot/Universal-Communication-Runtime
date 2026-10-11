@@ -53,14 +53,16 @@ pub(super) fn create_v34_objects(transaction: &Transaction<'_>) -> Result<(), Du
 pub(super) fn create_v51_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     transaction
         .execute_batch(
-            "CREATE INDEX conference_join_grants_expiry
+            "ALTER TABLE conference_join_grants
+             ADD COLUMN metadata_redacted INTEGER NOT NULL DEFAULT 0
+             CHECK(metadata_redacted IN (0,1));
+             CREATE INDEX conference_join_grants_expiry
              ON conference_join_grants(expires_at_unix_ms);
-             -- Persistent anti-replay tombstones must not be scanned again.
+             -- Explicit state avoids treating legal opaque ID 'expired' as a
+             -- completed redaction. Only unredacted rows appear in this index.
              CREATE INDEX conference_join_grants_pending_redaction
              ON conference_join_grants(expires_at_unix_ms)
-             WHERE integration_id <> 'expired' OR call_id <> 'expired'
-               OR participant_id <> 'expired' OR device_id <> 'expired'
-               OR participant_kind <> 'person' OR revoked=0 OR redeemed=0;",
+             WHERE metadata_redacted=0;",
         )
         .map_err(|error| map_schema_change_error(&error))
 }
@@ -281,14 +283,12 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
                 "UPDATE conference_join_grants
                  SET integration_id='expired', call_id='expired',
                      participant_kind='person', participant_id='expired',
-                     device_id='expired', revoked=1, redeemed=1
+                     device_id='expired', revoked=1, redeemed=1,
+                     metadata_redacted=1
                  WHERE (tenant_id, namespace_present, namespace_id, session_id) IN (
                    SELECT tenant_id, namespace_present, namespace_id, session_id
                    FROM conference_join_grants INDEXED BY conference_join_grants_pending_redaction
-                   WHERE expires_at_unix_ms <= ?1
-                     AND (integration_id <> 'expired' OR call_id <> 'expired'
-                       OR participant_id <> 'expired' OR device_id <> 'expired'
-                       OR participant_kind <> 'person' OR revoked=0 OR redeemed=0)
+                   WHERE expires_at_unix_ms <= ?1 AND metadata_redacted=0
                    LIMIT 4096
                  )",
                 params![now_unix_ms],
