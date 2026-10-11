@@ -4730,7 +4730,19 @@ mod universal_runtime_tests {
     fn assert_expired_join_grant_is_not_reissued(
         store: &SqliteLocalStore,
         issuer: &JoinTokenIssuer,
+        session_id: &ucr_model::SessionId,
     ) {
+        // Deny expired accepted command replay before cleanup and after
+        // the original metadata has been redacted. This is based on the
+        // immutable expiry, never a user-controlled opaque ID sentinel.
+        let originally_issued = ucr_core::ConferenceJoinGrantStore::conference_join_grant(
+            store, &scope(), session_id,
+        ).expect("original grant store read").expect("original grant");
+        let before_cleanup = super::require_replayable_join_grant_context(
+            &originally_issued, &conference().conference_id,
+            &conference().integration_id, 1_400_000,
+        ).expect_err("expired original grant is not replayable");
+        assert_eq!(before_cleanup.code, CanonicalErrorCode::Conflict);
         // A replay of the original accepted issuance command must NEVER
         // mint a new live bearer after the expired grant's sensitive fields
         // have been sanitized. Its session tombstone remains authoritative.
@@ -4740,6 +4752,17 @@ mod universal_runtime_tests {
             ),
             Ok(1)
         );
+        let tombstone = ucr_core::ConferenceJoinGrantStore::conference_join_grant(
+            store, &scope(), session_id,
+        ).expect("read redacted grant").expect("durable replay tombstone");
+        assert_eq!(tombstone.integration_id.as_opaque().as_str(), "expired");
+        // The redaction literal is itself a legal IntegrationId. Matching it
+        // must NEVER make a terminal grant replayable or sign a response.
+        let colliding = IntegrationId::from_opaque(oid("expired"));
+        let collision = super::require_replayable_join_grant_context(
+            &tombstone, &conference().conference_id, &colliding, 1_400_000,
+        ).expect_err("valid opaque ID redaction collision must reject replay");
+        assert_eq!(collision.code, CanonicalErrorCode::Conflict);
         let replay = issue_join_grant(
             store,
             issuer,
@@ -4862,7 +4885,7 @@ mod universal_runtime_tests {
         assert_eq!(grant.expires_at_unix_ms, 1_300_000);
         assert_eq!(owner.role, ConferenceParticipantRole::Owner);
 
-        assert_expired_join_grant_is_not_reissued(&store, &issuer);
+        assert_expired_join_grant_is_not_reissued(&store, &issuer, &claims.session_id);
     }
 
     #[test]
