@@ -76,8 +76,21 @@ export function createUcrFirstPartyCallEntry(
     await prepare(original);
     // Key possession and canonical trusted descriptor are now independently
     // confirmed. Recheck on the SERVER prior to signing any join grant.
-    const issued = await host.issueSignedDeviceJoin(original);
-    if (!issued || !sameScope(original, issued) ||
+    const response = await host.issueSignedDeviceJoin(original);
+    // The host may reuse mutable response objects for another join. Snapshot
+    // every value BEFORE checking scope and before any awaited trust inspection;
+    // never return values from the mutable host object after that inspection.
+    if (!response) throw new Error("first-party join grant differs from prepared Device");
+    const issued: UcrCanonicalJoinIssuance = Object.freeze({
+      tenantId: response.tenantId,
+      namespaceId: response.namespaceId,
+      participantId: response.participantId,
+      deviceId: response.deviceId,
+      callId: response.callId,
+      sessionId: response.sessionId,
+      joinFragment: response.joinFragment,
+    });
+    if (!sameScope(original, issued) ||
         typeof issued.callId !== "string" || !issued.callId ||
         typeof issued.sessionId !== "string" || !issued.sessionId ||
         typeof issued.joinFragment !== "string" ||
@@ -89,7 +102,7 @@ export function createUcrFirstPartyCallEntry(
     // A concurrent Device revocation or signer rotation after issuance cannot
     // allow a stale join fragment to be consumed by this endpoint.
     await prepare({...original, callId:issued.callId, sessionId:issued.sessionId});
-    return Object.freeze({...issued});
+    return issued;
   };
   return () => {
     if (pending) return pending;
