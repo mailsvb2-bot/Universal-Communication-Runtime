@@ -1660,6 +1660,10 @@ async function leave(){
   // Stop screen tracks synchronously, even if remote cleanup never resolves.
   if(screenStream){screenStream.getTracks().forEach(track=>track.stop());screenStream=null;setScreenUi(false);}
   if(leavingOfferId&&leavingClaims)void closeServerPeer(false,leavingOfferId,leavingClaims).catch(()=>{});
+  // Remote Leave is independent of cosmetic/UI cleanup. Submit it as soon as
+  // physical capture has stopped, even if later controls fail to reset.
+  if(wasActive&&leavingClaims&&leavingSequence>0)
+    void api("/v1/realtime/leave",{...leavingClaims,expected_session_sequence:leavingSequence}).catch(()=>{});
   ui.privacyMode.disabled=false;
   sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
@@ -1672,8 +1676,6 @@ async function leave(){
       "Conference session closed.";
     ui.join.disabled=signedGrantRetired;
   }
-  if(wasActive&&leavingClaims&&leavingSequence>0)
-    void api("/v1/realtime/leave",{...leavingClaims,expected_session_sequence:leavingSequence}).catch(()=>{});
 }
 function scheduleWaitingRoom(){
   if(signedGrantRetired){ui.join.disabled=true;return true;}
