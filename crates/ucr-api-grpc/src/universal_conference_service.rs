@@ -3108,7 +3108,9 @@ where
         .conference_join_grant(&input.scope, &session_id)
         .map_err(map_store_error)?
     {
-        require_join_grant_context(&existing, &input.conference_id, &input.integration_id)?;
+        require_replayable_join_grant_context(
+            &existing, &input.conference_id, &input.integration_id, now_unix_ms,
+        )?;
         return pb_join_grant_from_record(issuer, &existing);
     }
 
@@ -3186,7 +3188,9 @@ where
                 .conference_join_grant(&input.scope, &record.session_id)
                 .map_err(map_store_error)?
                 .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
-            require_join_grant_context(&existing, &record.conference_id, &record.integration_id)?;
+            require_replayable_join_grant_context(
+                &existing, &record.conference_id, &record.integration_id, now_unix_ms,
+            )?;
             pb_join_grant_from_record(issuer, &existing)
         }
         Err(error) => Err(map_store_error(error)),
@@ -3204,6 +3208,22 @@ fn realtime_join_use_policy(value: ConferenceJoinGrantUsePolicy) -> RealtimeJoin
     match value {
         ConferenceJoinGrantUsePolicy::SingleUse => RealtimeJoinGrantUsePolicy::SingleUse,
         ConferenceJoinGrantUsePolicy::Reusable => RealtimeJoinGrantUsePolicy::Reusable,
+    }
+}
+
+/// An accepted issuance command cannot mint or return a signed credential
+/// once the original grant has expired. This authorization fact is independent
+/// of opaque ID values (which may legally equal the redaction sentinel).
+fn require_replayable_join_grant_context(
+    record: &ConferenceJoinGrantRecord,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+    now_unix_ms: i64,
+) -> Result<(), CanonicalError> {
+    if record.expires_at_unix_ms <= now_unix_ms {
+        Err(CanonicalError::new(CanonicalErrorCode::Conflict))
+    } else {
+        require_join_grant_context(record, conference_id, integration_id)
     }
 }
 
