@@ -2864,7 +2864,7 @@ mod tests {
                      WHERE expires_at_unix_ms <= 200
                        AND (integration_id <> 'expired' OR call_id <> 'expired'
                             OR participant_id <> 'expired' OR device_id <> 'expired'
-                            OR revoked=0 OR redeemed=0)
+                            OR participant_kind <> 'person' OR revoked=0 OR redeemed=0)
                      LIMIT 4096",
                     [],
                     |row| row.get(3),
