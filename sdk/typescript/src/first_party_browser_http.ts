@@ -72,7 +72,12 @@ function sameBinding(a: UcrAuthenticatedFirstEntry, b: UcrAuthenticatedFirstEntr
 }
 
 function snapshotBinding(binding: UcrDeviceEnrollmentBinding): UcrDeviceEnrollmentBinding {
-  const base = parseBinding(binding);
+  const base = parseBinding({
+    tenantId: binding.tenantId,
+    namespaceId: binding.namespaceId,
+    participantId: binding.participantId,
+    deviceId: binding.deviceId,
+  });
   if ((binding.callId === undefined) !== (binding.sessionId === undefined)) {
     throw new Error("Call and Session must be supplied together");
   }
@@ -142,7 +147,8 @@ function parseIssuance(raw: unknown): UcrCanonicalJoinIssuance {
     participantId: raw.participantId, deviceId: raw.deviceId,
   });
   if (typeof raw.joinFragment !== "string" ||
-      !/^#ucr_join=[A-Za-z0-9_-]{10,16373}$/.test(raw.joinFragment)) {
+      !/^#ucr_join=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(raw.joinFragment) ||
+      raw.joinFragment.length > 16384) {
     throw new Error("invalid signed Join fragment");
   }
   return Object.freeze({
