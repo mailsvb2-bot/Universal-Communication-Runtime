@@ -1,3 +1,4 @@
+import type { UcrDirectCallHost, UcrCallStartIntent, UcrDirectCallAction } from "./contact_call_journey.ts";
 import type {
   UcrCanonicalDeviceKeyVault,
   UcrCanonicalDeviceTrust,
@@ -262,7 +263,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 export function createUcrFirstPartyHttpHost(
   vault: UcrCanonicalDeviceKeyVault,
   options: UcrFirstPartyHttpOptions,
-): UcrFirstPartyAuthenticatedUserHost {
+): UcrDirectCallHost {
   if (!vault || typeof vault.signChallenge !== "function") {
     throw new Error("existing protected Device signer vault required");
   }
@@ -368,6 +369,68 @@ export function createUcrFirstPartyHttpHost(
       if (!isObject(result) || Object.keys(result).length !== 1 || result.approved !== true) {
         throw new Error("canonical Device enrollment was not approved");
       }
+    },
+    async startDirectCall(binding, intent: UcrCallStartIntent) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) {
+        throw new Error("first-party account changed before canonical StartCall");
+      }
+      return await request("POST", "/v1/first-party/call/start", {
+        binding: auth,
+        intent: {
+          peerIdentityId: requiredId(intent.peerIdentityId,"peer Identity"),
+          media: intent.media,
+          idempotencyKey: requiredId(intent.idempotencyKey,"Call idempotency"),
+        },
+      }) as Awaited<ReturnType<UcrDirectCallHost["startDirectCall"]>>;
+    },
+    async getDirectCall(binding, callId) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) {
+        throw new Error("first-party account changed before canonical GetCall");
+      }
+      return await request("POST", "/v1/first-party/call/get", {
+        binding: auth, callId: requiredId(callId,"Call"),
+      }) as Awaited<ReturnType<UcrDirectCallHost["getDirectCall"]>>;
+    },
+    async listIncomingDirectCalls(binding) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) {
+        throw new Error("first-party account changed before canonical incoming Calls");
+      }
+      return await request("POST", "/v1/first-party/call/incoming", {
+        binding: auth,
+      }) as Awaited<ReturnType<UcrDirectCallHost["listIncomingDirectCalls"]>>;
+    },
+    async signalDirectCall(binding, input: {
+      callId: string; expectedRevision: number; action: UcrDirectCallAction
+    }) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) {
+        throw new Error("first-party account changed before canonical SignalCall");
+      }
+      return await request("POST", "/v1/first-party/call/signal", {
+        binding: auth, callId: requiredId(input.callId,"Call"),
+        expectedRevision: input.expectedRevision, action: input.action,
+      }) as Awaited<ReturnType<UcrDirectCallHost["signalDirectCall"]>>;
+    },
+    async issueSignedJoinForAcceptedCall(binding, input: {
+      callId: string; expectedRevision: number
+    }) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) {
+        throw new Error("first-party account changed before accepted Call Join");
+      }
+      const issued = parseIssuance(await request(
+        "POST", "/v1/first-party/call/join-accepted", {
+          binding: auth, callId: requiredId(input.callId,"Call"),
+          expectedRevision: input.expectedRevision,
+        },
+      ));
+      if (!sameBinding(auth,issued) || issued.callId !== input.callId) {
+        throw new Error("first-party Join issuer returned a foreign Call/Device");
+      }
+      return issued;
     },
     async issueSignedDeviceJoin(binding) {
       const context = snapshotBinding(binding);
