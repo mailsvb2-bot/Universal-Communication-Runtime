@@ -1535,10 +1535,8 @@ where
     }
 }
 
-
-///
 /// First-party human-device Call admission is not a login endpoint.
- *
+///
 /// The embedding first-party server MUST authenticate a real user and verify
 /// possession of that user's current trusted Device signing key before it
 /// constructs the `ScopedPrincipal` and invokes these methods. No browser-
