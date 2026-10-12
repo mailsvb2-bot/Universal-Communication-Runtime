@@ -1473,7 +1473,7 @@ impl RealtimeSessionRegistry {
     }
 
     /// Retires only the stable connection generation established by the matching Join.
-    /// MediaReady and downlink attendance events cannot invalidate this lease fence.
+    /// `MediaReady` and downlink attendance events cannot invalidate this lease fence.
     ///
     /// The sequence comparison and removal happen under the same registry lock,
     /// so a stale external Leave cannot remove an intervening reconnect.
