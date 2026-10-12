@@ -605,7 +605,7 @@ pub trait TrustedSigningKeyStore: StorageProvider {
 }
 
 /// Atomic first-party Device + trusted signer enrollment against the EXISTING
-/// canonical Device and TrustedSigningKey stores. This is not a separate
+/// canonical `Device` and `TrustedSigningKey` stores. This is not a separate
 /// identity/key registry or permission to self-authorize enrollment.
 ///
 /// Callers MUST independently authenticate an Identity and verify an
