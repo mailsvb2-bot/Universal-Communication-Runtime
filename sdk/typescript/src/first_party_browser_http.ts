@@ -114,6 +114,36 @@ function encodeBase64Url(bytes: Uint8Array): string {
   return btoa(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/**
+ * Domain-separated Ed25519 proof. The server reconstructs this byte sequence
+ * using its OWN authenticated session/scope and stored single-use challenge.
+ * Never ask a Device signer to sign unqualified, server-chosen bytes.
+ */
+export function encodeUcrFirstPartyEnrollmentProof(
+  binding: UcrAuthenticatedFirstEntry,
+  signer: UcrLocalDeviceSigner,
+  challengeId: string,
+  challenge: Uint8Array,
+): Uint8Array {
+  const user = parseBinding(binding);
+  const keyId = requiredId(signer.keyId, "key ID");
+  const serverChallengeId = requiredId(challengeId, "challenge");
+  if (!(signer.publicKey instanceof Uint8Array) || signer.publicKey.length !== 32 ||
+      !(challenge instanceof Uint8Array) ||
+      challenge.length < ENROLLMENT_CHALLENGE_MIN ||
+      challenge.length > ENROLLMENT_CHALLENGE_MAX) {
+    throw new Error("invalid Device enrollment signature context");
+  }
+  const context = [
+    user.tenantId, user.namespaceId, user.participantId, user.deviceId,
+    keyId, encodeBase64Url(signer.publicKey), serverChallengeId,
+    encodeBase64Url(challenge),
+  ];
+  return new TextEncoder().encode(
+    "ucr-first-party-device-enrollment.v1\u0000" + JSON.stringify(context),
+  );
+}
+
 function parseTrust(raw: unknown): UcrCanonicalDeviceTrust {
   if (!isObject(raw)) throw new Error("invalid canonical Device trust response");
   exactKeys(raw, ["deviceActive", "deviceRevoked", "activeKey"]);
@@ -309,7 +339,10 @@ export function createUcrFirstPartyHttpHost(
           challenge.length > ENROLLMENT_CHALLENGE_MAX) {
         throw new Error("invalid server possession challenge size");
       }
-      const signature = await vault.signChallenge(scope, challenge.slice());
+      const signedMessage = encodeUcrFirstPartyEnrollmentProof(context, {
+        keyId, publicKey: approvedPublicKey,
+      }, challengeId, challenge);
+      const signature = await vault.signChallenge(scope, signedMessage.slice());
       if (!(signature instanceof Uint8Array) || signature.length !== 64) {
         throw new Error("protected signer could not prove enrollment possession");
       }
@@ -318,7 +351,7 @@ export function createUcrFirstPartyHttpHost(
         {name: "Ed25519"}, false, ["verify"],
       );
       if (!await globalThis.crypto.subtle.verify(
-        "Ed25519", verifier, signature as Uint8Array<ArrayBuffer>, challenge,
+        "Ed25519", verifier, signature as Uint8Array<ArrayBuffer>, signedMessage,
       )) {
         throw new Error("server enrollment challenge signer mismatch");
       }
