@@ -640,6 +640,9 @@ struct SessionEntry {
     sender: mpsc::Sender<SfuForwardEnvelope>,
     receiver: Option<mpsc::Receiver<SfuForwardEnvelope>>,
     sequence: u64,
+    // Connection lease fence: stable from this Join until the next actual Join.
+    // MediaReady and downlink reattachment only increment attendance sequence.
+    join_generation: u64,
     media_ready: bool,
     adaptive_stage: Option<AdaptiveMediaStage>,
     publisher_owner: Option<ScopedPrincipal>,
@@ -651,6 +654,7 @@ impl fmt::Debug for SessionEntry {
             .debug_struct("SessionEntry")
             .field("claims", &self.claims)
             .field("sequence", &self.sequence)
+            .field("join_generation", &self.join_generation)
             .field("media_ready", &self.media_ready)
             .field("adaptive_stage", &self.adaptive_stage)
             .field("publisher_active", &self.publisher_owner.is_some())
@@ -974,6 +978,7 @@ impl RealtimeSessionRegistry {
                 .sequence
                 .checked_add(1)
                 .ok_or(RealtimeRegistryError::SequenceOverflow)?;
+            entry.join_generation = entry.sequence;
             entry.media_ready = false;
             entry.publisher_owner = None;
             let (sender, receiver) = mpsc::channel(self.queue_capacity);
@@ -1002,6 +1007,7 @@ impl RealtimeSessionRegistry {
             sender,
             receiver: Some(receiver),
             sequence: 1,
+            join_generation: 1,
             media_ready: false,
             adaptive_stage: None,
             publisher_owner: None,
@@ -1385,7 +1391,8 @@ impl RealtimeSessionRegistry {
         self.leave_matching_sequence(claims, None, now_unix_ms)
     }
 
-    /// Retires only the connection generation established by the matching Join.
+    /// Retires only the stable connection generation established by the matching Join.
+    /// MediaReady and downlink attendance events cannot invalidate this lease fence.
     ///
     /// The sequence comparison and removal happen under the same registry lock,
     /// so a stale external Leave cannot remove an intervening reconnect.
@@ -1419,7 +1426,7 @@ impl RealtimeSessionRegistry {
             .position(|entry| same_session(entry, claims))
             .ok_or(RealtimeRegistryError::SessionUnavailable)?;
         if entries[index].claims != *claims
-            || expected_session_sequence.is_some_and(|sequence| entries[index].sequence != sequence)
+            || expected_session_sequence.is_some_and(|generation| entries[index].join_generation != generation)
         {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
@@ -1897,6 +1904,47 @@ mod tests {
                 .contains_active_session(&claims, claims.expires_at_unix_ms)
                 .expect("expired lookup")
         );
+    }
+
+    #[test]
+    fn media_ready_and_downlink_reattachment_do_not_invalidate_leave_generation() {
+        let registry = RealtimeSessionRegistry::new(8, 4);
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("stable-lease-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("stable-lease-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let joined = registry.join(claims.clone(), 18_001).expect("join");
+        let generation = joined.transition.session_sequence;
+        let media = registry
+            .mark_media_ready(&claims, 18_002)
+            .expect("media ready")
+            .expect("transition");
+        assert!(media.session_sequence > generation);
+        let receiver = registry
+            .take_downlink(&claims, 18_003)
+            .expect("initial downlink");
+        drop(receiver);
+        let attachment = registry.attach_downlink(&claims, 18_004).expect("reattach");
+        assert!(
+            attachment.transition.expect("attendance reconnect").session_sequence
+                > media.session_sequence
+        );
+        assert_eq!(
+            registry.heartbeat(&claims, 18_005).expect("heartbeat"),
+            media.session_sequence + 1,
+            "attendance sequence may advance without replacing the Join"
+        );
+        registry
+            .leave_if_sequence(&claims, generation, 18_006)
+            .expect("the original Join lease must remain valid");
+        assert_eq!(registry.active_session_count(), 0);
     }
 
     #[test]
