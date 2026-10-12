@@ -106,6 +106,13 @@ struct WebRtcCloseRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct LeaveRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    expected_session_sequence: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct HeartbeatRequest {
     #[serde(flatten)]
     session: SessionRequest,
@@ -394,6 +401,13 @@ impl From<pb::RealtimeMediaPolicy> for BrowserMediaPolicyResponse {
     }
 }
 
+#[derive(Default)]
+struct RealtimeResponseState {
+    admission_state: Option<&'static str>,
+    media_policy: Option<BrowserMediaPolicyResponse>,
+    session_sequence: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 struct ApiResponse {
     ok: bool,
@@ -402,6 +416,8 @@ struct ApiResponse {
     expires_at_unix_ms: Option<i64>,
     heartbeat_interval_ms: Option<u64>,
     accepted_recipient_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_sequence: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     admission_state: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -542,7 +558,7 @@ async fn handle_post_route(state: &AppState, token: &str, path: &str, body: &[u8
             Ok(input) => heartbeat(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/leave" => match decode_json::<SessionRequest>(body) {
+        "/v1/realtime/leave" => match decode_json::<LeaveRequest>(body) {
             Ok(input) => leave(state, token, input).await,
             Err(error) => error.into_response(),
         },
@@ -729,14 +745,24 @@ async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpRespo
         Ok(response) => match response.into_inner().result {
             Some(pb::realtime_join_response::Result::Session(session)) => {
                 let media_policy = session.media_policy.map(BrowserMediaPolicyResponse::from);
+                if session.session_sequence == 0 {
+                    return api_error(
+                        StatusCode::BAD_GATEWAY,
+                        "invalid_join_sequence",
+                        "realtime upstream did not bind the Join to a session generation",
+                    );
+                }
                 api_ok_with_realtime_state(
                     "joined",
                     "realtime session joined",
                     Some(session.expires_at_unix_ms),
                     Some(session.heartbeat_interval_ms),
                     None,
-                    admission_state_name(session.admission_state),
-                    media_policy,
+                    RealtimeResponseState {
+                        admission_state: admission_state_name(session.admission_state),
+                        media_policy,
+                        session_sequence: Some(session.session_sequence),
+                    },
                 )
             }
             Some(pb::realtime_join_response::Result::Error(error)) => join_error(&error),
@@ -789,8 +815,11 @@ async fn heartbeat(state: &AppState, token: &str, input: HeartbeatRequest) -> Ht
                         None,
                         None,
                         None,
-                        admission_state_name(response.admission_state),
-                        media_policy,
+                        RealtimeResponseState {
+                            admission_state: admission_state_name(response.admission_state),
+                            media_policy,
+                            ..RealtimeResponseState::default()
+                        },
                     )
                 }
                 Some(pb::realtime_heartbeat_response::Result::Error(_)) | None => api_error(
@@ -1043,12 +1072,20 @@ async fn get_mls_bootstrap(state: &AppState, token: &str, input: SessionRequest)
     }
 }
 
-async fn leave(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+async fn leave(state: &AppState, token: &str, input: LeaveRequest) -> HttpResponse {
+    if input.expected_session_sequence == 0 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_session_sequence",
+            "Leave requires a nonzero authenticated Join generation",
+        );
+    }
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeLeaveRequest {
-        scope: Some(pb_scope(&input)),
-        call_id: Some(pb_id(&input.call)),
-        session_id: Some(pb_id(&input.session)),
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        expected_session_sequence: input.expected_session_sequence,
     });
     if let Err(error) = attach_bearer(&mut request, token) {
         return error.into_response();
@@ -2319,8 +2356,7 @@ fn api_ok(
         expires_at_unix_ms,
         heartbeat_interval_ms,
         accepted_recipient_count,
-        None,
-        None,
+        RealtimeResponseState::default(),
     )
 }
 
@@ -2330,8 +2366,7 @@ fn api_ok_with_realtime_state(
     expires_at_unix_ms: Option<i64>,
     heartbeat_interval_ms: Option<u64>,
     accepted_recipient_count: Option<u32>,
-    admission_state: Option<&'static str>,
-    media_policy: Option<BrowserMediaPolicyResponse>,
+    realtime_state: RealtimeResponseState,
 ) -> HttpResponse {
     json_response(
         StatusCode::OK,
@@ -2342,8 +2377,9 @@ fn api_ok_with_realtime_state(
             expires_at_unix_ms,
             heartbeat_interval_ms,
             accepted_recipient_count,
-            admission_state,
-            media_policy,
+            session_sequence: realtime_state.session_sequence,
+            admission_state: realtime_state.admission_state,
+            media_policy: realtime_state.media_policy,
         },
     )
 }
@@ -2375,6 +2411,7 @@ fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>)
             expires_at_unix_ms: None,
             heartbeat_interval_ms: None,
             accepted_recipient_count: None,
+            session_sequence: None,
             admission_state: None,
             media_policy: None,
         },
