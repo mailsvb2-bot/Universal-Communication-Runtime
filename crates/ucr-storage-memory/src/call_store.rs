@@ -183,6 +183,50 @@ impl CallStore for MemoryLocalStore {
         Ok(Some(session))
     }
 
+    fn incoming_direct_calls(
+        &self,
+        recipient: &ScopedPrincipal,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut ids = state
+            .calls
+            .values()
+            .filter(|call| {
+                call.scope == recipient.scope
+                    && call.conversation.kind == ConversationKind::Direct
+                    && call.initiated_by != recipient.principal
+                    && matches!(
+                        call.signalling_state,
+                        CallSignallingState::Inviting | CallSignallingState::Ringing
+                    )
+                    && call.participants.iter().any(|participant| {
+                        participant.principal == recipient.principal
+                            && matches!(
+                                participant.state,
+                                CallParticipantState::Invited | CallParticipantState::Ringing
+                            )
+                    })
+            })
+            .map(|call| call.call_id.clone())
+            .collect::<Vec<_>>();
+        ids.sort_by(|a, b| a.as_opaque().as_str().cmp(b.as_opaque().as_str()));
+        ids.truncate(max_items);
+        ids.into_iter()
+            .map(|id| {
+                let call = validated_call_from_state(&state, &recipient.scope, &id)?
+                    .ok_or(DurableStoreError::Corrupt)?;
+                if !active_call_participant(&call, &recipient.principal) {
+                    return Err(DurableStoreError::Corrupt);
+                }
+                Ok(call)
+            })
+            .collect()
+    }
+
     fn apply_call_signal(
         &self,
         actor: &ScopedPrincipal,
