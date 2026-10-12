@@ -90,7 +90,7 @@ function sessionHost(overrides: {
       return reply(trust);
     }
     if (path === "/v1/first-party/device/challenge") {
-      assert.equal(body.deviceId, binding.deviceId, "bind challenge to authenticated Device");
+      assert.deepEqual(body.binding, binding, "bind challenge to authenticated Device and scope");
       requestedKey = {keyId: body.keyId, publicKeyBase64Url: body.publicKeyBase64Url};
       if (overrides.mutateSessionAfterChallenge) activeSession = second;
       return reply({
