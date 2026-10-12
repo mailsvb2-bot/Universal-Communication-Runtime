@@ -51,7 +51,7 @@ pub(super) fn verify_schema_v15(connection: &Connection) -> Result<(), DurableSt
     verify_rows(connection)
 }
 
-/// The canonical Device and signing-key tables share exactly one SQLite
+/// The canonical `Device` and signing-key tables share exactly one `SQLite`
 /// transaction. An authenticated first-party handler must separately prove
 /// user/Identity ownership and verify an unexpired one-time Ed25519 challenge
 /// BEFORE invoking this persistence operation.
