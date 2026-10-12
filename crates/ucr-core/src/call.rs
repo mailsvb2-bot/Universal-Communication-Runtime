@@ -88,6 +88,21 @@ pub trait CallStore: StorageProvider + ConversationStore + GroupStore {
         call_id: &CallId,
     ) -> Result<Option<CallSession>, DurableStoreError>;
 
+    /// Returns a bounded, recipient-only view of unanswered direct Calls.
+    ///
+    /// The principal must be independently authenticated by the caller. The
+    /// projection is evaluated against the same canonical participant and
+    /// Call snapshots; it never creates a second inbox or exposes other
+    /// tenants, initiators, groups or terminated Calls.
+    ///
+    /// # Errors
+    /// Rejects an incorrect scope, invalid bound, corrupt record or storage failure.
+    fn incoming_direct_calls(
+        &self,
+        recipient: &ScopedPrincipal,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, DurableStoreError>;
+
     /// Applies one actor-bound idempotent signalling mutation atomically.
     /// Duplicate/conflict evidence is returned only after current exact participant authority is
     /// established. The signal `EventId` is scope-wide reserved against unrelated Event/Group/Call
