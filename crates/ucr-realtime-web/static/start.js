@@ -11,7 +11,18 @@ const host = createUcrFirstPartyHttpHost(vault, {origin:location.origin});
 const calls = createUcrContactCallJourney(host,vault);
 let active = null, busy = false, navigating = false, refreshing = false, timer = null;
 let knownContacts = [];
+let accountScope = null;
 const idempotency = new Map();
+
+function clearRetryKey(call) {
+  // A terminal Call is not a retry of a previous button press. A fresh
+  // click must start a new canonical Call with a new idempotency key.
+  const contact = knownContacts.find(c => c.peerIdentityId === call.calleeIdentityId);
+  if (contact) idempotency.delete(contact.id + ":" + call.media);
+}
+function principalScope(user) {
+  return JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]);
+}
 
 function message(value) { status.textContent = value; }
 function textNode(value) {return document.createTextNode(value);}
@@ -151,6 +162,7 @@ async function refresh() {
       showActive();
       if (fresh.state === "active") await beginMedia(fresh.callId);
       if (fresh.state === "terminated") {
+        if (active.identity === fresh.callerIdentityId) clearRetryKey(fresh);
         message("Вызов завершён сервером. Старая сессия больше не используется.");
       }
     }
@@ -160,6 +172,18 @@ async function initialize() {
   clearInterval(timer);
   message("Проверка независимо авторизованной Identity и Device…");
   const user = await host.resumeAuthenticatedDevice();
+  const currentScope = principalScope(user);
+  if (accountScope !== currentScope) {
+    // Switching user or Device must never reuse another identity's selected
+    // Call, cached UI state, or in-flight idempotency keys.
+    accountScope = currentScope;
+    knownContacts = [];
+    idempotency.clear();
+    active = null;
+    showActive();
+    renderIncoming([]);
+    renderContacts([]);
+  }
   await updateContacts();
   el("who").textContent = "Identity: " + user.participantId + " · Device: " + user.deviceId;
   await refresh();
@@ -189,6 +213,9 @@ el("cancel").addEventListener("click",() => void run(async () => {
   const state = active.call.state;
   const action = state === "active" || state === "reconnecting" ? "hangup" : "cancel";
   active.call = await calls.signal(active.call.callId,action);
+  if (active.call.state === "terminated" && active.identity === active.call.callerIdentityId) {
+    clearRetryKey(active.call);
+  }
   showActive();
   message("Завершение вызова подтверждено каноническим сервером.");
 }));
