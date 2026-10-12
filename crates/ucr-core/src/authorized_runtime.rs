@@ -1498,6 +1498,23 @@ where
             .map_err(AuthorizedMutationError::Store)
     }
 
+    /// Lists a bounded recipient-only direct Call inbox under canonical
+    /// observation policy. This is a read projection, not an event queue
+    /// or a second Call lifecycle owner.
+    ///
+    /// # Errors
+    /// Returns authorization, invalid-limit or canonical durable-store failures.
+    pub fn incoming_direct_calls(
+        &self,
+        recipient: &ScopedPrincipal,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, AuthorizedMutationError> {
+        self.require(recipient, &recipient.scope, CALL_OBSERVE_PERMISSION)?;
+        self.store
+            .incoming_direct_calls(recipient, max_items)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
     /// Applies one idempotent Call signalling fact through the atomic canonical owner.
     ///
     /// # Errors
