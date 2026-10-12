@@ -2448,7 +2448,9 @@ fn first_party_start_js_response() -> HttpResponse {
         .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
         .header(CACHE_CONTROL, "no-store")
         .header("X-Content-Type-Options", "nosniff")
-        .body(full_body(Bytes::from_static(FIRST_PARTY_START_JS.as_bytes())))
+        .body(full_body(Bytes::from_static(
+            FIRST_PARTY_START_JS.as_bytes(),
+        )))
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
@@ -2485,7 +2487,10 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 mod tests {
     #[test]
     fn first_party_entry_uses_only_canonical_signed_fragment_and_never_mints_trust() {
-        assert!(super::FIRST_PARTY_START_HTML.contains("An authenticated first-party session is required"));
+        assert!(
+            super::FIRST_PARTY_START_HTML
+                .contains("An authenticated first-party session is required")
+        );
         assert!(super::FIRST_PARTY_START_JS.contains("createUcrFirstPartyHttpHost"));
         assert!(super::FIRST_PARTY_START_JS.contains("createUcrFirstPartyCallEntry"));
         assert!(super::FIRST_PARTY_START_JS.contains("issued.joinFragment.slice(1)"));
