@@ -76,3 +76,7 @@ export { createUcrBrowserProtectedDeviceVault } from "./canonical_device_seed_va
 export { createUcrFirstPartyCallEntry } from "./canonical_first_party_call_entry.ts";
 // Same-origin authenticated first-party HTTP transport; server remains canonical.
 export { createUcrFirstPartyHttpHost } from "./first_party_browser_http.ts";
+
+// Authenticated contact picker -> canonical direct Call -> accepted, Device-bound Join.
+// This is an SDK coordinator, not a second Call or cryptographic owner.
+export { createUcrContactCallJourney } from "./contact_call_journey.ts";
