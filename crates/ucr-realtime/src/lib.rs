@@ -966,11 +966,12 @@ impl RealtimeSessionRegistry {
             // Native opaque ID has 128 bits from the OS CSPRNG; hash the entire
             // random ID and use an unpredictable 63-bit initial generation.
             // The top bit stays clear so one registry has ample counter space.
-            let nonce = generate_opaque_id().map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+            let nonce =
+                generate_opaque_id().map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
             let digest = Sha256::digest(nonce.as_wire_bytes());
             let initial = u64::from_be_bytes([
-                digest[0], digest[1], digest[2], digest[3],
-                digest[4], digest[5], digest[6], digest[7],
+                digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
+                digest[7],
             ]) & 0x7fff_ffff_ffff_ffff;
             let _ = self.last_join_generation.compare_exchange(
                 0,
@@ -2001,9 +2002,13 @@ mod tests {
             .expect("issue")
             .claims;
         let before_restart = RealtimeSessionRegistry::new(8, 4);
-        let first = before_restart.join(claims.clone(), 18_001).expect("first process");
+        let first = before_restart
+            .join(claims.clone(), 18_001)
+            .expect("first process");
         let after_restart = RealtimeSessionRegistry::new(8, 4);
-        let second = after_restart.join(claims.clone(), 18_002).expect("restarted process");
+        let second = after_restart
+            .join(claims.clone(), 18_002)
+            .expect("restarted process");
         assert_ne!(first.join_generation, second.join_generation);
         assert!(
             after_restart
