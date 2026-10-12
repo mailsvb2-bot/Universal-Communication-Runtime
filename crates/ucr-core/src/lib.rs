@@ -604,6 +604,32 @@ pub trait TrustedSigningKeyStore: StorageProvider {
     ) -> Result<Option<PublicKeyDescriptor>, DurableStoreError>;
 }
 
+/// Atomic first-party Device + trusted signer enrollment against the EXISTING
+/// canonical Device and TrustedSigningKey stores. This is not a separate
+/// identity/key registry or permission to self-authorize enrollment.
+///
+/// Callers MUST independently authenticate an Identity and verify an
+/// unexpired, one-time, exact-scope Ed25519 possession challenge first.
+/// Public HTTP clients never invoke this raw storage owner directly.
+pub trait AtomicTrustedDeviceEnrollmentStore: StorageProvider {
+    /// Registers a previously unknown ACTIVE Device for an already-existing
+    /// canonical Identity and its verified signing key in ONE transaction.
+    ///
+    /// Identical retries succeed only when BOTH the Device and currently
+    /// active trusted key still match exactly. A prior unkeyed, revoked, or
+    /// reassigned Device is not an enrollment retry and MUST conflict.
+    ///
+    /// # Errors
+    /// Rejects missing Identity, non-active Device, malformed/foreign key,
+    /// revoked/conflicting history and any atomic storage failure.
+    fn enroll_new_trusted_device(
+        &self,
+        scope: &TenantScope,
+        device: &DeviceDescriptor,
+        signing_key: &PublicKeyDescriptor,
+    ) -> Result<(), DurableStoreError>;
+}
+
 /// Authorization-enforcing façade for trusted signing-key mutations.
 ///
 /// Raw key storage remains an internal persistence capability. External/runtime
