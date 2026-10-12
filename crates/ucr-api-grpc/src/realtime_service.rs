@@ -4154,11 +4154,7 @@ mod sfu_placement_lifecycle_tests {
         );
         assert_eq!(
             service
-                .leave_realtime_session_with_sfu_placement(
-                    &active,
-                    1_003,
-                    first.join_generation,
-                )
+                .leave_realtime_session_with_sfu_placement(&active, 1_003, first.join_generation,)
                 .await,
             Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
             "old Leave must not revoke newer connection"
@@ -4168,11 +4164,7 @@ mod sfu_placement_lifecycle_tests {
             "stale Leave must not revoke live grant"
         );
         let (_, placement_cleanup) = service
-            .leave_realtime_session_with_sfu_placement(
-                &active,
-                1_004,
-                next.join_generation,
-            )
+            .leave_realtime_session_with_sfu_placement(&active, 1_004, next.join_generation)
             .await
             .expect("terminal Leave revokes grant");
         placement_cleanup.expect("terminal placement cleanup");
@@ -4266,11 +4258,7 @@ mod sfu_placement_lifecycle_tests {
             .await
             .expect("admit existing durable grant");
         let (_, placement_cleanup) = service
-            .leave_realtime_session_with_sfu_placement(
-                &active,
-                1_002,
-                joined.join_generation,
-            )
+            .leave_realtime_session_with_sfu_placement(&active, 1_002, joined.join_generation)
             .await
             .expect("revoke and close durable grant");
         placement_cleanup.expect("durable grant placement cleanup");
@@ -4343,10 +4331,12 @@ mod sfu_placement_lifecycle_tests {
         let current = registry.join(claims.clone(), 1_002).expect("new Join");
         assert_ne!(earlier.join_generation, current.join_generation);
 
-        assert!(service
-            .rollback_realtime_join(&claims, earlier.join_generation, 1_003)
-            .await
-            .is_err());
+        assert!(
+            service
+                .rollback_realtime_join(&claims, earlier.join_generation, 1_003)
+                .await
+                .is_err()
+        );
         assert_eq!(registry.active_session_count(), 1);
         assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 0);
         service
