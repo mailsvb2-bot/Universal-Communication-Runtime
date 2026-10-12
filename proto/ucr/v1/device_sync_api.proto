@@ -20,6 +20,22 @@ message DeviceRegisterResponse {
   }
 }
 
+// Atomic Device+trusted-key enrollment by an already authorized SERVICE
+// principal after the FIRST-PARTY BFF has independently authenticated
+// human Identity and verified exact one-time Ed25519 key possession.
+// This RPC itself is NOT a human login or proof verifier.
+message DeviceEnrollTrustedRequest {
+  TenantScope scope = 1;
+  DeviceDescriptor device = 2;
+  PublicKeyDescriptor signing_key = 3;
+}
+message DeviceEnrollTrustedResponse {
+  oneof result {
+    DeviceDescriptor device = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 message DeviceGetRequest {
   TenantScope scope = 1;
   OpaqueId device_id = 2;
@@ -119,6 +135,7 @@ message SyncGetLatestCheckpointResponse {
 // Thin Phase-40 consumer API over the existing DeviceLifecycleStore owner.
 service DeviceService {
   rpc RegisterDevice(DeviceRegisterRequest) returns (DeviceRegisterResponse);
+  rpc EnrollTrustedDevice(DeviceEnrollTrustedRequest) returns (DeviceEnrollTrustedResponse);
   rpc GetDevice(DeviceGetRequest) returns (DeviceGetResponse);
   rpc RevokeDevice(DeviceRevokeRequest) returns (DeviceRevokeResponse);
   rpc ProvisionTrustedSigningKey(DeviceProvisionTrustedSigningKeyRequest) returns (DeviceProvisionTrustedSigningKeyResponse);
