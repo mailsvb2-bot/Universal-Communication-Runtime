@@ -11,7 +11,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use ucr_core::generate_opaque_id;
 use ucr_model::{
@@ -954,10 +954,31 @@ impl RealtimeSessionRegistry {
             .any(|entry| same_session(entry, claims) && entry.claims == *claims))
     }
 
-    /// Allocates a new lease fence without reusing an old generation after Leave.
-    /// This is a counter within the existing canonical session registry, not
-    /// a second Call/Device registry.
+    /// Allocates a unique connection lease fence. A CSPRNG-derived registry
+    /// incarnation prevents the ordinary ABA problem after an API restart:
+    /// sequence 1 on an old process must not represent sequence 1 on a new
+    /// process that reused the same unexpired Join grant.
+    ///
+    /// This is still only infrastructure state of the canonical session owner,
+    /// not another persistent Identity, Device, Call or Conference store.
     fn next_join_generation(&self) -> Result<u64, RealtimeRegistryError> {
+        if self.last_join_generation.load(Ordering::Relaxed) == 0 {
+            // Native opaque ID has 128 bits from the OS CSPRNG; hash the entire
+            // random ID and use an unpredictable 63-bit initial generation.
+            // The top bit stays clear so one registry has ample counter space.
+            let nonce = generate_opaque_id().map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+            let digest = Sha256::digest(nonce.as_wire_bytes());
+            let initial = u64::from_be_bytes([
+                digest[0], digest[1], digest[2], digest[3],
+                digest[4], digest[5], digest[6], digest[7],
+            ]) & 0x7fff_ffff_ffff_ffff;
+            let _ = self.last_join_generation.compare_exchange(
+                0,
+                initial.max(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
         self.last_join_generation
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
                 last.checked_add(1)
@@ -1964,6 +1985,35 @@ mod tests {
                 .contains_active_session(&claims, claims.expires_at_unix_ms)
                 .expect("expired lookup")
         );
+    }
+
+    #[test]
+    fn independent_process_incarnations_use_distinct_randomized_join_fences() {
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("restart-lease-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("restart-lease-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let before_restart = RealtimeSessionRegistry::new(8, 4);
+        let first = before_restart.join(claims.clone(), 18_001).expect("first process");
+        let after_restart = RealtimeSessionRegistry::new(8, 4);
+        let second = after_restart.join(claims.clone(), 18_002).expect("restarted process");
+        assert_ne!(first.join_generation, second.join_generation);
+        assert!(
+            after_restart
+                .leave_if_sequence(&claims, first.join_generation, 18_003)
+                .is_err(),
+            "stale Leave from previous process may not retire the new process's connection"
+        );
+        after_restart
+            .leave_if_sequence(&claims, second.join_generation, 18_004)
+            .expect("new incarnation's participant can leave");
     }
 
     #[test]
