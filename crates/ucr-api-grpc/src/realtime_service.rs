@@ -435,7 +435,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         if expected_session_sequence == 0
             || self
                 .registry
-                .heartbeat(claims, now_unix_ms)
+                .current_join_generation(claims, now_unix_ms)
                 .map_err(map_registry_error)?
                 != expected_session_sequence
         {
@@ -468,11 +468,12 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     async fn rollback_realtime_join(
         &self,
         claims: &RealtimeSessionClaims,
+        expected_join_generation: u64,
         now_unix_ms: i64,
     ) -> Result<(), CanonicalError> {
         let _guard = self.sfu_placement_transition_guard().await;
         self.registry
-            .leave(claims, now_unix_ms)
+            .leave_if_sequence(claims, expected_join_generation, now_unix_ms)
             .map_err(map_registry_error)?;
         self.release_sfu_call_placement_if_inactive(claims, now_unix_ms)
             .await
@@ -648,14 +649,14 @@ where
                         .admit_realtime_session_with_sfu_placement(claims.clone(), now)
                         .await?;
                     if let Err(error) = self.append_attendance(&outcome.transition) {
-                        let _ = self.rollback_realtime_join(&claims, now).await;
+                        let _ = self.rollback_realtime_join(&claims, outcome.join_generation, now).await;
                         return Err(error);
                     }
                     Ok(pb_realtime_session(
                         &claims,
                         admission,
                         media_policy,
-                        outcome.transition.session_sequence,
+                        outcome.join_generation,
                     ))
                 }
                 .await
@@ -4320,9 +4321,9 @@ mod sfu_placement_lifecycle_tests {
             .ensure_sfu_call_placement(&claims)
             .await
             .expect("placement");
-        registry.join(claims.clone(), 1_001).expect("join");
+        let joined = registry.join(claims.clone(), 1_001).expect("join");
         service
-            .rollback_realtime_join(&claims, 1_002)
+            .rollback_realtime_join(&claims, joined.join_generation, 1_002)
             .await
             .expect("rollback");
 
