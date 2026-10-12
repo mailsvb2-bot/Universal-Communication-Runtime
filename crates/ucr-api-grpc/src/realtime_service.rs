@@ -459,6 +459,16 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .registry
             .leave_if_sequence(claims, expected_session_sequence, now_unix_ms)
             .map_err(map_registry_error)?;
+        // Already revoked canonical admission and removed the registry session.
+        // Keep the same lifecycle gate held while retiring the provider peer:
+        // no concurrent Start/Restart can reopen it after this Leave.
+        let provider = Arc::clone(&self.webrtc_provider);
+        let session_id = claims.session_id.clone();
+        match tokio::task::spawn_blocking(move || provider.close_session(&session_id)).await {
+            Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {}
+            Ok(Err(error)) => return Err(map_webrtc_provider_error(error)),
+            Err(_) => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+        }
         let placement_cleanup = self
             .release_sfu_call_placement_if_inactive(claims, now_unix_ms)
             .await;
@@ -1524,6 +1534,9 @@ where
         &self,
         request: Request<pb::RealtimeStartWebRtcRequest>,
     ) -> Result<Response<pb::RealtimeStartWebRtcResponse>, Status> {
+        // Serialize WebRTC peer creation and ICE restart with Join/Leave.
+        // A provider operation completing late must not resurrect a retired lease.
+        let _peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let lookup = decode_realtime_lookup(request.into_inner());
         let result = match (token, lookup) {
@@ -1735,6 +1748,9 @@ where
         &self,
         request: Request<pb::RealtimeRestartWebRtcRequest>,
     ) -> Result<Response<pb::RealtimeRestartWebRtcResponse>, Status> {
+        // Serialize WebRTC peer creation and ICE restart with Join/Leave.
+        // A provider operation completing late must not resurrect a retired lease.
+        let _peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let lookup = decode_realtime_lookup(request.into_inner());
         let result = match (token, lookup) {
