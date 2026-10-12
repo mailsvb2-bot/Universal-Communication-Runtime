@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{
-    AtomicTrustedDeviceEnrollmentStore, DeviceLifecycleStore, DeviceReverificationProof, DurableStoreError, IdentityDeviceLookupStore,
-    ReverifiedDeviceActivationStore,
+    AtomicTrustedDeviceEnrollmentStore, DeviceLifecycleStore, DeviceReverificationProof,
+    DurableStoreError, IdentityDeviceLookupStore, ReverifiedDeviceActivationStore,
 };
 use ucr_model::{
     DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, OpaqueId, PublicKeyDescriptor,
@@ -62,8 +62,7 @@ impl AtomicTrustedDeviceEnrollmentStore for SqliteLocalStore {
         device: &DeviceDescriptor,
         signing_key: &PublicKeyDescriptor,
     ) -> Result<(), DurableStoreError> {
-        if device.state != DeviceLifecycleState::Active
-            || signing_key.device_id != device.device_id
+        if device.state != DeviceLifecycleState::Active || signing_key.device_id != device.device_id
         {
             return Err(DurableStoreError::InvalidRecord);
         }
@@ -73,11 +72,7 @@ impl AtomicTrustedDeviceEnrollmentStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        if !super::identity_store::identity_exists_in(
-            &transaction,
-            scope,
-            &device.identity_id,
-        )? {
+        if !super::identity_store::identity_exists_in(&transaction, scope, &device.identity_id)? {
             return Err(DurableStoreError::PermissionDenied);
         }
         if let Some(existing) = load_device(&transaction, scope, &device.device_id)? {
@@ -87,35 +82,30 @@ impl AtomicTrustedDeviceEnrollmentStore for SqliteLocalStore {
             if existing != *device {
                 return Err(DurableStoreError::Conflict);
             }
-            let active = super::trusted_key_store::active_key_id(
-                &transaction, scope, &device.device_id,
-            )?;
+            let active =
+                super::trusted_key_store::active_key_id(&transaction, scope, &device.device_id)?;
             if active.as_ref() != Some(&signing_key.key_id) {
                 return Err(DurableStoreError::Conflict);
             }
             let record = super::trusted_key_store::load_key_record(
-                &transaction, scope, &signing_key.key_id,
+                &transaction,
+                scope,
+                &signing_key.key_id,
             )?
             .ok_or(DurableStoreError::Corrupt)?;
-            if record.state != TrustedSigningKeyState::Active
-                || record.descriptor != *signing_key
-            {
+            if record.state != TrustedSigningKeyState::Active || record.descriptor != *signing_key {
                 return Err(DurableStoreError::Conflict);
             }
         } else {
             // First-entry register and trusted signer publication cannot
             // race with Device revoke, rebind, or an existing key ID.
-            if super::trusted_key_store::load_key_record(
-                &transaction, scope, &signing_key.key_id,
-            )?
-            .is_some()
+            if super::trusted_key_store::load_key_record(&transaction, scope, &signing_key.key_id)?
+                .is_some()
             {
                 return Err(DurableStoreError::Conflict);
             }
             insert_device(&transaction, scope, device)?;
-            super::trusted_key_store::insert_active_key(
-                &transaction, scope, signing_key,
-            )?;
+            super::trusted_key_store::insert_active_key(&transaction, scope, signing_key)?;
         }
         transaction
             .commit()
@@ -545,16 +535,15 @@ mod tests {
     use rusqlite::Connection;
     use ucr_core::{
         AtomicTrustedDeviceEnrollmentStore, DeviceLifecycleStore, DeviceReverificationGate,
-        DeviceReverificationVerificationError, IdentityStore,
-        DeviceReverificationVerifier, DurableStoreError, IdentityDeviceLookupStore,
-        ReverifiedDeviceActivationStore, StorageProvider, TrustedSigningKeyStore,
-        authorize_and_activate_reverified_device,
+        DeviceReverificationVerificationError, DeviceReverificationVerifier, DurableStoreError,
+        IdentityDeviceLookupStore, IdentityStore, ReverifiedDeviceActivationStore, StorageProvider,
+        TrustedSigningKeyStore, authorize_and_activate_reverified_device,
     };
     use ucr_crypto::{TrustedKeyResolutionError, TrustedSigningKeyResolver};
     use ucr_model::{
         DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityEvidence, IdentityId,
-        IdentityOwnership, IdentityRecord, KeyId, KeyPurpose,
-        NamespaceId, OpaqueId, PublicKeyDescriptor, TenantId, TenantScope, TrustedSigningKeyState,
+        IdentityOwnership, IdentityRecord, KeyId, KeyPurpose, NamespaceId, OpaqueId,
+        PublicKeyDescriptor, TenantId, TenantScope, TrustedSigningKeyState,
     };
     use ucr_protocol::{ALGORITHM_VERSION, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID};
 
@@ -661,7 +650,10 @@ mod tests {
             store.enroll_new_trusted_device(&scope, &active, &signer),
             Ok(())
         );
-        assert_eq!(store.device(&scope, &active.device_id), Ok(Some(active.clone())));
+        assert_eq!(
+            store.device(&scope, &active.device_id),
+            Ok(Some(active.clone()))
+        );
         assert_eq!(
             store.active_trusted_signing_key(&scope, &active.device_id),
             Ok(Some(signer.clone()))
@@ -696,12 +688,17 @@ mod tests {
 
         // Existing unkeyed Device must use explicit recovery, not silently
         // self-approve the proposed key just because the scope matches.
-        store.register_device(&scope, &active).expect("legacy unkeyed registration");
+        store
+            .register_device(&scope, &active)
+            .expect("legacy unkeyed registration");
         assert_eq!(
             store.enroll_new_trusted_device(&scope, &active, &signer),
             Err(DurableStoreError::Conflict)
         );
-        assert_eq!(store.active_trusted_signing_key(&scope, &active.device_id), Ok(None));
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &active.device_id),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -723,7 +720,9 @@ mod tests {
         let mut reassigned = active.clone();
         reassigned.identity_id = IdentityId::from_opaque(oid("other-identity"));
         assert!(
-            store.enroll_new_trusted_device(&scope, &reassigned, &signer).is_err(),
+            store
+                .enroll_new_trusted_device(&scope, &reassigned, &signer)
+                .is_err(),
             "key cannot transfer to another canonical Identity"
         );
         store
@@ -733,7 +732,10 @@ mod tests {
             store.enroll_new_trusted_device(&scope, &active, &signer),
             Err(DurableStoreError::Conflict)
         );
-        assert_eq!(store.active_trusted_signing_key(&scope, &active.device_id), Ok(None));
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &active.device_id),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -759,10 +761,16 @@ mod tests {
             }));
         }
         barrier.wait();
-        let results: Vec<_> = joins.into_iter().map(|join| join.join().expect("thread")).collect();
+        let results: Vec<_> = joins
+            .into_iter()
+            .map(|join| join.join().expect("thread"))
+            .collect();
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
         assert_eq!(
-            results.iter().filter(|result| **result == Err(DurableStoreError::Conflict)).count(),
+            results
+                .iter()
+                .filter(|result| **result == Err(DurableStoreError::Conflict))
+                .count(),
             1
         );
         let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
