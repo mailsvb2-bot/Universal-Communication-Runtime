@@ -341,13 +341,13 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         self
     }
 
-    async fn sfu_placement_transition_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        self.sfu_placement_lifecycle.as_ref()?;
-        Some(
-            Arc::clone(&self.sfu_placement_transition)
-                .lock_owned()
-                .await,
-        )
+    // Serialize Join, terminal Leave and grant revocation even when SFU
+    // placement management is disabled. Otherwise old reusable grants can
+    // reconnect between a Leave's generation check and its revocation.
+    async fn sfu_placement_transition_guard(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.sfu_placement_transition)
+            .lock_owned()
+            .await
     }
 
     async fn ensure_sfu_call_placement(
@@ -385,8 +385,27 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         &self,
         claims: RealtimeSessionClaims,
         now_unix_ms: i64,
-    ) -> Result<RealtimeJoinOutcome, CanonicalError> {
+    ) -> Result<RealtimeJoinOutcome, CanonicalError>
+    where
+        S: ConferenceJoinGrantStore,
+    {
         let _guard = self.sfu_placement_transition_guard().await;
+        // Redemption can precede this mutex. Recheck the SAME canonical
+        // grant owner inside the gate, before resurrecting a retired session.
+        if let Some(record) = self
+            .store
+            .conference_join_grant(&claims.scope, &claims.session_id)
+            .map_err(map_store_error)?
+        {
+            require_durable_grant_matches_claims(&record, &claims)?;
+            if record.revoked {
+                return Err(map_join_token_error(JoinTokenError::Revoked));
+            }
+        } else {
+            self.join_issuer
+                .validate_live_claims(&claims, now_unix_ms)
+                .map_err(map_join_token_error)?;
+        }
         self.ensure_sfu_call_placement(&claims).await?;
         match self.registry.join(claims.clone(), now_unix_ms) {
             Ok(outcome) => Ok(outcome),
@@ -404,11 +423,41 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         &self,
         claims: &RealtimeSessionClaims,
         now_unix_ms: i64,
-    ) -> Result<(AttendanceTransition, Result<(), CanonicalError>), CanonicalError> {
+        expected_session_sequence: u64,
+    ) -> Result<(AttendanceTransition, Result<(), CanonicalError>), CanonicalError>
+    where
+        S: ConferenceJoinGrantStore,
+    {
         let _guard = self.sfu_placement_transition_guard().await;
+        // A stale Leave must not revoke a valid, newer connection grant.
+        // The check, canonical revocation, and registry retirement share
+        // the same Join/Leave gate, preventing a reset to sequence 1 (ABA).
+        if expected_session_sequence == 0
+            || self
+                .registry
+                .heartbeat(claims, now_unix_ms)
+                .map_err(map_registry_error)?
+                != expected_session_sequence
+        {
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
+        if let Some(record) = self
+            .store
+            .conference_join_grant(&claims.scope, &claims.session_id)
+            .map_err(map_store_error)?
+        {
+            require_durable_grant_matches_claims(&record, claims)?;
+            self.store
+                .revoke_conference_join_grant(&claims.scope, &claims.session_id)
+                .map_err(map_store_error)?;
+        } else {
+            self.join_issuer
+                .revoke(&claims.scope, &claims.session_id)
+                .map_err(map_join_token_error)?;
+        }
         let transition = self
             .registry
-            .leave(claims, now_unix_ms)
+            .leave_if_sequence(claims, expected_session_sequence, now_unix_ms)
             .map_err(map_registry_error)?;
         let placement_cleanup = self
             .release_sfu_call_placement_if_inactive(claims, now_unix_ms)
@@ -602,7 +651,12 @@ where
                         let _ = self.rollback_realtime_join(&claims, now).await;
                         return Err(error);
                     }
-                    Ok(pb_realtime_session(&claims, admission, media_policy))
+                    Ok(pb_realtime_session(
+                        &claims,
+                        admission,
+                        media_policy,
+                        outcome.transition.session_sequence,
+                    ))
                 }
                 .await
             }
@@ -675,7 +729,9 @@ where
         request: Request<pb::RealtimeLeaveRequest>,
     ) -> Result<Response<pb::RealtimeLeaveResponse>, Status> {
         let token = decode_bearer_token(request.metadata());
-        let lookup = decode_realtime_lookup(request.into_inner());
+        let input = request.into_inner();
+        let expected_session_sequence = input.expected_session_sequence;
+        let lookup = decode_realtime_lookup_fields(input.scope, input.call_id, input.session_id);
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => {
                 async {
@@ -683,7 +739,11 @@ where
                         self.authenticated_claims(&token, &scope, &call_id, &session_id)?;
                     let now = self.now()?;
                     let (transition, placement_cleanup) = self
-                        .leave_realtime_session_with_sfu_placement(&claims, now)
+                        .leave_realtime_session_with_sfu_placement(
+                            &claims,
+                            now,
+                            expected_session_sequence,
+                        )
                         .await?;
                     self.append_attendance(&transition)?;
                     conference_runtime(self)
@@ -3197,6 +3257,7 @@ fn pb_realtime_session(
     claims: &RealtimeSessionClaims,
     admission: pb::RealtimeAdmissionState,
     media_policy: Option<EffectiveRealtimeMediaPolicy>,
+    session_sequence: u64,
 ) -> pb::RealtimeSession {
     pb::RealtimeSession {
         scope: Some(pb_scope(&claims.scope)),
@@ -3211,6 +3272,7 @@ fn pb_realtime_session(
         heartbeat_interval_ms: REALTIME_HEARTBEAT_INTERVAL_MS,
         admission_state: admission as i32,
         media_policy: media_policy.map(pb_realtime_media_policy),
+        session_sequence,
     }
 }
 
@@ -3917,7 +3979,7 @@ mod sfu_placement_lifecycle_tests {
     fn service<L>(
         registry: Arc<RealtimeSessionRegistry>,
         lifecycle: Arc<L>,
-    ) -> GrpcRealtimeService<(), (), ()>
+    ) -> GrpcRealtimeService<(), (), ucr_storage_memory::MemoryLocalStore>
     where
         L: RealtimeSfuPlacementLifecycle + 'static,
     {
@@ -3932,7 +3994,7 @@ mod sfu_placement_lifecycle_tests {
         GrpcRealtimeService::new(
             Arc::new(()),
             Arc::new(()),
-            Arc::new(()),
+            Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
             join_issuer,
             registry,
             Arc::new(ConferenceRuntimeState::new()),
@@ -3991,7 +4053,21 @@ mod sfu_placement_lifecycle_tests {
         });
         lifecycle.release_started.notified().await;
 
-        let fresh = claims("placement-fresh-session", "placement-fresh-device");
+        let fresh_device = claims("placement-fresh-session", "placement-fresh-device");
+        // This admission is genuinely authorized by the existing legacy Join
+        // owner; the service no longer admits fabricated, unissued claims.
+        let fresh = service
+            .join_issuer
+            .issue(
+                fresh_device.scope,
+                fresh_device.call_id,
+                fresh_device.participant,
+                fresh_device.device_id,
+                300,
+                1_000,
+            )
+            .expect("issue canonical fresh Join")
+            .claims;
         let join_service = service.clone();
         let join = tokio::spawn(async move {
             join_service
@@ -4012,6 +4088,190 @@ mod sfu_placement_lifecycle_tests {
         assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 1);
         assert_eq!(lifecycle.ensures.load(Ordering::Relaxed), 1);
         assert_eq!(registry.active_session_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_leave_revokes_reusable_grant_and_rejects_sequence_aba() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([10_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("issuer"),
+        );
+        let service = GrpcRealtimeService::new(
+            Arc::new(()),
+            Arc::new(()),
+            Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
+            Arc::clone(&issuer),
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+        );
+        // With NO optional SFU placement owner, Join/Leave still serialize.
+        let binding = claims("placeholder", "reusable-device");
+        let granted = issuer
+            .issue(
+                binding.scope.clone(),
+                binding.call_id.clone(),
+                binding.participant.clone(),
+                binding.device_id.clone(),
+                300,
+                1_000,
+            )
+            .expect("issue existing reusable grant");
+        let active = granted.claims;
+        let first = service
+            .admit_realtime_session_with_sfu_placement(active.clone(), 1_001)
+            .await
+            .expect("initial join");
+        let next = service
+            .admit_realtime_session_with_sfu_placement(active.clone(), 1_002)
+            .await
+            .expect("live reconnect");
+        assert!(
+            next.transition.session_sequence > first.transition.session_sequence,
+            "reconnect must have a newer generation"
+        );
+        assert_eq!(
+            service
+                .leave_realtime_session_with_sfu_placement(
+                    &active,
+                    1_003,
+                    first.transition.session_sequence,
+                )
+                .await,
+            Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+            "old Leave must not revoke newer connection"
+        );
+        assert!(
+            issuer.validate_live_claims(&active, 1_003).is_ok(),
+            "stale Leave must not revoke live grant"
+        );
+        let (_, placement_cleanup) = service
+            .leave_realtime_session_with_sfu_placement(
+                &active,
+                1_004,
+                next.transition.session_sequence,
+            )
+            .await
+            .expect("terminal Leave revokes grant");
+        placement_cleanup.expect("terminal placement cleanup");
+        assert_eq!(registry.active_session_count(), 0);
+        assert_eq!(
+            issuer.validate_live_claims(&active, 1_005),
+            Err(JoinTokenError::Revoked)
+        );
+        assert_eq!(
+            service
+                .admit_realtime_session_with_sfu_placement(active.clone(), 1_006)
+                .await,
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+            "reused token must not recreate sequence 1 after terminal Leave"
+        );
+        assert_eq!(registry.active_session_count(), 0);
+
+        // The only legal recovery is a separately authorized new grant.
+        let next_grant = issuer
+            .issue(
+                active.scope.clone(),
+                active.call_id.clone(),
+                active.participant.clone(),
+                active.device_id.clone(),
+                300,
+                1_006,
+            )
+            .expect("fresh grant")
+            .claims;
+        assert_ne!(next_grant.session_id, active.session_id);
+        service
+            .admit_realtime_session_with_sfu_placement(next_grant, 1_007)
+            .await
+            .expect("new grant joins normally");
+        assert_eq!(registry.active_session_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_leave_revokes_the_existing_durable_join_grant() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([11_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("issuer"),
+        );
+        let store = Arc::new(ucr_storage_memory::MemoryLocalStore::default());
+        let service = GrpcRealtimeService::new(
+            Arc::new(()),
+            Arc::new(()),
+            Arc::clone(&store),
+            Arc::clone(&issuer),
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+        );
+        let binding = claims("durable-placeholder", "durable-device");
+        let granted = issuer
+            .issue(
+                binding.scope,
+                binding.call_id,
+                binding.participant,
+                binding.device_id,
+                300,
+                1_000,
+            )
+            .expect("canonical issue");
+        let active = granted.claims;
+        store
+            .persist_conference_join_grant(&ConferenceJoinGrantRecord {
+                scope: active.scope.clone(),
+                conference_id: GroupId::from_opaque(id("durable-conference")),
+                integration_id: ucr_model::IntegrationId::from_opaque(id("durable-integration")),
+                call_id: active.call_id.clone(),
+                participant: active.participant.clone(),
+                device_id: active.device_id.clone().expect("bound device"),
+                session_id: active.session_id.clone(),
+                issued_at_unix_ms: active.issued_at_unix_ms,
+                not_before_unix_ms: active.not_before_unix_ms,
+                expires_at_unix_ms: active.expires_at_unix_ms,
+                use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+                revoked: false,
+                redeemed: false,
+            })
+            .expect("persist in existing canonical grant store");
+        store
+            .redeem_conference_join_grant(&active.scope, &active.session_id)
+            .expect("redeem authorized grant");
+        let joined = service
+            .admit_realtime_session_with_sfu_placement(active.clone(), 1_001)
+            .await
+            .expect("admit existing durable grant");
+        let (_, placement_cleanup) = service
+            .leave_realtime_session_with_sfu_placement(
+                &active,
+                1_002,
+                joined.transition.session_sequence,
+            )
+            .await
+            .expect("revoke and close durable grant");
+        placement_cleanup.expect("durable grant placement cleanup");
+        let saved = store
+            .conference_join_grant(&active.scope, &active.session_id)
+            .expect("canonical read")
+            .expect("durable record");
+        assert!(
+            saved.revoked,
+            "canonical owner must retain revocation tombstone"
+        );
+        assert_eq!(registry.active_session_count(), 0);
+        assert_eq!(
+            service
+                .admit_realtime_session_with_sfu_placement(active.clone(), 1_003)
+                .await,
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+            "reused signed grant must not restore an ended session"
+        );
+        assert_eq!(registry.active_session_count(), 0);
     }
 
     #[tokio::test]

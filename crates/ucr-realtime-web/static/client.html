@@ -101,6 +101,11 @@ let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
+let heartbeatInFlight=false,heartbeatWatchdog=null;
+// This signed session grant is retired after any accepted session leaves.
+// Rejoining must start with a newly issued canonical Call/Session grant.
+let signedGrantRetired=false,activeSessionSequence=0;
+const HEARTBEAT_AUTH_TIMEOUT_MS=12000;
 let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
 let receiveRosterGeneration=0,receiveRosterInFlight=false,receiveSubscriptionFingerprint=null;
 let receiveSubscriptionInFlight=false,receiveSubscriptionDirty=false;
@@ -734,6 +739,12 @@ function closeE2eeTransport(){
     ui.remoteVideo.classList.remove("hidden");
   }
   ++e2eeActivationGeneration;
+  // A retired adapter must never change the UI of a newly joined session.
+  const teardownLifecycle=sessionLifecycleGeneration;
+  const teardownActivation=e2eeActivationGeneration;
+  const teardownStillCurrent=()=>sessionActive&&
+    teardownLifecycle===sessionLifecycleGeneration&&
+    teardownActivation===e2eeActivationGeneration;
   ui.screenToggle.disabled=true;
   if(screenStream){
     const current=screenStream;screenStream=null;setScreenUi(false);
@@ -745,10 +756,10 @@ function closeE2eeTransport(){
       // stop() retires crypto immediately, but media cleanup can reject later.
       // Observe the Promise so failed device teardown never becomes an unhandled error.
       Promise.resolve(adapter.stop()).catch(()=>{
-        if(sessionActive)ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
+        if(teardownStillCurrent())ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
       });
     }catch(_){
-      if(sessionActive)ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
+      if(teardownStillCurrent())ui.status.textContent="Encrypted media cleanup failed; rejoin required.";
     }
   }
   // The canonical bridge revokes permanently on stop. Never reuse a retired
@@ -1207,13 +1218,13 @@ function teardownPeer(){
   if(peer){peer.onicecandidate=null;peer.ontrack=null;peer.ondatachannel=null;peer.onconnectionstatechange=null;peer.close();peer=null;}
   remoteStream=null;ui.remoteVideo.srcObject=null;ui.webrtcState.textContent="Idle";
 }
-async function closeServerPeer(keepalive=false){
+async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims=null){
   // Only an offer's owner can retire that attempt. An absent token must not
   // issue a session-wide close that could erase a new peer in another tab.
-  const offerId=startWebRtc.offerId;
-  if(!sessionActive||!offerId)return;
+  const offerId=retiredOfferId||startWebRtc.offerId;
+  if((!sessionActive&&!retiredOfferId)||!offerId)return;
   try{
-    await api("/v1/realtime/webrtc/close",{...body(),offer_id:offerId},undefined,keepalive);
+    await api("/v1/realtime/webrtc/close",{...(retiredClaims||body()),offer_id:offerId},undefined,keepalive);
     if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
   }catch(_){}
 }
@@ -1458,14 +1469,22 @@ async function applyAdmissionState(state){
   if(state==="admitted"||!state)await activateAdmittedMedia();
 }
 async function heartbeat(){
-  if(!sessionActive)return;
+  if(!sessionActive||heartbeatInFlight)return;
+  heartbeatInFlight=true;
   const generation=sessionLifecycleGeneration,request=++heartbeatRequestGeneration;
+  // Local watchdog is independent of fetch: a hung control plane cannot
+  // silently extend permission to capture or publish media indefinitely.
+  heartbeatWatchdog=setTimeout(()=>{
+    if(sessionActive&&generation===sessionLifecycleGeneration&&request===heartbeatRequestGeneration){
+      void endUnverifiedMedia(generation,"Conference authorization timed out; media capture stopped.");
+    }
+  },HEARTBEAT_AUTH_TIMEOUT_MS);
   // Ignore out-of-order concurrent heartbeats: an older "admitted" response
   // must not override newer waiting-room / revoked admission.
   const current=()=>sessionActive&&generation===sessionLifecycleGeneration&&
     request===heartbeatRequestGeneration;
   try{
-    const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
+    const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:activeSessionSequence});
     if(!current())return;
     const data=await r.json();
     if(!current())return;
@@ -1479,6 +1498,10 @@ async function heartbeat(){
     // A failed heartbeat from a retired/replaced session must not invoke the
     // UI's heartbeat_rejected handler and terminate a newer active session.
     if(current())throw error;
+  }finally{
+    if(generation===sessionLifecycleGeneration&&request===heartbeatRequestGeneration){
+      clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;
+    }
   }
 }
 // Canonical Device registration belongs before signed Join issuance. A host
@@ -1538,6 +1561,12 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
   requireCanonicalMediaHostReady();
 }
 async function join(){
+  if(signedGrantRetired){
+    ui.state.textContent="Access ended";
+    ui.status.textContent="This session grant has ended. Open a fresh authorized call link.";
+    ui.join.disabled=true;
+    return;
+  }
   if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
   // A signed join URL alone does not provision an authorized media signer.
   // Reject before opening a realtime session/heartbeat when the host omitted
@@ -1560,6 +1589,9 @@ async function join(){
     const r=await api("/v1/realtime/join",body());const data=await r.json();
     if(generation!==sessionLifecycleGeneration)return;
     if(!data.ok)throw new Error(data.message||"Join rejected");
+    if(!Number.isSafeInteger(data.session_sequence)||data.session_sequence<=0)
+      throw new Error("Join was not bound to a valid canonical session generation");
+    activeSessionSequence=data.session_sequence;
     sessionActive=true;ui.leave.disabled=false;ui.privacyMode.disabled=true;
     // Complete approved enrollment/recovery before media admission can prompt
     // for camera/microphone. This is not authorized by the URL alone.
@@ -1569,7 +1601,7 @@ async function join(){
     if(generation!==sessionLifecycleGeneration)return;
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
-    heartbeatTimer=setInterval(()=>{heartbeat().catch(async e=>{if(e.code==="heartbeat_rejected"){await leave();ui.state.textContent="Access ended";ui.status.textContent="Conference access ended by host or server policy.";return;}ui.status.textContent="Heartbeat failed: "+e.message;});},interval);
+    heartbeatTimer=setInterval(()=>{const generation=sessionLifecycleGeneration;heartbeat().catch(e=>{void endUnverifiedMedia(generation,e.code==="heartbeat_rejected"?"Conference access ended by host or server policy.":"Conference authorization could not be verified; media capture stopped.");});},interval);
     await applyAdmissionState(data.admission_state);
   }catch(e){
     if(generation!==sessionLifecycleGeneration)return;
@@ -1587,34 +1619,66 @@ async function join(){
         ui.leave.disabled=true;ui.privacyMode.disabled=false;
       }
     }
-    ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=false;
+    ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=signedGrantRetired;
   }
 }
 function scheduleEntryRetry(){
+  if(signedGrantRetired){ui.join.disabled=true;return;}
   if(Date.now()>=claims.expires){fail("Join grant has expired");return;}
   ui.state.textContent="Waiting";ui.join.disabled=true;ui.status.textContent=waitCopy("waitingEntry");
   if(entryRetryTimer)clearTimeout(entryRetryTimer);
   entryRetryTimer=setTimeout(()=>{entryRetryTimer=null;join();},ENTRY_RETRY_MS);
 }
+async function endUnverifiedMedia(generation,message){
+  if(!sessionActive||generation!==sessionLifecycleGeneration)return;
+  // leave() synchronously invalidates authority and stops all local tracks.
+  const cleanup=leave();
+  ui.state.textContent="Access ended";ui.status.textContent=message;
+  await cleanup;
+  if(generation+1===sessionLifecycleGeneration){ui.state.textContent="Access ended";ui.status.textContent=message;}
+}
 async function leave(){
   const wasActive=sessionActive;
+  const leavingClaims=wasActive?body():null;
+  const leavingSequence=activeSessionSequence;
+  const leavingOfferId=startWebRtc.offerId;
+  // A late Leave from this grant must never compete with another Join using
+  // the same session identity. Only the first-party host can issue a new grant.
+  if(wasActive)signedGrantRetired=true;
+  activeSessionSequence=0;
+  sessionActive=false; // Revoke local authority before any awaited cleanup.
   // Invalidate late joins, heartbeats and permission prompts synchronously.
-  ++sessionLifecycleGeneration;++mediaCaptureGeneration;mediaActive=false;
+  ++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;mediaActive=false;
+  const leaveGeneration=sessionLifecycleGeneration;
+  clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;
   retireEndpointMlsState();
   if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
   if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
   // Device tracks must stop before the first await on explicit Leave.
   teardownPeer();
   stopLocalCapture();
-  await stopScreenShare(false);
-  if(wasActive)await closeServerPeer();
+  // Stop screen tracks synchronously, even if remote cleanup never resolves.
+  if(screenStream){screenStream.getTracks().forEach(track=>track.stop());screenStream=null;setScreenUi(false);}
+  if(leavingOfferId&&leavingClaims)void closeServerPeer(false,leavingOfferId,leavingClaims).catch(()=>{});
+  // Remote Leave is independent of cosmetic/UI cleanup. Submit it as soon as
+  // physical capture has stopped, even if later controls fail to reset.
+  if(wasActive&&leavingClaims&&leavingSequence>0)
+    void api("/v1/realtime/leave",{...leavingClaims,expected_session_sequence:leavingSequence}).catch(()=>{});
   ui.privacyMode.disabled=false;
   sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
-  if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
-  ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;
+  // Local capture is already retired. Never silently reuse the same signed
+  // session grant while its asynchronous remote Leave may still be pending.
+  if(leaveGeneration===sessionLifecycleGeneration){
+    ui.state.textContent="Left";
+    ui.status.textContent=signedGrantRetired?
+      "Conference session closed. Open a fresh authorized call link to reconnect.":
+      "Conference session closed.";
+    ui.join.disabled=signedGrantRetired;
+  }
 }
 function scheduleWaitingRoom(){
+  if(signedGrantRetired){ui.join.disabled=true;return true;}
   const delay=claims.not_before-Date.now();
   if(delay<=0){ui.state.textContent="Ready";ui.status.textContent="Signed grant active. Ready to join.";ui.join.disabled=false;return false;}
   ui.state.textContent="Waiting";ui.join.disabled=true;ui.status.textContent=waitCopy("waitingScheduled");
@@ -2022,9 +2086,9 @@ ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);
 if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="function"){
   navigator.mediaDevices.addEventListener("devicechange",()=>{handleMediaDeviceChange();});
 }
-window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
+window.addEventListener("offline",()=>{if(sessionActive){const generation=sessionLifecycleGeneration;ui.webrtcState.textContent="Offline";void endUnverifiedMedia(generation,"Network unavailable; capture stopped until fresh authorization.");}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
-window.addEventListener("pagehide",()=>{++sessionLifecycleGeneration;++mediaCaptureGeneration;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("pagehide",()=>{const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>

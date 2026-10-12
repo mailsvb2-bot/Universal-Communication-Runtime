@@ -41,6 +41,8 @@ message RealtimeSession {
   uint64 heartbeat_interval_ms = 7;
   RealtimeAdmissionState admission_state = 8;
   optional RealtimeMediaPolicy media_policy = 9;
+  // Monotonic registry connection generation; required to fence stale Leave.
+  uint64 session_sequence = 10;
 }
 
 message RealtimeJoinResponse {
@@ -70,6 +72,8 @@ message RealtimeLeaveRequest {
   TenantScope scope = 1;
   OpaqueId call_id = 2;
   OpaqueId session_id = 3;
+  // Exact generation returned by Join; zero/missing must fail closed.
+  uint64 expected_session_sequence = 4;
 }
 
 message RealtimeLeaveResponse {
