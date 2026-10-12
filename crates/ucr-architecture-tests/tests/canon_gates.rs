@@ -1895,6 +1895,7 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "group_message",
     "create_call",
     "call",
+    "incoming_direct_calls",
     "apply_call_signal",
     "persist_communication_intent",
     "communication_intent",
