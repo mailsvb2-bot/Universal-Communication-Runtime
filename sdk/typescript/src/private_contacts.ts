@@ -136,14 +136,29 @@ export function createUcrIndexedDbContactsStorage(): UcrPrivateContactsStorage {
     if (!globalThis.indexedDB) throw new Error("endpoint-owned IndexedDB unavailable");
     return new Promise((resolve,reject) => {
       const request = indexedDB.open(DATABASE, DB_VERSION);
+      let settled = false;
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(KEYS)) db.createObjectStore(KEYS);
         if (!db.objectStoreNames.contains(BOOKS)) db.createObjectStore(BOOKS);
       };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error ?? new Error("endpoint IndexedDB open failed"));
-      request.onblocked = () => reject(new Error("endpoint IndexedDB upgrade blocked"));
+      request.onsuccess = () => {
+        // A blocked upgrade can succeed after another tab releases its DB.
+        // Never leak a late connection after the caller has already failed.
+        if (settled) { request.result.close(); return; }
+        settled = true;
+        resolve(request.result);
+      };
+      request.onerror = () => {
+        if (settled) return;
+        settled = true;
+        reject(request.error ?? new Error("endpoint IndexedDB open failed"));
+      };
+      request.onblocked = () => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("endpoint IndexedDB upgrade blocked"));
+      };
     });
   }
   return {
@@ -265,7 +280,10 @@ export function createUcrPrivateContactBook(
       });
     },
     async remove(contactId:string):Promise<void> {
-      await modify(contacts => contacts.filter(x=>x.id!==contactId));
+      await modify(contacts => {
+        if (!contacts.some(x=>x.id===contactId)) throw new Error("contact not found");
+        return contacts.filter(x=>x.id!==contactId);
+      });
     },
     async exportEncrypted(password:string):Promise<string> {
       const contacts = (await snapshot()).contacts;
