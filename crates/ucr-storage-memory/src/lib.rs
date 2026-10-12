@@ -725,7 +725,7 @@ impl ServiceAuditStore for MemoryLocalStore {
 }
 
 /// The in-memory canonical owner implements the SAME atomic enrollment
-/// semantics as SQLite. One Mutex guards Identity, Device and TrustedKey
+/// semantics as `SQLite`. One `Mutex` guards `Identity`, `Device` and `TrustedKey`
 /// together so concurrent first-entry requests cannot observe partial state.
 impl AtomicTrustedDeviceEnrollmentStore for MemoryLocalStore {
     fn enroll_new_trusted_device(
