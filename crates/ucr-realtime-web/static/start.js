@@ -154,6 +154,20 @@ async function refresh() {
   if (refreshing || navigating) return;
   refreshing = true;
   try {
+    const user = await host.resumeAuthenticatedDevice();
+    if (accountScope !== principalScope(user)) {
+      // Fail closed immediately if the user logs out or changes Device in
+      // another tab. Never keep the former user's contacts/Call on screen.
+      clearInterval(timer);
+      accountScope = null;
+      active = null;
+      knownContacts = [];
+      idempotency.clear();
+      renderContacts([]);
+      renderIncoming([]);
+      showActive();
+      throw Error("учётная запись сменилась — требуется повторная проверка");
+    }
     const incoming = await calls.incoming();
     renderIncoming(incoming);
     if (active) {
