@@ -448,6 +448,67 @@ impl CallStore for SqliteLocalStore {
         Ok(Some(session))
     }
 
+    fn incoming_direct_calls(
+        &self,
+        recipient: &ScopedPrincipal,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let namespace = namespace_storage_key(&recipient.scope);
+        let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
+        // Use the canonical participant index. Neither polling nor pagination
+        // scans another recipient's Call details or creates an inbox table.
+        let mut statement = connection
+            .prepare(
+                "SELECT c.call_id
+                 FROM calls c
+                 JOIN call_participants p
+                   ON p.tenant_id=c.tenant_id
+                  AND p.namespace_present=c.namespace_present
+                  AND p.namespace_id=c.namespace_id
+                  AND p.call_id=c.call_id
+                 WHERE c.tenant_id=?1 AND c.namespace_present=?2 AND c.namespace_id=?3
+                   AND p.principal_id=?4 AND p.principal_kind=?5
+                   AND p.state IN ('invited','ringing')
+                   AND c.conversation_kind='direct'
+                   AND c.signalling_state IN ('inviting','ringing')
+                   AND NOT (c.initiated_by_principal_id=?4
+                            AND c.initiated_by_principal_kind=?5)
+                 ORDER BY c.call_id LIMIT ?6",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let ids = statement
+            .query_map(
+                params![
+                    recipient.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    recipient.principal.principal_id.as_opaque().as_str(),
+                    group_store::principal_kind_name(recipient.principal.kind),
+                    limit,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_sqlite_error(&error))?;
+        drop(statement);
+        ids.into_iter()
+            .map(|raw| {
+                let id = CallId::from_opaque(parse_id(&raw)?);
+                let call = load_call_from(&connection, &recipient.scope, &id)?
+                    .ok_or(DurableStoreError::Corrupt)?;
+                if !active_call_participant(&call, &recipient.principal) {
+                    return Err(DurableStoreError::Corrupt);
+                }
+                Ok(call)
+            })
+            .collect()
+    }
+
     fn apply_call_signal(
         &self,
         actor: &ScopedPrincipal,
