@@ -41,7 +41,8 @@ use ucr_protocol::{
 };
 
 use crate::{
-    AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError, CallStore,
+    AtomicTrustedDeviceEnrollmentStore, AuthorizationEvaluator, AuthorizedDurableRuntime,
+    AuthorizedMutationError, CallStore,
     CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DeviceLifecycleStore,
     DurableStoreError, ExternalIdentityBindingStore, GroupMessageStore, GroupStore, IdentityStore,
     MessageStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
@@ -964,6 +965,57 @@ where
             .group_message(&subject, scope, message_id)
             .map_err(map_authorized_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+}
+
+impl<C, A, S> IntegrationIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore
+        + ServiceQuotaStore
+        + ServiceAuditStore
+        + AtomicTrustedDeviceEnrollmentStore,
+{
+    /// Authenticates a Service Principal, checks BOTH existing Device registration
+    /// and signing-key provisioning permissions, and atomically enrolls a
+    /// canonical Device + key against an already-existing Identity.
+    ///
+    /// An independently authenticated first-party BFF MUST verify human
+    /// authorization and server-issued Ed25519 possession proof BEFORE this
+    /// method is called. A Service Principal cannot authorize itself as a user.
+    ///
+    /// # Errors
+    /// Returns canonical auth, quota, audit, permission, conflict or store errors.
+    pub fn enroll_new_trusted_device(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        device: &DeviceDescriptor,
+        signing_key: &PublicKeyDescriptor,
+    ) -> Result<DeviceDescriptor, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_DEVICE_REGISTER_OPERATION_KIND.to_owned(),
+            operation_id: device.device_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(
+            self.clock, self.authorization, self.store,
+        )
+        .authenticate_request_for_operation(
+            presented_scope,
+            credential_id,
+            secret,
+            DEVICE_REGISTER_PERMISSION,
+            scope,
+            &operation,
+        )?;
+        request.authorize_additional_permission(TRUSTED_SIGNING_KEY_PROVISION_PERMISSION)?;
+        self.store
+            .enroll_new_trusted_device(scope, device, signing_key)
+            .map_err(map_store_error)?;
+        Ok(device.clone())
     }
 }
 
