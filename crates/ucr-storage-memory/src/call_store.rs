@@ -467,16 +467,15 @@ fn map_call_error(error: ucr_protocol::CallSignallingError) -> DurableStoreError
 mod tests {
     use super::*;
     use ucr_core::{
-        AtomicTrustedDeviceEnrollmentStore, AuthorizedDurableRuntime, CallStore,
-        ConversationStore, DeviceLifecycleStore, IdentityStore, PermissionGrantStore,
-        PrincipalIdentityBindingStore,
+        AtomicTrustedDeviceEnrollmentStore, AuthorizedDurableRuntime, CallStore, ConversationStore,
+        DeviceLifecycleStore, IdentityStore, PermissionGrantStore, PrincipalIdentityBindingStore,
     };
     use ucr_model::{
         CallParticipant, CallSignallingState, CallTerminationReason, ConversationId,
-        ConversationRecord, ConversationRef, DeviceDescriptor, DeviceId,
-        DeviceLifecycleState, EventId, IdentityEvidence, IdentityId, IdentityOwnership,
-        IdentityRecord, KeyId, KeyPurpose, OpaqueId, PermissionGrant, PermissionScope,
-        PrincipalId, PrincipalIdentityBinding, PrincipalKind, PublicKeyDescriptor, TenantId,
+        ConversationRecord, ConversationRef, DeviceDescriptor, DeviceId, DeviceLifecycleState,
+        EventId, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, KeyId,
+        KeyPurpose, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
+        PrincipalIdentityBinding, PrincipalKind, PublicKeyDescriptor, TenantId,
     };
 
     fn oid(value: &str) -> OpaqueId {
@@ -546,7 +545,6 @@ mod tests {
         (conversation, session, alice, bob)
     }
 
-
     fn prepare_first_party_person_device(
         store: &MemoryLocalStore,
         principal: &ScopedPrincipal,
@@ -613,20 +611,32 @@ mod tests {
         let (conversation, session, alice, bob) = fixture();
         store.persist_conversation(&conversation).unwrap();
         let alice_device = prepare_first_party_person_device(
-            &store, &alice, "alice-identity", "alice-device", "alice-key",
+            &store,
+            &alice,
+            "alice-identity",
+            "alice-device",
+            "alice-key",
         );
         let bob_device = prepare_first_party_person_device(
-            &store, &bob, "bob-identity", "bob-device", "bob-key",
+            &store,
+            &bob,
+            "bob-identity",
+            "bob-device",
+            "bob-key",
         );
         let runtime = AuthorizedDurableRuntime::new(&store, &store);
         assert_eq!(
-            runtime.first_party_call_start(&alice, &alice_device, &session).unwrap(),
+            runtime
+                .first_party_call_start(&alice, &alice_device, &session)
+                .unwrap(),
             DurableRecordStatus::Persisted
         );
-        assert!(runtime
-            .first_party_call_incoming(&alice, &alice_device, 64)
-            .unwrap()
-            .is_empty());
+        assert!(
+            runtime
+                .first_party_call_incoming(&alice, &alice_device, 64)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             runtime
                 .first_party_call_incoming(&bob, &bob_device, 64)
@@ -634,12 +644,16 @@ mod tests {
                 .len(),
             1
         );
-        assert!(runtime
-            .first_party_call_join_admission(&bob, &bob_device, &session.call_id, 0)
-            .is_err());
-        assert!(runtime
-            .first_party_call_get(&bob, &alice_device, &session.call_id)
-            .is_err());
+        assert!(
+            runtime
+                .first_party_call_join_admission(&bob, &bob_device, &session.call_id, 0)
+                .is_err()
+        );
+        assert!(
+            runtime
+                .first_party_call_get(&bob, &alice_device, &session.call_id)
+                .is_err()
+        );
 
         let accept = signal(&session, "first-party-accept", CallSignalKind::Accept);
         assert_eq!(
@@ -655,13 +669,17 @@ mod tests {
                 .signalling_state,
             CallSignallingState::Active
         );
-        assert!(runtime
-            .first_party_call_join_admission(&bob, &bob_device, &session.call_id, 0)
-            .is_err());
-        assert!(runtime
-            .first_party_call_incoming(&bob, &bob_device, 64)
-            .unwrap()
-            .is_empty());
+        assert!(
+            runtime
+                .first_party_call_join_admission(&bob, &bob_device, &session.call_id, 0)
+                .is_err()
+        );
+        assert!(
+            runtime
+                .first_party_call_incoming(&bob, &bob_device, 64)
+                .unwrap()
+                .is_empty()
+        );
 
         store
             .revoke_device(
@@ -670,15 +688,21 @@ mod tests {
                 &IdentityId::from_opaque(oid("bob-identity")),
             )
             .unwrap();
-        assert!(runtime
-            .first_party_call_join_admission(&bob, &bob_device, &session.call_id, 1)
-            .is_err());
-        assert!(runtime
-            .first_party_call_get(&bob, &bob_device, &session.call_id)
-            .is_err());
-        assert!(runtime
-            .first_party_call_incoming(&bob, &bob_device, 64)
-            .is_err());
+        assert!(
+            runtime
+                .first_party_call_join_admission(&bob, &bob_device, &session.call_id, 1)
+                .is_err()
+        );
+        assert!(
+            runtime
+                .first_party_call_get(&bob, &bob_device, &session.call_id)
+                .is_err()
+        );
+        assert!(
+            runtime
+                .first_party_call_incoming(&bob, &bob_device, 64)
+                .is_err()
+        );
         let hangup = signal(
             &store.call(&scope(), &session.call_id).unwrap().unwrap(),
             "revoke-should-block-hangup",
@@ -686,9 +710,11 @@ mod tests {
                 reason: CallTerminationReason::Completed,
             },
         );
-        assert!(runtime
-            .first_party_call_signal(&bob, &bob_device, &hangup)
-            .is_err());
+        assert!(
+            runtime
+                .first_party_call_signal(&bob, &bob_device, &hangup)
+                .is_err()
+        );
     }
 
     fn signal(session: &CallSession, id: &str, kind: CallSignalKind) -> CallSignal {
