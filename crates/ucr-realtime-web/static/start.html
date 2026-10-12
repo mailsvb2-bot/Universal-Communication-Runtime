@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>UCR — Protected call</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui,sans-serif;background:#0b1222;color:#edf3ff}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}
+main{width:min(100%,490px);border:1px solid #36415a;border-radius:20px;padding:32px;background:#111b31}
+h1{font-size:1.65rem;margin:0 0 12px}p{color:#c5d0e4;line-height:1.55}
+button{font:inherit;background:#7ac0ff;color:#00172d;padding:14px 20px;width:100%;
+border:none;border-radius:11px;font-weight:700;cursor:pointer}
+button:focus-visible{outline:3px solid white;outline-offset:4px}
+button:disabled{opacity:.45;cursor:not-allowed}
+#status{min-height:3em;font-size:.9rem;white-space:pre-wrap}
+small{display:block;color:#9aaaca;line-height:1.5;margin-top:18px}
+</style>
+<script type="module" src="/start.js"></script>
+</head>
+<body>
+<main>
+<h1>UCR protected call</h1>
+<p>Continue with your existing independently authenticated account and trusted device. A signed, expiring call permission is created by the canonical server — never by this page.</p>
+<button id="begin" type="button">Continue to protected call</button>
+<p id="status" role="status" aria-live="polite">An authenticated first-party session is required.</p>
+<small>This page cannot register an account from a call link. If the first-party login service is unavailable, no device trust or call permission is created. Microphone and camera remain off until authorized encryption is ready.</small>
+</main>
+</body>
+</html>
