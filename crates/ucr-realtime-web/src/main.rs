@@ -2606,11 +2606,15 @@ mod tests {
         let html = super::first_party_start_response();
         assert_eq!(html.status(), super::StatusCode::OK);
         assert_eq!(
-            html.headers().get(super::CACHE_CONTROL).expect("cache header"),
+            html.headers()
+                .get(super::CACHE_CONTROL)
+                .expect("cache header"),
             "no-store"
         );
         assert_eq!(
-            html.headers().get("Referrer-Policy").expect("referrer policy"),
+            html.headers()
+                .get("Referrer-Policy")
+                .expect("referrer policy"),
             "no-referrer"
         );
         assert_eq!(
@@ -2633,7 +2637,9 @@ mod tests {
         let js = super::first_party_start_js_response();
         assert_eq!(js.status(), super::StatusCode::OK);
         assert_eq!(
-            js.headers().get(super::CACHE_CONTROL).expect("cache header"),
+            js.headers()
+                .get(super::CACHE_CONTROL)
+                .expect("cache header"),
             "no-store"
         );
         assert_eq!(
