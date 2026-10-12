@@ -33,6 +33,8 @@ const MAX_SIGNALING_SDP_BYTES: usize = 256 * 1024;
 const MAX_SIGNALING_ICE_CANDIDATE_BYTES: usize = 4096;
 const MAX_SIGNALING_ICE_MID_BYTES: usize = 256;
 const CLIENT_HTML: &str = include_str!("../static/client.html");
+const FIRST_PARTY_START_HTML: &str = include_str!("../static/start.html");
+const FIRST_PARTY_START_JS: &str = include_str!("../static/start.js");
 
 // Generated endpoint-only public code: no secrets, grants or MLS state in these
 // artifacts. The gateway serves only an explicit allowlist, never a directory.
@@ -489,6 +491,12 @@ async fn handle_request(
 
     if method == Method::GET && path == "/healthz" {
         return Ok(text_response(StatusCode::OK, "ok"));
+    }
+    if method == Method::GET && matches!(path.as_str(), "/start" | "/start.html") {
+        return Ok(first_party_start_response());
+    }
+    if method == Method::GET && path == "/start.js" {
+        return Ok(first_party_start_js_response());
     }
     if method == Method::GET
         && matches!(
@@ -2419,6 +2427,31 @@ fn serve_reference_media_asset(path: &str) -> HttpResponse {
     }
 }
 
+fn first_party_start_response() -> HttpResponse {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .header("X-Content-Type-Options", "nosniff")
+        .header(
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'self'; style-src 'unsafe-inline';              connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+        )
+        .body(full_body(Bytes::from_static(FIRST_PARTY_START_HTML.as_bytes())))
+        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+fn first_party_start_js_response() -> HttpResponse {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(full_body(Bytes::from_static(FIRST_PARTY_START_JS.as_bytes())))
+        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
 fn html_response(status: StatusCode, html: &'static str) -> HttpResponse {
     Response::builder()
         .status(status)
@@ -2450,6 +2483,18 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn first_party_entry_uses_only_canonical_signed_fragment_and_never_mints_trust() {
+        assert!(super::FIRST_PARTY_START_HTML.contains("An authenticated first-party session is required"));
+        assert!(super::FIRST_PARTY_START_JS.contains("createUcrFirstPartyHttpHost"));
+        assert!(super::FIRST_PARTY_START_JS.contains("createUcrFirstPartyCallEntry"));
+        assert!(super::FIRST_PARTY_START_JS.contains("issued.joinFragment.slice(1)"));
+        assert!(super::FIRST_PARTY_START_JS.contains("location.replace(url.href)"));
+        assert!(!super::FIRST_PARTY_START_JS.contains("localStorage"));
+        assert!(!super::FIRST_PARTY_START_JS.contains("client_secret"));
+        assert!(!super::FIRST_PARTY_START_JS.contains("access_token"));
+    }
+
     use super::*;
 
     #[test]
