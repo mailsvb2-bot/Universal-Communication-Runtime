@@ -2,7 +2,10 @@
 
 use core::fmt;
 use std::{
-    sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -956,7 +959,9 @@ impl RealtimeSessionRegistry {
     /// a second Call/Device registry.
     fn next_join_generation(&self) -> Result<u64, RealtimeRegistryError> {
         self.last_join_generation
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| last.checked_add(1))
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+                last.checked_add(1)
+            })
             .map(|previous| previous + 1)
             .map_err(|_| RealtimeRegistryError::SequenceOverflow)
     }
@@ -1007,7 +1012,11 @@ impl RealtimeSessionRegistry {
                 session_sequence: entry.sequence,
                 occurred_at_unix_ms: now_unix_ms,
             };
-            return Ok(RealtimeJoinOutcome { claims, transition, join_generation: generation });
+            return Ok(RealtimeJoinOutcome {
+                claims,
+                transition,
+                join_generation: generation,
+            });
         }
         if entries.len() >= self.max_sessions {
             return Err(RealtimeRegistryError::CapacityExceeded);
@@ -1030,7 +1039,11 @@ impl RealtimeSessionRegistry {
             adaptive_stage: None,
             publisher_owner: None,
         });
-        Ok(RealtimeJoinOutcome { claims, transition, join_generation: generation })
+        Ok(RealtimeJoinOutcome {
+            claims,
+            transition,
+            join_generation: generation,
+        })
     }
 
     /// Attaches the one downlink consumer for the current connection.
@@ -1472,7 +1485,8 @@ impl RealtimeSessionRegistry {
             .position(|entry| same_session(entry, claims))
             .ok_or(RealtimeRegistryError::SessionUnavailable)?;
         if entries[index].claims != *claims
-            || expected_session_sequence.is_some_and(|generation| entries[index].join_generation != generation)
+            || expected_session_sequence
+                .is_some_and(|generation| entries[index].join_generation != generation)
         {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
@@ -1972,9 +1986,11 @@ mod tests {
             .expect("leave");
         let second = registry.join(claims.clone(), 18_003).expect("fresh Join");
         assert_ne!(first.join_generation, second.join_generation);
-        assert!(registry
-            .leave_if_sequence(&claims, first.join_generation, 18_004)
-            .is_err());
+        assert!(
+            registry
+                .leave_if_sequence(&claims, first.join_generation, 18_004)
+                .is_err()
+        );
         registry
             .leave_if_sequence(&claims, second.join_generation, 18_005)
             .expect("new owner can leave");
@@ -2007,7 +2023,10 @@ mod tests {
         drop(receiver);
         let attachment = registry.attach_downlink(&claims, 18_004).expect("reattach");
         assert!(
-            attachment.transition.expect("attendance reconnect").session_sequence
+            attachment
+                .transition
+                .expect("attendance reconnect")
+                .session_sequence
                 > media.session_sequence
         );
         assert_eq!(
