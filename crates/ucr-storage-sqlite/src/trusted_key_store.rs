@@ -293,7 +293,7 @@ impl TrustedSigningKeyResolver for SqliteLocalStore {
     }
 }
 
-fn insert_active_key(
+pub(super) fn insert_active_key(
     transaction: &Transaction<'_>,
     scope: &TenantScope,
     descriptor: &PublicKeyDescriptor,
@@ -346,7 +346,7 @@ fn set_key_state(
         .map_err(|error| map_write_error(&error))
 }
 
-fn active_key_id(
+pub(super) fn active_key_id(
     connection: &Connection,
     scope: &TenantScope,
     device_id: &DeviceId,
@@ -370,7 +370,7 @@ fn active_key_id(
     value.map(|value| decode_key_id(&value)).transpose()
 }
 
-fn load_key_record(
+pub(super) fn load_key_record(
     connection: &Connection,
     scope: &TenantScope,
     key_id: &KeyId,
