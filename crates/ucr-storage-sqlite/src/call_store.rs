@@ -1343,6 +1343,56 @@ mod tests {
     }
 
     #[test]
+    fn recipient_inbox_is_durable_private_and_disappears_on_accept_or_cancel() {
+        let db = TestDb::new();
+        let (session, alice, bob) = session();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store
+                .persist_conversation(&conversation())
+                .expect("conversation");
+            store.create_call(&alice, &session).expect("create");
+
+            assert!(store.incoming_direct_calls(&alice, 64).unwrap().is_empty());
+            assert!(
+                store
+                    .incoming_direct_calls(&subject("call-other"), 64)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                store.incoming_direct_calls(&bob, 0),
+                Err(DurableStoreError::InvalidRecord)
+            );
+            assert_eq!(
+                store.incoming_direct_calls(&bob, 65),
+                Err(DurableStoreError::InvalidRecord)
+            );
+            assert_eq!(store.incoming_direct_calls(&bob, 64).unwrap().len(), 1);
+        }
+        {
+            let reopened = SqliteLocalStore::open(db.path()).expect("reopen before acceptance");
+            let incoming = reopened.incoming_direct_calls(&bob, 1).unwrap();
+            assert_eq!(incoming.len(), 1);
+            assert_eq!(incoming[0].call_id, session.call_id);
+            let accept = signal(&incoming[0], "inbox-sqlite-accept", CallSignalKind::Accept);
+            assert_eq!(
+                reopened.apply_call_signal(&bob, &accept),
+                Ok(DurableRecordStatus::Persisted)
+            );
+            assert!(reopened.incoming_direct_calls(&bob, 64).unwrap().is_empty());
+            let active = reopened.call(&scope(), &session.call_id).unwrap().unwrap();
+            assert_eq!(active.signalling_state, CallSignallingState::Active);
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen after acceptance");
+        assert!(reopened.incoming_direct_calls(&bob, 64).unwrap().is_empty());
+        assert_eq!(
+            reopened.call(&scope(), &session.call_id).unwrap().unwrap().signalling_state,
+            CallSignallingState::Active
+        );
+    }
+
+    #[test]
     fn call_state_and_idempotency_survive_sqlite_reopen() {
         let db = TestDb::new();
         let (session, alice, bob) = session();
