@@ -4147,7 +4147,7 @@ mod sfu_placement_lifecycle_tests {
             .await
             .expect("live reconnect");
         assert!(
-            next.transition.session_sequence > first.transition.session_sequence,
+            next.join_generation > first.join_generation,
             "reconnect must have a newer generation"
         );
         assert_eq!(
@@ -4155,7 +4155,7 @@ mod sfu_placement_lifecycle_tests {
                 .leave_realtime_session_with_sfu_placement(
                     &active,
                     1_003,
-                    first.transition.session_sequence,
+                    first.join_generation,
                 )
                 .await,
             Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
@@ -4169,7 +4169,7 @@ mod sfu_placement_lifecycle_tests {
             .leave_realtime_session_with_sfu_placement(
                 &active,
                 1_004,
-                next.transition.session_sequence,
+                next.join_generation,
             )
             .await
             .expect("terminal Leave revokes grant");
@@ -4267,7 +4267,7 @@ mod sfu_placement_lifecycle_tests {
             .leave_realtime_session_with_sfu_placement(
                 &active,
                 1_002,
-                joined.transition.session_sequence,
+                joined.join_generation,
             )
             .await
             .expect("revoke and close durable grant");
@@ -4324,6 +4324,34 @@ mod sfu_placement_lifecycle_tests {
             .await
             .expect("last cleanup");
         assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_attendance_failure_rollback_does_not_evict_new_join() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
+        let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+        let claims = claims("stale-rollback-session", "stale-rollback-device");
+
+        service
+            .ensure_sfu_call_placement(&claims)
+            .await
+            .expect("placement");
+        let earlier = registry.join(claims.clone(), 1_001).expect("first Join");
+        let current = registry.join(claims.clone(), 1_002).expect("new Join");
+        assert_ne!(earlier.join_generation, current.join_generation);
+
+        assert!(service
+            .rollback_realtime_join(&claims, earlier.join_generation, 1_003)
+            .await
+            .is_err());
+        assert_eq!(registry.active_session_count(), 1);
+        assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 0);
+        service
+            .rollback_realtime_join(&claims, current.join_generation, 1_004)
+            .await
+            .expect("current owner can roll back");
+        assert_eq!(registry.active_session_count(), 0);
     }
 
     #[tokio::test]
