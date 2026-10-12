@@ -1,31 +1,69 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>UCR — Protected call</title>
+<meta http-equiv="Cache-Control" content="no-store">
+<title>UCR — Защищённые звонки</title>
 <style>
 :root{color-scheme:dark;font:16px system-ui,sans-serif;background:#0b1222;color:#edf3ff}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}
-main{width:min(100%,490px);border:1px solid #36415a;border-radius:20px;padding:32px;background:#111b31}
-h1{font-size:1.65rem;margin:0 0 12px}p{color:#c5d0e4;line-height:1.55}
-button{font:inherit;background:#7ac0ff;color:#00172d;padding:14px 20px;width:100%;
-border:none;border-radius:11px;font-weight:700;cursor:pointer}
-button:focus-visible{outline:3px solid white;outline-offset:4px}
-button:disabled{opacity:.45;cursor:not-allowed}
-#status{min-height:3em;font-size:.9rem;white-space:pre-wrap}
-small{display:block;color:#9aaaca;line-height:1.5;margin-top:18px}
+*{box-sizing:border-box}body{margin:0;padding:24px;min-height:100vh}
+main{max-width:900px;margin:0 auto}h1{font-size:1.7rem}h2{font-size:1.2rem;margin-top:0}
+section{border:1px solid #36415a;border-radius:15px;padding:20px;margin:16px 0;background:#111b31}
+p{line-height:1.55;color:#c5d0e4}
+input,button{font:inherit;border-radius:8px;padding:10px 12px}
+input{max-width:100%;background:#0b1222;color:#fff;border:1px solid #60718a}
+button{background:#7ac0ff;color:#00172d;border:0;cursor:pointer;font-weight:650}
+button.secondary{background:#384961;color:#eef3ff}
+button:focus-visible,input:focus-visible{outline:3px solid white;outline-offset:2px}
+button:disabled{opacity:.4;cursor:not-allowed}
+form{display:flex;gap:8px;flex-wrap:wrap}
+ul{list-style:none;padding:0;margin:0}li{padding:14px 0;border-bottom:1px solid #36415a}
+li:last-child{border-bottom:0}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
+.identity{color:#aebed6;overflow-wrap:anywhere;font-size:.85rem}
+#status{white-space:pre-wrap;min-height:2em}
+small{color:#9aaaca;line-height:1.5;display:block}
+[hidden]{display:none!important}
 </style>
 <script type="module" src="/start.js"></script>
 </head>
 <body>
 <main>
-<h1>UCR protected call</h1>
-<p>Continue with your existing independently authenticated account and trusted device. A signed, expiring call permission is created by the canonical server — never by this page.</p>
-<button id="begin" type="button">Continue to protected call</button>
-<p id="status" role="status" aria-live="polite">An authenticated first-party session is required.</p>
-<small>This page cannot register an account from a call link. If the first-party login service is unavailable, no device trust or call permission is created. Microphone and camera remain off until authorized encryption is ready.</small>
+<h1>UCR — Защищённые звонки</h1>
+<p>Контакт → один вызов → согласие собеседника → отдельное разрешение на защищённую медиасессию.</p>
+<section aria-label="Учётная запись">
+  <h2>Моё устройство</h2>
+  <p id="who" class="identity">Проверка независимой авторизации…</p>
+  <button type="button" id="retry" class="secondary">Повторить проверку входа</button>
+</section>
+<section>
+  <h2>Контакты</h2>
+  <form id="new-contact">
+    <input id="contact-name" aria-label="Имя" maxlength="128" placeholder="Имя" required>
+    <input id="contact-peer" aria-label="Проверенный идентификатор собеседника" maxlength="128" placeholder="Проверенный Identity ID" required>
+    <button type="submit">Добавить</button>
+  </form>
+  <small>Идентификатор собеседника необходимо независимо проверить. Имя и телефон не являются доказательством личности. Адресная книга зашифрована на устройстве.</small>
+  <ul id="contacts" aria-label="Мои контакты"></ul>
+</section>
+<section>
+  <h2>Входящие звонки</h2>
+  <ul id="incoming" aria-label="Входящие"></ul>
+  <small>В этом браузерном варианте входящие проверяются только при открытом приложении. Фоновые мобильные уведомления ещё требуют отдельного провайдера.</small>
+</section>
+<section>
+  <h2>Текущий вызов</h2>
+  <p id="call-state">Нет активного вызова.</p>
+  <div class="actions">
+    <button type="button" id="cancel" class="secondary" hidden>Отменить / завершить</button>
+  </div>
+</section>
+<section role="status" aria-live="polite">
+  <h2>Состояние защиты</h2>
+  <p id="status">До подтверждения учётной записи и Device камера и микрофон не включаются.</p>
+</section>
 </main>
 </body>
 </html>
