@@ -4,7 +4,8 @@ use std::{fmt, sync::Arc};
 
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_core::{
-    AuthorizationEvaluator, CallStore, CanonicalTransportError, ClassifiedTransportFailure,
+    AtomicTrustedDeviceEnrollmentStore, AuthorizationEvaluator, CallStore,
+    CanonicalTransportError, ClassifiedTransportFailure,
     CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DeviceLifecycleStore,
     EventApiIngress, EventAppendStatus, EventCursorRejection, EventDeliveryClock,
     EventSubscriptionStore, ExternalIdentityBindingLookup, ExternalIdentityBindingStore,
@@ -1114,6 +1115,7 @@ where
         + ServiceAuditStore
         + DeviceLifecycleStore
         + TrustedSigningKeyStore
+        + AtomicTrustedDeviceEnrollmentStore
         + 'static,
 {
     pb::device_service_server::DeviceServiceServer::new(service)
@@ -1131,6 +1133,7 @@ where
         + ServiceAuditStore
         + DeviceLifecycleStore
         + TrustedSigningKeyStore
+        + AtomicTrustedDeviceEnrollmentStore
         + 'static,
 {
     async fn register_device(
@@ -1159,6 +1162,57 @@ where
             result: Some(match result {
                 Ok(device) => pb::device_register_response::Result::Device(device),
                 Err(error) => pb::device_register_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn enroll_trusted_device(
+        &self,
+        request: Request<pb::DeviceEnrollTrustedRequest>,
+    ) -> Result<Response<pb::DeviceEnrollTrustedResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let scope = body
+            .scope
+            .ok_or_else(invalid_argument)
+            .and_then(decode_scope);
+        let device = body
+            .device
+            .ok_or_else(invalid_argument)
+            .and_then(decode_device_descriptor);
+        let signer = body
+            .signing_key
+            .ok_or_else(invalid_argument)
+            .and_then(decode_public_key_descriptor);
+        let result = match (credentials, scope, device, signer) {
+            (
+                Ok((credential_id, secret)),
+                Ok(scope),
+                Ok(device),
+                Ok(signer),
+            ) => IntegrationIngress::new(
+                &*self.clock,
+                &*self.authorization,
+                &*self.store,
+            )
+            .enroll_new_trusted_device(
+                &scope,
+                &credential_id,
+                &secret,
+                &scope,
+                &device,
+                &signer,
+            )
+            .map(|device| pb_device_descriptor(&device)),
+            (Err(error), _, _, _)
+            | (_, Err(error), _, _)
+            | (_, _, Err(error), _)
+            | (_, _, _, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::DeviceEnrollTrustedResponse {
+            result: Some(match result {
+                Ok(device) => pb::device_enroll_trusted_response::Result::Device(device),
+                Err(error) => pb::device_enroll_trusted_response::Result::Error(pb_error(error)),
             }),
         }))
     }
