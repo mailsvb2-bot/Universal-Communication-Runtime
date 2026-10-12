@@ -13,16 +13,16 @@ use std::{
 };
 
 use ucr_core::{
-    AntiEntropyStore, AtomicTrustedDeviceEnrollmentStore, AttachmentStore,
-    AuthorizationEvaluator, BridgeActionStore,
-    BridgeRegistrationStore, CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore,
-    ConferenceJoinGrantStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
-    DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
-    IdentityDeviceLookupStore, IdentityStore, LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE,
-    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_ACTIVE_RECORDINGS_PER_CALL, MAX_ATOMIC_EVENT_BATCH,
-    MAX_RECORDING_PROVIDER_OPERATION_BATCH, MAX_RECORDING_RETENTION_BATCH, MessageStore,
-    PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
+    AntiEntropyStore, AtomicTrustedDeviceEnrollmentStore, AttachmentStore, AuthorizationEvaluator,
+    BridgeActionStore, BridgeRegistrationStore, CommandAcceptanceStore, CommandOutcomeStore,
+    CommunicationIntentStore, ConferenceJoinGrantStore, ConversationStore, DeliveryStore,
+    DeviceLifecycleStore, DeviceReverificationProof, DurableRecordStatus, DurableStoreError,
+    EventAppendStatus, EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore,
+    FederationPeerStore, IdentityDeviceLookupStore, IdentityStore,
+    LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE, LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD,
+    MAX_ACTIVE_RECORDINGS_PER_CALL, MAX_ATOMIC_EVENT_BATCH, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+    MAX_RECORDING_RETENTION_BATCH, MessageStore, PermissionGrantStore,
+    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     RecordingConsentProviderStopRequest, RecordingProviderOperation,
     RecordingProviderOperationRecord, RecordingProviderOperationState,
     RecordingProviderOperationStore, RecordingProviderRequest, RecordingStore,
@@ -734,8 +734,7 @@ impl AtomicTrustedDeviceEnrollmentStore for MemoryLocalStore {
         device: &DeviceDescriptor,
         signing_key: &PublicKeyDescriptor,
     ) -> Result<(), DurableStoreError> {
-        if device.state != DeviceLifecycleState::Active
-            || signing_key.device_id != device.device_id
+        if device.state != DeviceLifecycleState::Active || signing_key.device_id != device.device_id
         {
             return Err(DurableStoreError::InvalidRecord);
         }
@@ -3511,11 +3510,11 @@ mod tests {
         IdentityStore, StorageProvider, TrustedSigningKeyStore,
     };
     use ucr_model::{
-        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
-        DeviceDescriptor, DeviceLifecycleState, DeviceRef, EventEnvelope, EventId,
-        IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, KeyId,
-        KeyPurpose, NamespaceId, OpaqueId, ProtocolExtension, ProtocolVersion,
-        PublicKeyDescriptor, TenantId, TenantScope,
+        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext,
+        DeviceDescriptor, DeviceId, DeviceLifecycleState, DeviceRef, EventEnvelope, EventId,
+        IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, KeyId, KeyPurpose,
+        NamespaceId, OpaqueId, ProtocolExtension, ProtocolVersion, PublicKeyDescriptor, TenantId,
+        TenantScope,
     };
     use ucr_protocol::CommandReceiptStatus;
 
