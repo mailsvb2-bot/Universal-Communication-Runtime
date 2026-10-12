@@ -1,12 +1,13 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{
-    DeviceLifecycleStore, DeviceReverificationProof, DurableStoreError, IdentityDeviceLookupStore,
+    AtomicTrustedDeviceEnrollmentStore, DeviceLifecycleStore, DeviceReverificationProof, DurableStoreError, IdentityDeviceLookupStore,
     ReverifiedDeviceActivationStore,
 };
 use ucr_model::{
-    DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, OpaqueId, TenantScope,
+    DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, OpaqueId, PublicKeyDescriptor,
+    TenantScope, TrustedSigningKeyState,
 };
-use ucr_protocol::device_allows_protected_access;
+use ucr_protocol::{device_allows_protected_access, validate_trusted_signing_key_descriptor};
 
 use super::{
     SqliteLocalStore, map_schema_change_error, map_sqlite_error, namespace_storage_key,
@@ -48,6 +49,78 @@ pub(super) fn verify_schema_v15(connection: &Connection) -> Result<(), DurableSt
         ],
     )?;
     verify_rows(connection)
+}
+
+/// The canonical Device and signing-key tables share exactly one SQLite
+/// transaction. An authenticated first-party handler must separately prove
+/// user/Identity ownership and verify an unexpired one-time Ed25519 challenge
+/// BEFORE invoking this persistence operation.
+impl AtomicTrustedDeviceEnrollmentStore for SqliteLocalStore {
+    fn enroll_new_trusted_device(
+        &self,
+        scope: &TenantScope,
+        device: &DeviceDescriptor,
+        signing_key: &PublicKeyDescriptor,
+    ) -> Result<(), DurableStoreError> {
+        if device.state != DeviceLifecycleState::Active
+            || signing_key.device_id != device.device_id
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        validate_trusted_signing_key_descriptor(signing_key)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        if !super::identity_store::identity_exists_in(
+            &transaction,
+            scope,
+            &device.identity_id,
+        )? {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        if let Some(existing) = load_device(&transaction, scope, &device.device_id)? {
+            // A known unkeyed Device cannot be silently "completed" through
+            // first-entry enrollment. That requires the explicitly authorized
+            // recovery flow. Revoked/stale Devices must never be resurrected.
+            if existing != *device {
+                return Err(DurableStoreError::Conflict);
+            }
+            let active = super::trusted_key_store::active_key_id(
+                &transaction, scope, &device.device_id,
+            )?;
+            if active.as_ref() != Some(&signing_key.key_id) {
+                return Err(DurableStoreError::Conflict);
+            }
+            let record = super::trusted_key_store::load_key_record(
+                &transaction, scope, &signing_key.key_id,
+            )?
+            .ok_or(DurableStoreError::Corrupt)?;
+            if record.state != TrustedSigningKeyState::Active
+                || record.descriptor != *signing_key
+            {
+                return Err(DurableStoreError::Conflict);
+            }
+        } else {
+            // First-entry register and trusted signer publication cannot
+            // race with Device revoke, rebind, or an existing key ID.
+            if super::trusted_key_store::load_key_record(
+                &transaction, scope, &signing_key.key_id,
+            )?
+            .is_some()
+            {
+                return Err(DurableStoreError::Conflict);
+            }
+            insert_device(&transaction, scope, device)?;
+            super::trusted_key_store::insert_active_key(
+                &transaction, scope, signing_key,
+            )?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))
+    }
 }
 
 impl DeviceLifecycleStore for SqliteLocalStore {
