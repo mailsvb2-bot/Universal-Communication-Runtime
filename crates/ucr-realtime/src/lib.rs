@@ -2,7 +2,7 @@
 
 use core::fmt;
 use std::{
-    sync::{Arc, Mutex},
+    sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -669,6 +669,9 @@ pub struct RealtimeSessionRegistry {
     expired_call_cleanup: Mutex<Vec<(TenantScope, CallId)>>,
     track_expired_call_cleanup: bool,
     bandwidth_usage: Mutex<Vec<BandwidthWindow>>,
+    // Monotonic within one running registry: Leave+Join cannot reuse a lease
+    // generation even when the previous entry was fully removed (ABA).
+    last_join_generation: AtomicU64,
     max_sessions: usize,
     queue_capacity: usize,
 }
@@ -677,6 +680,7 @@ pub struct RealtimeSessionRegistry {
 pub struct RealtimeJoinOutcome {
     pub claims: RealtimeSessionClaims,
     pub transition: AttendanceTransition,
+    pub join_generation: u64,
 }
 
 #[derive(Debug)]
@@ -699,6 +703,7 @@ impl RealtimeSessionRegistry {
             expired_call_cleanup: Mutex::new(Vec::new()),
             track_expired_call_cleanup: false,
             bandwidth_usage: Mutex::new(Vec::new()),
+            last_join_generation: AtomicU64::new(0),
             max_sessions,
             queue_capacity,
         }
@@ -716,6 +721,7 @@ impl RealtimeSessionRegistry {
             expired_call_cleanup: Mutex::new(Vec::new()),
             track_expired_call_cleanup: true,
             bandwidth_usage: Mutex::new(Vec::new()),
+            last_join_generation: AtomicU64::new(0),
             max_sessions,
             queue_capacity,
         }
@@ -945,6 +951,16 @@ impl RealtimeSessionRegistry {
             .any(|entry| same_session(entry, claims) && entry.claims == *claims))
     }
 
+    /// Allocates a new lease fence without reusing an old generation after Leave.
+    /// This is a counter within the existing canonical session registry, not
+    /// a second Call/Device registry.
+    fn next_join_generation(&self) -> Result<u64, RealtimeRegistryError> {
+        self.last_join_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| last.checked_add(1))
+            .map(|previous| previous + 1)
+            .map_err(|_| RealtimeRegistryError::SequenceOverflow)
+    }
+
     /// Opens or reconnects the exact signed session. Reconnect replaces the old downlink sender,
     /// causing the prior receiver to close rather than keeping two consumers for one session ID.
     ///
@@ -978,7 +994,8 @@ impl RealtimeSessionRegistry {
                 .sequence
                 .checked_add(1)
                 .ok_or(RealtimeRegistryError::SequenceOverflow)?;
-            entry.join_generation = entry.sequence;
+            let generation = self.next_join_generation()?;
+            entry.join_generation = generation;
             entry.media_ready = false;
             entry.publisher_owner = None;
             let (sender, receiver) = mpsc::channel(self.queue_capacity);
@@ -990,11 +1007,12 @@ impl RealtimeSessionRegistry {
                 session_sequence: entry.sequence,
                 occurred_at_unix_ms: now_unix_ms,
             };
-            return Ok(RealtimeJoinOutcome { claims, transition });
+            return Ok(RealtimeJoinOutcome { claims, transition, join_generation: generation });
         }
         if entries.len() >= self.max_sessions {
             return Err(RealtimeRegistryError::CapacityExceeded);
         }
+        let generation = self.next_join_generation()?;
         let (sender, receiver) = mpsc::channel(self.queue_capacity);
         let transition = AttendanceTransition {
             kind: AttendanceTransitionKind::Joined,
@@ -1007,12 +1025,12 @@ impl RealtimeSessionRegistry {
             sender,
             receiver: Some(receiver),
             sequence: 1,
-            join_generation: 1,
+            join_generation: generation,
             media_ready: false,
             adaptive_stage: None,
             publisher_owner: None,
         });
-        Ok(RealtimeJoinOutcome { claims, transition })
+        Ok(RealtimeJoinOutcome { claims, transition, join_generation: generation })
     }
 
     /// Attaches the one downlink consumer for the current connection.
@@ -1174,6 +1192,34 @@ impl RealtimeSessionRegistry {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
         Ok(entry.sequence)
+    }
+
+    /// Stable generation of the current Join, not the mutable attendance
+    /// sequence returned by heartbeat. Use this for external Leave fencing.
+    ///
+    /// # Errors
+    /// Fails closed if the signed claims have expired, changed or disappeared.
+    pub fn current_join_generation(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<u64, RealtimeRegistryError> {
+        if now_unix_ms >= claims.expires_at_unix_ms {
+            return Err(RealtimeRegistryError::Expired);
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        self.prune_expired(&mut entries, now_unix_ms)?;
+        let entry = entries
+            .iter()
+            .find(|entry| same_session(entry, claims))
+            .ok_or(RealtimeRegistryError::SessionUnavailable)?;
+        if entry.claims != *claims {
+            return Err(RealtimeRegistryError::ClaimMismatch);
+        }
+        Ok(entry.join_generation)
     }
 
     /// Applies one already-evaluated adaptive-media stage to the exact live realtime session.
@@ -1907,6 +1953,34 @@ mod tests {
     }
 
     #[test]
+    fn leave_then_join_cannot_reuse_removed_lease_generation() {
+        let registry = RealtimeSessionRegistry::new(8, 4);
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("leave-rejoin-aba-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("leave-rejoin-aba-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let first = registry.join(claims.clone(), 18_001).expect("first");
+        registry
+            .leave_if_sequence(&claims, first.join_generation, 18_002)
+            .expect("leave");
+        let second = registry.join(claims.clone(), 18_003).expect("fresh Join");
+        assert_ne!(first.join_generation, second.join_generation);
+        assert!(registry
+            .leave_if_sequence(&claims, first.join_generation, 18_004)
+            .is_err());
+        registry
+            .leave_if_sequence(&claims, second.join_generation, 18_005)
+            .expect("new owner can leave");
+    }
+
+    #[test]
     fn media_ready_and_downlink_reattachment_do_not_invalidate_leave_generation() {
         let registry = RealtimeSessionRegistry::new(8, 4);
         let claims = issuer()
@@ -1921,7 +1995,7 @@ mod tests {
             .expect("issue")
             .claims;
         let joined = registry.join(claims.clone(), 18_001).expect("join");
-        let generation = joined.transition.session_sequence;
+        let generation = joined.join_generation;
         let media = registry
             .mark_media_ready(&claims, 18_002)
             .expect("media ready")
@@ -1971,7 +2045,7 @@ mod tests {
             "unfenced external Leave must fail closed"
         );
         assert_eq!(
-            registry.leave_if_sequence(&claims, first.transition.session_sequence, 18_004),
+            registry.leave_if_sequence(&claims, first.join_generation, 18_004),
             Err(RealtimeRegistryError::ClaimMismatch),
             "a delayed old Leave must not close a reconnected session"
         );
