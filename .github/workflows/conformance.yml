@@ -42,6 +42,8 @@ jobs:
               node --experimental-strip-types sdk/typescript/endpoint_e2ee_conformance.ts
               node --experimental-strip-types sdk/typescript/canonical_device_seed_vault_conformance.ts
               node --experimental-strip-types sdk/typescript/first_party_http_conformance.ts
+              node --experimental-strip-types sdk/typescript/private_contacts_conformance.ts
+              node --experimental-strip-types sdk/typescript/contact_call_journey_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_embed_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_client_conformance.ts
               ;;
