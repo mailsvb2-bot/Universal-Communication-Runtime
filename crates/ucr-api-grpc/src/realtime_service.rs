@@ -659,7 +659,9 @@ where
                         .admit_realtime_session_with_sfu_placement(claims.clone(), now)
                         .await?;
                     if let Err(error) = self.append_attendance(&outcome.transition) {
-                        let _ = self.rollback_realtime_join(&claims, outcome.join_generation, now).await;
+                        let _ = self
+                            .rollback_realtime_join(&claims, outcome.join_generation, now)
+                            .await;
                         return Err(error);
                     }
                     Ok(pb_realtime_session(
