@@ -1387,9 +1387,47 @@ mod tests {
         let reopened = SqliteLocalStore::open(db.path()).expect("reopen after acceptance");
         assert!(reopened.incoming_direct_calls(&bob, 64).unwrap().is_empty());
         assert_eq!(
-            reopened.call(&scope(), &session.call_id).unwrap().unwrap().signalling_state,
+            reopened
+                .call(&scope(), &session.call_id)
+                .unwrap()
+                .unwrap()
+                .signalling_state,
             CallSignallingState::Active
         );
+    }
+
+    #[test]
+    fn incoming_cancelled_or_rejected_calls_do_not_reappear_after_restart() {
+        for reject in [false, true] {
+            let db = TestDb::new();
+            let (session, alice, bob) = session();
+            {
+                let store = SqliteLocalStore::open(db.path()).expect("open");
+                store.persist_conversation(&conversation()).expect("conversation");
+                store.create_call(&alice, &session).expect("create");
+                assert_eq!(store.incoming_direct_calls(&bob, 64).unwrap().len(), 1);
+                let kind = if reject {
+                    CallSignalKind::Reject
+                } else {
+                    CallSignalKind::Cancel
+                };
+                let actor = if reject { &bob } else { &alice };
+                store
+                    .apply_call_signal(actor, &signal(&session, "inbox-end", kind))
+                    .expect("signal");
+                assert!(store.incoming_direct_calls(&bob, 64).unwrap().is_empty());
+            }
+            let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+            assert!(reopened.incoming_direct_calls(&bob, 64).unwrap().is_empty());
+            assert_eq!(
+                reopened
+                    .call(&scope(), &session.call_id)
+                    .unwrap()
+                    .unwrap()
+                    .signalling_state,
+                CallSignallingState::Terminated
+            );
+        }
     }
 
     #[test]
