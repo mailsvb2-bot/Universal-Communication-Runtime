@@ -551,6 +551,49 @@ mod tests {
     }
 
     #[test]
+    fn incoming_direct_calls_are_recipient_scoped_and_follow_canonical_signals() {
+        let store = MemoryLocalStore::default();
+        let (conversation, session, alice, bob) = fixture();
+        store.persist_conversation(&conversation).unwrap();
+        store.create_call(&alice, &session).unwrap();
+
+        assert_eq!(store.incoming_direct_calls(&alice, 64), Ok(vec![]));
+        assert_eq!(
+            store.incoming_direct_calls(&subject("bob", PrincipalKind::Organization), 64),
+            Ok(vec![])
+        );
+        assert_eq!(
+            store.incoming_direct_calls(&subject("charlie", PrincipalKind::Person), 64),
+            Ok(vec![])
+        );
+        assert_eq!(
+            store.incoming_direct_calls(&bob, 0),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(
+            store.incoming_direct_calls(&bob, 65),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        let pending = store.incoming_direct_calls(&bob, 64).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].call_id, session.call_id);
+
+        let ringing = signal(&session, "inbox-ring", CallSignalKind::Ringing);
+        store.apply_call_signal(&bob, &ringing).unwrap();
+        assert_eq!(store.incoming_direct_calls(&bob, 1).unwrap().len(), 1);
+
+        let ringing_state = store.call(&scope(), &session.call_id).unwrap().unwrap();
+        let accept = signal(&ringing_state, "inbox-accept", CallSignalKind::Accept);
+        store.apply_call_signal(&bob, &accept).unwrap();
+        assert!(store.incoming_direct_calls(&bob, 64).unwrap().is_empty());
+        // The accepted Call remains in its canonical store, not in inbox.
+        assert_eq!(
+            store.call(&scope(), &session.call_id).unwrap().unwrap().signalling_state,
+            CallSignallingState::Active
+        );
+    }
+
+    #[test]
     fn call_signalling_is_atomic_non_oracular_and_idempotent() {
         let store = MemoryLocalStore::default();
         let (conversation, session, alice, bob) = fixture();
