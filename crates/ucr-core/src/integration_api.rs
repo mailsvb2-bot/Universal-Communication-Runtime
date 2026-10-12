@@ -42,12 +42,11 @@ use ucr_protocol::{
 
 use crate::{
     AtomicTrustedDeviceEnrollmentStore, AuthorizationEvaluator, AuthorizedDurableRuntime,
-    AuthorizedMutationError, CallStore,
-    CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DeviceLifecycleStore,
-    DurableStoreError, ExternalIdentityBindingStore, GroupMessageStore, GroupStore, IdentityStore,
-    MessageStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
-    ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore, SyncStore,
-    TrustedSigningKeyStore,
+    AuthorizedMutationError, CallStore, CommandAcceptanceStore, CommunicationIntentStore,
+    ConversationStore, DeviceLifecycleStore, DurableStoreError, ExternalIdentityBindingStore,
+    GroupMessageStore, GroupStore, IdentityStore, MessageStore, ServiceAuditStore,
+    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
+    ServiceQuotaClock, ServiceQuotaStore, SyncStore, TrustedSigningKeyStore,
 };
 
 /// Transport-neutral Phase-13 ingress for external Service Principal operations.
@@ -1000,17 +999,15 @@ where
             operation_kind: SERVICE_AUDIT_DEVICE_REGISTER_OPERATION_KIND.to_owned(),
             operation_id: device.device_id.as_opaque().clone(),
         };
-        let request = ServicePrincipalRequestGate::new(
-            self.clock, self.authorization, self.store,
-        )
-        .authenticate_request_for_operation(
-            presented_scope,
-            credential_id,
-            secret,
-            DEVICE_REGISTER_PERMISSION,
-            scope,
-            &operation,
-        )?;
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                DEVICE_REGISTER_PERMISSION,
+                scope,
+                &operation,
+            )?;
         request.authorize_additional_permission(TRUSTED_SIGNING_KEY_PROVISION_PERMISSION)?;
         self.store
             .enroll_new_trusted_device(scope, device, signing_key)
