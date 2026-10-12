@@ -296,3 +296,26 @@ revocation, interoperable MLS agreement, trusted media source descriptors,
 real NAT/TURN transport and two-device audible/visible encrypted playback
 still require live independent validation. Do not close issue #274 or claim
 production readiness based on this UI, a mock peer or an HTTP 200 status.
+
+
+### Domain-separated first-entry enrollment proof (RT0)
+
+The server challenge is not signed raw. The browser Ed25519 signer signs UTF-8
+bytes: the literal string "ucr-first-party-device-enrollment.v1" followed by
+one NUL byte followed by compact JSON array, in this exact ordered form:
+[tenantId,namespaceId,participantId,deviceId,keyId,
+ publicKeyBase64Url,challengeId,challengeBytesBase64Url].
+The optional namespace is JSON null, not an omitted element. Base64url is
+canonical unpadded RFC4648 with no alternate spellings; IDs are restricted
+to printable ASCII. The BFF MUST reconstruct the message from its OWN
+authenticated session and the previously issued server-held one-time
+challenge. The BFF MUST NOT trust a message supplied by the browser, nor
+accept a detached signature over raw challenge bytes. This prevents a
+compromised or buggy challenge issuer from asking a Device signer to sign
+another protocol's message with the same Ed25519 key.
+
+Browser local verification against the proposed public key proves internal
+vault consistency only. The BFF independently verifies that public key
+against the signature, exact session binding and consumed challenge before
+publishing it to the canonical TrustedSigningKeyStore. A replayed challenge,
+retired session or mismatched Device must fail closed.
