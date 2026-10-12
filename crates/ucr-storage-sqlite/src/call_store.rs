@@ -1403,7 +1403,9 @@ mod tests {
             let (session, alice, bob) = session();
             {
                 let store = SqliteLocalStore::open(db.path()).expect("open");
-                store.persist_conversation(&conversation()).expect("conversation");
+                store
+                    .persist_conversation(&conversation())
+                    .expect("conversation");
                 store.create_call(&alice, &session).expect("create");
                 assert_eq!(store.incoming_direct_calls(&bob, 64).unwrap().len(), 1);
                 let kind = if reject {
