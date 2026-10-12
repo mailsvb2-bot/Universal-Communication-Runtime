@@ -588,9 +588,45 @@ mod tests {
         assert!(store.incoming_direct_calls(&bob, 64).unwrap().is_empty());
         // The accepted Call remains in its canonical store, not in inbox.
         assert_eq!(
-            store.call(&scope(), &session.call_id).unwrap().unwrap().signalling_state,
+            store
+                .call(&scope(), &session.call_id)
+                .unwrap()
+                .unwrap()
+                .signalling_state,
             CallSignallingState::Active
         );
+    }
+
+    #[test]
+    fn caller_cancellation_and_recipient_rejection_clear_the_same_inbox() {
+        for reject in [false, true] {
+            let store = MemoryLocalStore::default();
+            let (conversation, session, alice, bob) = fixture();
+            store.persist_conversation(&conversation).unwrap();
+            store.create_call(&alice, &session).unwrap();
+            assert_eq!(store.incoming_direct_calls(&bob, 64).unwrap().len(), 1);
+
+            if reject {
+                store
+                    .apply_call_signal(
+                        &bob,
+                        &signal(&session, "inbox-reject", CallSignalKind::Reject),
+                    )
+                    .unwrap();
+            } else {
+                store
+                    .apply_call_signal(
+                        &alice,
+                        &signal(&session, "inbox-cancel", CallSignalKind::Cancel),
+                    )
+                    .unwrap();
+            }
+            assert!(store.incoming_direct_calls(&bob, 64).unwrap().is_empty());
+            assert_eq!(
+                store.call(&scope(), &session.call_id).unwrap().unwrap().signalling_state,
+                CallSignallingState::Terminated
+            );
+        }
     }
 
     #[test]
