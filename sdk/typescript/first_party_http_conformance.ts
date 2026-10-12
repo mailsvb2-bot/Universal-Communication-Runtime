@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {webcrypto} from "node:crypto";
 import {createUcrFirstPartyCallEntry} from "./src/canonical_first_party_call_entry.ts";
-import {createUcrFirstPartyHttpHost} from "./src/first_party_browser_http.ts";
+import {createUcrFirstPartyHttpHost, encodeUcrFirstPartyEnrollmentProof} from "./src/first_party_browser_http.ts";
 import {
   createUcrBrowserProtectedDeviceVault,
   type UcrLocalSignerRecord,
@@ -19,7 +19,6 @@ const binding = {
 };
 const second = {...binding, deviceId: "device-two"};
 const origin = "http://localhost:18080";
-const endpoint = "/client.html";
 function encode(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
@@ -48,7 +47,6 @@ function sessionHost(overrides: {
   session?: typeof binding | null;
   missingSession?: boolean;
   corruptChallenge?: boolean;
-  tamperSignature?: boolean;
   foreignIssuer?: boolean;
   rejectApproval?: boolean;
   mutateSessionAfterChallenge?: boolean;
@@ -115,8 +113,17 @@ function sessionHost(overrides: {
         atob(body.signatureBase64Url.replace(/-/g, "+").replace(/_/g, "/")),
         char => char.charCodeAt(0),
       );
+      const proofMessage = encodeUcrFirstPartyEnrollmentProof(binding, {
+        keyId: body.keyId,
+        publicKey: Uint8Array.from(
+          atob(body.publicKeyBase64Url.replace(/-/g, "+").replace(/_/g, "/")),
+          char => char.charCodeAt(0),
+        ),
+      }, challengeId, challenge);
       assert.equal(await webcrypto.subtle.verify("Ed25519", key,
-        signature, challenge), !overrides.tamperSignature);
+        signature, proofMessage), true, "Device enrollment proof must be domain-scoped");
+      assert.equal(await webcrypto.subtle.verify("Ed25519", key,
+        signature, challenge), false, "Device cannot be tricked into signing raw server bytes");
       if (overrides.rejectApproval) return reply({error:"forbidden"}, 403);
       challengeUsed = true;
       approvals++;
