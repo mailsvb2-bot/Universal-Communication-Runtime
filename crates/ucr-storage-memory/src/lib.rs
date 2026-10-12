@@ -3506,13 +3506,16 @@ impl CommandOutcomeStore for MemoryLocalStore {
 #[cfg(test)]
 mod tests {
     use ucr_core::{
-        CommandAcceptanceStore, CommandOutcomeStore, DurableStoreError, EventAppendStatus,
-        EventJournalStore, StorageProvider,
+        AtomicTrustedDeviceEnrollmentStore, CommandAcceptanceStore, CommandOutcomeStore,
+        DeviceLifecycleStore, DurableStoreError, EventAppendStatus, EventJournalStore,
+        IdentityStore, StorageProvider, TrustedSigningKeyStore,
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
-        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolExtension,
-        ProtocolVersion, TenantId, TenantScope,
+        DeviceDescriptor, DeviceLifecycleState, DeviceRef, EventEnvelope, EventId,
+        IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, KeyId,
+        KeyPurpose, NamespaceId, OpaqueId, ProtocolExtension, ProtocolVersion,
+        PublicKeyDescriptor, TenantId, TenantScope,
     };
     use ucr_protocol::CommandReceiptStatus;
 
@@ -3567,6 +3570,73 @@ mod tests {
             integrity_metadata: Vec::new(),
             extensions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn atomic_first_entry_matches_sqlite_owner_without_partial_trust() {
+        let store = MemoryLocalStore::default();
+        let scope = command("identity-scope", "key", b"").scope;
+        let identity_id = IdentityId::from_opaque(opaque("identity-first-party"));
+        let device = DeviceDescriptor {
+            device_id: DeviceId::from_opaque(opaque("device-first-party")),
+            identity_id: identity_id.clone(),
+            state: DeviceLifecycleState::Active,
+        };
+        let signing_key = PublicKeyDescriptor {
+            key_id: KeyId::from_opaque(opaque("trusted-key-first-party")),
+            device_id: device.device_id.clone(),
+            purpose: KeyPurpose::Signing,
+            algorithm_id: ucr_protocol::SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ucr_protocol::ALGORITHM_VERSION,
+            key_format_version: ucr_protocol::KEY_FORMAT_VERSION,
+            public_key: vec![42; 32],
+        };
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &device, &signing_key),
+            Err(DurableStoreError::PermissionDenied),
+            "no client may invent its own parent Identity",
+        );
+        assert_eq!(store.device(&scope, &device.device_id), Ok(None));
+        store
+            .persist_identity(&IdentityRecord {
+                scope: scope.clone(),
+                identity_id: identity_id.clone(),
+                ownership: IdentityOwnership::UcrNative,
+                evidence: IdentityEvidence::SelfAsserted,
+                expires_at_unix_ms: None,
+            })
+            .expect("canonical owner");
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &device, &signing_key),
+            Ok(())
+        );
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &device.device_id),
+            Ok(Some(signing_key.clone()))
+        );
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &device, &signing_key),
+            Ok(()),
+            "same Device+trusted descriptor only",
+        );
+        let mut foreign_key = signing_key.clone();
+        foreign_key.public_key = vec![43; 32];
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &device, &foreign_key),
+            Err(DurableStoreError::Conflict),
+        );
+        store
+            .revoke_device(&scope, &device.device_id, &identity_id)
+            .expect("revoke");
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &device, &signing_key),
+            Err(DurableStoreError::Conflict),
+            "re-enrollment may not resurrect revoked devices",
+        );
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &device.device_id),
+            Ok(None),
+        );
     }
 
     #[test]
