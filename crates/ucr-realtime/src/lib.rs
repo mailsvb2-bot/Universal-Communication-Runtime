@@ -2071,7 +2071,17 @@ mod tests {
             .mark_media_ready(&claims, 18_002)
             .expect("media ready")
             .expect("transition");
-        assert!(media.session_sequence > generation);
+        assert!(
+            media.session_sequence > joined.transition.session_sequence,
+            "MediaReady advances attendance, not the Join lease"
+        );
+        assert_eq!(
+            registry
+                .current_join_generation(&claims, 18_002)
+                .expect("current lease"),
+            generation,
+            "MediaReady must leave the authenticated Join generation unchanged"
+        );
         let receiver = registry
             .take_downlink(&claims, 18_003)
             .expect("initial downlink");
@@ -2132,7 +2142,7 @@ mod tests {
         assert_eq!(registry.active_session_count(), 1);
 
         let retired = registry
-            .leave_if_sequence(&claims, second.transition.session_sequence, 18_006)
+            .leave_if_sequence(&claims, second.join_generation, 18_006)
             .expect("current Leave");
         assert_eq!(retired.kind, AttendanceTransitionKind::Left);
         assert_eq!(registry.active_session_count(), 0);
