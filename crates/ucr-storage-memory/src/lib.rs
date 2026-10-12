@@ -13,7 +13,8 @@ use std::{
 };
 
 use ucr_core::{
-    AntiEntropyStore, AttachmentStore, AuthorizationEvaluator, BridgeActionStore,
+    AntiEntropyStore, AtomicTrustedDeviceEnrollmentStore, AttachmentStore,
+    AuthorizationEvaluator, BridgeActionStore,
     BridgeRegistrationStore, CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore,
     ConferenceJoinGrantStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
@@ -720,6 +721,76 @@ impl ServiceAuditStore for MemoryLocalStore {
             .collect::<Vec<_>>();
         records.reverse();
         Ok(records)
+    }
+}
+
+/// The in-memory canonical owner implements the SAME atomic enrollment
+/// semantics as SQLite. One Mutex guards Identity, Device and TrustedKey
+/// together so concurrent first-entry requests cannot observe partial state.
+impl AtomicTrustedDeviceEnrollmentStore for MemoryLocalStore {
+    fn enroll_new_trusted_device(
+        &self,
+        scope: &TenantScope,
+        device: &DeviceDescriptor,
+        signing_key: &PublicKeyDescriptor,
+    ) -> Result<(), DurableStoreError> {
+        if device.state != DeviceLifecycleState::Active
+            || signing_key.device_id != device.device_id
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        validate_trusted_signing_key_descriptor(signing_key)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let device_ref = device_key(scope, &device.device_id);
+        let signer_ref = trusted_key_ref(scope, &signing_key.key_id);
+        let active_ref = trusted_device_ref(scope, &device.device_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if !state
+            .identities
+            .contains_key(&identity_key(scope, &device.identity_id))
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        if let Some(existing) = state.devices.get(&device_ref) {
+            if existing != device {
+                return Err(DurableStoreError::Conflict);
+            }
+            if state.active_trusted_signing_keys.get(&active_ref)
+                != Some(&signing_key.key_id.as_opaque().as_str().to_owned())
+            {
+                return Err(DurableStoreError::Conflict);
+            }
+            let current = state
+                .trusted_signing_keys
+                .get(&signer_ref)
+                .ok_or(DurableStoreError::Corrupt)?;
+            return if current.state == TrustedSigningKeyState::Active
+                && current.descriptor == *signing_key
+            {
+                Ok(())
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if state.trusted_signing_keys.contains_key(&signer_ref)
+            || state.active_trusted_signing_keys.contains_key(&active_ref)
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        state.devices.insert(device_ref, device.clone());
+        state.trusted_signing_keys.insert(
+            signer_ref,
+            TrustedSigningKeyRecord {
+                scope: scope.clone(),
+                descriptor: signing_key.clone(),
+                state: TrustedSigningKeyState::Active,
+            },
+        );
+        state.active_trusted_signing_keys.insert(
+            active_ref,
+            signing_key.key_id.as_opaque().as_str().to_owned(),
+        );
+        Ok(())
     }
 }
 
