@@ -249,3 +249,50 @@ This addition introduces no new database, identity/cryptography owner or
 telephone lookup directory. Canonical durable Device/Trust state continues
 to live in the existing reference stores. Passing gRPC conformance does not
 prove two physical Device E2EE audio/video or TURN/NAT interoperability.
+
+
+## RT0 first-party browser admission (PR #285; incomplete without server)
+
+A new first-party screen at /start, served by the existing realtime gateway,
+uses the pinned endpoint-media ESM bundle and the existing protected signer vault.
+The browser flow is session -> canonical Device inspection -> signer challenge
+-> canonical approval -> signed Conference Join -> post-Join trust recheck ->
+navigation to the existing /client.html#ucr_join=... Conference client.
+
+The first-party browser transport requires same-origin HTTPS or loopback and
+uses same-origin cookies only; it forbids HTTP redirects, external origin,
+referrer leaks, unexpected JSON, and unbounded responses. No Service Principal
+secret, private signing seed, MLS exporter or private group state may be sent
+to or retained by the backend.
+
+### Required independently authenticated first-party BFF routes
+
+- GET /v1/first-party/session: identity-bound tenantId, namespaceId,
+  participantId, deviceId from a secure human login, not a Join fragment.
+- POST /v1/first-party/device/inspect: active/revoked state and trusted
+  signing key from existing canonical Device and TrustedSigningKey owners.
+- POST /v1/first-party/device/challenge: issue unpredictable 32..512-byte
+  server challenge bound to authenticated session, scope, Device, proposed
+  key and expiry; return challengeId and challengeBytesBase64Url.
+- POST /v1/first-party/device/approve: independently verify Ed25519 signature
+  of exactly that challenge, atomically consume it once, recheck human auth,
+  enforce Device ownership/authorization, and publish the canonical key.
+  Reply exactly {approved:true} only after durable canonical approval.
+- POST /v1/first-party/call/join: independently recheck active Device, matching
+  trusted signer, Call/Group admission and policy; use the existing canonical
+  Conference issuer for short-lived, signed, device-bound Join fragment.
+  Do not interpret URL possession as user authentication.
+
+The server MUST validate same-origin, CSRF custom header, HTTPS trust edge,
+bounded JSON, replay/expiry/conflict and concurrent enrollment. It must not
+introduce a separate Identity registry, phone list, or cryptographic authority.
+An ACTIVE Device with a missing signing-key descriptor must fail closed.
+The proposed signing key is never trusted based solely on the client claim.
+
+IMPORTANT: the first-party BFF and authenticated human session establishment
+are not yet provided by the UCR realtime gateway. Serving /start does not
+automatically log in or grant a protected call. Device recovery after restart,
+revocation, interoperable MLS agreement, trusted media source descriptors,
+real NAT/TURN transport and two-device audible/visible encrypted playback
+still require live independent validation. Do not close issue #274 or claim
+production readiness based on this UI, a mock peer or an HTTP 200 status.
