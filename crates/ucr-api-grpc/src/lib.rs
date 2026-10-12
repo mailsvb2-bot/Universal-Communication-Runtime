@@ -4,12 +4,12 @@ use std::{fmt, sync::Arc};
 
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_core::{
-    AtomicTrustedDeviceEnrollmentStore, AuthorizationEvaluator, CallStore,
-    CanonicalTransportError, ClassifiedTransportFailure,
-    CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DeviceLifecycleStore,
-    EventApiIngress, EventAppendStatus, EventCursorRejection, EventDeliveryClock,
-    EventSubscriptionStore, ExternalIdentityBindingLookup, ExternalIdentityBindingStore,
-    GroupMessageStore, IdentityStore, IntegrationIngress, MAX_RECORDING_PROVIDER_EXPORT_BYTES,
+    AtomicTrustedDeviceEnrollmentStore, AuthorizationEvaluator, CallStore, CanonicalTransportError,
+    ClassifiedTransportFailure, CommandAcceptanceStore, CommunicationIntentStore,
+    ConversationStore, DeviceLifecycleStore, EventApiIngress, EventAppendStatus,
+    EventCursorRejection, EventDeliveryClock, EventSubscriptionStore,
+    ExternalIdentityBindingLookup, ExternalIdentityBindingStore, GroupMessageStore, IdentityStore,
+    IntegrationIngress, MAX_RECORDING_PROVIDER_EXPORT_BYTES,
     MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES, MessageStore, RouteCandidate, ServiceAuditStore,
     ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
     ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore, SyncStore, SyncTransition,
@@ -1185,25 +1185,18 @@ where
             .ok_or_else(invalid_argument)
             .and_then(decode_public_key_descriptor);
         let result = match (credentials, scope, device, signer) {
-            (
-                Ok((credential_id, secret)),
-                Ok(scope),
-                Ok(device),
-                Ok(signer),
-            ) => IntegrationIngress::new(
-                &*self.clock,
-                &*self.authorization,
-                &*self.store,
-            )
-            .enroll_new_trusted_device(
-                &scope,
-                &credential_id,
-                &secret,
-                &scope,
-                &device,
-                &signer,
-            )
-            .map(|device| pb_device_descriptor(&device)),
+            (Ok((credential_id, secret)), Ok(scope), Ok(device), Ok(signer)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .enroll_new_trusted_device(
+                        &scope,
+                        &credential_id,
+                        &secret,
+                        &scope,
+                        &device,
+                        &signer,
+                    )
+                    .map(|device| pb_device_descriptor(&device))
+            }
             (Err(error), _, _, _)
             | (_, Err(error), _, _)
             | (_, _, Err(error), _)
