@@ -2523,18 +2523,125 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn first_party_entry_uses_only_canonical_signed_fragment_and_never_mints_trust() {
-        assert!(
-            super::FIRST_PARTY_START_HTML
-                .contains("An authenticated first-party session is required")
+    fn first_party_contact_call_entry_has_complete_fail_closed_user_route() {
+        let html = super::FIRST_PARTY_START_HTML;
+        let js = super::FIRST_PARTY_START_JS;
+
+        // A first-party account and a contact book are required before
+        // the canonical owner will accept an outgoing or incoming call.
+        assert!(html.contains("lang=\"ru\""));
+        for element in [
+            "id=\"who\"",
+            "id=\"retry\"",
+            "id=\"new-contact\"",
+            "id=\"contact-name\"",
+            "id=\"contact-peer\"",
+            "id=\"contacts\"",
+            "id=\"incoming\"",
+            "id=\"call-state\"",
+            "id=\"cancel\"",
+            "id=\"status\"",
+        ] {
+            assert!(html.contains(element), "missing first-party UI: {element}");
+        }
+        assert!(html.contains("src=\"/start.js\""));
+        assert!(html.contains("name=\"referrer\" content=\"no-referrer\""));
+        assert!(html.contains("камера и микрофон не включаются"));
+
+        // One existing endpoint-owned signer, authenticated HTTP bridge and
+        // canonical Call coordinator. No manual grant, static Contact/Call
+        // authority or parallel browser-side permission store.
+        assert!(js.contains("createUcrBrowserProtectedDeviceVault()"));
+        assert!(js.contains("createUcrFirstPartyHttpHost(vault, {origin:location.origin})"));
+        assert!(js.contains("createUcrContactCallJourney(host,vault)"));
+        assert!(js.contains("await host.resumeAuthenticatedDevice()"));
+        assert!(js.contains("await calls.contacts()"));
+        assert!(js.contains("await calls.addContact(name,peer)"));
+        assert!(js.contains("await calls.start(contact.id,media,requestId)"));
+        assert!(js.contains("await calls.incoming()"));
+        assert!(js.contains("await calls.signal(call.callId,\"accept\")"));
+        assert!(js.contains("await calls.signal(call.callId,\"reject\")"));
+        assert!(js.contains("await calls.signal(active.call.callId,action)"));
+        assert!(js.contains("await calls.inspect(active.call.callId)"));
+        assert!(js.contains("if (accountScope !== principalScope(user))"));
+        assert!(js.contains("idempotency.clear()"));
+        assert!(js.contains("clearRetryKey(active.call)"));
+
+        // Browser media navigation requires a server-issued, recipient-
+        // accepted, exact-Call Join. It only enters the URL fragment and
+        // cannot leak through a query string or a server request.
+        let join = js
+            .find("const grant = await calls.join(callId)")
+            .expect("media entry must be authorized by canonical Call");
+        let bound = js
+            .find("grant.callId !== callId")
+            .expect("media Join must bind the exact selected Call");
+        let fragment = js
+            .find("next.hash = grant.joinFragment.slice(1)")
+            .expect("the signed grant must remain in the URL fragment");
+        let navigate = js
+            .find("location.replace(next.href)")
+            .expect("navigate only after canonical media authorization");
+        assert!(join < bound && bound < fragment && fragment < navigate);
+        assert!(js.contains("if (fresh.state === \"active\") await beginMedia(fresh.callId)"));
+        for forbidden in [
+            "createUcrFirstPartyCallEntry",
+            "localStorage",
+            "client_secret",
+            "access_token",
+            "Authorization: Bearer",
+            "getUserMedia(",
+            "getDisplayMedia(",
+            "next.searchParams",
+        ] {
+            assert!(
+                !js.contains(forbidden),
+                "first-party entry must not expose credentials or capture media: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_party_contact_call_assets_are_no_store_and_refuse_cross_origin_embedding() {
+        let html = super::first_party_start_response();
+        assert_eq!(html.status(), super::StatusCode::OK);
+        assert_eq!(
+            html.headers().get(super::CACHE_CONTROL).expect("cache header"),
+            "no-store"
         );
-        assert!(super::FIRST_PARTY_START_JS.contains("createUcrFirstPartyHttpHost"));
-        assert!(super::FIRST_PARTY_START_JS.contains("createUcrFirstPartyCallEntry"));
-        assert!(super::FIRST_PARTY_START_JS.contains("issued.joinFragment.slice(1)"));
-        assert!(super::FIRST_PARTY_START_JS.contains("location.replace(url.href)"));
-        assert!(!super::FIRST_PARTY_START_JS.contains("localStorage"));
-        assert!(!super::FIRST_PARTY_START_JS.contains("client_secret"));
-        assert!(!super::FIRST_PARTY_START_JS.contains("access_token"));
+        assert_eq!(
+            html.headers().get("Referrer-Policy").expect("referrer policy"),
+            "no-referrer"
+        );
+        assert_eq!(
+            html.headers()
+                .get("X-Content-Type-Options")
+                .expect("content sniffing policy"),
+            "nosniff"
+        );
+        let csp = html
+            .headers()
+            .get("Content-Security-Policy")
+            .expect("content security policy")
+            .to_str()
+            .expect("valid content security policy");
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("connect-src 'self'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("base-uri 'none'"));
+
+        let js = super::first_party_start_js_response();
+        assert_eq!(js.status(), super::StatusCode::OK);
+        assert_eq!(
+            js.headers().get(super::CACHE_CONTROL).expect("cache header"),
+            "no-store"
+        );
+        assert_eq!(
+            js.headers()
+                .get("X-Content-Type-Options")
+                .expect("content sniffing policy"),
+            "nosniff"
+        );
     }
 
     use super::*;
