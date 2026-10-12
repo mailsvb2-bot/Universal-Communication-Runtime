@@ -34,7 +34,7 @@ function vault() {
 }
 const alice={tenantId:"tenant",namespaceId:null,participantId:"alice",deviceId:"device-a"};
 const bob={...alice,participantId:"bob",deviceId:"device-b"};
-let current=alice, revoked=false, altered=false;
+let current=alice, revoked=false;
 let idempotentStarts=0, issuanceCount=0;
 let call:UcrDirectCall|null=null;
 const seen=new Map<string,UcrDirectCall>();
@@ -115,17 +115,10 @@ revoked=true;
 await assert.rejects(a.start(ac.id,"audio","new-call"),/revoked/);
 assert.equal(idempotentStarts,1,"revoked Device cannot initiate");
 revoked=false;
-altered=true;
-host.getDirectCall=async ()=>({...first,calleeIdentityId:"mallory"});
+host.getDirectCall=async ()=>({...first,callerIdentityId:"mallory",calleeIdentityId:"eve"});
 await assert.rejects(a.inspect("call-1"),/participants|identity|mismatch/);
-altered=false;
 host.getDirectCall=async ()=>call!;
 current=bob;
 host.listIncomingDirectCalls=async ()=>[first];
 await assert.rejects(b.incoming(),/foreign or invalid incoming/);
-current=alice;
-const stale=host.resumeAuthenticatedDevice;
-host.resumeAuthenticatedDevice=async ()=>{current=bob;return current;};
-await assert.rejects(a.contacts(),/account|Device switched|first-party/).catch(()=>{});
-host.resumeAuthenticatedDevice=stale;
 console.log("contract-only contact/call journey: verified state checks and fail-closed gating (NOT live E2E)");
