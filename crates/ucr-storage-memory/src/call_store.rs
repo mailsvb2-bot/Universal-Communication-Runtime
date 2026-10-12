@@ -466,11 +466,17 @@ fn map_call_error(error: ucr_protocol::CallSignallingError) -> DurableStoreError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ucr_core::{CallStore, ConversationStore};
+    use ucr_core::{
+        AtomicTrustedDeviceEnrollmentStore, AuthorizedDurableRuntime, CallStore,
+        ConversationStore, DeviceLifecycleStore, IdentityStore, PermissionGrantStore,
+        PrincipalIdentityBindingStore,
+    };
     use ucr_model::{
         CallParticipant, CallSignallingState, CallTerminationReason, ConversationId,
-        ConversationRecord, ConversationRef, EventId, OpaqueId, PrincipalId, PrincipalKind,
-        TenantId,
+        ConversationRecord, ConversationRef, DeviceDescriptor, DeviceId,
+        DeviceLifecycleState, EventId, IdentityEvidence, IdentityId, IdentityOwnership,
+        IdentityRecord, KeyId, KeyPurpose, OpaqueId, PermissionGrant, PermissionScope,
+        PrincipalId, PrincipalIdentityBinding, PrincipalKind, PublicKeyDescriptor, TenantId,
     };
 
     fn oid(value: &str) -> OpaqueId {
@@ -538,6 +544,151 @@ mod tests {
             termination_reason: None,
         };
         (conversation, session, alice, bob)
+    }
+
+
+    fn prepare_first_party_person_device(
+        store: &MemoryLocalStore,
+        principal: &ScopedPrincipal,
+        identity: &str,
+        device: &str,
+        key: &str,
+    ) -> DeviceId {
+        let identity_id = IdentityId::from_opaque(oid(identity));
+        store
+            .persist_identity(&IdentityRecord {
+                scope: principal.scope.clone(),
+                identity_id: identity_id.clone(),
+                ownership: IdentityOwnership::UserManaged,
+                evidence: IdentityEvidence::DeviceVerified,
+                expires_at_unix_ms: None,
+            })
+            .unwrap();
+        store
+            .persist_principal_identity_binding(&PrincipalIdentityBinding {
+                scope: principal.scope.clone(),
+                principal: principal.principal.clone(),
+                identity_id: identity_id.clone(),
+            })
+            .unwrap();
+        let device_id = DeviceId::from_opaque(oid(device));
+        store
+            .enroll_new_trusted_device(
+                &principal.scope,
+                &DeviceDescriptor {
+                    device_id: device_id.clone(),
+                    identity_id,
+                    state: DeviceLifecycleState::Active,
+                },
+                &PublicKeyDescriptor {
+                    key_id: KeyId::from_opaque(oid(key)),
+                    device_id: device_id.clone(),
+                    purpose: KeyPurpose::Signing,
+                    algorithm_id: ucr_protocol::SIGNATURE_ALGORITHM_ID.to_owned(),
+                    algorithm_version: ucr_protocol::ALGORITHM_VERSION,
+                    key_format_version: ucr_protocol::KEY_FORMAT_VERSION,
+                    public_key: vec![9; 32],
+                },
+            )
+            .unwrap();
+        for permission in [
+            ucr_protocol::CALL_START_PERMISSION,
+            ucr_protocol::CALL_OBSERVE_PERMISSION,
+            ucr_protocol::CALL_SIGNAL_PERMISSION,
+        ] {
+            store
+                .grant_permission(&PermissionGrant {
+                    grantee: principal.clone(),
+                    permission: permission.to_owned(),
+                    scope: PermissionScope::Exact(principal.scope.clone()),
+                })
+                .unwrap();
+        }
+        device_id
+    }
+
+    #[test]
+    fn first_party_call_admission_rechecks_canonical_identity_device_key_and_callee() {
+        let store = MemoryLocalStore::default();
+        let (conversation, session, alice, bob) = fixture();
+        store.persist_conversation(&conversation).unwrap();
+        let alice_device = prepare_first_party_person_device(
+            &store, &alice, "alice-identity", "alice-device", "alice-key",
+        );
+        let bob_device = prepare_first_party_person_device(
+            &store, &bob, "bob-identity", "bob-device", "bob-key",
+        );
+        let runtime = AuthorizedDurableRuntime::new(&store, &store);
+        assert_eq!(
+            runtime.first_party_call_start(&alice, &alice_device, &session).unwrap(),
+            DurableRecordStatus::Persisted
+        );
+        assert!(runtime
+            .first_party_call_incoming(&alice, &alice_device, 64)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            runtime
+                .first_party_call_incoming(&bob, &bob_device, 64)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(runtime
+            .first_party_call_join_admission(&bob, &bob_device, &session.call_id, 0)
+            .is_err());
+        assert!(runtime
+            .first_party_call_get(&bob, &alice_device, &session.call_id)
+            .is_err());
+
+        let accept = signal(&session, "first-party-accept", CallSignalKind::Accept);
+        assert_eq!(
+            runtime
+                .first_party_call_signal(&bob, &bob_device, &accept)
+                .unwrap(),
+            DurableRecordStatus::Persisted
+        );
+        assert_eq!(
+            runtime
+                .first_party_call_join_admission(&alice, &alice_device, &session.call_id, 1)
+                .unwrap()
+                .signalling_state,
+            CallSignallingState::Active
+        );
+        assert!(runtime
+            .first_party_call_join_admission(&bob, &bob_device, &session.call_id, 0)
+            .is_err());
+        assert!(runtime
+            .first_party_call_incoming(&bob, &bob_device, 64)
+            .unwrap()
+            .is_empty());
+
+        store
+            .revoke_device(
+                &scope(),
+                &bob_device,
+                &IdentityId::from_opaque(oid("bob-identity")),
+            )
+            .unwrap();
+        assert!(runtime
+            .first_party_call_join_admission(&bob, &bob_device, &session.call_id, 1)
+            .is_err());
+        assert!(runtime
+            .first_party_call_get(&bob, &bob_device, &session.call_id)
+            .is_err());
+        assert!(runtime
+            .first_party_call_incoming(&bob, &bob_device, 64)
+            .is_err());
+        let hangup = signal(
+            &store.call(&scope(), &session.call_id).unwrap().unwrap(),
+            "revoke-should-block-hangup",
+            CallSignalKind::Terminate {
+                reason: CallTerminationReason::Completed,
+            },
+        );
+        assert!(runtime
+            .first_party_call_signal(&bob, &bob_device, &hangup)
+            .is_err());
     }
 
     fn signal(session: &CallSession, id: &str, kind: CallSignalKind) -> CallSignal {
