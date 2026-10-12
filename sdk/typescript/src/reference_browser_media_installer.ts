@@ -74,3 +74,5 @@ export { createUcrBrowserProtectedDeviceVault } from "./canonical_device_seed_va
 // local Device signer preparation and BEFORE the canonical signed join grant.
 // The real first-party authenticated BFF must still be supplied by UCR.
 export { createUcrFirstPartyCallEntry } from "./canonical_first_party_call_entry.ts";
+// Same-origin authenticated first-party HTTP transport; server remains canonical.
+export { createUcrFirstPartyHttpHost } from "./first_party_browser_http.ts";
