@@ -623,7 +623,11 @@ mod tests {
             }
             assert!(store.incoming_direct_calls(&bob, 64).unwrap().is_empty());
             assert_eq!(
-                store.call(&scope(), &session.call_id).unwrap().unwrap().signalling_state,
+                store
+                    .call(&scope(), &session.call_id)
+                    .unwrap()
+                    .unwrap()
+                    .signalling_state,
                 CallSignallingState::Terminated
             );
         }
