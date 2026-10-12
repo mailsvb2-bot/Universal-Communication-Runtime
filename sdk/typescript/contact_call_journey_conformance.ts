@@ -119,6 +119,6 @@ host.getDirectCall=async ()=>({...first,callerIdentityId:"mallory",calleeIdentit
 await assert.rejects(a.inspect("call-1"),/participants|identity|mismatch/);
 host.getDirectCall=async ()=>call!;
 current=bob;
-host.listIncomingDirectCalls=async ()=>[first];
+host.listIncomingDirectCalls=async ()=>[{...first,state:"active"}];
 await assert.rejects(b.incoming(),/foreign or invalid incoming/);
 console.log("contract-only contact/call journey: verified state checks and fail-closed gating (NOT live E2E)");
