@@ -16,6 +16,49 @@ let active = null, busy = false, navigating = false, refreshing = false, timer =
 let knownContacts = [];
 let accountScope = null;
 const idempotency = new Map();
+const HINT_KEY = "ucr.first-party.last-device.v1";
+// A convenience hint only: never a login credential, authorization grant,
+// private Device signer, recovery code or second Identity database.
+function rememberBinding(binding) {
+  const publicHint={
+    tenantId:binding.tenantId,namespaceId:binding.namespaceId,
+    participantId:binding.participantId,deviceId:binding.deviceId,
+  };
+  try {localStorage.setItem(HINT_KEY,JSON.stringify(publicHint));} catch {}
+}
+function forgetBinding() {
+  try {localStorage.removeItem(HINT_KEY);} catch {}
+}
+function lastBinding() {
+  try {
+    const hint=JSON.parse(localStorage.getItem(HINT_KEY)??"null");
+    if(!hint||typeof hint!=="object"||
+        !["tenantId","participantId","deviceId"].every(
+          key=>typeof hint[key]==="string"&&hint[key].length>0&&hint[key].length<=120) ||
+        !(hint.namespaceId===null||
+          (typeof hint.namespaceId==="string"&&hint.namespaceId.length>0))){
+      return null;
+    }
+    return hint;
+  } catch {return null;}
+}
+async function restoreSession() {
+  try {return await host.resumeAuthenticatedDevice();}
+  catch(error) {
+    const hint=lastBinding();
+    if(!hint)throw error;
+    // Only a real protected, previously registered signer may re-login.
+    // If the server revoked this Device, do not turn the hint into trust.
+    const verified=await authenticateUcrFirstPartyDevice(
+      vault,{origin:location.origin},hint);
+    if(principalScope(verified)!==principalScope(hint)){
+      forgetBinding();
+      throw Error("восстановленная учётная запись или Device не совпадает");
+    }
+    return verified;
+  }
+}
+
 
 function clearRetryKey(call) {
   // A terminal Call is not a retry of a previous button press. A fresh
@@ -52,7 +95,7 @@ async function updateDevices() {
         if(!window.confirm("Отзыв устройства необратим. Подтвердить?"))return;
         const own=record.deviceId===(await host.resumeAuthenticatedDevice()).deviceId;
         await host.revokeDevice(record.deviceId);
-        if(own){clearInterval(timer);active=null;accountScope=null;
+        if(own){forgetBinding();clearInterval(timer);active=null;accountScope=null;
           renderContacts([]);renderIncoming([]);showActive();message("Это устройство отозвано. Повторный вход с ним невозможен.");
         }else{await updateDevices();}
       },"secondary"));
@@ -222,7 +265,8 @@ async function refresh() {
 async function initialize() {
   clearInterval(timer);
   message("Проверка независимо авторизованной Identity и Device…");
-  const user = await host.resumeAuthenticatedDevice();
+  const user = await restoreSession();
+  rememberBinding(user);
   const currentScope = principalScope(user);
   if (accountScope !== currentScope) {
     // Switching user or Device must never reuse another identity's selected
@@ -264,6 +308,7 @@ el("device-login").addEventListener("submit", event => {
     if (principalScope(verified)!==principalScope(binding)) {
       throw Error("сервер вернул другую Identity или Device");
     }
+    rememberBinding(verified);
     await initialize();
   });
 });
@@ -310,6 +355,7 @@ el("recover-form").addEventListener("submit",event=>{
     el("login-tenant").value=result.binding.tenantId;
     el("login-identity").value=result.binding.participantId;
     el("login-device").value=result.binding.deviceId;
+    rememberBinding(result.binding);
     await initialize();
   });
 });
@@ -323,6 +369,7 @@ el("rotate-recovery").addEventListener("click",()=>void run(async()=>{
 }));
 el("logout").addEventListener("click",()=>void run(async()=>{
   await host.logout();
+  forgetBinding();
   clearInterval(timer);
   active=null;accountScope=null;knownContacts=[];idempotency.clear();
   renderContacts([]);renderIncoming([]);el("devices").replaceChildren();
