@@ -43,10 +43,19 @@ const status = document.querySelector("#status");
 const submit = document.querySelector("#submit");
 const api = "%%UCR_ROOM_API%%";
 const rememberedDeviceKey = "ucrRoomDevice";
-const runtimeReady = Promise.all([
-  import("./endpoint-wasm/ucr_endpoint_wasm.js"),
-  import("./endpoint-media/reference_browser_media_installer.js"),
-]).catch(() => null);
+const installerReady = import("./endpoint-media/reference_browser_media_installer.js").catch(() => null);
+import("./endpoint-wasm/ucr_endpoint_wasm.js").catch(() => {});
+
+function warmRoomCapture(role) {
+  if (role !== "speaker" || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return Promise.resolve();
+  }
+  // Must start during this click. A later page load no longer has the gesture,
+  // and a camera prompt there never appears.
+  return navigator.mediaDevices.getUserMedia({audio: true, video: true}).then((stream) => {
+    stream.getTracks().forEach((track) => track.stop());
+  }).catch(() => {});
+}
 
 function readRememberedDevice() {
   try {
@@ -87,6 +96,7 @@ document.querySelector("#enter").addEventListener("submit", async (event) => {
   const role = document.querySelector("#role").value;
   if (!name) return;
   submit.disabled = true;
+  const permission = warmRoomCapture(role);
   try {
     status.textContent = "Создаём устройство…";
     const remembered = readRememberedDevice();
@@ -95,8 +105,7 @@ document.querySelector("#enter").addEventListener("submit", async (event) => {
       role,
       externalUserId: remembered && remembered.role === role ? remembered.externalUserId : undefined,
     });
-    const loaded = await runtimeReady;
-    const module = loaded ? loaded[1] : await import("./endpoint-media/reference_browser_media_installer.js");
+    const module = (await installerReady) || await import("./endpoint-media/reference_browser_media_installer.js");
     const vault = module.createUcrBrowserProtectedDeviceVault();
     const signer = await vault.stageNew({
       tenantId: reserved.tenantId,
@@ -126,6 +135,7 @@ document.querySelector("#enter").addEventListener("submit", async (event) => {
     if (!joined.joinFragment || !joined.joinFragment.startsWith("#ucr_join=")) {
       throw new Error("Сервер не выдал подписанный вход");
     }
+    await permission;
     location.assign("/" + joined.joinFragment);
   } catch (error) {
     submit.disabled = false;
