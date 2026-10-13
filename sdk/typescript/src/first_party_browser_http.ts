@@ -510,18 +510,12 @@ export function createUcrFirstPartyHttpHost(
       }
       return issued;
     },
-    async issueSignedDeviceJoin(binding) {
-      const context = snapshotBinding(binding);
-      if (!sameBinding(context, await session())) {
-        throw new Error("first-party Device session changed before Join");
-      }
-      const issued = parseIssuance(
-        await request("POST", "/v1/first-party/call/join", context),
-      );
-      if (!sameBinding(context, issued)) {
-        throw new Error("first-party Join issuer returned a foreign Device");
-      }
-      return issued;
+    async issueSignedDeviceJoin(_binding) {
+      // This legacy transport-neutral hook is intentionally unavailable in
+      // the integrated first-party BFF. A Device alone is not Call admission.
+      // Only issueSignedJoinForAcceptedCall may request a signed grant, after
+      // the canonical recipient has accepted the exact Call/revision.
+      throw new Error("unscoped Device Join forbidden: use accepted canonical Call admission");
     },
   };
 }
