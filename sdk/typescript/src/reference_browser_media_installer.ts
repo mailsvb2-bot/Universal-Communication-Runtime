@@ -76,7 +76,7 @@ export { createUcrBrowserProtectedDeviceVault } from "./canonical_device_seed_va
 // SDK module remains available for transport-neutral integrations, but the
 // shipped first-party UI exposes only the single contact -> Call route.
 // Same-origin authenticated first-party HTTP transport; server remains canonical.
-export { createUcrFirstPartyHttpHost, authenticateUcrFirstPartyDevice } from "./first_party_browser_http.ts";
+export { createUcrFirstPartyHttpHost, authenticateUcrFirstPartyDevice, registerUcrFirstPartyUser, recoverUcrFirstPartyDevice } from "./first_party_browser_http.ts";
 
 // Authenticated contact picker -> canonical direct Call -> accepted, Device-bound Join.
 // This is an SDK coordinator, not a second Call or cryptographic owner.
