@@ -4,11 +4,11 @@
 //! Recovery credentials MUST be uniformly random 256-bit values; never a
 //! human password, phone number, or server-retained Device private key.
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use ucr_core::{DurableStoreError, IdentityStore, PrincipalIdentityLookupStore};
+use ucr_core::DurableStoreError;
 use ucr_model::{
-    DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityEvidence, IdentityId,
-    IdentityOwnership, IdentityRecord, KeyPurpose, PrincipalId, PrincipalKind,
-    PrincipalRef, PublicKeyDescriptor, TenantScope,
+    DeviceDescriptor, DeviceLifecycleState, IdentityEvidence, IdentityId,
+    IdentityOwnership, IdentityRecord, KeyPurpose,
+    PublicKeyDescriptor, TenantScope,
 };
 use ucr_protocol::{validate_identity_record, validate_trusted_signing_key_descriptor};
 
