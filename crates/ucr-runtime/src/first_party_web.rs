@@ -865,7 +865,7 @@ fn login_route(
             let (value, cookie) = issue_session(state, proof.binding, subject, key_id, public_key)?;
             return Ok((value, Some(cookie)));
         }
-                _ => return Err(StatusCode::NOT_FOUND),
+        _ => return Err(StatusCode::NOT_FOUND),
     };
     Ok((response, None))
 }
@@ -933,7 +933,7 @@ fn device_route(
             verify_ed25519(key, &signed, &input.signature_base64_url)?;
             json!({"approved": true})
         }
-                _ => return Err(StatusCode::NOT_FOUND),
+        _ => return Err(StatusCode::NOT_FOUND),
     };
     Ok(response)
 }
@@ -981,11 +981,10 @@ fn call_route(
             // A bare device binding cannot establish accepted Call authority.
             return Err(StatusCode::FORBIDDEN);
         }
-                _ => return Err(StatusCode::NOT_FOUND),
+        _ => return Err(StatusCode::NOT_FOUND),
     };
     Ok(response)
 }
-
 
 #[cfg(test)]
 mod tests {
