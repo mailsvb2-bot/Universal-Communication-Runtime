@@ -1159,7 +1159,6 @@ async fn restart_live_peer_connection(
     })
 }
 
-
 fn engine_ice_server(server: &IceServerConfig) -> RTCIceServer {
     RTCIceServer {
         urls: server.urls.clone(),
