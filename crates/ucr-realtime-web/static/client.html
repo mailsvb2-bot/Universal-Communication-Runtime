@@ -2094,7 +2094,18 @@ async function refreshLocalRoomEndpointAuthority(){
       return;
     }
     ui.status.textContent="A participant joined. Refreshing encrypted media for the new conference epoch.";
-    await activateE2eeAdapter();
+    try{
+      await activateE2eeAdapter();
+    }catch(error){
+      if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive)return;
+      // The DataChannel stays open, so nothing else will reconnect encryption.
+      // Rebuild the peer; its retry loop keeps going if this attempt fails.
+      startWebRtc.retireEndpointMls=true;
+      webrtcNeedsPeerRebuild=true;
+      ui.status.textContent="Encrypted media refresh failed. Reconnecting the protected transport: "+(error&&error.message||error);
+      if(restarting){scheduleWebRtcRetry();return;}
+      await restartWebRtc(false);
+    }
   })();
   localRoomAuthorityRefresh=run;
   try{await run;}finally{if(localRoomAuthorityRefresh===run)localRoomAuthorityRefresh=null;}
