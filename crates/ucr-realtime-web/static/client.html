@@ -135,7 +135,8 @@ const ENTRY_RETRY_MS=2000;
 const STREAM_RETRY_MS=1500;
 // Recovery is bounded; only a newly authenticated E2EE DataChannel resets it.
 const WEBRTC_RETRY_DELAYS_MS=[250,500,1000,2000,4000,8000,15000];
-let webrtcRecoveryAttempt=0,webrtcNeedsPeerRebuild=false;
+let webrtcRecoveryAttempt=0,webrtcNeedsPeerRebuild=false,retireEndpointMlsBeforeNextStart=false;
+let localRoomMediaHost=false,localRoomAuthorityFingerprint=null,localRoomAuthorityRefresh=null;
 const BRANDING_FRAGMENT_KEY="ucr_brand";
 const BRANDING_MAX_JSON_BYTES=4096;
 const BRAND_NAME_MAX=80;
@@ -1258,6 +1259,10 @@ async function startWebRtc(forceMedia=false){
 }
 async function startWebRtcOnce(forceMedia=false){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
+  if(retireEndpointMlsBeforeNextStart){
+    retireEndpointMlsBeforeNextStart=false;
+    retireEndpointMlsState();
+  }
   if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
   const generation=mediaCaptureGeneration;
   const ensureCurrent=()=>{
@@ -1472,6 +1477,9 @@ async function heartbeat(){
     await applyMediaPolicy(data.media_policy);
     if(!current())return;
     await applyAdmissionState(data.admission_state);
+    if(current()&&mediaActive&&e2eeAdapterReady&&localRoomMediaHost){
+      refreshLocalRoomEndpointAuthority().catch(e=>{if(current())ui.status.textContent="Encrypted media membership refresh failed: "+e.message;});
+    }
     if(current()&&mediaActive&&e2eeAdapterReady){
       syncReceiveSubscriptions().catch(e=>{if(current()&&e2eeAdapterReady)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
     }
@@ -2010,8 +2018,33 @@ function bytesToBase64(bytes){
   }
   return btoa(binary);
 }
+function endpointAuthorityFingerprint(context){
+  const keys=Array.isArray(context.trusted_device_keys)?context.trusted_device_keys:[];
+  const roster=keys.map(key=>[key.device_id,key.key_id,key.public_key_base64].join(":")).sort().join("|");
+  return String(context.group_crypto_epoch)+"|"+roster;
+}
+async function refreshLocalRoomEndpointAuthority(){
+  if(localRoomAuthorityRefresh||restarting||!sessionActive||!mediaActive||!e2eeAdapterReady)return;
+  const generation=sessionLifecycleGeneration;
+  const run=(async()=>{
+    const context=await fetchEndpointMlsContext();
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive||!e2eeAdapterReady||restarting)return;
+    const fingerprint=endpointAuthorityFingerprint(context);
+    if(fingerprint===localRoomAuthorityFingerprint)return;
+    // The installed adapter keeps the epoch and trusted-key roster from the
+    // moment it started. A later join advances MLS and adds a signer, so this
+    // endpoint must retire that adapter and restore MLS from the new chain.
+    retireEndpointMlsBeforeNextStart=true;
+    webrtcNeedsPeerRebuild=true;
+    ui.status.textContent="A participant joined. Refreshing encrypted media for the new conference epoch.";
+    await restartWebRtc(false);
+  })();
+  localRoomAuthorityRefresh=run;
+  try{await run;}finally{if(localRoomAuthorityRefresh===run)localRoomAuthorityRefresh=null;}
+}
 function installLocalRoomMediaHost(){
   if(sessionStorage.getItem("ucrLocalRoom")!=="1")return;
+  localRoomMediaHost=true;
   const roomApi=sessionStorage.getItem("ucrRoomApi")||"";
   if(!roomApi)throw new Error("Local room API address is missing");
   const roomPost=async(path,payload)=>{
@@ -2078,6 +2111,7 @@ function installLocalRoomMediaHost(){
     window.ucrLocalRoomAudioContext=audioContext;
     if(audioContext.state==="suspended")await audioContext.resume();
     const keyById=new Map(keys.map(key=>[key.key_id,endpointBase64ToBytes(key.public_key_base64)]));
+    localRoomAuthorityFingerprint=endpointAuthorityFingerprint(context);
     return {
       sessionId:bootstrap.claims.sessionId,
       deviceId:bootstrap.claims.deviceId,

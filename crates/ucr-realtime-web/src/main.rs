@@ -506,7 +506,7 @@ async fn handle_request(
         return Ok(text_response(StatusCode::OK, "ok"));
     }
     if method == Method::GET && path == "/room" {
-        return Ok(html_response(StatusCode::OK, ROOM_HTML));
+        return Ok(html_body_response(StatusCode::OK, room_page()));
     }
     if method == Method::GET
         && matches!(
@@ -2472,12 +2472,75 @@ fn serve_reference_media_asset(path: &str) -> HttpResponse {
 }
 
 fn html_response(status: StatusCode, html: &'static str) -> HttpResponse {
+    html_body_response(status, html.to_owned())
+}
+
+fn html_body_response(status: StatusCode, html: String) -> HttpResponse {
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "text/html; charset=utf-8")
         .header(CACHE_CONTROL, "no-store")
-        .body(full_body(Bytes::from_static(html.as_bytes())))
+        .body(full_body(Bytes::from(html)))
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+fn room_page() -> String {
+    let api = room_api_base();
+    let encoded =
+        serde_json::to_string(&api).unwrap_or_else(|_| "\"http://127.0.0.1:43123\"".to_owned());
+    ROOM_HTML.replace("\"%%UCR_ROOM_API%%\"", &encoded)
+}
+
+fn room_api_base() -> String {
+    let configured =
+        std::env::var("UCR_ROOM_API").unwrap_or_else(|_| "http://127.0.0.1:43123".to_owned());
+    validate_room_api_base(&configured).unwrap_or_else(|error| {
+        eprintln!("ucr-realtime-web: ignoring UCR_ROOM_API: {error}");
+        "http://127.0.0.1:43123".to_owned()
+    })
+}
+
+fn validate_room_api_base(value: &str) -> Result<String, String> {
+    if value.len() > 128
+        || value.chars().any(|character| {
+            character.is_control() || matches!(character, '"' | '\\' | '<' | '>' | ' ' | '\'' | '`')
+        })
+    {
+        return Err("room API address contains unsupported characters".to_owned());
+    }
+    let Some(rest) = value.strip_prefix("http://") else {
+        return Err("room API must be an http loopback URL".to_owned());
+    };
+    let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
+        let Some((host, after)) = bracketed.split_once(']') else {
+            return Err("room API IPv6 address is incomplete".to_owned());
+        };
+        if host != "::1" {
+            return Err("room API host must be loopback".to_owned());
+        }
+        let Some(port) = after.strip_prefix(':') else {
+            return Err("room API port is required".to_owned());
+        };
+        ("[::1]", port)
+    } else {
+        let Some((host, port)) = rest.split_once(':') else {
+            return Err("room API port is required".to_owned());
+        };
+        if host != "127.0.0.1" && host != "localhost" {
+            return Err("room API host must be loopback".to_owned());
+        }
+        (host, port)
+    };
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) || port.len() > 5 {
+        return Err("room API port is invalid".to_owned());
+    }
+    let port_number: u16 = port
+        .parse()
+        .map_err(|_| "room API port is invalid".to_owned())?;
+    if port_number == 0 {
+        return Err("room API port is invalid".to_owned());
+    }
+    Ok(format!("http://{host}:{port_number}"))
 }
 
 fn text_response(status: StatusCode, text: &'static str) -> HttpResponse {
@@ -2503,6 +2566,31 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn room_page_uses_the_configured_loopback_api_port() {
+        assert_eq!(
+            validate_room_api_base("http://127.0.0.1:43999").expect("ipv4"),
+            "http://127.0.0.1:43999"
+        );
+        assert_eq!(
+            validate_room_api_base("http://localhost:43123").expect("localhost"),
+            "http://localhost:43123"
+        );
+        assert_eq!(
+            validate_room_api_base("http://[::1]:43123").expect("ipv6"),
+            "http://[::1]:43123"
+        );
+        assert!(validate_room_api_base("http://192.168.1.10:43123").is_err());
+        assert!(validate_room_api_base("https://127.0.0.1:43123").is_err());
+        assert!(validate_room_api_base("http://127.0.0.1:43123/room").is_err());
+        let page = ROOM_HTML.replace(
+            "\"%%UCR_ROOM_API%%\"",
+            &serde_json::to_string("http://127.0.0.1:43999").expect("json"),
+        );
+        assert!(page.contains("const api = \"http://127.0.0.1:43999\";"));
+        assert!(!page.contains("%%UCR_ROOM_API%%"));
+    }
 
     #[test]
     fn bounded_webrtc_signaling_rejects_malformed_or_oversized_inputs() {

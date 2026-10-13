@@ -107,11 +107,13 @@ until the repository's own release evidence exists.
 cargo run -p ucr-dev -- dev --room
 UCR_REALTIME_WEB_BIND=127.0.0.1:43124 \
   UCR_REALTIME_GRPC_UPSTREAM=http://127.0.0.1:50051 \
+  UCR_ROOM_API=http://127.0.0.1:43123 \
   cargo run -p ucr-realtime-web
 ```
 
 Open <http://127.0.0.1:43124/room> in two browser windows, enter a name, and choose a role.
 Signing seeds stay in the browser. The room API on `127.0.0.1:43123` stores only public keys.
+`ucr dev --room` prints the exact `UCR_ROOM_API` value for the address given to `--room-bind`.
 
 The browser page also needs the endpoint package built from this revision. Those files are
 generated, not committed:
