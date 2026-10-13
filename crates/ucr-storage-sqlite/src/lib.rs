@@ -2097,7 +2097,16 @@ fn test_restore_v49_mls_transition_shape(connection: &Connection) -> Result<(), 
 }
 
 #[cfg(test)]
+fn test_remove_v52_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    // Synthetic historical databases start from a fresh current schema.
+    // Remove the recovery credential table before stamping them as v51 or
+    // older. Production migrations must NEVER silently ignore this table.
+    connection.execute_batch("DROP TABLE IF EXISTS first_party_recovery_credentials;")
+}
+
+#[cfg(test)]
 fn test_remove_v49_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v52_objects(connection)?;
     // A historical-schema fixture must first remove every newer schema
     // object. Otherwise v50->v51 tries to recreate an index left over from
     // the fresh v51 database and fails with an unrelated migration error.
@@ -2939,6 +2948,33 @@ mod tests {
     }
 
     #[test]
+    fn v51_to_v52_recovery_schema_migration_is_exact_and_starts_without_accounts() {
+        let db = TestDbPath::new();
+        let original = SqliteLocalStore::open(db.path()).expect("create canonical v52");
+        assert_eq!(original.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        drop(original);
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open historical fixture");
+            test_remove_v52_objects(&connection).expect("restore genuine v51 schema objects");
+            connection
+                .pragma_update(None, "user_version", SQLITE_SCHEMA_V51)
+                .expect("set v51 marker");
+        }
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate true v51 to v52");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let connection = migrated.lock_connection().expect("lock migrated store");
+        assert_eq!(first_party_account_store::verify_v52_objects(&connection), Ok(()));
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM first_party_recovery_credentials",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check no fabricated recovery authority");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn v50_to_v51_grant_expiry_index_migration_preserves_existing_store() {
         let db = TestDbPath::new();
         let original = SqliteLocalStore::open(db.path()).expect("initialize");
@@ -2951,7 +2987,8 @@ mod tests {
             let connection = rusqlite::Connection::open(db.path()).expect("open old schema");
             connection
                 .execute_batch(
-                    "DROP INDEX conference_join_grants_expiry;
+                    "DROP TABLE first_party_recovery_credentials;
+                     DROP INDEX conference_join_grants_expiry;
                      DROP INDEX conference_join_grants_pending_redaction;
                      ALTER TABLE conference_join_grants DROP COLUMN metadata_redacted;
                      PRAGMA user_version=50;",

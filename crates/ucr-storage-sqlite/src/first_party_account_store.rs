@@ -36,11 +36,9 @@ CREATE TABLE first_party_recovery_credentials (
 pub(super) fn create_v52_objects(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<(), DurableStoreError> {
-    transaction.execute_batch(V52_SQL).map_err(|error| {
-        #[cfg(test)]
-        eprintln!("v52 recovery credential schema creation rejected: {error}");
-        map_schema_change_error(&error)
-    })
+    transaction
+        .execute_batch(V52_SQL)
+        .map_err(|e| map_schema_change_error(&e))
 }
 
 pub(super) fn verify_v52_objects(connection: &Connection) -> Result<(), DurableStoreError> {
