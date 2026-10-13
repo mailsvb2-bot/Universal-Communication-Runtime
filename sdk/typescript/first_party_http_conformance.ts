@@ -47,7 +47,6 @@ function sessionHost(overrides: {
   session?: typeof binding | null;
   missingSession?: boolean;
   corruptChallenge?: boolean;
-  foreignIssuer?: boolean;
   rejectApproval?: boolean;
   mutateSessionAfterChallenge?: boolean;
 } = {}) {
@@ -130,16 +129,7 @@ function sessionHost(overrides: {
       return reply({approved:true});
     }
     if (path === "/v1/first-party/call/join") {
-      assert.equal(trust.deviceActive, true);
-      assert.equal(trust.deviceRevoked, false);
-      assert.deepEqual(body, binding);
-      issuances++;
-      const signed = "#ucr_join=" + encode(new TextEncoder().encode("fake-claims")) +
-        "." + encode(new TextEncoder().encode("fake-signature"));
-      return reply({
-        ...binding, deviceId: overrides.foreignIssuer ? "stolen-device" : binding.deviceId,
-        callId: "call-one", sessionId: "session-one", joinFragment: signed,
-      });
+      throw new Error("unscoped Device Join must never reach first-party HTTP transport");
     }
     return reply({error:"route_not_found"}, 404);
   };
@@ -153,66 +143,48 @@ function sessionHost(overrides: {
   };
 }
 
-// First visit: separately authenticated session -> local private signer ->
-// server-generated, one-time challenge -> canonical trusted-key approval ->
-// independently issued signed Join -> final inspection-only recheck.
+// First visit: the same browser must authenticate and prove possession of
+// its protected Device signer, but CAN NEVER receive an unscoped Call Join.
+// A mocked 200 from /call/join formerly gave a false green result that was
+// impossible against the canonical Rust BFF (which always returns 403).
 const first = sessionHost();
-const a = await first.enter();
-assert.equal(a.deviceId, binding.deviceId);
-assert.equal(a.callId, "call-one");
-assert.equal(first.approvals, 1);
-assert.equal(first.issuances, 1);
-assert.equal(first.local.records.size, 1);
+await assert.rejects(first.enter(), /unscoped Device Join forbidden/);
+assert.equal(first.approvals,1);
+assert.equal(first.issuances,0);
+assert.equal(first.local.records.size,1);
 const challengeIndex = first.trace.indexOf("/v1/first-party/device/challenge");
 const approveIndex = first.trace.indexOf("/v1/first-party/device/approve");
-const joinIndex = first.trace.indexOf("/v1/first-party/call/join");
-assert.ok(challengeIndex !== -1 && challengeIndex < approveIndex && approveIndex < joinIndex);
-assert.equal(first.trace[0], "/v1/first-party/session");
-assert.equal(first.trace.at(-1), "/v1/first-party/device/inspect");
+assert.ok(challengeIndex !== -1 && challengeIndex < approveIndex);
+assert.equal(first.trace[0],"/v1/first-party/session");
+assert.ok(!first.trace.includes("/v1/first-party/call/join"));
 assert.ok(!first.http.some(({url}) => /ucr_join|client_secret|authorization/i.test(url)));
 
-// Repeat login and a simulated browser restart share the same protected signer.
+// A browser restart reuses the protected signer; no duplicate registration
+// and no unauthorized standalone Join are possible.
 const signer = await first.vault.load(binding);
-const b = await first.enter();
-assert.equal(b.deviceId, binding.deviceId);
-assert.equal(first.approvals, 1, "never re-enroll already trusted Device");
-assert.equal(first.issuances, 2);
+await assert.rejects(first.enter(), /unscoped Device Join forbidden/);
+assert.equal(first.approvals,1);
+assert.equal(first.issuances,0);
 const restored = createUcrBrowserProtectedDeviceVault(first.local.backing);
-assert.equal((await restored.load(binding))?.keyId, signer?.keyId);
-assert.equal(first.local.records.size, 1, "no second signing key");
+assert.equal((await restored.load(binding))?.keyId,signer?.keyId);
+assert.equal(first.local.records.size,1);
 
-// A revoked signer must fail before another Join is issued.
+// Fail closed on revoked, missing or swapped Identity/Device, corrupt challenge
+// and explicit denial of canonical signer proof.
 first.revoke();
 await assert.rejects(first.enter(), /revoked|trust unavailable/);
-assert.equal(first.issuances, 2);
-
-// Browser cannot invent its own authenticated session by presenting a grant.
 const missing = sessionHost({missingSession:true});
 await assert.rejects(missing.enter(), /HTTP 401/);
-assert.equal(missing.local.records.size, 0);
-assert.equal(missing.issuances, 0);
-
-// An invalid server-provided challenge cannot reach enrollment/Join.
+assert.equal(missing.local.records.size,0);
 const malformed = sessionHost({corruptChallenge:true});
 await assert.rejects(malformed.enter(), /binary descriptor/);
-assert.equal(malformed.approvals, 0);
-assert.equal(malformed.issuances, 0);
-
-// Authenticated user swap between signing steps rejects the proof.
+assert.equal(malformed.approvals,0);
 const changed = sessionHost({mutateSessionAfterChallenge:true});
 await assert.rejects(changed.enter(), /session changed/);
-assert.equal(changed.approvals, 0);
-assert.equal(changed.issuances, 0);
-
-// Trust approval is not implicit: explicit server denial is terminal.
+assert.equal(changed.approvals,0);
 const denied = sessionHost({rejectApproval:true});
 await assert.rejects(denied.enter(), /HTTP 403/);
-assert.equal(denied.issuances, 0);
-
-// A mismatched issuer cannot hand back another Device's signed grant.
-const foreign = sessionHost({foreignIssuer:true});
-await assert.rejects(foreign.enter(), /foreign Device|differs from prepared Device/);
-assert.equal(foreign.issuances, 1);
+assert.equal(denied.issuances,0);
 
 // Reject insecure HTTP on LAN, cross-origin hosts, embedded URL credentials
 // and pages lacking a validated origin, BEFORE any network access.
@@ -329,12 +301,13 @@ assert.equal((await canonicalHttp.signalDirectCall(binding,{
 assert.equal((await canonicalHttp.issueSignedJoinForAcceptedCall(binding,{
   callId:direct.callId,expectedRevision:7,
 })).sessionId,"session-42");
-await assert.rejects(canonicalHttp.issueSignedDeviceJoin(binding),/HTTP 403/);
+await assert.rejects(canonicalHttp.issueSignedDeviceJoin(binding),/unscoped Device Join forbidden/);
 for (const route of [
   "device/inspect","call/start","call/get","call/incoming",
-  "call/signal","call/join-accepted","call/join",
+  "call/signal","call/join-accepted",
 ]) {
   assert.ok(authenticatedRoutes.includes("/v1/first-party/"+route),route);
 }
 
-console.log("RT0 first-party HTTP authenticated Device -> possession -> signed Join conformance passed");
+assert.ok(!authenticatedRoutes.includes("/v1/first-party/call/join"));
+console.log("RT0 HTTP: existing Device proof, canonical Call routes, and unscoped Join denial passed");
