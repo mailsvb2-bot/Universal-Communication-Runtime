@@ -20,6 +20,13 @@ import type {
  * No machine Service Principal credentials, private keys, MLS exporter or
  * permanent user/phone registry may be passed through these endpoints.
  */
+export interface UcrManagedFirstPartyHost extends UcrDirectCallHost {
+  listDevices(): Promise<readonly {deviceId:string;state:string}[]>;
+  revokeDevice(deviceId:string): Promise<void>;
+  rotateRecoveryCode(): Promise<string>;
+  logout(): Promise<void>;
+}
+
 export interface UcrFirstPartyHttpOptions {
   /** Must be EXACTLY the browser document origin. Do not permit cross-origin BFFs. */
   readonly origin: string;
@@ -463,7 +470,7 @@ export async function recoverUcrFirstPartyDevice(
 export function createUcrFirstPartyHttpHost(
   vault: UcrCanonicalDeviceKeyVault,
   options: UcrFirstPartyHttpOptions,
-): UcrDirectCallHost {
+): UcrManagedFirstPartyHost {
   if (!vault || typeof vault.signChallenge !== "function") {
     throw new Error("existing protected Device signer vault required");
   }
