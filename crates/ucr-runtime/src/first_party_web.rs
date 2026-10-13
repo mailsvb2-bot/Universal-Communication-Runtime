@@ -825,8 +825,7 @@ async fn dispatch(
                 ]),
             )?;
             verify_ed25519(public_key, &signed, &proof.signature_base64_url)?;
-            let (value, cookie) =
-                issue_session(state, proof.binding, subject, key_id, public_key)?;
+            let (value, cookie) = issue_session(state, proof.binding, subject, key_id, public_key)?;
             return Ok((value, Some(cookie)));
         }
         "/v1/first-party/device/inspect" => {
