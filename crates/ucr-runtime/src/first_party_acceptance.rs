@@ -92,12 +92,8 @@ fn proof(
 }
 
 fn signup(state: &State, seed: u8) -> (Binding, SigningKey, String) {
-    let (issued, _) = account_route(
-        state,
-        "/v1/first-party/signup/begin",
-        b"{}",
-    )
-    .expect("independent public signup challenge");
+    let (issued, _) = account_route(state, "/v1/first-party/signup/begin", b"{}")
+        .expect("independent public signup challenge");
     let binding: Binding = serde_json::from_value(issued["binding"].clone()).unwrap();
     let signer = SigningKey::from_bytes(&[seed; 32]);
     let finish = proof(
@@ -215,14 +211,7 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
     let (bob_two, bob_second_signer, _) =
         recover(&server, &bob, &bob_recovery, "bob-second-device", 20).unwrap();
     assert_eq!(
-        recover(
-            &server,
-            &alice,
-            &alice_recovery,
-            "alice-replay-device",
-            21,
-        )
-        .err(),
+        recover(&server, &alice, &alice_recovery, "alice-replay-device", 21).err(),
         Some(StatusCode::FORBIDDEN)
     );
     assert_eq!(
@@ -263,10 +252,7 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
         assert!(
             restarted
                 .store
-                .active_trusted_signing_key(
-                    &scope(binding).unwrap(),
-                    &device(binding).unwrap()
-                )
+                .active_trusted_signing_key(&scope(binding).unwrap(), &device(binding).unwrap())
                 .unwrap()
                 .is_some()
         );
@@ -284,14 +270,7 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
         .unwrap();
     drop(restarted);
     let revoked = state(&db.0);
-    assert!(
-        login_route(
-            &revoked,
-            "/v1/first-party/login/verify",
-            b"{}"
-        )
-        .is_err()
-    );
+    assert!(login_route(&revoked, "/v1/first-party/login/verify", b"{}").is_err());
     let (challenge, _) = login_route(
         &revoked,
         "/v1/first-party/login/challenge",
@@ -301,8 +280,11 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
     let signed = encoded_proof(
         "ucr-first-party-device-login.v1",
         &json!([
-            bob_two.tenant_id, bob_two.namespace_id, bob_two.participant_id,
-            bob_two.device, challenge["challengeId"].as_str().unwrap(),
+            bob_two.tenant_id,
+            bob_two.namespace_id,
+            bob_two.participant_id,
+            bob_two.device,
+            challenge["challengeId"].as_str().unwrap(),
             challenge["challengeBytesBase64Url"].as_str().unwrap()
         ]),
     )
