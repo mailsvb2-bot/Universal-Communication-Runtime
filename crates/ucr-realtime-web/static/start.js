@@ -343,6 +343,7 @@ el("signup").addEventListener("click",()=>void run(async()=>{
   el("login-tenant").value=result.binding.tenantId;
   el("login-identity").value=result.binding.participantId;
   el("login-device").value=result.binding.deviceId;
+  rememberBinding(result.binding);
   await initialize();
 }));
 el("recover-form").addEventListener("submit",event=>{
