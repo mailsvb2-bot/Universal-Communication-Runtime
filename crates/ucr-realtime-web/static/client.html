@@ -135,7 +135,7 @@ const ENTRY_RETRY_MS=2000;
 const STREAM_RETRY_MS=1500;
 // Recovery is bounded; only a newly authenticated E2EE DataChannel resets it.
 const WEBRTC_RETRY_DELAYS_MS=[250,500,1000,2000,4000,8000,15000];
-let webrtcRecoveryAttempt=0,webrtcNeedsPeerRebuild=false,retireEndpointMlsBeforeNextStart=false;
+let webrtcRecoveryAttempt=0,webrtcNeedsPeerRebuild=false;
 let localRoomMediaHost=false,localRoomAuthorityFingerprint=null,localRoomAuthorityRefresh=null;
 const BRANDING_FRAGMENT_KEY="ucr_brand";
 const BRANDING_MAX_JSON_BYTES=4096;
@@ -1259,8 +1259,8 @@ async function startWebRtc(forceMedia=false){
 }
 async function startWebRtcOnce(forceMedia=false){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
-  if(retireEndpointMlsBeforeNextStart){
-    retireEndpointMlsBeforeNextStart=false;
+  if(startWebRtc.retireEndpointMls){
+    startWebRtc.retireEndpointMls=false;
     retireEndpointMlsState();
   }
   if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
@@ -1477,7 +1477,7 @@ async function heartbeat(){
     await applyMediaPolicy(data.media_policy);
     if(!current())return;
     await applyAdmissionState(data.admission_state);
-    if(current()&&mediaActive&&e2eeAdapterReady&&localRoomMediaHost){
+    if(current()&&mediaActive&&e2eeAdapterReady&&typeof refreshLocalRoomEndpointAuthority==="function"){
       refreshLocalRoomEndpointAuthority().catch(e=>{if(current())ui.status.textContent="Encrypted media membership refresh failed: "+e.message;});
     }
     if(current()&&mediaActive&&e2eeAdapterReady){
@@ -2034,7 +2034,7 @@ async function refreshLocalRoomEndpointAuthority(){
     // The installed adapter keeps the epoch and trusted-key roster from the
     // moment it started. A later join advances MLS and adds a signer, so this
     // endpoint must retire that adapter and restore MLS from the new chain.
-    retireEndpointMlsBeforeNextStart=true;
+    startWebRtc.retireEndpointMls=true;
     webrtcNeedsPeerRebuild=true;
     ui.status.textContent="A participant joined. Refreshing encrypted media for the new conference epoch.";
     await restartWebRtc(false);
