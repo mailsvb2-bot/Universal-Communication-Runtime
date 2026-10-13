@@ -386,7 +386,7 @@ export function createUcrFirstPartyHttpHost(
     const context = snapshotBinding(binding);
     const user = await session();
     if (!sameBinding(context, user)) throw new Error("first-party Device session changed");
-    return parseTrust(await request("POST", "/v1/first-party/device/inspect", context));
+    return parseTrust(await request("POST", "/v1/first-party/device/inspect", {binding: context}));
   };
 
   return {
