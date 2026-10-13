@@ -28,15 +28,16 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, DeviceLifecycleStore, IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
-    PrincipalIdentityLookupStore, TrustedSigningKeyStore, generate_opaque_id,
+    AuthorizedDurableRuntime, DeviceLifecycleStore, IdentityDeviceLookupStore, IdentityStore,
+    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, TrustedSigningKeyStore,
+    generate_opaque_id,
 };
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRecord, ConversationRef, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventId, IdentityId,
-    KeyId, KeyPurpose, PublicKeyDescriptor,
-    NamespaceId, OpaqueId, PrincipalKind, ScopedPrincipal, TenantId, TenantScope,
+    ConversationRecord, ConversationRef, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventId,
+    IdentityId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor,
+    ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
 use ucr_storage_sqlite::SqliteLocalStore;
@@ -210,11 +211,18 @@ impl Configuration {
             .map(|tenant| {
                 opaque(&tenant)
                     .map(TenantId::from_opaque)
-                    .map(|tenant_id| TenantScope { tenant_id, namespace_id: None })
+                    .map(|tenant_id| TenantScope {
+                        tenant_id,
+                        namespace_id: None,
+                    })
                     .map_err(|_| "invalid self-service Tenant ID".to_owned())
             })
             .transpose()?;
-        Ok(Some(Self { bind, origin, registration_scope }))
+        Ok(Some(Self {
+            bind,
+            origin,
+            registration_scope,
+        }))
     }
 }
 
@@ -785,15 +793,24 @@ async fn dispatch(
         require_post_headers(&request, &state.origin)?;
     }
     if method == Method::GET && path == "/v1/first-party/bootstrap" {
-        let public = state.registration_scope.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-        return Ok((json!({"tenantId": public.tenant_id.as_opaque().as_str(),
-            "namespaceId": null}), None));
+        let public = state
+            .registration_scope
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        return Ok((
+            json!({"tenantId": public.tenant_id.as_opaque().as_str(),
+            "namespaceId": null}),
+            None,
+        ));
     }
     let session = if matches!(
         path,
-        "/v1/first-party/login/challenge" | "/v1/first-party/login/verify"
-        | "/v1/first-party/signup/begin" | "/v1/first-party/signup/finish"
-        | "/v1/first-party/recover/begin" | "/v1/first-party/recover/finish"
+        "/v1/first-party/login/challenge"
+            | "/v1/first-party/login/verify"
+            | "/v1/first-party/signup/begin"
+            | "/v1/first-party/signup/finish"
+            | "/v1/first-party/recover/begin"
+            | "/v1/first-party/recover/finish"
     ) {
         None
     } else {
@@ -858,8 +875,10 @@ fn dispatch_post(
     }
     if matches!(
         path,
-        "/v1/first-party/signup/begin" | "/v1/first-party/signup/finish"
-        | "/v1/first-party/recover/begin" | "/v1/first-party/recover/finish"
+        "/v1/first-party/signup/begin"
+            | "/v1/first-party/signup/finish"
+            | "/v1/first-party/recover/begin"
+            | "/v1/first-party/recover/finish"
     ) {
         return account_route(state, path, body);
     }
@@ -867,9 +886,13 @@ fn dispatch_post(
     if path == "/v1/first-party/logout" {
         let input: BoundRequest = parse(body)?;
         ensure_binding(&input.binding, auth)?;
-        let mut sessions = state.sessions.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         sessions.retain(|item| item.token != auth.token);
-        let cookie = format!("{COOKIE_NAME}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict");
+        let cookie =
+            format!("{COOKIE_NAME}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict");
         return Ok((json!({"signedOut": true}), Some(cookie)));
     }
     let response = if path.starts_with("/v1/first-party/device/") {
@@ -885,7 +908,9 @@ fn dispatch_post(
 fn recovery_verifier(secret: &str) -> Result<[u8; 32], StatusCode> {
     // A recovery code is NOT a password: require 32 CSPRNG bytes. SHA-256
     // is sufficient only because guessing a random 256-bit value is infeasible.
-    let bytes = URL_SAFE_NO_PAD.decode(secret).map_err(|_| StatusCode::FORBIDDEN)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(secret)
+        .map_err(|_| StatusCode::FORBIDDEN)?;
     if bytes.len() != 32 || URL_SAFE_NO_PAD.encode(&bytes) != secret {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -900,7 +925,10 @@ fn account_route(
     path: &str,
     body: &[u8],
 ) -> Result<(Value, Option<String>), StatusCode> {
-    let public = state.registration_scope.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let public = state
+        .registration_scope
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     match path {
         "/v1/first-party/signup/begin" => {
             let value: Value = parse(body)?;
@@ -916,15 +944,17 @@ fn account_route(
                 device: format!("fp-device-{}", nonce()?),
             };
             let mut result = challenge(state, binding.clone(), "signup", None, None)?;
-            result["binding"] = serde_json::to_value(binding)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            result["binding"] =
+                serde_json::to_value(binding).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             Ok((result, None))
         }
         "/v1/first-party/recover/begin" => {
             // The user explicitly brings an unguessable recovery credential.
             // Challenge issuance does not disclose whether an Identity exists.
             let binding: Binding = parse(body)?;
-            if &scope(&binding)? != public {return Err(StatusCode::FORBIDDEN);}
+            if &scope(&binding)? != public {
+                return Err(StatusCode::FORBIDDEN);
+            }
             identity(&binding)?;
             device(&binding)?;
             Ok((challenge(state, binding, "recover", None, None)?, None))
@@ -932,58 +962,104 @@ fn account_route(
         "/v1/first-party/signup/finish" | "/v1/first-party/recover/finish" => {
             let input: AccountFinish = parse(body)?;
             let registration = path.ends_with("/signup/finish");
-            let purpose = if registration {"signup"} else {"recover"};
-            if &scope(&input.binding)? != public {return Err(StatusCode::FORBIDDEN);}
+            let purpose = if registration { "signup" } else { "recover" };
+            if &scope(&input.binding)? != public {
+                return Err(StatusCode::FORBIDDEN);
+            }
             let pending = consume(state, &input.binding, &input.challenge_id, purpose)?;
             let key_id = KeyId::from_opaque(opaque(&input.key_id)?);
-            let public_key = URL_SAFE_NO_PAD.decode(&input.public_key_base64_url)
+            let public_key = URL_SAFE_NO_PAD
+                .decode(&input.public_key_base64_url)
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
-            if public_key.len() != 32 ||
-                URL_SAFE_NO_PAD.encode(&public_key) != input.public_key_base64_url {
+            if public_key.len() != 32
+                || URL_SAFE_NO_PAD.encode(&public_key) != input.public_key_base64_url
+            {
                 return Err(StatusCode::BAD_REQUEST);
             }
             let signed = encoded_proof(
-                if registration {"ucr-first-party-signup.v1"} else {"ucr-first-party-recover.v1"},
+                if registration {
+                    "ucr-first-party-signup.v1"
+                } else {
+                    "ucr-first-party-recover.v1"
+                },
                 &json!([
-                    input.binding.tenant_id, input.binding.namespace_id,
-                    input.binding.participant_id, input.binding.device, input.key_id,
-                    input.public_key_base64_url, pending.id, pending.nonce,
-                ])
+                    input.binding.tenant_id,
+                    input.binding.namespace_id,
+                    input.binding.participant_id,
+                    input.binding.device,
+                    input.key_id,
+                    input.public_key_base64_url,
+                    pending.id,
+                    pending.nonce,
+                ]),
             )?;
-            let verifier_key:[u8;32] = public_key.clone().try_into()
+            let verifier_key: [u8; 32] = public_key
+                .clone()
+                .try_into()
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
             verify_ed25519(verifier_key, &signed, &input.signature_base64_url)?;
             let account = identity(&input.binding)?;
             let device_id = device(&input.binding)?;
             let descriptor = DeviceDescriptor {
-                device_id: device_id.clone(), identity_id: account.clone(),
+                device_id: device_id.clone(),
+                identity_id: account.clone(),
                 state: DeviceLifecycleState::Active,
             };
             let signer = PublicKeyDescriptor {
-                key_id, device_id, purpose: KeyPurpose::Signing,
-                algorithm_id: "ed25519".to_owned(), algorithm_version: 1,
-                key_format_version: 1, public_key,
+                key_id,
+                device_id,
+                purpose: KeyPurpose::Signing,
+                algorithm_id: "ed25519".to_owned(),
+                algorithm_version: 1,
+                key_format_version: 1,
+                public_key,
             };
             let next_code = nonce()?;
             let next_verifier = recovery_verifier(&next_code)?;
             if registration {
-                if input.recovery_code.is_some() {return Err(StatusCode::BAD_REQUEST);}
-                state.store.first_party_register_account(
-                    public, &account, &descriptor, &signer, next_verifier
-                ).map_err(|_| StatusCode::CONFLICT)?;
+                if input.recovery_code.is_some() {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                state
+                    .store
+                    .first_party_register_account(
+                        public,
+                        &account,
+                        &descriptor,
+                        &signer,
+                        next_verifier,
+                    )
+                    .map_err(|_| StatusCode::CONFLICT)?;
             } else {
-                let existing = input.recovery_code.as_deref().ok_or(StatusCode::FORBIDDEN)?;
+                let existing = input
+                    .recovery_code
+                    .as_deref()
+                    .ok_or(StatusCode::FORBIDDEN)?;
                 let verifier = recovery_verifier(existing)?;
-                state.store.first_party_recover_device(
-                    public, &account, &descriptor, &signer, verifier, next_verifier
-                ).map_err(|_| StatusCode::FORBIDDEN)?;
+                state
+                    .store
+                    .first_party_recover_device(
+                        public,
+                        &account,
+                        &descriptor,
+                        &signer,
+                        verifier,
+                        next_verifier,
+                    )
+                    .map_err(|_| StatusCode::FORBIDDEN)?;
             }
             let subject = subject_for(state, &input.binding)?;
             let (value, cookie) = issue_session(
-                state, input.binding, subject,
-                signer.key_id.as_opaque().as_str().to_owned(), verifier_key,
+                state,
+                input.binding,
+                subject,
+                signer.key_id.as_opaque().as_str().to_owned(),
+                verifier_key,
             )?;
-            Ok((json!({"binding": value, "recoveryCode": next_code}), Some(cookie)))
+            Ok((
+                json!({"binding": value, "recoveryCode": next_code}),
+                Some(cookie),
+            ))
         }
         _ => Err(StatusCode::NOT_FOUND),
     }
@@ -1037,7 +1113,9 @@ fn device_route(
         "/v1/first-party/device/list" => {
             let input: BoundRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
-            let devices = state.store.devices_for_identity(&scope(&auth.binding)?, &identity(&auth.binding)?, 64)
+            let devices = state
+                .store
+                .devices_for_identity(&scope(&auth.binding)?, &identity(&auth.binding)?, 64)
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
             json!(devices.iter().map(|device| json!({
                 "deviceId": device.device_id.as_opaque().as_str(),
@@ -1054,21 +1132,33 @@ fn device_route(
             let input: RevokeRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             let target = DeviceId::from_opaque(opaque(&input.device_id)?);
-            state.store.revoke_device(&auth.subject.scope, &target, &identity(&auth.binding)?)
+            state
+                .store
+                .revoke_device(&auth.subject.scope, &target, &identity(&auth.binding)?)
                 .map_err(|_| StatusCode::FORBIDDEN)?;
-            let mut sessions = state.sessions.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-            sessions.retain(|item| !(item.binding.tenant_id == auth.binding.tenant_id
-                && item.binding.namespace_id == auth.binding.namespace_id
-                && item.binding.device == input.device_id));
+            let mut sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            sessions.retain(|item| {
+                !(item.binding.tenant_id == auth.binding.tenant_id
+                    && item.binding.namespace_id == auth.binding.namespace_id
+                    && item.binding.device == input.device_id)
+            });
             json!({"revoked": true})
         }
         "/v1/first-party/device/rotate-recovery" => {
             let input: BoundRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             let code = nonce()?;
-            state.store.first_party_rotate_recovery(
-                &auth.subject.scope, &identity(&auth.binding)?, recovery_verifier(&code)?
-            ).map_err(|_| StatusCode::FORBIDDEN)?;
+            state
+                .store
+                .first_party_rotate_recovery(
+                    &auth.subject.scope,
+                    &identity(&auth.binding)?,
+                    recovery_verifier(&code)?,
+                )
+                .map_err(|_| StatusCode::FORBIDDEN)?;
             json!({"recoveryCode": code})
         }
         "/v1/first-party/device/inspect" => {
