@@ -19,7 +19,10 @@ use hyper::{
     header::{CACHE_CONTROL, CONTENT_TYPE, COOKIE, ORIGIN, SET_COOKIE},
     service::service_fn,
 };
-use hyper_util::{rt::{TokioExecutor, TokioIo}, server::conn::auto};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -34,7 +37,7 @@ use ucr_model::{
     ConversationRecord, ConversationRef, DeviceId, DeviceLifecycleState, EventId, IdentityId,
     NamespaceId, OpaqueId, PrincipalKind, ScopedPrincipal, TenantId, TenantScope,
 };
-use ucr_realtime::{JoinTokenIssuer, DEFAULT_JOIN_TTL_SECONDS};
+use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
 use ucr_storage_sqlite::SqliteLocalStore;
 
 const MAX_BODY: usize = 16 * 1024;
@@ -197,9 +200,15 @@ pub(super) async fn serve(
         pending: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     });
-    println!("UCR_FIRST_PARTY_READY loopback={} https_edge=required", config.bind);
+    println!(
+        "UCR_FIRST_PARTY_READY loopback={} https_edge=required",
+        config.bind
+    );
     loop {
-        let (stream, _) = listener.accept().await.map_err(|e| format!("BFF accept: {e}"))?;
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("BFF accept: {e}"))?;
         let state = Arc::clone(&state);
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
@@ -237,9 +246,12 @@ fn reply(status: StatusCode, body: &Value, cookie: Option<&str>) -> HttpResponse
 }
 
 fn opaque(value: &str) -> Result<OpaqueId, StatusCode> {
-    if value.is_empty() || value.len() > 120 || !value.bytes().all(|b| {
-        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'@')
-    }) {
+    if value.is_empty()
+        || value.len() > 120
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'@'))
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
     OpaqueId::new(value).map_err(|_| StatusCode::BAD_REQUEST)
@@ -248,8 +260,12 @@ fn opaque(value: &str) -> Result<OpaqueId, StatusCode> {
 fn scope(binding: &Binding) -> Result<TenantScope, StatusCode> {
     Ok(TenantScope {
         tenant_id: TenantId::from_opaque(opaque(&binding.tenant_id)?),
-        namespace_id: binding.namespace_id.as_deref().map(opaque)
-            .transpose()?.map(NamespaceId::from_opaque),
+        namespace_id: binding
+            .namespace_id
+            .as_deref()
+            .map(opaque)
+            .transpose()?
+            .map(NamespaceId::from_opaque),
     })
 }
 
@@ -262,7 +278,8 @@ fn device(binding: &Binding) -> Result<DeviceId, StatusCode> {
 }
 
 fn now_unix_ms() -> Result<i64, StatusCode> {
-    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     i64::try_from(elapsed.as_millis()).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
 }
@@ -271,30 +288,39 @@ fn subject_for(state: &State, binding: &Binding) -> Result<ScopedPrincipal, Stat
     let scope = scope(binding)?;
     let identity = identity(binding)?;
     let device_id = device(binding)?;
-    let record = state.store.identity(&scope, &identity)
+    let record = state
+        .store
+        .identity(&scope, &identity)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    if record.expires_at_unix_ms.is_some_and(|expires| {
-        now_unix_ms().map_or(true, |now| now >= expires)
-    }) {
+    if record
+        .expires_at_unix_ms
+        .is_some_and(|expires| now_unix_ms().map_or(true, |now| now >= expires))
+    {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let candidates = state.store
+    let candidates = state
+        .store
         .principal_identity_bindings_for_identity_kind(&scope, &identity, PrincipalKind::Person, 2)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if candidates.len() != 1 {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let descriptor = state.store.device(&scope, &device_id)
+    let descriptor = state
+        .store
+        .device(&scope, &device_id)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
     if descriptor.identity_id != identity || descriptor.state != DeviceLifecycleState::Active {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let active = state.store.active_trusted_signing_key(&scope, &device_id)
+    let active = state
+        .store
+        .active_trusted_signing_key(&scope, &device_id)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    if active.device_id != device_id || active.purpose != ucr_model::KeyPurpose::Signing
+    if active.device_id != device_id
+        || active.purpose != ucr_model::KeyPurpose::Signing
         || active.public_key.len() != 32
     {
         return Err(StatusCode::UNAUTHORIZED);
@@ -306,18 +332,26 @@ fn subject_for(state: &State, binding: &Binding) -> Result<ScopedPrincipal, Stat
 }
 
 fn trusted_key(state: &State, binding: &Binding) -> Result<(String, [u8; 32]), StatusCode> {
-    let key = state.store.active_trusted_signing_key(&scope(binding)?, &device(binding)?)
+    let key = state
+        .store
+        .active_trusted_signing_key(&scope(binding)?, &device(binding)?)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    let raw: [u8; 32] = key.public_key.try_into().map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let raw: [u8; 32] = key
+        .public_key
+        .try_into()
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
     Ok((key.key_id.as_opaque().as_str().to_owned(), raw))
 }
 
 fn verify_ed25519(pubkey: [u8; 32], proof: &str, signature: &str) -> Result<(), StatusCode> {
-    let raw = URL_SAFE_NO_PAD.decode(signature).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let raw = URL_SAFE_NO_PAD
+        .decode(signature)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let raw: [u8; 64] = raw.try_into().map_err(|_| StatusCode::UNAUTHORIZED)?;
     let verifier = VerifyingKey::from_bytes(&pubkey).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    verifier.verify_strict(proof.as_bytes(), &Signature::from_bytes(&raw))
+    verifier
+        .verify_strict(proof.as_bytes(), &Signature::from_bytes(&raw))
         .map_err(|_| StatusCode::UNAUTHORIZED)
 }
 
@@ -327,8 +361,12 @@ fn nonce() -> Result<String, StatusCode> {
     Ok(URL_SAFE_NO_PAD.encode(raw))
 }
 
-fn challenge(state: &State, binding: Binding, purpose: &'static str,
-    key_id: Option<String>, public_key: Option<[u8; 32]>
+fn challenge(
+    state: &State,
+    binding: Binding,
+    purpose: &'static str,
+    key_id: Option<String>,
+    public_key: Option<[u8; 32]>,
 ) -> Result<Value, StatusCode> {
     // Always bounded and one-time. The server does not trust the supplied Identity
     // until signature verification; challenge requests never reveal its existence.
@@ -341,7 +379,10 @@ fn challenge(state: &State, binding: Binding, purpose: &'static str,
         public_key,
         until: Instant::now() + CHALLENGE_TTL,
     };
-    let mut pending = state.pending.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut pending = state
+        .pending
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     pending.retain(|c| c.until > Instant::now());
     if pending.len() >= MAX_PENDING {
         return Err(StatusCode::TOO_MANY_REQUESTS);
@@ -354,9 +395,19 @@ fn challenge(state: &State, binding: Binding, purpose: &'static str,
     Ok(response)
 }
 
-fn consume(state: &State, binding: &Binding, id: &str, purpose: &str) -> Result<Pending, StatusCode> {
-    let mut pending = state.pending.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let index = pending.iter().position(|c| c.id == id && c.purpose == purpose)
+fn consume(
+    state: &State,
+    binding: &Binding,
+    id: &str,
+    purpose: &str,
+) -> Result<Pending, StatusCode> {
+    let mut pending = state
+        .pending
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let index = pending
+        .iter()
+        .position(|c| c.id == id && c.purpose == purpose)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let challenge = pending.swap_remove(index);
     if challenge.until <= Instant::now() || challenge.binding != *binding {
@@ -366,15 +417,22 @@ fn consume(state: &State, binding: &Binding, id: &str, purpose: &str) -> Result<
 }
 
 fn encoded_proof(prefix: &str, context: Value) -> Result<String, StatusCode> {
-    Ok(format!("{prefix}\0{}", serde_json::to_string(&context)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
+    Ok(format!(
+        "{prefix}\0{}",
+        serde_json::to_string(&context).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    ))
 }
 
-fn issue_session(state: &State, binding: Binding, subject: ScopedPrincipal)
-    -> Result<(Value, String), StatusCode>
-{
+fn issue_session(
+    state: &State,
+    binding: Binding,
+    subject: ScopedPrincipal,
+) -> Result<(Value, String), StatusCode> {
     let token = nonce()?;
-    let mut sessions = state.sessions.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     sessions.retain(|session| session.until > Instant::now());
     if sessions.len() >= MAX_SESSIONS {
         return Err(StatusCode::TOO_MANY_REQUESTS);
@@ -385,28 +443,45 @@ fn issue_session(state: &State, binding: Binding, subject: ScopedPrincipal)
         subject,
         until: Instant::now() + SESSION_TTL,
     });
-    let cookie = format!(
-        "{COOKIE_NAME}={token}; Path=/; Max-Age=1800; Secure; HttpOnly; SameSite=Strict"
-    );
-    Ok((serde_json::to_value(binding).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?, cookie))
+    let cookie =
+        format!("{COOKIE_NAME}={token}; Path=/; Max-Age=1800; Secure; HttpOnly; SameSite=Strict");
+    Ok((
+        serde_json::to_value(binding).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        cookie,
+    ))
 }
 
 fn authenticated(state: &State, request: &Request<Incoming>) -> Result<Session, StatusCode> {
-    let raw = request.headers().get(COOKIE).and_then(|x| x.to_str().ok())
+    let raw = request
+        .headers()
+        .get(COOKIE)
+        .and_then(|x| x.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
     if raw.len() > 4096 {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let token = raw.split(';').filter_map(|part| {
-        part.trim().strip_prefix(&format!("{COOKIE_NAME}="))
-    }).next().ok_or(StatusCode::UNAUTHORIZED)?;
-    if token.len() != 43 || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+    let token = raw
+        .split(';')
+        .filter_map(|part| part.trim().strip_prefix(&format!("{COOKIE_NAME}=")))
+        .next()
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if token.len() != 43
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
         return Err(StatusCode::UNAUTHORIZED);
     }
     let session = {
-        let mut sessions = state.sessions.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         sessions.retain(|session| session.until > Instant::now());
-        sessions.iter().find(|s| s.token == token).cloned()
+        sessions
+            .iter()
+            .find(|s| s.token == token)
+            .cloned()
             .ok_or(StatusCode::UNAUTHORIZED)?
     };
     let live_subject = subject_for(state, &session.binding)?;
@@ -443,12 +518,19 @@ fn to_call(state: &State, call: &CallSession) -> Result<Value, StatusCode> {
     if call.conversation.kind != ConversationKind::Direct || call.participants.len() != 2 {
         return Err(StatusCode::FORBIDDEN);
     }
-    let a = state.store.principal_identity_binding(&call.scope, &call.initiated_by)
+    let a = state
+        .store
+        .principal_identity_binding(&call.scope, &call.initiated_by)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::FORBIDDEN)?;
-    let other = call.participants.iter().find(|p| p.principal != call.initiated_by)
+    let other = call
+        .participants
+        .iter()
+        .find(|p| p.principal != call.initiated_by)
         .ok_or(StatusCode::FORBIDDEN)?;
-    let b = state.store.principal_identity_binding(&call.scope, &other.principal)
+    let b = state
+        .store
+        .principal_identity_binding(&call.scope, &other.principal)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::FORBIDDEN)?;
     let state_name = match call.signalling_state {
@@ -472,8 +554,11 @@ fn to_call(state: &State, call: &CallSession) -> Result<Value, StatusCode> {
 
 fn get_call(state: &State, session: &Session, id: &str) -> Result<CallSession, StatusCode> {
     AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
-        .first_party_call_get(&session.subject, &device(&session.binding)?,
-            &CallId::from_opaque(opaque(id)?))
+        .first_party_call_get(
+            &session.subject,
+            &device(&session.binding)?,
+            &CallId::from_opaque(opaque(id)?),
+        )
         .map_err(|_| StatusCode::FORBIDDEN)?
         .ok_or(StatusCode::NOT_FOUND)
 }
@@ -483,9 +568,15 @@ fn start_call(state: &State, session: &Session, intent: StartIntent) -> Result<V
         return Err(StatusCode::BAD_REQUEST);
     }
     let peer_id = IdentityId::from_opaque(opaque(&intent.peer_identity_id)?);
-    let peer = state.store.principal_identity_bindings_for_identity_kind(
-        &session.subject.scope, &peer_id, PrincipalKind::Person, 2
-    ).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let peer = state
+        .store
+        .principal_identity_bindings_for_identity_kind(
+            &session.subject.scope,
+            &peer_id,
+            PrincipalKind::Person,
+            2,
+        )
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if peer.len() != 1 || peer[0].principal == session.subject.principal {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -507,11 +598,16 @@ fn start_call(state: &State, session: &Session, intent: StartIntent) -> Result<V
         kind: ConversationKind::Direct,
     };
     let runtime = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref());
-    runtime.persist_conversation(&session.subject, &ConversationRecord {
-        scope: session.subject.scope.clone(),
-        conversation: conversation.clone(),
-        parent_conversation_id: None,
-    }).map_err(|_| StatusCode::FORBIDDEN)?;
+    runtime
+        .persist_conversation(
+            &session.subject,
+            &ConversationRecord {
+                scope: session.subject.scope.clone(),
+                conversation: conversation.clone(),
+                parent_conversation_id: None,
+            },
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
     let draft = CallSession {
         scope: session.subject.scope.clone(),
         call_id: call_id.clone(),
@@ -539,16 +635,15 @@ fn start_call(state: &State, session: &Session, intent: StartIntent) -> Result<V
         revision: 0,
         termination_reason: None,
     };
-    runtime.first_party_call_start(&session.subject, &device(&session.binding)?, &draft)
+    runtime
+        .first_party_call_start(&session.subject, &device(&session.binding)?, &draft)
         .map_err(|_| StatusCode::CONFLICT)?;
     // Return the current canonical persisted revision, not a synthetic Ringing.
     let current = get_call(state, session, &id)?;
     to_call(state, &current)
 }
 
-fn signal_call(state: &State, session: &Session, req: SignalRequest)
-    -> Result<Value, StatusCode>
-{
+fn signal_call(state: &State, session: &Session, req: SignalRequest) -> Result<Value, StatusCode> {
     let before = get_call(state, session, &req.call_id)?;
     if before.revision != req.expected_revision {
         return Err(StatusCode::CONFLICT);
@@ -558,12 +653,15 @@ fn signal_call(state: &State, session: &Session, req: SignalRequest)
         "reject" => CallSignalKind::Reject,
         "busy" => CallSignalKind::Busy,
         "cancel" => CallSignalKind::Cancel,
-        "hangup" => CallSignalKind::Terminate { reason: CallTerminationReason::Completed },
+        "hangup" => CallSignalKind::Terminate {
+            reason: CallTerminationReason::Completed,
+        },
         _ => return Err(StatusCode::BAD_REQUEST),
     };
     let signal = CallSignal {
-        event_id: EventId::from_opaque(generate_opaque_id()
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?),
+        event_id: EventId::from_opaque(
+            generate_opaque_id().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+        ),
         scope: session.subject.scope.clone(),
         call_id: before.call_id,
         expected_revision: req.expected_revision,
@@ -576,26 +674,30 @@ fn signal_call(state: &State, session: &Session, req: SignalRequest)
     to_call(state, &current)
 }
 
-fn issue_join(state: &State, session: &Session, req: JoinRequest)
-    -> Result<Value, StatusCode>
-{
+fn issue_join(state: &State, session: &Session, req: JoinRequest) -> Result<Value, StatusCode> {
     let call = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
         .first_party_call_join_admission(
             &session.subject,
             &device(&session.binding)?,
             &CallId::from_opaque(opaque(&req.call_id)?),
             req.expected_revision,
-        ).map_err(|_| StatusCode::FORBIDDEN)?;
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
     // This is the SAME issuer instance used for gRPC Realtime admission.
-    let grant = state.issuer.issue(
-        call.scope,
-        call.call_id,
-        session.subject.principal.clone(),
-        Some(device(&session.binding)?),
-        DEFAULT_JOIN_TTL_SECONDS,
-        now_unix_ms()?,
-    ).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let fragment = grant.join_url.split_once('#')
+    let grant = state
+        .issuer
+        .issue(
+            call.scope,
+            call.call_id,
+            session.subject.principal.clone(),
+            Some(device(&session.binding)?),
+            DEFAULT_JOIN_TTL_SECONDS,
+            now_unix_ms()?,
+        )
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let fragment = grant
+        .join_url
+        .split_once('#')
         .map(|(_, fragment)| format!("#{fragment}"))
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     if !fragment.starts_with("#ucr_join=") {
@@ -613,9 +715,7 @@ fn issue_join(state: &State, session: &Session, req: JoinRequest)
     }))
 }
 
-async fn route(request: Request<Incoming>, state: Arc<State>)
-    -> Result<HttpResponse, Infallible>
-{
+async fn route(request: Request<Incoming>, state: Arc<State>) -> Result<HttpResponse, Infallible> {
     let path = request.uri().path().to_owned();
     let method = request.method().clone();
     let result = dispatch(request, &state, &path, method).await;
@@ -625,9 +725,12 @@ async fn route(request: Request<Incoming>, state: Arc<State>)
     })
 }
 
-async fn dispatch(request: Request<Incoming>, state: &State, path: &str, method: Method)
-    -> Result<(Value, Option<String>), StatusCode>
-{
+async fn dispatch(
+    request: Request<Incoming>,
+    state: &State,
+    path: &str,
+    method: Method,
+) -> Result<(Value, Option<String>), StatusCode> {
     if method == Method::GET && path == "/healthz" {
         return Ok((json!({"ok": true}), None));
     }
@@ -640,18 +743,24 @@ async fn dispatch(request: Request<Incoming>, state: &State, path: &str, method:
     if method == Method::POST {
         if request.headers().get(ORIGIN).and_then(|v| v.to_str().ok())
             != Some(state.origin.as_str())
-            || request.headers().get("X-UCR-First-Party-Request")
-                .and_then(|v| v.to_str().ok()) != Some("v1")
-            || !request.headers().get(CONTENT_TYPE)
+            || request
+                .headers()
+                .get("X-UCR-First-Party-Request")
+                .and_then(|v| v.to_str().ok())
+                != Some("v1")
+            || !request
+                .headers()
+                .get(CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .is_some_and(|v| v == "application/json")
         {
             return Err(StatusCode::FORBIDDEN);
         }
     }
-    let session = if matches!(path, "/v1/first-party/login/challenge"
-        | "/v1/first-party/login/verify")
-    {
+    let session = if matches!(
+        path,
+        "/v1/first-party/login/challenge" | "/v1/first-party/login/verify"
+    ) {
         None
     } else {
         Some(authenticated(state, &request)?)
@@ -659,13 +768,19 @@ async fn dispatch(request: Request<Incoming>, state: &State, path: &str, method:
     if method == Method::GET {
         if path == "/v1/first-party/session" {
             let binding = &session.ok_or(StatusCode::UNAUTHORIZED)?.binding;
-            return Ok((serde_json::to_value(binding)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?, None));
+            return Ok((
+                serde_json::to_value(binding).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                None,
+            ));
         }
         return Err(StatusCode::NOT_FOUND);
     }
-    let mut body = request.into_body().collect().await
-        .map_err(|_| StatusCode::BAD_REQUEST)?.to_bytes();
+    let mut body = request
+        .into_body()
+        .collect()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .to_bytes();
     if body.len() > MAX_BODY {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
@@ -683,11 +798,17 @@ async fn dispatch(request: Request<Incoming>, state: &State, path: &str, method:
             let pending = consume(state, &proof.binding, &proof.challenge_id, "login")?;
             let subject = subject_for(state, &proof.binding)?;
             let (_, public_key) = trusted_key(state, &proof.binding)?;
-            let signed = encoded_proof("ucr-first-party-device-login.v1", json!([
-                proof.binding.tenant_id, proof.binding.namespace_id,
-                proof.binding.participant_id, proof.binding.device_id,
-                pending.id, pending.nonce,
-            ]))?;
+            let signed = encoded_proof(
+                "ucr-first-party-device-login.v1",
+                json!([
+                    proof.binding.tenant_id,
+                    proof.binding.namespace_id,
+                    proof.binding.participant_id,
+                    proof.binding.device_id,
+                    pending.id,
+                    pending.nonce,
+                ]),
+            )?;
             verify_ed25519(public_key, &signed, &proof.signature_base64_url)?;
             let (value, cookie) = issue_session(state, proof.binding, subject)?;
             return Ok((value, Some(cookie)));
@@ -706,11 +827,17 @@ async fn dispatch(request: Request<Incoming>, state: &State, path: &str, method:
             let auth = session.as_ref().ok_or(StatusCode::UNAUTHORIZED)?;
             ensure_binding(&input.binding, auth)?;
             opaque(&input.key_id)?;
-            let public_key = URL_SAFE_NO_PAD.decode(&input.public_key_base64_url)
+            let public_key = URL_SAFE_NO_PAD
+                .decode(&input.public_key_base64_url)
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
-            let pubkey: [u8; 32] = public_key.try_into()
-                .map_err(|_| StatusCode::BAD_REQUEST)?;
-            challenge(state, input.binding, "device", Some(input.key_id), Some(pubkey))?
+            let pubkey: [u8; 32] = public_key.try_into().map_err(|_| StatusCode::BAD_REQUEST)?;
+            challenge(
+                state,
+                input.binding,
+                "device",
+                Some(input.key_id),
+                Some(pubkey),
+            )?
         }
         "/v1/first-party/device/approve" => {
             let input: DeviceApproval = parse(&body)?;
@@ -729,11 +856,19 @@ async fn dispatch(request: Request<Incoming>, state: &State, path: &str, method:
                 // authority. Never let a logged-in device self-provision a new signer.
                 return Err(StatusCode::FORBIDDEN);
             }
-            let signed = encoded_proof("ucr-first-party-device-enrollment.v1", json!([
-                input.binding.tenant_id, input.binding.namespace_id,
-                input.binding.participant_id, input.binding.device_id,
-                input.key_id, input.public_key_base64_url, pending.id, pending.nonce,
-            ]))?;
+            let signed = encoded_proof(
+                "ucr-first-party-device-enrollment.v1",
+                json!([
+                    input.binding.tenant_id,
+                    input.binding.namespace_id,
+                    input.binding.participant_id,
+                    input.binding.device_id,
+                    input.key_id,
+                    input.public_key_base64_url,
+                    pending.id,
+                    pending.nonce,
+                ]),
+            )?;
             verify_ed25519(key, &signed, &input.signature_base64_url)?;
             json!({"approved": true})
         }
@@ -756,7 +891,9 @@ async fn dispatch(request: Request<Incoming>, state: &State, path: &str, method:
             let calls = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
                 .first_party_call_incoming(&auth.subject, &device(&auth.binding)?, 64)
                 .map_err(|_| StatusCode::FORBIDDEN)?;
-            let calls = calls.iter().map(|call| to_call(state, call))
+            let calls = calls
+                .iter()
+                .map(|call| to_call(state, call))
                 .collect::<Result<Vec<_>, _>>()?;
             json!(calls)
         }
@@ -797,9 +934,11 @@ mod tests {
 
     #[test]
     fn challenge_signature_proof_is_domain_separated_and_ordered() {
-        let proof = encoded_proof("ucr-first-party-device-login.v1",
-            json!(["tenant", null, "identity", "device", "id", "nonce"]))
-            .unwrap();
+        let proof = encoded_proof(
+            "ucr-first-party-device-login.v1",
+            json!(["tenant", null, "identity", "device", "id", "nonce"]),
+        )
+        .unwrap();
         assert!(proof.starts_with("ucr-first-party-device-login.v1\0["));
         assert!(proof.ends_with("[\"tenant\",null,\"identity\",\"device\",\"id\",\"nonce\"]"));
     }
