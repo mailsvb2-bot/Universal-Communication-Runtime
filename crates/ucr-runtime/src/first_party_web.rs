@@ -1033,15 +1033,19 @@ mod tests {
         assert_eq!(parsed.intent.idempotency_key, "first-call-42");
         assert_eq!(parsed.binding.device, "device-one");
         assert!(
-            parse::<StartRequest>(&serde_json::to_vec(&json!({
-                "binding": binding.clone(),
-                "intent": {
-                    "peerIdentityId": "identity-two",
-                    "media": "video",
-                    "idempotencyKey": "first-call-42",
-                    "joinFragment": "#forged"
-                }
-            })).unwrap()).is_err(),
+            parse::<StartRequest>(
+                &serde_json::to_vec(&json!({
+                    "binding": binding.clone(),
+                    "intent": {
+                        "peerIdentityId": "identity-two",
+                        "media": "video",
+                        "idempotencyKey": "first-call-42",
+                        "joinFragment": "#forged"
+                    }
+                    }))
+                .unwrap()
+            )
+            .is_err(),
             "Call start must not accept browser-supplied Join material"
         );
 
@@ -1058,12 +1062,16 @@ mod tests {
         assert_eq!(parsed.expected_revision, 7);
         assert_eq!(parsed.action, "accept");
         assert!(
-            parse::<SignalRequest>(&serde_json::to_vec(&json!({
-                "binding": binding.clone(),
-                "callId": "fp-v-first-call-42",
-                "expectedRevision": -1,
-                "action": "hangup"
-            })).unwrap()).is_err(),
+            parse::<SignalRequest>(
+                &serde_json::to_vec(&json!({
+                    "binding": binding.clone(),
+                    "callId": "fp-v-first-call-42",
+                    "expectedRevision": -1,
+                    "action": "hangup"
+                    }))
+                .unwrap()
+            )
+            .is_err(),
             "CAS revisions must be unsigned canonical revision numbers"
         );
         let join = json!({
@@ -1075,19 +1083,27 @@ mod tests {
         assert_eq!(parsed.call_id, "fp-v-first-call-42");
         assert_eq!(parsed.expected_revision, 8);
         assert!(
-            parse::<JoinRequest>(&serde_json::to_vec(&json!({
-                "binding": binding.clone(),
-                "callId": "fp-v-first-call-42"
-            })).unwrap()).is_err(),
+            parse::<JoinRequest>(
+                &serde_json::to_vec(&json!({
+                    "binding": binding.clone(),
+                    "callId": "fp-v-first-call-42"
+                    }))
+                .unwrap()
+            )
+            .is_err(),
             "Join must not bypass the accepted Call's revision"
         );
         assert!(
-            parse::<JoinRequest>(&serde_json::to_vec(&json!({
-                "binding": binding,
-                "callId": "fp-v-first-call-42",
-                "expectedRevision": 8,
-                "deviceJoin": true
-            })).unwrap()).is_err(),
+            parse::<JoinRequest>(
+                &serde_json::to_vec(&json!({
+                    "binding": binding,
+                    "callId": "fp-v-first-call-42",
+                    "expectedRevision": 8,
+                    "deviceJoin": true
+                    }))
+                .unwrap()
+            )
+            .is_err(),
             "Device-only Join cannot be smuggled through accepted-Call admission"
         );
     }
