@@ -25,15 +25,17 @@ use hyper_util::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, DeviceLifecycleStore, IdentityStore, PrincipalIdentityBindingStore,
+    AuthorizedDurableRuntime, DeviceLifecycleStore, IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
     PrincipalIdentityLookupStore, TrustedSigningKeyStore, generate_opaque_id,
 };
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRecord, ConversationRef, DeviceId, DeviceLifecycleState, EventId, IdentityId,
+    ConversationRecord, ConversationRef, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventId, IdentityId,
+    KeyId, KeyPurpose, PublicKeyDescriptor,
     NamespaceId, OpaqueId, PrincipalKind, ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
@@ -87,6 +89,24 @@ struct DeviceApproval {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BoundRequest {
     binding: Binding,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccountFinish {
+    binding: Binding,
+    challenge_id: String,
+    key_id: String,
+    public_key_base64_url: String,
+    signature_base64_url: String,
+    recovery_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RevokeRequest {
+    binding: Binding,
+    device_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,6 +174,7 @@ struct State {
     store: Arc<SqliteLocalStore>,
     issuer: Arc<JoinTokenIssuer>,
     origin: String,
+    registration_scope: Option<TenantScope>,
     pending: Mutex<Vec<Pending>>,
     sessions: Mutex<Vec<Session>>,
 }
@@ -162,6 +183,7 @@ struct State {
 pub(super) struct Configuration {
     bind: SocketAddr,
     origin: String,
+    registration_scope: Option<TenantScope>,
 }
 
 impl Configuration {
@@ -183,7 +205,16 @@ impl Configuration {
         {
             return Err("first-party public origin must be an exact HTTPS origin".into());
         }
-        Ok(Some(Self { bind, origin }))
+        let registration_scope = std::env::var("UCR_FIRST_PARTY_SELF_SERVICE_TENANT")
+            .ok()
+            .map(|tenant| {
+                opaque(&tenant)
+                    .map(TenantId::from_opaque)
+                    .map(|tenant_id| TenantScope { tenant_id, namespace_id: None })
+                    .map_err(|_| "invalid self-service Tenant ID".to_owned())
+            })
+            .transpose()?;
+        Ok(Some(Self { bind, origin, registration_scope }))
     }
 }
 
@@ -199,6 +230,7 @@ pub(super) async fn serve(
         store,
         issuer,
         origin: config.origin,
+        registration_scope: config.registration_scope,
         pending: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     });
@@ -752,9 +784,16 @@ async fn dispatch(
     if method == Method::POST {
         require_post_headers(&request, &state.origin)?;
     }
+    if method == Method::GET && path == "/v1/first-party/bootstrap" {
+        let public = state.registration_scope.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        return Ok((json!({"tenantId": public.tenant_id.as_opaque().as_str(),
+            "namespaceId": null}), None));
+    }
     let session = if matches!(
         path,
         "/v1/first-party/login/challenge" | "/v1/first-party/login/verify"
+        | "/v1/first-party/signup/begin" | "/v1/first-party/signup/finish"
+        | "/v1/first-party/recover/begin" | "/v1/first-party/recover/finish"
     ) {
         None
     } else {
@@ -817,7 +856,22 @@ fn dispatch_post(
     ) {
         return login_route(state, path, body);
     }
+    if matches!(
+        path,
+        "/v1/first-party/signup/begin" | "/v1/first-party/signup/finish"
+        | "/v1/first-party/recover/begin" | "/v1/first-party/recover/finish"
+    ) {
+        return account_route(state, path, body);
+    }
     let auth = session.ok_or(StatusCode::UNAUTHORIZED)?;
+    if path == "/v1/first-party/logout" {
+        let input: BoundRequest = parse(body)?;
+        ensure_binding(&input.binding, auth)?;
+        let mut sessions = state.sessions.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        sessions.retain(|item| item.token != auth.token);
+        let cookie = format!("{COOKIE_NAME}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict");
+        return Ok((json!({"signedOut": true}), Some(cookie)));
+    }
     let response = if path.starts_with("/v1/first-party/device/") {
         device_route(state, auth, path, body)?
     } else if path.starts_with("/v1/first-party/call/") {
@@ -873,6 +927,43 @@ fn device_route(
     body: &[u8],
 ) -> Result<Value, StatusCode> {
     let response = match path {
+        "/v1/first-party/device/list" => {
+            let input: BoundRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            let devices = state.store.devices_for_identity(&scope(&auth.binding)?, &identity(&auth.binding)?, 64)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            json!(devices.iter().map(|device| json!({
+                "deviceId": device.device_id.as_opaque().as_str(),
+                "state": match device.state {
+                    DeviceLifecycleState::Active => "active",
+                    DeviceLifecycleState::Revoked => "revoked",
+                    DeviceLifecycleState::Stale => "stale",
+                    DeviceLifecycleState::ReverificationRequired => "reverificationRequired",
+                    DeviceLifecycleState::Expired => "expired",
+                }
+            })).collect::<Vec<_>>())
+        }
+        "/v1/first-party/device/revoke" => {
+            let input: RevokeRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            let target = DeviceId::from_opaque(opaque(&input.device_id)?);
+            state.store.revoke_device(&auth.subject.scope, &target, &identity(&auth.binding)?)
+                .map_err(|_| StatusCode::FORBIDDEN)?;
+            let mut sessions = state.sessions.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            sessions.retain(|item| !(item.binding.tenant_id == auth.binding.tenant_id
+                && item.binding.namespace_id == auth.binding.namespace_id
+                && item.binding.device == input.device_id));
+            json!({"revoked": true})
+        }
+        "/v1/first-party/device/rotate-recovery" => {
+            let input: BoundRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            let code = nonce()?;
+            state.store.first_party_rotate_recovery(
+                &auth.subject.scope, &identity(&auth.binding)?, recovery_verifier(&code)?
+            ).map_err(|_| StatusCode::FORBIDDEN)?;
+            json!({"recoveryCode": code})
+        }
         "/v1/first-party/device/inspect" => {
             let input: BoundRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
