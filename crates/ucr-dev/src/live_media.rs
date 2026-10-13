@@ -16,7 +16,9 @@ use ucr_webrtc::{
     WebRtcProviderError, WebRtcSessionConfigFactory,
 };
 
-pub(crate) fn start() -> Result<
+pub(crate) fn start(
+    config: Arc<WebRtcSessionConfigFactory>,
+) -> Result<
     (
         RealtimeWebRtcDependencies,
         Arc<LiveWebRtcProvider>,
@@ -31,8 +33,7 @@ pub(crate) fn start() -> Result<
     );
     let concrete = Arc::clone(&provider);
     let shared: Arc<dyn ucr_webrtc::WebRtcProvider> = concrete;
-    let dependencies =
-        RealtimeWebRtcDependencies::new(shared, Arc::new(WebRtcSessionConfigFactory::default()));
+    let dependencies = RealtimeWebRtcDependencies::new(shared, config);
     Ok((dependencies, provider, ingress_rx))
 }
 

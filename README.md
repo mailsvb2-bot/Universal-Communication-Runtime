@@ -96,8 +96,12 @@ See `spec/dev-mode.md` for the trust boundary and nonclaims.
 `ucr dev --room` opens one loopback webinar on the development API. A hidden technical owner
 stays on the server so each browser can hold its own device key. Two speakers are a two-way
 call. A speaker plus an attendee is a webinar: the attendee watches and listens, and does not
-publish a camera. This is a local loopback room. It is not Production 1.0, a public TURN
-deployment, recording, or a horizontal SFU.
+publish a camera. The room starts coturn on `127.0.0.1:53478`. `turnserver` must be on `PATH`. About eight
+seconds after two people are in the call, ciphertext is written into an encrypted archive
+under the system temp directory. Someone who arrives after that archive has started is
+refused, because an active recording only admits people already covered by its consent
+snapshot. This is not Production 1.0 and it is not a horizontal SFU: those stay fail-closed
+until the repository's own release evidence exists.
 
 ```bash
 cargo run -p ucr-dev -- dev --room

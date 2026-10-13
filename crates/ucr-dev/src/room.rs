@@ -20,10 +20,13 @@ use tokio::{
 use tonic::Request;
 use ucr_api_grpc::pb;
 use ucr_core::{
-    DeviceLifecycleStore, IdentityDeviceLookupStore, PrincipalIdentityBindingStore,
-    TrustedSigningKeyStore, UniversalConferenceStore,
+    DeviceLifecycleStore, GroupCallLookupStore, IdentityDeviceLookupStore,
+    PrincipalIdentityBindingStore, TrustedSigningKeyStore, UniversalConferenceStore,
 };
-use ucr_model::{DeviceId, DeviceLifecycleState, GroupId, IntegrationId, OpaqueId};
+use ucr_model::{
+    CallParticipantState, DeviceId, DeviceLifecycleState, GroupId, IntegrationId, OpaqueId,
+    RecordingId,
+};
 use ucr_protocol::{ALGORITHM_VERSION, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID};
 
 use super::{DevEnvironment, attach_dev_credential, opaque, pb_id, pb_scope, wire_text};
@@ -39,6 +42,7 @@ struct RoomHost {
     /// Serializes the Waiting → Live transition so a second join cannot
     /// request Waiting after the conference is already Live.
     open_gate: AsyncMutex<()>,
+    edge: Option<Arc<super::room_edge::RoomEdge>>,
 }
 
 struct RoomState {
@@ -84,6 +88,7 @@ pub async fn spawn(
     env: Arc<DevEnvironment>,
     grpc_bind: SocketAddr,
     room_bind: SocketAddr,
+    edge: Option<Arc<super::room_edge::RoomEdge>>,
 ) -> Result<(), String> {
     if !room_bind.ip().is_loopback() {
         return Err("local room refuses non-loopback bind addresses".to_owned());
@@ -107,6 +112,7 @@ pub async fn spawn(
             opened: false,
         }),
         open_gate: AsyncMutex::new(()),
+        edge,
     });
     tokio::spawn(async move {
         loop {
@@ -175,13 +181,14 @@ async fn handle_connection(host: Arc<RoomHost>, mut stream: TcpStream) -> Result
 }
 
 async fn dispatch(
-    host: &RoomHost,
+    host: &Arc<RoomHost>,
     method: &str,
     path: &str,
     body: &[u8],
 ) -> Result<Vec<u8>, String> {
     if method == "GET" && path == "/healthz" {
-        return Ok(br#"{"ok":true}"#.to_vec());
+        let turn = host.edge.is_some();
+        return Ok(format!(r#"{{"ok":true,"turn":{turn},"recording":{turn}}}"#).into_bytes());
     }
     if method != "POST" {
         return Err("only POST is supported".to_owned());
@@ -304,14 +311,21 @@ fn inspect(host: &RoomHost, body: &[u8]) -> Result<Vec<u8>, String> {
     .map_err(|error| format!("encode inspect response: {error}"))
 }
 
-async fn join(host: &RoomHost, body: &[u8]) -> Result<Vec<u8>, String> {
+async fn join(host: &Arc<RoomHost>, body: &[u8]) -> Result<Vec<u8>, String> {
     let request: JoinRequest =
         serde_json::from_slice(body).map_err(|_| "invalid join request".to_owned())?;
     let conference_id = conference_id(host)?;
     let _identity =
         participant_identity(host, &conference_id, request.external_user_id.as_bytes())?;
     prepare_runtime(host, &conference_id).await?;
-    open_live(host, &conference_id).await?;
+    if open_live(host, &conference_id).await? && host.edge.is_some() {
+        let host = Arc::clone(host);
+        tokio::spawn(async move {
+            if let Err(error) = watch_room_recording(host).await {
+                eprintln!("ucr room recording: {error}");
+            }
+        });
+    }
     let mut conference = conference_client(host).await?;
     let mut issue = Request::new(pb::UniversalIssueJoinGrantRequest {
         scope: Some(pb_scope(&host.env.scope)),
@@ -485,7 +499,7 @@ async fn prepare_runtime(host: &RoomHost, conference_id: &pb::OpaqueId) -> Resul
     }
 }
 
-async fn open_live(host: &RoomHost, conference_id: &pb::OpaqueId) -> Result<(), String> {
+async fn open_live(host: &RoomHost, conference_id: &pb::OpaqueId) -> Result<bool, String> {
     let _gate = host.open_gate.lock().await;
     if host
         .state
@@ -493,7 +507,7 @@ async fn open_live(host: &RoomHost, conference_id: &pb::OpaqueId) -> Result<(), 
         .map_err(|_| "room state lock poisoned".to_owned())?
         .opened
     {
-        return Ok(());
+        return Ok(false);
     }
     let mut conference = conference_client(host).await?;
     for (target, key) in [
@@ -543,7 +557,166 @@ async fn open_live(host: &RoomHost, conference_id: &pb::OpaqueId) -> Result<(), 
         .lock()
         .map_err(|_| "room state lock poisoned".to_owned())?
         .opened = true;
+    Ok(true)
+}
+
+async fn watch_room_recording(host: Arc<RoomHost>) -> Result<(), String> {
+    let edge = host
+        .edge
+        .as_ref()
+        .ok_or_else(|| "recording edge is missing".to_owned())?
+        .clone();
+    let mut last_error = None;
+    let mut previous_accepted = 0_usize;
+    let mut stable_polls = 0_u32;
+    for _ in 0..3_000 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let conference = conference_id(&host)?;
+        let accepted = accepted_participant_count(&host, &conference)?;
+        let humans = accepted.saturating_sub(1);
+        if humans >= 2 && accepted == previous_accepted {
+            stable_polls = stable_polls.saturating_add(1);
+        } else {
+            stable_polls = 0;
+            previous_accepted = accepted;
+        }
+        // The consent snapshot is fixed when recording becomes active. Wait until two
+        // people have been in the call long enough for a second window to finish joining.
+        if humans >= 2 && stable_polls >= 40 {
+            match start_room_recording(&host, &edge, &conference).await {
+                Ok(()) => return Ok(()),
+                Err(error) => last_error = Some(error),
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "recording waited for two people to join".to_owned()))
+}
+
+fn accepted_participant_count(
+    host: &RoomHost,
+    conference_id: &pb::OpaqueId,
+) -> Result<usize, String> {
+    let group_id = GroupId::from_opaque(
+        OpaqueId::from_wire_bytes(&conference_id.value)
+            .map_err(|_| "invalid conference id".to_owned())?,
+    );
+    let calls = host
+        .env
+        .store
+        .active_calls_for_group(&host.env.scope, &group_id, 2)
+        .map_err(|error| format!("call lookup: {error:?}"))?;
+    let [call] = calls.as_slice() else {
+        return Ok(0);
+    };
+    Ok(call
+        .participants
+        .iter()
+        .filter(|participant| {
+            participant.state == CallParticipantState::Accepted
+                && participant.left_revision.is_none()
+        })
+        .count())
+}
+
+async fn start_room_recording(
+    host: &RoomHost,
+    edge: &super::room_edge::RoomEdge,
+    conference_id: &pb::OpaqueId,
+) -> Result<(), String> {
+    let group_id = GroupId::from_opaque(
+        OpaqueId::from_wire_bytes(&conference_id.value)
+            .map_err(|_| "invalid conference id".to_owned())?,
+    );
+    let calls = host
+        .env
+        .store
+        .active_calls_for_group(&host.env.scope, &group_id, 2)
+        .map_err(|error| format!("call lookup: {error:?}"))?;
+    let [call] = calls.as_slice() else {
+        return Err("room does not have exactly one active call".to_owned());
+    };
+    let canonical_call_id = call.call_id.clone();
+    let recording_opaque = opaque("room-recording");
+    let recording_id = pb::OpaqueId {
+        value: recording_opaque.as_wire_bytes().to_vec(),
+    };
+    let mut recording = recording_client(host).await?;
+    let mut request = Request::new(pb::RecordingRequest {
+        scope: Some(pb_scope(&host.env.scope)),
+        recording_id: Some(recording_id.clone()),
+        call_id: Some(pb::OpaqueId {
+            value: canonical_call_id.as_opaque().as_wire_bytes().to_vec(),
+        }),
+        policy: Some(pb::RecordingPolicy {
+            require_all_participant_consent: false,
+            notify_all_participants: true,
+            retention_seconds: 3_600,
+            policy_reference: Some("local-room".to_owned()),
+        }),
+    });
+    attach_dev_credential(&mut request, &host.env);
+    let requested = recording
+        .request_recording(request)
+        .await
+        .map_err(|error| format!("request recording: {error}"))?
+        .into_inner();
+    let session = recording_session(requested.result, "recording request was denied")?;
+    let mut start = Request::new(pb::RecordingStartRequest {
+        scope: Some(pb_scope(&host.env.scope)),
+        recording_id: Some(recording_id),
+        expected_revision: session.revision,
+        idempotency_key: Some("room-recording-start".to_owned()),
+    });
+    attach_dev_credential(&mut start, &host.env);
+    let started = recording
+        .start_recording(start)
+        .await
+        .map_err(|error| format!("start recording: {error}"))?
+        .into_inner();
+    let session = recording_session(
+        started.result.map(start_result),
+        "recording start was denied",
+    )?;
+    edge.recorder.begin(
+        host.env.scope.clone(),
+        RecordingId::from_opaque(recording_opaque),
+        canonical_call_id,
+        session.revision,
+        session.expires_at_unix_ms,
+    )?;
+    println!(
+        "UCR_ROOM_RECORDING_STATE=active revision={}",
+        session.revision
+    );
     Ok(())
+}
+
+fn start_result(
+    result: pb::recording_start_response::Result,
+) -> pb::recording_request_response::Result {
+    match result {
+        pb::recording_start_response::Result::Recording(recording) => {
+            pb::recording_request_response::Result::Recording(recording)
+        }
+        pb::recording_start_response::Result::Error(error) => {
+            pb::recording_request_response::Result::Error(error)
+        }
+    }
+}
+
+fn recording_session(
+    result: Option<pb::recording_request_response::Result>,
+    empty: &str,
+) -> Result<pb::RecordingSession, String> {
+    match result {
+        Some(pb::recording_request_response::Result::Recording(session)) => Ok(session),
+        Some(pb::recording_request_response::Result::Error(error)) => {
+            let code = pb::ErrorCode::try_from(error.code)
+                .map_or_else(|_| error.code.to_string(), |code| format!("{code:?}"));
+            Err(format!("{empty}: {code}"))
+        }
+        None => Err(empty.to_owned()),
+    }
 }
 
 struct ParticipantIdentity {
@@ -603,6 +776,15 @@ fn conference_id(host: &RoomHost) -> Result<pb::OpaqueId, String> {
 
 fn integration_id() -> pb::OpaqueId {
     pb_id("dev-service-principal")
+}
+
+async fn recording_client(
+    host: &RoomHost,
+) -> Result<pb::recording_service_client::RecordingServiceClient<tonic::transport::Channel>, String>
+{
+    pb::recording_service_client::RecordingServiceClient::connect(host.grpc.clone())
+        .await
+        .map_err(|error| format!("recording service: {error}"))
 }
 
 async fn conference_client(
