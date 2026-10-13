@@ -24,8 +24,8 @@ use ucr_core::{
     PrincipalIdentityBindingStore, TrustedSigningKeyStore, UniversalConferenceStore,
 };
 use ucr_model::{
-    CallParticipantState, DeviceId, DeviceLifecycleState, GroupId, IntegrationId, OpaqueId,
-    RecordingId,
+    CallParticipantState, ConferenceParticipantRole, DeviceId, DeviceLifecycleState, GroupId,
+    IntegrationId, OpaqueId, RecordingId,
 };
 use ucr_protocol::{ALGORITHM_VERSION, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID};
 
@@ -39,8 +39,9 @@ struct RoomHost {
     env: Arc<DevEnvironment>,
     grpc: String,
     state: Mutex<RoomState>,
-    /// Serializes the Waiting → Live transition so a second join cannot
-    /// request Waiting after the conference is already Live.
+    /// Serializes conference creation and the Waiting → Live transition.
+    /// Two creators would mint different schedules and conflict, and a second
+    /// join must not request Waiting after the conference is already Live.
     open_gate: AsyncMutex<()>,
     edge: Option<Arc<super::room_edge::RoomEdge>>,
 }
@@ -55,6 +56,8 @@ struct RoomState {
 struct ReserveRequest {
     display_name: String,
     role: String,
+    #[serde(default)]
+    external_user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +116,12 @@ pub async fn spawn(
         }),
         open_gate: AsyncMutex::new(()),
         edge,
+    });
+    let prewarm_host = Arc::clone(&host);
+    tokio::spawn(async move {
+        if let Err(error) = prewarm_when_ready(prewarm_host, grpc_bind).await {
+            eprintln!("ucr room prewarm: {error}");
+        }
     });
     tokio::spawn(async move {
         loop {
@@ -212,19 +221,21 @@ async fn reserve(host: &RoomHost, body: &[u8]) -> Result<Vec<u8>, String> {
         _ => return Err("role must be speaker or attendee".to_owned()),
     };
     let conference_id = ensure_conference(host).await?;
-    let external_user_id = random_external_id()?;
+    let external_user_id = if let Some(existing) = request
+        .external_user_id
+        .as_deref()
+        .filter(|value| reusable_external_id(value))
+    {
+        if let Some(identity) = returning_human(host, &conference_id, existing, role)? {
+            return reserve_body(host, existing, &identity, &request.display_name);
+        }
+        random_external_id()?
+    } else {
+        random_external_id()?
+    };
     ensure_human(host, &conference_id, external_user_id.as_bytes(), role).await?;
     let identity = participant_identity(host, &conference_id, external_user_id.as_bytes())?;
-    serde_json::to_vec(&serde_json::json!({
-        "ok": true,
-        "externalUserId": external_user_id,
-        "tenantId": wire_text(host.env.scope.tenant_id.as_opaque()),
-        "namespaceId": host.env.scope.namespace_id.as_ref().map(|value| wire_text(value.as_opaque())),
-        "participantId": identity.participant_id,
-        "deviceId": identity.device_id,
-        "displayName": request.display_name,
-    }))
-    .map_err(|error| format!("encode reserve response: {error}"))
+    reserve_body(host, &external_user_id, &identity, &request.display_name)
 }
 
 async fn trust(host: &RoomHost, body: &[u8]) -> Result<Vec<u8>, String> {
@@ -366,6 +377,7 @@ async fn join(host: &Arc<RoomHost>, body: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 async fn ensure_conference(host: &RoomHost) -> Result<pb::OpaqueId, String> {
+    let _gate = host.open_gate.lock().await;
     if let Ok(existing) = conference_id(host) {
         return Ok(existing);
     }
@@ -475,7 +487,28 @@ async fn ensure_human(
     Ok(())
 }
 
+async fn prepare_group(host: &RoomHost, conference_id: &pb::OpaqueId) -> Result<(), String> {
+    let status = request_runtime(host, conference_id).await?;
+    if status.group_ready {
+        Ok(())
+    } else {
+        Err("conference group is not ready".to_owned())
+    }
+}
+
 async fn prepare_runtime(host: &RoomHost, conference_id: &pb::OpaqueId) -> Result<(), String> {
+    let status = request_runtime(host, conference_id).await?;
+    if status.group_ready && status.call_ready {
+        Ok(())
+    } else {
+        Err("conference runtime is not ready for a call".to_owned())
+    }
+}
+
+async fn request_runtime(
+    host: &RoomHost,
+    conference_id: &pb::OpaqueId,
+) -> Result<pb::UniversalConferenceRuntimeStatus, String> {
     let mut conference = conference_client(host).await?;
     let mut prepare = Request::new(pb::UniversalPrepareConferenceRuntimeRequest {
         scope: Some(pb_scope(&host.env.scope)),
@@ -490,13 +523,32 @@ async fn prepare_runtime(host: &RoomHost, conference_id: &pb::OpaqueId) -> Resul
         .map_err(|error| format!("prepare runtime: {error}"))?
         .into_inner();
     match runtime.result {
-        Some(pb::universal_prepare_conference_runtime_response::Result::Runtime(status))
-            if status.group_ready && status.call_ready =>
-        {
-            Ok(())
+        Some(pb::universal_prepare_conference_runtime_response::Result::Runtime(status)) => {
+            Ok(status)
         }
-        _ => Err("conference runtime is not ready for a call".to_owned()),
+        _ => Err("conference runtime preparation was denied".to_owned()),
     }
+}
+
+async fn prewarm_when_ready(host: Arc<RoomHost>, grpc_bind: SocketAddr) -> Result<(), String> {
+    for _ in 0..100 {
+        if TcpStream::connect(grpc_bind).await.is_ok() {
+            let conference_id = ensure_conference(&host).await?;
+            prepare_group(&host, &conference_id).await?;
+            if open_live(&host, &conference_id).await? && host.edge.is_some() {
+                let watcher = Arc::clone(&host);
+                tokio::spawn(async move {
+                    if let Err(error) = watch_room_recording(watcher).await {
+                        eprintln!("ucr room recording: {error}");
+                    }
+                });
+            }
+            println!("UCR_ROOM_PREWARM=ready");
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Err("development API did not accept a room prewarm connection".to_owned())
 }
 
 async fn open_live(host: &RoomHost, conference_id: &pb::OpaqueId) -> Result<bool, String> {
@@ -763,6 +815,77 @@ fn participant_identity(
         participant_id: wire_text(profile.participant.principal_id.as_opaque()),
         device_id: wire_text(device.device_id.as_opaque()),
     })
+}
+
+fn returning_human(
+    host: &RoomHost,
+    conference_id: &pb::OpaqueId,
+    external_user_id: &str,
+    role: pb::ConferenceParticipantRole,
+) -> Result<Option<ParticipantIdentity>, String> {
+    let conference = GroupId::from_opaque(
+        OpaqueId::from_wire_bytes(&conference_id.value)
+            .map_err(|_| "invalid conference id".to_owned())?,
+    );
+    let integration_id = IntegrationId::from_opaque(opaque("dev-service-principal"));
+    let Some(profile) = host
+        .env
+        .store
+        .universal_conference_participant_for_external(
+            &host.env.scope,
+            &conference,
+            &integration_id,
+            external_user_id.as_bytes(),
+        )
+        .map_err(|error| format!("participant lookup: {error:?}"))?
+    else {
+        return Ok(None);
+    };
+    if !profile.active || !roles_match(role, profile.role) {
+        return Ok(None);
+    }
+    match participant_identity(host, conference_id, external_user_id.as_bytes()) {
+        Ok(identity) => Ok(Some(identity)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn roles_match(
+    requested: pb::ConferenceParticipantRole,
+    stored: ConferenceParticipantRole,
+) -> bool {
+    matches!(
+        (requested, stored),
+        (
+            pb::ConferenceParticipantRole::Speaker,
+            ConferenceParticipantRole::Speaker
+        ) | (
+            pb::ConferenceParticipantRole::Attendee,
+            ConferenceParticipantRole::Attendee
+        )
+    )
+}
+
+fn reusable_external_id(value: &str) -> bool {
+    (8..64).contains(&value.len()) && value.starts_with("user-") && identity_safe(value) == value
+}
+
+fn reserve_body(
+    host: &RoomHost,
+    external_user_id: &str,
+    identity: &ParticipantIdentity,
+    display_name: &str,
+) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&serde_json::json!({
+        "ok": true,
+        "externalUserId": external_user_id,
+        "tenantId": wire_text(host.env.scope.tenant_id.as_opaque()),
+        "namespaceId": host.env.scope.namespace_id.as_ref().map(|value| wire_text(value.as_opaque())),
+        "participantId": identity.participant_id,
+        "deviceId": identity.device_id,
+        "displayName": display_name,
+    }))
+    .map_err(|error| format!("encode reserve response: {error}"))
 }
 
 fn conference_id(host: &RoomHost) -> Result<pb::OpaqueId, String> {
