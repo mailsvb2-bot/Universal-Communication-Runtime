@@ -1012,6 +1012,87 @@ mod tests {
     }
 
     #[test]
+    fn first_party_call_http_envelopes_match_the_single_browser_contract() {
+        let binding = json!({
+            "tenantId": "tenant-one",
+            "namespaceId": null,
+            "participantId": "identity-one",
+            "deviceId": "device-one"
+        });
+        let start = json!({
+            "binding": binding.clone(),
+            "intent": {
+                "peerIdentityId": "identity-two",
+                "media": "video",
+                "idempotencyKey": "first-call-42"
+            }
+        });
+        let parsed: StartRequest = parse(&serde_json::to_vec(&start).unwrap()).unwrap();
+        assert_eq!(parsed.intent.peer_identity_id, "identity-two");
+        assert_eq!(parsed.intent.media, "video");
+        assert_eq!(parsed.intent.idempotency_key, "first-call-42");
+        assert_eq!(parsed.binding.device, "device-one");
+        assert!(
+            parse::<StartRequest>(&serde_json::to_vec(&json!({
+                "binding": binding.clone(),
+                "intent": {
+                    "peerIdentityId": "identity-two",
+                    "media": "video",
+                    "idempotencyKey": "first-call-42",
+                    "joinFragment": "#forged"
+                }
+            })).unwrap()).is_err(),
+            "Call start must not accept browser-supplied Join material"
+        );
+
+        let get = json!({"binding": binding.clone(), "callId": "fp-v-first-call-42"});
+        let parsed: GetRequest = parse(&serde_json::to_vec(&get).unwrap()).unwrap();
+        assert_eq!(parsed.call_id, "fp-v-first-call-42");
+        let signal = json!({
+            "binding": binding.clone(),
+            "callId": "fp-v-first-call-42",
+            "expectedRevision": 7,
+            "action": "accept"
+        });
+        let parsed: SignalRequest = parse(&serde_json::to_vec(&signal).unwrap()).unwrap();
+        assert_eq!(parsed.expected_revision, 7);
+        assert_eq!(parsed.action, "accept");
+        assert!(
+            parse::<SignalRequest>(&serde_json::to_vec(&json!({
+                "binding": binding.clone(),
+                "callId": "fp-v-first-call-42",
+                "expectedRevision": -1,
+                "action": "hangup"
+            })).unwrap()).is_err(),
+            "CAS revisions must be unsigned canonical revision numbers"
+        );
+        let join = json!({
+            "binding": binding.clone(),
+            "callId": "fp-v-first-call-42",
+            "expectedRevision": 8
+        });
+        let parsed: JoinRequest = parse(&serde_json::to_vec(&join).unwrap()).unwrap();
+        assert_eq!(parsed.call_id, "fp-v-first-call-42");
+        assert_eq!(parsed.expected_revision, 8);
+        assert!(
+            parse::<JoinRequest>(&serde_json::to_vec(&json!({
+                "binding": binding.clone(),
+                "callId": "fp-v-first-call-42"
+            })).unwrap()).is_err(),
+            "Join must not bypass the accepted Call's revision"
+        );
+        assert!(
+            parse::<JoinRequest>(&serde_json::to_vec(&json!({
+                "binding": binding,
+                "callId": "fp-v-first-call-42",
+                "expectedRevision": 8,
+                "deviceJoin": true
+            })).unwrap()).is_err(),
+            "Device-only Join cannot be smuggled through accepted-Call admission"
+        );
+    }
+
+    #[test]
     fn challenge_signature_proof_is_domain_separated_and_ordered() {
         let proof = encoded_proof(
             "ucr-first-party-device-login.v1",
