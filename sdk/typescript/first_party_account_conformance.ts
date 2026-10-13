@@ -49,7 +49,9 @@ function transport(){
       return reply({tenantId:"public-self-service",namespaceId:null});
     }
     if(path==="/v1/first-party/session"){
-      return session?reply(session):reply({error:"unauthorized"},401);
+      const live=session && accounts.get(session.participantId)?.devices.get(session.deviceId);
+      return session && live && !live.revoked
+        ? reply(session) : reply({error:"unauthorized"},401);
     }
     const data=JSON.parse(String(init?.body));
     assert.equal((init?.headers as Record<string,string>)["X-UCR-First-Party-Request"],"v1");
