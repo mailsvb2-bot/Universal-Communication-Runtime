@@ -36,7 +36,15 @@ small{color:#9aaaca;line-height:1.5;display:block}
 <section aria-label="Учётная запись">
   <h2>Моё устройство</h2>
   <p id="who" class="identity">Проверка независимой авторизации…</p>
-  <button type="button" id="retry" class="secondary">Повторить проверку входа</button>
+  <form id="device-login" aria-label="Вход с существующим защищённым устройством">
+    <input id="login-tenant" aria-label="Tenant ID" maxlength="120" placeholder="Tenant ID" required>
+    <input id="login-namespace" aria-label="Namespace ID" maxlength="120" placeholder="Namespace ID (необязательно)">
+    <input id="login-identity" aria-label="Мой Identity ID" maxlength="120" placeholder="Мой Identity ID" required>
+    <input id="login-device" aria-label="Мой Device ID" maxlength="120" placeholder="Мой Device ID" required>
+    <button type="submit">Войти с доверенного устройства</button>
+  </form>
+  <small>Вход возможен только с ранее зарегистрированным Device и его сохранённым ключом. Новый Device требует отдельного подтверждения или восстановления — идентификатор сам по себе не даёт доступа.</small>
+  <div class="actions"><button type="button" id="retry" class="secondary">Повторить проверку входа</button></div>
 </section>
 <section>
   <h2>Контакты</h2>
