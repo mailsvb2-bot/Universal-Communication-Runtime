@@ -97,7 +97,7 @@ impl SqliteLocalStore {
             scope: scope.clone(),
             identity_id: identity_id.clone(),
             ownership: IdentityOwnership::UcrNative,
-            evidence: IdentityEvidence::DeviceVerified,
+            evidence: IdentityEvidence::SelfAsserted,
             expires_at_unix_ms: None,
         };
         validate_identity_record(&identity).map_err(|_| DurableStoreError::InvalidRecord)?;
@@ -116,7 +116,7 @@ impl SqliteLocalStore {
         let ns = namespace_storage_key(scope);
         tx.execute(
             "INSERT INTO identities (tenant_id,namespace_present,namespace_id,identity_id,ownership,evidence,expires_at_unix_ms)
-             VALUES (?1,?2,?3,?4,'ucr_native','device_verified',NULL)",
+             VALUES (?1,?2,?3,?4,'ucr_native','self_asserted',NULL)",
             params![scope.tenant_id.as_opaque().as_str(),ns.present,ns.value,identity_id.as_opaque().as_str()],
         ).map_err(|e|map_sqlite_error(&e))?;
         // Exactly one Person principal per self-service Identity; use a scoped
