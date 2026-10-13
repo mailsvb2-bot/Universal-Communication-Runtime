@@ -16,10 +16,11 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, transport::Server};
 use ucr_api_grpc::{
     GrpcAttachmentService, GrpcCallService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
-    GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
-    GrpcUniversalConferenceService, RealtimeWebRtcDependencies, attach_service_credential,
-    attachment_service_server, call_service_server, device_service_server, event_service_server,
-    group_service_server, integration_service_server, pb, realtime_service_server,
+    GrpcIntegrationService, GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService,
+    GrpcSyncService, GrpcUniversalConferenceService, RealtimeValidatedMediaObserver,
+    RealtimeWebRtcDependencies, attach_service_credential, attachment_service_server,
+    call_service_server, device_service_server, event_service_server, group_service_server,
+    integration_service_server, pb, realtime_service_server, recording_service_server,
     store_forward_service_server, sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
@@ -39,9 +40,11 @@ use ucr_model::{
 use ucr_protocol::{RUNTIME_PERMISSION_IDS, attachment_content_id};
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_storage_sqlite::SqliteLocalStore;
+use ucr_webrtc::WebRtcSessionConfigFactory;
 
 mod live_media;
 mod room;
+mod room_edge;
 
 pub const DEFAULT_DEV_BIND: &str = "127.0.0.1:50051";
 pub const DEFAULT_ROOM_BIND: &str = "127.0.0.1:43123";
@@ -504,8 +507,15 @@ impl DevEnvironment {
         grpc_bind: SocketAddr,
         room_bind: SocketAddr,
     ) -> Result<(), String> {
-        room::spawn(Arc::clone(&self), grpc_bind, room_bind).await?;
-        self.serve(grpc_bind).await
+        let edge = Arc::new(room_edge::RoomEdge::start().await?);
+        room::spawn(
+            Arc::clone(&self),
+            grpc_bind,
+            room_bind,
+            Some(Arc::clone(&edge)),
+        )
+        .await?;
+        self.serve_with(grpc_bind, Some(edge)).await
     }
 
     fn dev_realtime_service<C>(
@@ -537,12 +547,17 @@ impl DevEnvironment {
         join_issuer: Arc<JoinTokenIssuer>,
         registry: Arc<RealtimeSessionRegistry>,
         conference_state: Arc<ConferenceRuntimeState>,
+        edge: Option<&room_edge::RoomEdge>,
     ) -> Result<GrpcRealtimeService<C, SqliteLocalStore, SqliteLocalStore>, String>
     where
         C: ucr_core::ServiceQuotaClock + 'static,
     {
-        let (webrtc, provider, ingress) = live_media::start()?;
-        let service = Self::dev_realtime_service(
+        let config = edge.map_or_else(
+            || Arc::new(WebRtcSessionConfigFactory::default()),
+            room_edge::RoomEdge::config,
+        );
+        let (webrtc, provider, ingress) = live_media::start(config)?;
+        let mut service = Self::dev_realtime_service(
             clock,
             authorization,
             store,
@@ -551,24 +566,16 @@ impl DevEnvironment {
             conference_state,
             webrtc,
         );
+        if let Some(edge) = edge {
+            let recorder = Arc::clone(&edge.recorder);
+            let observer: Arc<dyn RealtimeValidatedMediaObserver> = recorder;
+            service = service.with_validated_media_observer(observer);
+        }
         live_media::spawn_bridge(ingress, provider, registry, service.clone());
         Ok(service)
     }
 
-    /// Starts the public loopback gRPC dev API on the requested loopback address.
-    ///
-    /// # Errors
-    /// Non-loopback binds and listener/server failures fail closed.
-    pub async fn serve(self: Arc<Self>, bind: SocketAddr) -> Result<(), String> {
-        if !bind.ip().is_loopback() {
-            return Err("ucr dev may bind only to loopback addresses".to_owned());
-        }
-        let listener = TcpListener::bind(bind)
-            .await
-            .map_err(|error| format!("bind dev API: {error}"))?;
-        let address = listener
-            .local_addr()
-            .map_err(|error| format!("resolve dev API address: {error}"))?;
+    fn announce_ready(&self, address: SocketAddr) {
         println!("UCR_DEV_READY endpoint=http://{address}");
         println!(
             "UCR_DEV_TENANT={}",
@@ -585,7 +592,31 @@ impl DevEnvironment {
         println!(
             "UCR_DEV_MODE=development-only auth=enabled storage=sqlite-ephemeral loopback=true"
         );
+    }
 
+    /// Starts the public loopback gRPC dev API on the requested loopback address.
+    ///
+    /// # Errors
+    /// Non-loopback binds and listener/server failures fail closed.
+    pub async fn serve(self: Arc<Self>, bind: SocketAddr) -> Result<(), String> {
+        self.serve_with(bind, None).await
+    }
+
+    async fn serve_with(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        edge: Option<Arc<room_edge::RoomEdge>>,
+    ) -> Result<(), String> {
+        if !bind.ip().is_loopback() {
+            return Err("ucr dev may bind only to loopback addresses".to_owned());
+        }
+        let listener = TcpListener::bind(bind)
+            .await
+            .map_err(|error| format!("bind dev API: {error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("resolve dev API address: {error}"))?;
+        self.announce_ready(address);
         let incoming = TcpListenerStream::new(listener);
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
@@ -632,15 +663,21 @@ impl DevEnvironment {
                 Arc::clone(&authorization),
                 Arc::clone(&store),
             )))
-            .add_service(universal_conference_service_server(
-                GrpcUniversalConferenceService::with_state_and_join_issuer(
-                    Arc::clone(&clock),
-                    Arc::clone(&authorization),
-                    Arc::clone(&store),
-                    Arc::clone(&conference_state),
-                    Arc::clone(&join_issuer),
-                ),
-            ))
+            .add_service(universal_conference_service_server(dev_conference_service(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                Arc::clone(&conference_state),
+                Arc::clone(&join_issuer),
+                edge.as_deref(),
+            )))
+            .add_service(recording_service_server(GrpcRecordingService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                Arc::clone(&join_issuer),
+                edge.is_some(),
+            )))
             .add_service(realtime_service_server(Self::dev_live_realtime(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
@@ -648,6 +685,7 @@ impl DevEnvironment {
                 join_issuer,
                 realtime_registry,
                 conference_state,
+                edge.as_deref(),
             )?))
             .add_service(store_forward_service_server(GrpcStoreForwardService::new(
                 clock,
@@ -680,6 +718,35 @@ pub struct DevDiagnostics {
     pub storage_health: String,
     pub transport_health: String,
     pub debug_event_count: usize,
+}
+
+fn dev_conference_service(
+    clock: Arc<SystemServiceQuotaClock>,
+    authorization: Arc<SqliteLocalStore>,
+    store: Arc<SqliteLocalStore>,
+    conference_state: Arc<ConferenceRuntimeState>,
+    join_issuer: Arc<JoinTokenIssuer>,
+    edge: Option<&room_edge::RoomEdge>,
+) -> GrpcUniversalConferenceService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore> {
+    match edge {
+        Some(edge) => {
+            GrpcUniversalConferenceService::with_state_join_issuer_and_runtime_capabilities(
+                clock,
+                authorization,
+                store,
+                conference_state,
+                join_issuer,
+                edge.capabilities(),
+            )
+        }
+        None => GrpcUniversalConferenceService::with_state_and_join_issuer(
+            clock,
+            authorization,
+            store,
+            conference_state,
+            join_issuer,
+        ),
+    }
 }
 
 fn provision_dev_service_account(
