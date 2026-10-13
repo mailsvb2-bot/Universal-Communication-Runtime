@@ -932,6 +932,24 @@ impl RealtimeSessionRegistry {
         call_id: &CallId,
         now_unix_ms: i64,
     ) -> Result<usize, RealtimeRegistryError> {
+        Ok(self
+            .connected_call_participants_at(scope, call_id, now_unix_ms)?
+            .len())
+    }
+
+    /// Participants whose downlink is still open on one canonical Call.
+    ///
+    /// Accepted membership outlives a closed tab. Receive rosters use this set so a
+    /// subscriber is not pinned to someone who is no longer in the room.
+    ///
+    /// # Errors
+    /// Fails when the bounded registry state is unavailable.
+    pub fn connected_call_participants_at(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        now_unix_ms: i64,
+    ) -> Result<std::collections::BTreeSet<PrincipalId>, RealtimeRegistryError> {
         let mut entries = self
             .entries
             .lock()
@@ -946,7 +964,7 @@ impl RealtimeSessionRegistry {
                 participants.insert(entry.claims.participant.principal_id.clone());
             }
         }
-        Ok(participants.len())
+        Ok(participants)
     }
 
     /// Returns whether the exact signed session is already active.

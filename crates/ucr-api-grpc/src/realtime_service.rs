@@ -865,6 +865,10 @@ where
                     let snapshot = conference_runtime(self)
                         .snapshot(&actor_for(&claims), &scope, &call_id)
                         .map_err(|error| map_conference_error(&error))?;
+                    let live = self
+                        .registry
+                        .connected_call_participants_at(&scope, &call_id, now)
+                        .map_err(map_registry_error)?;
                     Ok(pb::RealtimeReceiveRoster {
                         call_revision: snapshot.call.revision,
                         accepted_sources: snapshot
@@ -875,6 +879,7 @@ where
                                 participant.principal != claims.participant
                                     && participant.state == CallParticipantState::Accepted
                                     && participant.left_revision.is_none()
+                                    && live.contains(&participant.principal.principal_id)
                             })
                             .map(|participant| pb_principal_ref(&participant.principal))
                             .collect(),

@@ -116,7 +116,9 @@ Open <http://127.0.0.1:43124/room> in two browser windows, enter a name, and cho
 Signing seeds stay in the browser. The room API on `127.0.0.1:43123` stores only public keys.
 `ucr dev --room` prints the exact `UCR_ROOM_API` value for the address given to `--room-bind`.
 The lobby preloads the endpoint runtime while the name is typed and reuses this browser's
-device key for the same role until the development process restarts. The conference group is
+device key for the same name and role until the development process restarts. A second
+window that is already in the room, or a different name, gets its own device so it does
+not take over the first participant's media session. The conference group is
 created when the room server starts, and the conference page joins itself after the signed
 grant. Camera permission is requested from the lobby click, because the next page no longer
 has that gesture. A second participant refreshes the encrypted epoch on the already open
