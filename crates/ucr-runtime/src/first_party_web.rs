@@ -144,6 +144,8 @@ struct Session {
     token: String,
     binding: Binding,
     subject: ScopedPrincipal,
+    signer_key_id: String,
+    signer_public_key: [u8; 32],
     until: Instant,
 }
 
@@ -427,6 +429,8 @@ fn issue_session(
     state: &State,
     binding: Binding,
     subject: ScopedPrincipal,
+    signer_key_id: String,
+    signer_public_key: [u8; 32],
 ) -> Result<(Value, String), StatusCode> {
     let token = nonce()?;
     let mut sessions = state
@@ -441,6 +445,8 @@ fn issue_session(
         token: token.clone(),
         binding: binding.clone(),
         subject,
+        signer_key_id,
+        signer_public_key,
         until: Instant::now() + SESSION_TTL,
     });
     let cookie =
@@ -486,6 +492,10 @@ fn authenticated(state: &State, request: &Request<Incoming>) -> Result<Session, 
     };
     let live_subject = subject_for(state, &session.binding)?;
     if live_subject != session.subject {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let (current_id, current_key) = trusted_key(state, &session.binding)?;
+    if session.signer_key_id != current_id || session.signer_public_key != current_key {
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(session)
@@ -775,16 +785,21 @@ async fn dispatch(
         }
         return Err(StatusCode::NOT_FOUND);
     }
-    let mut body = request
-        .into_body()
-        .collect()
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?
-        .to_bytes();
-    if body.len() > MAX_BODY {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    // Bound the stream before aggregating DATA frames. A Content-Length check
+    // or collect().await would permit unbounded memory growth from chunked POST.
+    let mut incoming = request.into_body();
+    let mut body = Vec::with_capacity(1024);
+    while let Some(frame) = incoming.frame().await {
+        let frame = frame.map_err(|_| StatusCode::BAD_REQUEST)?;
+        if let Some(data) = frame.data_ref() {
+            if data.len() > MAX_BODY.saturating_sub(body.len()) {
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+            body.extend_from_slice(data);
+        }
     }
-    // Reject duplicate JSON keys and extraneous fields via typed serde decoding.
+    // Typed decoding rejects extraneous fields; account/scope is verified against
+    // the independent server session on every route.
     let response = match path {
         "/v1/first-party/login/challenge" => {
             let binding: Binding = parse(&body)?;
@@ -797,7 +812,7 @@ async fn dispatch(
             let proof: LoginProof = parse(&body)?;
             let pending = consume(state, &proof.binding, &proof.challenge_id, "login")?;
             let subject = subject_for(state, &proof.binding)?;
-            let (_, public_key) = trusted_key(state, &proof.binding)?;
+            let (key_id, public_key) = trusted_key(state, &proof.binding)?;
             let signed = encoded_proof(
                 "ucr-first-party-device-login.v1",
                 json!([
@@ -810,7 +825,8 @@ async fn dispatch(
                 ]),
             )?;
             verify_ed25519(public_key, &signed, &proof.signature_base64_url)?;
-            let (value, cookie) = issue_session(state, proof.binding, subject)?;
+            let (value, cookie) =
+                issue_session(state, proof.binding, subject, key_id, public_key)?;
             return Ok((value, Some(cookie)));
         }
         "/v1/first-party/device/inspect" => {
