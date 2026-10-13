@@ -4117,8 +4117,8 @@ version = "0.0.1"
 dependencies = [
  "base64",
  "bytes",
- "ed25519-dalek",
- "getrandom",
+ "ed25519-dalek 3.0.0",
+ "getrandom 0.4.3",
  "http-body-util",
  "hyper",
  "hyper-util",
