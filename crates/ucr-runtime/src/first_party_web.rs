@@ -92,7 +92,7 @@ struct BoundRequest {
     binding: Binding,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AccountFinish {
     binding: Binding,
@@ -915,7 +915,7 @@ fn recovery_verifier(secret: &str) -> Result<[u8; 32], StatusCode> {
         return Err(StatusCode::FORBIDDEN);
     }
     let mut hasher = Sha256::new();
-    hasher.update(b"ucr-first-party-recovery-verifier.v1\\0");
+    hasher.update(b"ucr-first-party-recovery-verifier.v1\0");
     hasher.update(bytes);
     Ok(hasher.finalize().into())
 }
