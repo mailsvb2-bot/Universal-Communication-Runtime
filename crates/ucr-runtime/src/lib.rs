@@ -2342,7 +2342,7 @@ impl ProductionRuntime {
         bind: SocketAddr,
         config: RealtimeRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_realtime_inner(bind, None, config, None).await
+        Box::pin(self.serve_realtime_inner(bind, None, config, None)).await
     }
 
     /// Serves realtime plus a separately bound private operator/SFU placement API.
@@ -2355,8 +2355,7 @@ impl ProductionRuntime {
         operator_bind: SocketAddr,
         config: RealtimeRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_realtime_inner(bind, Some(operator_bind), config, None)
-            .await
+        Box::pin(self.serve_realtime_inner(bind, Some(operator_bind), config, None)).await
     }
 
     /// Serves realtime plus Universal Conference with verifier-only machine Bearer support.
@@ -2369,8 +2368,7 @@ impl ProductionRuntime {
         config: RealtimeRuntimeConfig,
         machine_bearer: MachineBearerRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_realtime_inner(bind, None, config, Some(machine_bearer))
-            .await
+        Box::pin(self.serve_realtime_inner(bind, None, config, Some(machine_bearer))).await
     }
 
     /// Serves realtime with machine Bearer support and a separately bound private operator/SFU
@@ -2385,7 +2383,7 @@ impl ProductionRuntime {
         config: RealtimeRuntimeConfig,
         machine_bearer: MachineBearerRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_realtime_inner(bind, Some(operator_bind), config, Some(machine_bearer))
+        Box::pin(self.serve_realtime_inner(bind, Some(operator_bind), config, Some(machine_bearer)))
             .await
     }
 
