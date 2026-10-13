@@ -322,6 +322,128 @@ export async function authenticateUcrFirstPartyDevice(
   return result;
 }
 
+/** Returns the server-owned shared self-service tenant. No client can mint a tenant. */
+export async function ucrFirstPartyBootstrap(options: UcrFirstPartyHttpOptions): Promise<{
+  tenantId:string; namespaceId:null
+}> {
+  const origin=validateOrigin(options.origin);
+  const http=options.fetchImpl ?? globalThis.fetch;
+  const response=await http(new URL("/v1/first-party/bootstrap",origin),{
+    method:"GET",credentials:"same-origin",redirect:"error",cache:"no-store",
+    referrerPolicy:"no-referrer",mode:"same-origin",
+    headers:{"Accept":REQUIRED_CONTENT_TYPE},
+  });
+  if(!response.ok || response.redirected)throw Error("self-service enrollment unavailable");
+  const data=await readBoundedJson(response);
+  if(!isObject(data))throw Error("invalid self-service scope");
+  exactKeys(data,["tenantId","namespaceId"]);
+  if(data.namespaceId!==null)throw Error("unsupported self-service namespace");
+  return {tenantId:requiredId(data.tenantId,"tenant"),namespaceId:null};
+}
+
+async function firstPartyAccountEnrollment(
+  vault: UcrCanonicalDeviceKeyVault,
+  options: UcrFirstPartyHttpOptions,
+  kind: "signup" | "recover",
+  recovery?: {identityId:string; recoveryCode:string},
+):Promise<{binding:UcrAuthenticatedFirstEntry;recoveryCode:string}> {
+  const origin=validateOrigin(options.origin);
+  const http=options.fetchImpl ?? globalThis.fetch;
+  const post=async(path:string,data:unknown):Promise<unknown>=>{
+    const body=JSON.stringify(data);
+    if(new TextEncoder().encode(body).length>MAX_REQUEST_BYTES)throw Error("enrollment request exceeds bound");
+    const response=await http(new URL(path,origin),{
+      method:"POST",credentials:"same-origin",redirect:"error",cache:"no-store",
+      referrerPolicy:"no-referrer",mode:"same-origin",
+      headers:{"Content-Type":REQUIRED_CONTENT_TYPE,
+        "Accept":REQUIRED_CONTENT_TYPE,"X-UCR-First-Party-Request":"v1"},
+      body,
+    });
+    if(response.redirected || (response.url && new URL(response.url).origin!==origin.origin)){
+      throw Error("self-service redirect forbidden");
+    }
+    if(!response.ok)throw Error("canonical account enrollment denied: HTTP "+response.status);
+    return readBoundedJson(response);
+  };
+  let binding:UcrAuthenticatedFirstEntry;
+  let challengeId:string,nonce:Uint8Array;
+  if(kind==="signup"){
+    const result=await post("/v1/first-party/signup/begin",{});
+    if(!isObject(result))throw Error("invalid registration challenge");
+    exactKeys(result,["binding","challengeId","challengeBytesBase64Url"]);
+    binding=parseBinding(result.binding);
+    challengeId=requiredId(result.challengeId,"signup challenge");
+    nonce=decodeBase64Url(result.challengeBytesBase64Url,32);
+  }else{
+    if(!recovery || !/^[A-Za-z0-9_-]{43}$/.test(recovery.recoveryCode)){
+      throw Error("256-bit recovery code required");
+    }
+    const scope=await ucrFirstPartyBootstrap(options);
+    // Recovery cannot reuse/reanimate a revoked Device identifier. Allocate
+    // a new canonical Device, independent of any old browser signing seed.
+    binding={...scope,participantId:requiredId(recovery.identityId,"recovery identity"),
+      deviceId:"fp-device-"+globalThis.crypto.randomUUID()};
+    const result=await post("/v1/first-party/recover/begin",binding);
+    if(!isObject(result))throw Error("invalid recovery challenge");
+    exactKeys(result,["challengeId","challengeBytesBase64Url"]);
+    challengeId=requiredId(result.challengeId,"recovery challenge");
+    nonce=decodeBase64Url(result.challengeBytesBase64Url,32);
+  }
+  const vaultScope:UcrDeviceVaultScope={
+    tenantId:binding.tenantId,namespaceId:binding.namespaceId,deviceId:binding.deviceId,
+  };
+  const signer=await vault.stageNew(vaultScope);
+  if(!(signer.publicKey instanceof Uint8Array)||signer.publicKey.length!==32){
+    throw Error("protected endpoint signer unavailable");
+  }
+  const keyId=requiredId(signer.keyId,"signing key");
+  const publicKeyBase64Url=encodeBase64Url(signer.publicKey);
+  const signed=new TextEncoder().encode(
+    (kind==="signup"?"ucr-first-party-signup.v1":"ucr-first-party-recover.v1")+"\u0000"+
+    JSON.stringify([
+      binding.tenantId,binding.namespaceId,binding.participantId,binding.deviceId,
+      keyId,publicKeyBase64Url,challengeId,encodeBase64Url(nonce),
+    ])
+  );
+  const signature=await vault.signChallenge(vaultScope,signed.slice());
+  if(!(signature instanceof Uint8Array)||signature.length!==64){
+    throw Error("new Device possession signature missing");
+  }
+  const verifying=await globalThis.crypto.subtle.importKey(
+    "raw",signer.publicKey as Uint8Array<ArrayBuffer>,{name:"Ed25519"},false,["verify"],
+  );
+  if(!await globalThis.crypto.subtle.verify(
+    "Ed25519",verifying,signature as Uint8Array<ArrayBuffer>,signed)){
+    throw Error("new signer cannot prove private-key possession");
+  }
+  const result=await post("/v1/first-party/"+kind+"/finish",{
+    binding,challengeId,keyId,publicKeyBase64Url,
+    signatureBase64Url:encodeBase64Url(signature),
+    ...(kind==="recover"?{recoveryCode:recovery?.recoveryCode}:{}),
+  });
+  if(!isObject(result))throw Error("account enrollment response missing");
+  exactKeys(result,["binding","recoveryCode"]);
+  const resolved=parseBinding(result.binding);
+  if(!sameBinding(resolved,binding))throw Error("server enrolled a different user/Device");
+  const next=decodeBase64Url(result.recoveryCode,32);
+  return {binding:resolved,recoveryCode:encodeBase64Url(next)};
+}
+
+/** Create a pseudonymous canonical Identity and its FIRST trusted Device. */
+export async function registerUcrFirstPartyUser(
+  vault:UcrCanonicalDeviceKeyVault,options:UcrFirstPartyHttpOptions,
+):Promise<{binding:UcrAuthenticatedFirstEntry;recoveryCode:string}>{
+  return firstPartyAccountEnrollment(vault,options,"signup");
+}
+
+/** Consume a user-held one-time recovery code to add a fresh trusted Device. */
+export async function recoverUcrFirstPartyDevice(
+  vault:UcrCanonicalDeviceKeyVault,options:UcrFirstPartyHttpOptions,
+  identityId:string,recoveryCode:string,
+):Promise<{binding:UcrAuthenticatedFirstEntry;recoveryCode:string}>{
+  return firstPartyAccountEnrollment(vault,options,"recover",{identityId,recoveryCode});
+}
+
 /**
  * Consumes existing first-party session cookies on SAME origin only. No OAuth
  * machine secrets are exposed to JS, and redirects are forbidden.
@@ -509,6 +631,38 @@ export function createUcrFirstPartyHttpHost(
         throw new Error("first-party Join issuer returned a foreign Call/Device");
       }
       return issued;
+    },
+    async listDevices() {
+      const auth=await session();
+      const data=await request("POST","/v1/first-party/device/list",{binding:auth});
+      if(!Array.isArray(data)||data.length>64)throw Error("invalid canonical Device list");
+      return data.map(row=>{
+        if(!isObject(row))throw Error("invalid Device record");
+        exactKeys(row,["deviceId","state"]);
+        const deviceId=requiredId(row.deviceId,"Device");
+        if(!["active","revoked","stale","reverificationRequired","expired"].includes(String(row.state))){
+          throw Error("invalid Device lifecycle");
+        }
+        return {deviceId,state:String(row.state)};
+      });
+    },
+    async revokeDevice(deviceId:string) {
+      const auth=await session();
+      const result=await request("POST","/v1/first-party/device/revoke",{
+        binding:auth,deviceId:requiredId(deviceId,"Device"),
+      });
+      if(!isObject(result)||result.revoked!==true)throw Error("Device revoke not confirmed");
+    },
+    async rotateRecoveryCode() {
+      const auth=await session();
+      const result=await request("POST","/v1/first-party/device/rotate-recovery",{binding:auth});
+      if(!isObject(result))throw Error("missing rotated recovery code");
+      return encodeBase64Url(decodeBase64Url(result.recoveryCode,32));
+    },
+    async logout() {
+      const auth=await session();
+      const result=await request("POST","/v1/first-party/logout",{binding:auth});
+      if(!isObject(result)||result.signedOut!==true)throw Error("canonical logout not confirmed");
     },
     async issueSignedDeviceJoin(_binding) {
       // This legacy transport-neutral hook is intentionally unavailable in
