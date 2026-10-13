@@ -635,8 +635,7 @@ mod tests {
 
     #[test]
     fn first_party_call_requires_current_trust_and_both_accepted_participants() {
-        let (store, session, alice, bob, alice_device, bob_device) =
-            first_party_call_fixture();
+        let (store, session, alice, bob, alice_device, bob_device) = first_party_call_fixture();
         let runtime = AuthorizedDurableRuntime::new(&store, &store);
         assert_eq!(
             runtime
@@ -693,17 +692,19 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-
     }
 
     #[test]
     fn revoked_device_cannot_observe_join_or_signal_existing_call() {
-        let (store, session, alice, bob, alice_device, bob_device) =
-            first_party_call_fixture();
+        let (store, session, alice, bob, alice_device, bob_device) = first_party_call_fixture();
         let runtime = AuthorizedDurableRuntime::new(&store, &store);
-        runtime.first_party_call_start(&alice, &alice_device, &session).unwrap();
+        runtime
+            .first_party_call_start(&alice, &alice_device, &session)
+            .unwrap();
         let accept = signal(&session, "first-party-accept", CallSignalKind::Accept);
-        runtime.first_party_call_signal(&bob, &bob_device, &accept).unwrap();
+        runtime
+            .first_party_call_signal(&bob, &bob_device, &accept)
+            .unwrap();
         store
             .revoke_device(
                 &scope(),
