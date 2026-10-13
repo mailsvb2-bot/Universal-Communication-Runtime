@@ -85,8 +85,7 @@ function sessionHost(overrides: {
       return reply(activeSession);
     }
     if (path === "/v1/first-party/device/inspect") {
-      assert.equal(body.tenantId, binding.tenantId);
-      assert.equal(body.participantId, binding.participantId);
+      assert.deepEqual(body, {binding}, "Rust BoundRequest requires exactly one binding field");
       return reply(trust);
     }
     if (path === "/v1/first-party/device/challenge") {
