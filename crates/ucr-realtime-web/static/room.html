@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#111827">
+<title>Комната UCR</title>
+<style>
+:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark;--bg:#0b1020;--card:#111827;--text:#f8fafc;--muted:#cbd5e1;--line:#334155;--accent:#f8fafc;--accent-text:#0f172a}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--text)}
+main{width:min(92vw,520px);padding:24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px}
+h1{margin:0 0 8px;font-size:1.7rem}
+p{color:var(--muted);line-height:1.45}
+label{display:block;margin:14px 0 6px;font-weight:650}
+input,select,button{width:100%;box-sizing:border-box;border-radius:12px;padding:12px 14px;font:inherit}
+input,select{background:#0f172a;color:var(--text);border:1px solid var(--line)}
+button{margin-top:16px;border:0;background:var(--accent);color:var(--accent-text);font-weight:750;cursor:pointer}
+button:disabled{opacity:.55;cursor:progress}
+.status{min-height:1.4em;margin-top:12px}
+</style>
+</head>
+<body>
+<main>
+  <section class="card">
+    <h1>Войти в эфир</h1>
+    <p>Локальная комната. Спикер публикует камеру и микрофон. Зритель только слушает и смотрит. Ключ устройства остаётся в этом браузере.</p>
+    <form id="enter">
+      <label for="name">Имя</label>
+      <input id="name" name="name" maxlength="40" autocomplete="nickname" required placeholder="Аня">
+      <label for="role">Роль</label>
+      <select id="role" name="role">
+        <option value="speaker">Спикер</option>
+        <option value="attendee">Зритель</option>
+      </select>
+      <button id="submit" type="submit">Подключиться</button>
+    </form>
+    <p class="status" id="status" role="status">Откройте эту страницу во втором окне, чтобы второй человек вошёл в ту же комнату.</p>
+  </section>
+</main>
+<script type="module">
+const status = document.querySelector("#status");
+const submit = document.querySelector("#submit");
+const api = `${location.protocol}//${location.hostname}:43123`;
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(bytes.length, offset + 0x8000)));
+  }
+  return btoa(binary);
+}
+
+async function post(path, payload) {
+  const response = await fetch(api + path, {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok) {
+    throw new Error(data.message || "Комната не ответила");
+  }
+  return data;
+}
+
+document.querySelector("#enter").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = document.querySelector("#name").value.trim();
+  const role = document.querySelector("#role").value;
+  if (!name) return;
+  submit.disabled = true;
+  try {
+    status.textContent = "Создаём устройство…";
+    const reserved = await post("/v1/room/reserve", {displayName: name, role});
+    const module = await import("./endpoint-media/reference_browser_media_installer.js");
+    const vault = module.createUcrBrowserProtectedDeviceVault();
+    const signer = await vault.stageNew({
+      tenantId: reserved.tenantId,
+      namespaceId: reserved.namespaceId,
+      deviceId: reserved.deviceId,
+    });
+    status.textContent = "Подтверждаем ключ устройства…";
+    await post("/v1/room/trust", {
+      externalUserId: reserved.externalUserId,
+      keyId: signer.keyId,
+      publicKeyBase64: bytesToBase64(signer.publicKey),
+    });
+    status.textContent = "Открываем комнату…";
+    const joined = await post("/v1/room/join", {externalUserId: reserved.externalUserId});
+    sessionStorage.setItem("ucrLocalRoom", "1");
+    sessionStorage.setItem("ucrRoomApi", api);
+    sessionStorage.setItem("ucrRoomUser", reserved.externalUserId);
+    if (!joined.joinFragment || !joined.joinFragment.startsWith("#ucr_join=")) {
+      throw new Error("Сервер не выдал подписанный вход");
+    }
+    location.assign("/" + joined.joinFragment);
+  } catch (error) {
+    submit.disabled = false;
+    status.textContent = error.message;
+  }
+});
+</script>
+</body>
+</html>

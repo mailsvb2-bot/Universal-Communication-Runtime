@@ -12,7 +12,10 @@ name = "ucr"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "time"] }
+base64 = "=0.22.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "=0.1.17", features = ["net"] }
 tonic = { version = "=0.14.6", features = ["transport"] }
 ucr-api-grpc = { path = "../ucr-api-grpc" }
@@ -21,7 +24,9 @@ ucr-conference = { path = "../ucr-conference" }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
 ucr-realtime = { path = "../ucr-realtime" }
+ucr-sfu = { path = "../ucr-sfu" }
 ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
+ucr-webrtc = { path = "../ucr-webrtc" }
 
 [lints]
 workspace = true
