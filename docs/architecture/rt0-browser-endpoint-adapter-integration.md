@@ -189,6 +189,14 @@ concurrent capture revocation, and measured full-HD quality and latency.
 
 The host must provide a concrete authenticated enrollment/provisioning endpoint before this can become a standalone user journey. No second cryptographic authority, shadow Device table, persistent telephone directory, server-retained signing seed, or database of phone numbers is introduced by this integration. The existing canonical Device/Trust/Identity persistence remains in use; this is **not** a stateless/no-data product claim.
 
+> **Integration status (PR #286).** This document contains the background
+> device-vault and media-authority design. For the shipped first-party route
+> and exact browser/server contracts, see
+> [rt0-single-branch-first-call-integration.md](rt0-single-branch-first-call-integration.md).
+> A Device-only signed Join is forbidden by the canonical first-party BFF.
+> Earlier #285 samples requiring that Join must not be treated as evidence of
+> working first-party calling.
+
 ## Browser-local protected Device signer (implemented, not user authentication)
 
 The reference browser now builds the endpoint-owned `UcrCanonicalDeviceKeyVault`
@@ -207,13 +215,13 @@ servers. The same local signer is restored after a page reload. Signer proof
 uses real Ed25519, and the short-lived seed passed to a preauthorized
 Rust/WASM media bridge is zeroed after use with a canonical trust recheck.
 
-The `createUcrFirstPartyCallEntry(host, vault)` coordinator is also exported:
-one click resumes an **independently authenticated** canonical user/Device,
-prepares and proves the Device signer **without a Call**, asks the canonical
-backend to issue its Device-bound signed Join fragment, and revalidates the
-same Device after grant issuance to catch concurrent revocation. A double
-click shares one pending operation. The coordinator is not a BFF or a new
-identity owner; it cannot issue a cryptographically trusted grant itself.
+The transport-neutral `createUcrFirstPartyCallEntry` remains a historical
+SDK seam, **not a first-party calling route**. It requests a Call-free Join,
+which the actual Rust BFF forbids. It is intentionally not exported by the
+reference browser bundle, and its first-party HTTP adapter always rejects the
+operation before transport. The only first-party user flow is
+`createUcrContactCallJourney`: contact selection, durable Call Start,
+recipient acceptance, and a fresh signed Join scoped to that accepted Call.
 
 **Limitations and release gates:** IndexedDB/WebCrypto are not a TPM,
 hardware-backed keystore, browser-origin compromise defense or cross-device
@@ -251,52 +259,60 @@ to live in the existing reference stores. Passing gRPC conformance does not
 prove two physical Device E2EE audio/video or TURN/NAT interoperability.
 
 
-## RT0 first-party browser admission (PR #285; incomplete without server)
+## RT0 canonical first-party BFF and browser admission (#286)
 
-A new first-party screen at /start, served by the existing realtime gateway,
-uses the pinned endpoint-media ESM bundle and the existing protected signer vault.
-The browser flow is session -> canonical Device inspection -> signer challenge
--> canonical approval -> signed Conference Join -> post-Join trust recheck ->
-navigation to the existing /client.html#ucr_join=... Conference client.
+The actual Rust BFF lives in `crates/ucr-runtime/src/first_party_web.rs`
+and shares the existing SQLite Identity, Device, Trust, Call, Conversation,
+and Conference Join owners. It binds only to a loopback address behind a
+separately provisioned HTTPS origin. The gateway serves `/start` and
+`/start.js` with the existing, single reference-browser ESM bundle.
+The authenticated first-party adapter is
+`sdk/typescript/src/first_party_browser_http.ts`; the user journey lives in
+`sdk/typescript/src/contact_call_journey.ts`.
 
-The first-party browser transport requires same-origin HTTPS or loopback and
-uses same-origin cookies only; it forbids HTTP redirects, external origin,
-referrer leaks, unexpected JSON, and unbounded responses. No Service Principal
-secret, private signing seed, MLS exporter or private group state may be sent
-to or retained by the backend.
+The correct order is: local existing Device signer -> independent signed
+login challenge -> HttpOnly Secure SameSite browser session -> canonical
+Device inspection -> private contact selection -> durable Call Start ->
+recipient-scoped incoming list -> recipient CAS acceptance -> two distinct
+fresh, Device-bound accepted-Call Joins -> MLS/E2EE media -> canonical hangup.
+User account or Device changes abort the browser coordinator.
 
-### Required independently authenticated first-party BFF routes
+The independently authenticated, existing trusted signer is **required
+before login**. The BFF's enrollment proof is possession verification of the
+already-canonically-trusted key; it **does not** create a new trusted Device,
+recover a lost private signer, or authorize one from a Join fragment.
 
-- GET /v1/first-party/session: identity-bound tenantId, namespaceId,
-  participantId, deviceId from a secure human login, not a Join fragment.
-- POST /v1/first-party/device/inspect: active/revoked state and trusted
-  signing key from existing canonical Device and TrustedSigningKey owners.
-- POST /v1/first-party/device/challenge: issue unpredictable 32..512-byte
-  server challenge bound to authenticated session, scope, Device, proposed
-  key and expiry; return challengeId and challengeBytesBase64Url.
-- POST /v1/first-party/device/approve: independently verify Ed25519 signature
-  of exactly that challenge, atomically consume it once, recheck human auth,
-  enforce Device ownership/authorization, and publish the canonical key.
-  Reply exactly {approved:true} only after durable canonical approval.
-- POST /v1/first-party/call/join: independently recheck active Device, matching
-  trusted signer, Call/Group admission and policy; use the existing canonical
-  Conference issuer for short-lived, signed, device-bound Join fragment.
-  Do not interpret URL possession as user authentication.
+### Exact HTTP surfaces
 
-The server MUST validate same-origin, CSRF custom header, HTTPS trust edge,
-bounded JSON, replay/expiry/conflict and concurrent enrollment. It must not
-introduce a separate Identity registry, phone list, or cryptographic authority.
-An ACTIVE Device with a missing signing-key descriptor must fail closed.
-The proposed signing key is never trusted based solely on the client claim.
+All POST routes require exact `Origin`, `Content-Type: application/json`,
+`X-UCR-First-Party-Request: v1`, bounded JSON and the same-origin secure
+cookie after login. All POST request structs reject unexpected fields.
 
-IMPORTANT: the first-party BFF and authenticated human session establishment
-are not yet provided by the UCR realtime gateway. Serving /start does not
-automatically log in or grant a protected call. Device recovery after restart,
-revocation, interoperable MLS agreement, trusted media source descriptors,
-real NAT/TURN transport and two-device audible/visible encrypted playback
-still require live independent validation. Do not close issue #274 or claim
-production readiness based on this UI, a mock peer or an HTTP 200 status.
+| Route | Request | Server decision |
+|---|---|---|
+| `POST /v1/first-party/login/challenge` | `{tenantId,namespaceId,participantId,deviceId}` | One-time scoped login challenge |
+| `POST /v1/first-party/login/verify` | `{binding,challengeId,signatureBase64Url}` | Current canonical Device signer proof and secured session |
+| `GET /v1/first-party/session` | Cookie | Independently authenticated Identity/Device |
+| `POST /v1/first-party/device/inspect` | `{binding}` | Current canonical Device/Trust, never a bare binding |
+| `POST /v1/first-party/device/challenge` | `{binding,keyId,publicKeyBase64Url}` | One-time proof of existing signer |
+| `POST /v1/first-party/device/approve` | `{binding,keyId,publicKeyBase64Url,challengeId,signatureBase64Url}` | Approved only for already-trusted key |
+| `POST /v1/first-party/call/start` | `{binding,intent:{peerIdentityId,media,idempotencyKey}}` | Persisted canonical direct Call |
+| `POST /v1/first-party/call/get` | `{binding,callId}` | Participant-scoped snapshot |
+| `POST /v1/first-party/call/incoming` | `{binding}` | Recipient-only pending Calls |
+| `POST /v1/first-party/call/signal` | `{binding,callId,expectedRevision,action}` | Durable CAS accept/reject/busy/cancel/hangup |
+| `POST /v1/first-party/call/join-accepted` | `{binding,callId,expectedRevision}` | Signed Join only after recipient acceptance |
+| `POST /v1/first-party/call/join` | Any Device-only request | Always forbidden; SDK refuses before HTTP |
 
+The `first_party_http_conformance.ts` and
+`first_party_two_device_http_conformance.ts` tests exercise these exact
+browser envelopes, independently bound simulated A/B sessions, encrypted
+contacts, retry/idempotency, acceptance, distinct Joins, conflict,
+termination, restart and revocation. They are **mock-backed contract tests**,
+not production claims. Rust local tests and GitHub CI verify server/request
+contract and build. Real HTTPS deployment, enrolled Devices, actual SFU,
+ICE/TURN/NAT, MLS encryption/decryption, persisted SQLite restart recovery,
+and two-physical-device audible/visible results remain release gates.
+See the single-branch integration document for the promotion policy.
 
 ### Domain-separated first-entry enrollment proof (RT0)
 
