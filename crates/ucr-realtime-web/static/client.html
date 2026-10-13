@@ -2099,6 +2099,32 @@ async function refreshLocalRoomEndpointAuthority(){
   localRoomAuthorityRefresh=run;
   try{await run;}finally{if(localRoomAuthorityRefresh===run)localRoomAuthorityRefresh=null;}
 }
+function resumeRoomAudio(audioContext){
+  if(!audioContext||audioContext.state==="closed")return;
+  // resume() stays pending forever when this document has no user gesture.
+  // Waiting here blocks the encrypted camera and microphone.
+  const attempt=()=>{
+    const pending=audioContext.resume();
+    if(pending&&typeof pending.catch==="function")pending.catch(()=>{});
+  };
+  attempt();
+  if(resumeRoomAudio.bound===audioContext)return;
+  resumeRoomAudio.bound=audioContext;
+  const unlock=()=>{
+    attempt();
+    if(audioContext.state==="running"){
+      window.removeEventListener("pointerdown",unlock,true);
+      window.removeEventListener("keydown",unlock,true);
+    }
+  };
+  window.addEventListener("pointerdown",unlock,true);
+  window.addEventListener("keydown",unlock,true);
+  setTimeout(()=>{
+    if(audioContext.state==="suspended"&&sessionActive&&sessionStorage.getItem("ucrLocalRoom")==="1"){
+      ui.status.textContent="Камера подключена. Нажмите в любое место страницы, чтобы включить звук.";
+    }
+  },800);
+}
 function installLocalRoomMediaHost(){
   if(sessionStorage.getItem("ucrLocalRoom")!=="1")return;
   localRoomMediaHost=true;
@@ -2174,7 +2200,7 @@ function installLocalRoomMediaHost(){
     if(bridgeInstalled)throw new Error("Canonical device trust changed before media start");
     const audioContext=window.ucrLocalRoomAudioContext||new AudioContext();
     window.ucrLocalRoomAudioContext=audioContext;
-    if(audioContext.state==="suspended")await audioContext.resume();
+    resumeRoomAudio(audioContext);
     const keyById=new Map(keys.map(key=>[key.key_id,endpointBase64ToBytes(key.public_key_base64)]));
     localRoomAuthorityFingerprint=endpointAuthorityFingerprint(context);
     return {
