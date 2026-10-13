@@ -948,6 +948,26 @@ mod tests {
     }
 
     #[test]
+    fn device_inspect_and_incoming_require_canonical_bound_request_envelope() {
+        let binding = json!({
+            "tenantId": "tenant-one",
+            "namespaceId": null,
+            "participantId": "identity-one",
+            "deviceId": "device-one"
+        });
+        let canonical = json!({"binding": binding.clone()});
+        let parsed: BoundRequest = parse(&serde_json::to_vec(&canonical).unwrap()).unwrap();
+        assert_eq!(parsed.binding.participant_id, "identity-one");
+
+        // An SDK mock that accepts the bare binding would lie about live BFF interoperability.
+        assert!(parse::<BoundRequest>(&serde_json::to_vec(&binding).unwrap()).is_err());
+        assert!(parse::<BoundRequest>(
+            &serde_json::to_vec(&json!({"binding": binding, "extra": true})).unwrap()
+        )
+        .is_err());
+    }
+
+    #[test]
     fn challenge_signature_proof_is_domain_separated_and_ordered() {
         let proof = encoded_proof(
             "ucr-first-party-device-login.v1",
