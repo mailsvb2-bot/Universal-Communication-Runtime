@@ -2584,9 +2584,18 @@ mod tests {
             .expect("navigate only after canonical media authorization");
         assert!(join < bound && bound < fragment && fragment < navigate);
         assert!(js.contains("if (fresh.state === \"active\") await beginMedia(fresh.callId)"));
+        // A public Device binding hint is not a login credential. It
+        // permits re-authentication only by proving possession of the
+        // canonical protected signer against the server after restart.
+        assert!(js.contains("const HINT_KEY = \"ucr.first-party.last-device.v1\""));
+        assert!(js.contains("tenantId:binding.tenantId,namespaceId:binding.namespaceId"));
+        assert!(js.contains("participantId:binding.participantId,deviceId:binding.deviceId"));
+        assert!(js.contains("localStorage.setItem(HINT_KEY,JSON.stringify(publicHint))"));
+        assert!(js.contains("localStorage.removeItem(HINT_KEY)"));
+        assert!(!js.contains("localStorage.setItem(HINT_KEY,JSON.stringify(binding))"));
+        assert!(!js.contains("localStorage.setItem(HINT_KEY,JSON.stringify(result))"));
         for forbidden in [
             "createUcrFirstPartyCallEntry",
-            "localStorage",
             "client_secret",
             "access_token",
             "Authorization: Bearer",
