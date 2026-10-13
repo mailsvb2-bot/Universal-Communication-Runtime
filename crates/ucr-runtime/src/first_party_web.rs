@@ -1042,7 +1042,7 @@ mod tests {
                         "idempotencyKey": "first-call-42",
                         "joinFragment": "#forged"
                     }
-                    }))
+                }))
                 .unwrap()
             )
             .is_err(),
@@ -1068,7 +1068,7 @@ mod tests {
                     "callId": "fp-v-first-call-42",
                     "expectedRevision": -1,
                     "action": "hangup"
-                    }))
+                }))
                 .unwrap()
             )
             .is_err(),
@@ -1087,7 +1087,7 @@ mod tests {
                 &serde_json::to_vec(&json!({
                     "binding": binding.clone(),
                     "callId": "fp-v-first-call-42"
-                    }))
+                }))
                 .unwrap()
             )
             .is_err(),
@@ -1100,7 +1100,7 @@ mod tests {
                     "callId": "fp-v-first-call-42",
                     "expectedRevision": 8,
                     "deviceJoin": true
-                    }))
+                }))
                 .unwrap()
             )
             .is_err(),
