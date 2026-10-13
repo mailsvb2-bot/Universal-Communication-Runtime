@@ -2,6 +2,8 @@ import {
   createUcrBrowserProtectedDeviceVault,
   createUcrFirstPartyHttpHost,
   authenticateUcrFirstPartyDevice,
+  registerUcrFirstPartyUser,
+  recoverUcrFirstPartyDevice,
   createUcrContactCallJourney,
 } from "/endpoint-media/reference_browser_media_installer.js";
 
@@ -26,6 +28,40 @@ function principalScope(user) {
 }
 
 function message(value) { status.textContent = value; }
+function showRecovery(code) {
+  const element = el("recovery-output");
+  element.hidden = false;
+  el("recovery-code").value = code;
+  message("Новый одноразовый код создан. Сохраните его отдельно: повторно он не показывается.");
+}
+async function updateDevices() {
+  const records = await host.listDevices();
+  const list = el("devices");
+  list.replaceChildren();
+  for (const record of records) {
+    const li=document.createElement("li");
+    const name=document.createElement("strong");
+    name.textContent=record.deviceId;
+    const state=document.createElement("div");
+    state.className="identity";state.textContent=record.state;
+    li.append(name,state);
+    if(record.state==="active"){
+      const actions=document.createElement("div");
+      actions.className="actions";
+      actions.append(btn("Отозвать устройство",async()=>{
+        if(!window.confirm("Отзыв устройства необратим. Подтвердить?"))return;
+        const own=record.deviceId===(await host.resumeAuthenticatedDevice()).deviceId;
+        await host.revokeDevice(record.deviceId);
+        if(own){clearInterval(timer);active=null;accountScope=null;
+          renderContacts([]);renderIncoming([]);showActive();message("Это устройство отозвано. Повторный вход с ним невозможен.");
+        }else{await updateDevices();}
+      },"secondary"));
+      li.append(actions);
+    }
+    list.append(li);
+  }
+}
+
 function textNode(value) {return document.createTextNode(value);}
 function btn(text, callback, style = "") {
   const button = document.createElement("button");
@@ -200,6 +236,7 @@ async function initialize() {
     renderContacts([]);
   }
   await updateContacts();
+  await updateDevices();
   el("who").textContent = "Identity: " + user.participantId + " · Device: " + user.deviceId;
   await refresh();
   timer = setInterval(() => {
@@ -253,5 +290,48 @@ el("cancel").addEventListener("click",() => void run(async () => {
   showActive();
   message("Завершение вызова подтверждено каноническим сервером.");
 }));
+
+el("signup").addEventListener("click",()=>void run(async()=>{
+  message("Создание Identity и первого защищённого устройства…");
+  const result=await registerUcrFirstPartyUser(vault,{origin:location.origin});
+  showRecovery(result.recoveryCode);
+  el("login-tenant").value=result.binding.tenantId;
+  el("login-identity").value=result.binding.participantId;
+  el("login-device").value=result.binding.deviceId;
+  await initialize();
+}));
+el("recover-form").addEventListener("submit",event=>{
+  event.preventDefault();
+  void run(async()=>{
+    const result=await recoverUcrFirstPartyDevice(vault,{origin:location.origin},
+      el("recover-identity").value.trim(),el("recover-code").value.trim());
+    el("recover-code").value="";
+    showRecovery(result.recoveryCode);
+    el("login-tenant").value=result.binding.tenantId;
+    el("login-identity").value=result.binding.participantId;
+    el("login-device").value=result.binding.deviceId;
+    await initialize();
+  });
+});
+el("copy-recovery").addEventListener("click",()=>void run(async()=>{
+  await navigator.clipboard.writeText(el("recovery-code").value);
+  message("Код скопирован. Сохраните его в защищённом месте.");
+}));
+el("rotate-recovery").addEventListener("click",()=>void run(async()=>{
+  const code=await host.rotateRecoveryCode();
+  showRecovery(code);
+}));
+el("logout").addEventListener("click",()=>void run(async()=>{
+  await host.logout();
+  clearInterval(timer);
+  active=null;accountScope=null;knownContacts=[];idempotency.clear();
+  renderContacts([]);renderIncoming([]);el("devices").replaceChildren();
+  el("who").textContent="Вы вышли из учётной записи.";
+  showActive();
+  el("recovery-output").hidden=true;
+  el("recovery-code").value="";
+  message("Серверная сессия закрыта. Приватный ключ остаётся на устройстве для повторного входа.");
+}));
+
 window.addEventListener("pagehide", () => clearInterval(timer));
 void run(initialize);
