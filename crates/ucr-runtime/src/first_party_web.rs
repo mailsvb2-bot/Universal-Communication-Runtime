@@ -1266,6 +1266,10 @@ fn call_route(state: &State, auth: &Session, path: &str, body: &[u8]) -> Result<
 }
 
 #[cfg(test)]
+#[path = "first_party_acceptance.rs"]
+mod acceptance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
