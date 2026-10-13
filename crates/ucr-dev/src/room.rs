@@ -853,7 +853,13 @@ async fn stop_room_recording(host: &RoomHost, session: &RecordingSession) -> Res
             value: session.recording_id.as_opaque().as_wire_bytes().to_vec(),
         }),
         expected_revision: session.revision,
-        idempotency_key: Some(format!("room-recording-stop-{}", session.revision)),
+        // Revision 2 is reused by every new archive. The key must name the
+        // recording, or the second stop is rejected as a duplicate of the first.
+        idempotency_key: Some(format!(
+            "room-recording-stop-{}-{}",
+            wire_text(session.recording_id.as_opaque()),
+            session.revision
+        )),
     });
     attach_dev_credential(&mut stop, &host.env);
     let stopped = recording
@@ -862,7 +868,17 @@ async fn stop_room_recording(host: &RoomHost, session: &RecordingSession) -> Res
         .map_err(|error| format!("stop recording: {error}"))?
         .into_inner();
     let stopped_session =
-        recording_session(stopped.result.map(stop_result), "recording stop was denied")?;
+        match recording_session(stopped.result.map(stop_result), "recording stop was denied") {
+            Ok(session) => session,
+            Err(error) => {
+                // A concurrent stop already moved the revision. The archive is no
+                // longer sealing the room, so the newcomer can enter.
+                if recording_is_inactive(host, session) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        };
     if let Some(edge) = &host.edge
         && let Err(error) = edge
             .recorder
@@ -875,6 +891,19 @@ async fn stop_room_recording(host: &RoomHost, session: &RecordingSession) -> Res
         stopped_session.revision
     );
     Ok(())
+}
+
+fn recording_is_inactive(host: &RoomHost, session: &RecordingSession) -> bool {
+    host.env
+        .store
+        .recording(host.env.scope(), &session.recording_id)
+        .ok()
+        .flatten()
+        .is_none_or(|current| {
+            current.state != RecordingState::Active
+                && current.state != RecordingState::Ready
+                && current.state != RecordingState::WaitingForConsent
+        })
 }
 
 fn stop_result(

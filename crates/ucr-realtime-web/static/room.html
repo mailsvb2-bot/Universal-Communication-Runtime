@@ -24,7 +24,7 @@ button:disabled{opacity:.55;cursor:progress}
 <main>
   <section class="card">
     <h1>Войти в эфир</h1>
-    <p>Локальная комната. Спикер публикует камеру и микрофон. Зритель только слушает и смотрит. Соединение может идти через локальный TURN. Через несколько секунд после того, как двое уже в эфире, шифротекст пишется в архив. Если кто-то входит позже, архив останавливается и комната снова принимает людей. Ключ устройства остаётся в этом браузере.</p>
+    <p>Локальная комната. Спикер публикует камеру и микрофон. Зритель только слушает и смотрит. Соединение может идти через локальный TURN. Через несколько секунд после того, как двое уже в эфире, шифротекст пишется в архив. Если кто-то входит позже, архив останавливается и комната снова принимает людей. Второе окно с другим именем входит как другой человек: пока первый в эфире, его устройство не перехватывается.</p>
     <form id="enter">
       <label for="name">Имя</label>
       <input id="name" name="name" maxlength="40" autocomplete="nickname" required placeholder="Аня">
@@ -69,6 +69,26 @@ function readRememberedDevice() {
   }
 }
 
+function readPresence() {
+  try {
+    const value = JSON.parse(localStorage.getItem("ucrRoomPresence") || "{}");
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function presenceFresh(externalUserId) {
+  const at = readPresence()[externalUserId];
+  return typeof at === "number" && Date.now() - at < 8000;
+}
+
+function markPresence(externalUserId) {
+  const all = readPresence();
+  all[externalUserId] = Date.now();
+  localStorage.setItem("ucrRoomPresence", JSON.stringify(all));
+}
+
 function bytesToBase64(bytes) {
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += 0x8000) {
@@ -100,10 +120,14 @@ document.querySelector("#enter").addEventListener("submit", async (event) => {
   try {
     status.textContent = "Создаём устройство…";
     const remembered = readRememberedDevice();
+    const samePerson = remembered
+      && remembered.role === role
+      && (!remembered.displayName || remembered.displayName === name)
+      && !presenceFresh(remembered.externalUserId);
     const reserved = await post("/v1/room/reserve", {
       displayName: name,
       role,
-      externalUserId: remembered && remembered.role === role ? remembered.externalUserId : undefined,
+      externalUserId: samePerson ? remembered.externalUserId : undefined,
     });
     const module = (await installerReady) || await import("./endpoint-media/reference_browser_media_installer.js");
     const vault = module.createUcrBrowserProtectedDeviceVault();
@@ -128,7 +152,9 @@ document.querySelector("#enter").addEventListener("submit", async (event) => {
       externalUserId: reserved.externalUserId,
       deviceId: reserved.deviceId,
       role,
+      displayName: name,
     }));
+    markPresence(reserved.externalUserId);
     sessionStorage.setItem("ucrLocalRoom", "1");
     sessionStorage.setItem("ucrRoomApi", api);
     sessionStorage.setItem("ucrRoomUser", reserved.externalUserId);

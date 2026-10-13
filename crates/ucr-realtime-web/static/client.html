@@ -2136,9 +2136,31 @@ function resumeRoomAudio(audioContext){
     }
   },800);
 }
+function holdRoomPresence(){
+  try{
+    const id=sessionStorage.getItem("ucrRoomUser");
+    if(!id)return;
+    const all=JSON.parse(localStorage.getItem("ucrRoomPresence")||"{}");
+    if(!all||typeof all!=="object")return;
+    all[id]=Date.now();
+    localStorage.setItem("ucrRoomPresence",JSON.stringify(all));
+  }catch(_){}
+}
+function releaseRoomPresence(){
+  try{
+    const id=sessionStorage.getItem("ucrRoomUser");
+    if(!id)return;
+    const all=JSON.parse(localStorage.getItem("ucrRoomPresence")||"{}");
+    if(!all||typeof all!=="object")return;
+    delete all[id];
+    localStorage.setItem("ucrRoomPresence",JSON.stringify(all));
+  }catch(_){}
+}
 function installLocalRoomMediaHost(){
   if(sessionStorage.getItem("ucrLocalRoom")!=="1")return;
   localRoomMediaHost=true;
+  holdRoomPresence();
+  if(!installLocalRoomMediaHost.presence)installLocalRoomMediaHost.presence=setInterval(holdRoomPresence,2000);
   if(!installLocalRoomMediaHost.watching){
     installLocalRoomMediaHost.watching=true;
     setInterval(()=>{
@@ -2270,7 +2292,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
-window.addEventListener("pagehide",()=>{++sessionLifecycleGeneration;++mediaCaptureGeneration;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("pagehide",()=>{releaseRoomPresence();++sessionLifecycleGeneration;++mediaCaptureGeneration;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>
