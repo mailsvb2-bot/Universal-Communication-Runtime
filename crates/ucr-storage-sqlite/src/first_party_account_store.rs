@@ -188,3 +188,107 @@ impl SqliteLocalStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs, path::PathBuf, sync::atomic::{AtomicU64, Ordering},
+    };
+    use ucr_core::{
+        DeviceLifecycleStore, IdentityDeviceLookupStore, IdentityStore,
+        TrustedSigningKeyStore, DurableStoreError, StorageProvider,
+    };
+    use ucr_model::{
+        DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId,
+        KeyId, KeyPurpose, OpaqueId, PublicKeyDescriptor, TenantId, TenantScope,
+    };
+    use super::SqliteLocalStore;
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(555_000);
+    struct Db(PathBuf);
+    impl Db {
+        fn new()->Self {
+            let n=SEQUENCE.fetch_add(1,Ordering::Relaxed);
+            let file=std::env::temp_dir().join(format!("ucr-self-service-{}-{n}.sqlite3",std::process::id()));
+            let _=fs::remove_file(&file);
+            Self(file)
+        }
+    }
+    impl Drop for Db {
+        fn drop(&mut self){
+            let _=fs::remove_file(&self.0);
+            let _=fs::remove_file(self.0.with_extension("sqlite3-wal"));
+            let _=fs::remove_file(self.0.with_extension("sqlite3-shm"));
+        }
+    }
+    fn id(value:&str)->OpaqueId{OpaqueId::new(value).expect("opaque")}
+    fn scope()->TenantScope{
+        TenantScope{tenant_id:TenantId::from_opaque(id("shared-first-party")),namespace_id:None}
+    }
+    fn account()->IdentityId{IdentityId::from_opaque(id("self-service-identity"))}
+    fn descriptor(device:&str)->DeviceDescriptor{
+        DeviceDescriptor{device_id:DeviceId::from_opaque(id(device)),
+            identity_id:account(),state:DeviceLifecycleState::Active}
+    }
+    fn key(device:&str,key_id:&str,seed:u8)->PublicKeyDescriptor{
+        PublicKeyDescriptor{
+            key_id:KeyId::from_opaque(id(key_id)),
+            device_id:DeviceId::from_opaque(id(device)),purpose:KeyPurpose::Signing,
+            algorithm_id:"ed25519".to_owned(),algorithm_version:1,
+            key_format_version:1,public_key:vec![seed;32],
+        }
+    }
+
+    #[test]
+    fn two_identities_first_devices_and_persisted_trust_are_canonical(){
+        let db=Db::new();
+        let store=SqliteLocalStore::open(&db.0).unwrap();
+        assert_eq!(store.schema_version(),Ok(crate::SQLITE_SCHEMA_VERSION));
+        let one=account();
+        store.first_party_register_account(&scope(),&one,
+            &descriptor("device-one"),&key("device-one","key-one",17),[21;32]).unwrap();
+        assert!(store.identity(&scope(),&one).unwrap().is_some());
+        assert_eq!(store.active_trusted_signing_key(&scope(),
+            &DeviceId::from_opaque(id("device-one"))).unwrap().unwrap().public_key,vec![17;32]);
+        assert_eq!(store.first_party_register_account(&scope(),&one,
+            &descriptor("device-duplicate"),&key("device-duplicate","key-two",17),[21;32]),
+            Err(DurableStoreError::Conflict));
+        drop(store);
+        let again=SqliteLocalStore::open(&db.0).unwrap();
+        assert_eq!(again.devices_for_identity(&scope(),&one,64).unwrap().len(),1);
+        assert_eq!(again.schema_version(),Ok(crate::SQLITE_SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn recovery_is_atomic_single_use_and_revoked_devices_never_resurrect(){
+        let db=Db::new();
+        let store=SqliteLocalStore::open(&db.0).unwrap();
+        let identity=account();
+        store.first_party_register_account(&scope(),&identity,
+            &descriptor("device-original"),&key("device-original","key-original",12),[10;32]).unwrap();
+        assert_eq!(store.first_party_recover_device(&scope(),&identity,
+            &descriptor("device-second"),&key("device-second","key-second",19),
+            [99;32],[11;32]),Err(DurableStoreError::PermissionDenied));
+        store.first_party_recover_device(&scope(),&identity,
+            &descriptor("device-second"),&key("device-second","key-second",19),
+            [10;32],[11;32]).unwrap();
+        assert_eq!(store.first_party_recover_device(&scope(),&identity,
+            &descriptor("device-third"),&key("device-third","key-third",22),
+            [10;32],[12;32]),Err(DurableStoreError::PermissionDenied));
+        assert!(store.device(&scope(),&DeviceId::from_opaque(id("device-third"))).unwrap().is_none());
+        store.revoke_device(&scope(),&DeviceId::from_opaque(id("device-second")),&identity).unwrap();
+        assert_eq!(store.first_party_recover_device(&scope(),&identity,
+            &descriptor("device-second"),&key("device-second","key-second-new",30),
+            [11;32],[12;32]),Err(DurableStoreError::Conflict));
+        store.first_party_rotate_recovery(&scope(),&identity,[40;32]).unwrap();
+        drop(store);
+        let again=SqliteLocalStore::open(&db.0).unwrap();
+        assert_eq!(again.first_party_recover_device(&scope(),&identity,
+            &descriptor("device-third"),&key("device-third","key-third",22),
+            [11;32],[41;32]),Err(DurableStoreError::PermissionDenied));
+        again.first_party_recover_device(&scope(),&identity,
+            &descriptor("device-third"),&key("device-third","key-third",22),
+            [40;32],[41;32]).unwrap();
+        assert_eq!(again.active_devices_for_identity(&scope(),&identity,64).unwrap().len(),2);
+    }
+}
