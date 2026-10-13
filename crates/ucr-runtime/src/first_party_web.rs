@@ -27,9 +27,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, DeviceLifecycleStore, IdentityStore,
-    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, TrustedSigningKeyStore,
-    generate_opaque_id,
+    AuthorizedDurableRuntime, DeviceLifecycleStore, IdentityStore, PrincipalIdentityBindingStore,
+    PrincipalIdentityLookupStore, TrustedSigningKeyStore, generate_opaque_id,
 };
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
@@ -786,8 +785,6 @@ async fn dispatch(
     }
     // Typed decoding rejects extraneous fields; account/scope is verified against
     // the independent server session on every route.
-    // Typed decoding rejects extraneous fields; account/scope is verified against
-    // the independent server session on every route.
     let response = dispatch_post(state, path, &body, session.as_ref())?;
     body.clear();
     Ok(response)
@@ -800,8 +797,7 @@ fn require_post_headers(request: &Request<Incoming>, origin: &str) -> Result<(),
             .get("X-UCR-First-Party-Request")
             .and_then(|v| v.to_str().ok())
             == Some("v1")
-        && headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok())
-            == Some("application/json")
+        && headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()) == Some("application/json")
     {
         Ok(())
     } else {
@@ -938,12 +934,7 @@ fn device_route(
     Ok(response)
 }
 
-fn call_route(
-    state: &State,
-    auth: &Session,
-    path: &str,
-    body: &[u8],
-) -> Result<Value, StatusCode> {
+fn call_route(state: &State, auth: &Session, path: &str, body: &[u8]) -> Result<Value, StatusCode> {
     let response = match path {
         "/v1/first-party/call/start" => {
             let input: StartRequest = parse(body)?;
