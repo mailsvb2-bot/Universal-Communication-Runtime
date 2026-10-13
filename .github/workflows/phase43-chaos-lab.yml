@@ -2,7 +2,7 @@ name: Phase 43 Chaos Lab
 
 on:
   push:
-    branches: [main, phase43-chaos-lab]
+    branches: [main, phase43-chaos-lab, cursor/local-room-1b1d]
   pull_request:
   workflow_dispatch:
 
