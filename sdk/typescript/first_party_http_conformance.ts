@@ -276,6 +276,7 @@ const canonicalHttp = createUcrFirstPartyHttpHost(first.vault, {
     const path = new URL(String(url)).pathname;
     authenticatedRoutes.push(path);
     if (path === "/v1/first-party/session") return reply(binding);
+    if (path === "/v1/first-party/call/join") return reply({error:"forbidden"},403);
     const body = JSON.parse(String(init?.body));
     assert.deepEqual(body.binding, binding, "live Rust BFF checks session-scoped binding");
     if (path === "/v1/first-party/device/inspect") {
@@ -310,10 +311,6 @@ const canonicalHttp = createUcrFirstPartyHttpHost(first.vault, {
         joinFragment:"#ucr_join="+encode(new TextEncoder().encode("fake-claims"))+
           "."+encode(new TextEncoder().encode("fake-signature")),
       });
-    }
-    if (path === "/v1/first-party/call/join") {
-      // This endpoint is always forbidden by the live Rust BFF.
-      return reply({error:"forbidden"},403);
     }
     return reply({error:"unknown canonical route"},404);
   },
