@@ -99,6 +99,7 @@ const ui={
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false,adaptiveMediaGeneration=0;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
+let localMediaPromise=null,earlyLocalCapture=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
 let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
@@ -966,22 +967,48 @@ async function activateE2eeAdapter(){
   if(!e2eeAdapter()){
     const install=await requireAuthorizedMediaInstaller();
     if(!isCurrent())throw new Error("Encrypted media session retired before installer load");
-    const mls=await ensureEndpointMlsReady();
-    if(!mls)throw new Error("Endpoint-owned MLS required for encrypted media");
-    const installed=await install(Object.freeze({
-      state:mls,
-      claims:Object.freeze({
-        tenantId:claims.tenant_id,
-        namespaceId:claims.namespace_id??null,
-        callId:claims.call_id,
-        deviceId:claims.device_id,
-        participantId:claims.participant_id,
-        participantKind:claims.participant_kind,
-        sessionId:claims.session_id
-      }),
-      groupId:endpointMlsGroupId,
-      loadWasm:loadEndpointWasmModule
-    }));
+    let installed=null;
+    for(let attempt=0;attempt<3;attempt++){
+      const mls=await ensureEndpointMlsReady();
+      if(!mls)throw new Error("Endpoint-owned MLS required for encrypted media");
+      // A second participant can advance the group epoch while this handshake
+      // is still running. Roll the local MLS state forward before the adapter
+      // is built, and retry if the epoch moves again during installation.
+      if(typeof fetchEndpointMlsContext==="function"){
+        const context=await fetchEndpointMlsContext();
+        if(!isCurrent())throw new Error("Encrypted media session retired before installer load");
+        if(BigInt(context.group_crypto_epoch)!==BigInt(mls.crypto_epoch())){
+          if(attempt===2)throw new Error("Endpoint MLS epoch differs from the canonical conference epoch");
+          if(typeof retireEndpointMlsState==="function")retireEndpointMlsState();
+          continue;
+        }
+      }
+      if(!isCurrent())throw new Error("Encrypted media session retired before installer load");
+      try{
+        installed=await install(Object.freeze({
+          state:mls,
+          claims:Object.freeze({
+            tenantId:claims.tenant_id,
+            namespaceId:claims.namespace_id??null,
+            callId:claims.call_id,
+            deviceId:claims.device_id,
+            participantId:claims.participant_id,
+            participantKind:claims.participant_kind,
+            sessionId:claims.session_id
+          }),
+          groupId:endpointMlsGroupId,
+          loadWasm:loadEndpointWasmModule
+        }));
+        break;
+      }catch(error){
+        const message=String(error&&error.message||error);
+        if(attempt===2||!/epoch/.test(message))throw error;
+        if(installed&&typeof installed.stop==="function"){try{await installed.stop();}catch(_){}}
+        if(installed&&window.ucrE2eeEndpoint===installed)delete window.ucrE2eeEndpoint;
+        installed=null;
+        if(typeof retireEndpointMlsState==="function")retireEndpointMlsState();
+      }
+    }
     if(!isCurrent()){
       if(installed&&typeof installed.stop==="function")await installed.stop();
       if(window.ucrE2eeEndpoint===installed)delete window.ucrE2eeEndpoint;
@@ -1105,10 +1132,18 @@ async function capturePermittedMedia(audio,video,isCurrent){
   }
 }
 async function ensureLocalMedia(force=false){
-  if(!mediaActive)throw new Error("Conference media is not admitted yet");
+  const early=typeof earlyLocalCapture!=="undefined"&&earlyLocalCapture;
+  if(!mediaActive&&!early)throw new Error("Conference media is not admitted yet");
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("Camera/microphone access is unavailable in this browser");
   if(localStream&&!force)return localStream;
-  if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;}
+  if(typeof localMediaPromise!=="undefined"&&localMediaPromise&&!force)return localMediaPromise;
+  const run=captureLocalMedia(force);
+  if(typeof localMediaPromise==="undefined")return run;
+  localMediaPromise=run;
+  try{return await run;}finally{if(localMediaPromise===run)localMediaPromise=null;}
+}
+async function captureLocalMedia(force){
+  if(force&&localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;}
   const audioAllowed=policyAllows("audio"),cameraAllowed=policyAllows("camera");
   if(!audioAllowed&&!cameraAllowed){
     localStream=new MediaStream();ui.localVideo.srcObject=localStream;refreshLocalMediaControls();return localStream;
@@ -1116,7 +1151,8 @@ async function ensureLocalMedia(force=false){
   const audio=audioAllowed?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):false;
   const video=cameraAllowed?preferredCameraCapture(ui.camera.value):false;
   const generation=mediaCaptureGeneration;
-  const captureCurrent=()=>generation===mediaCaptureGeneration&&sessionActive&&mediaActive&&
+  const captureCurrent=()=>generation===mediaCaptureGeneration&&sessionActive&&
+    (mediaActive||(typeof earlyLocalCapture!=="undefined"&&earlyLocalCapture))&&
     audioAllowed===policyAllows("audio")&&cameraAllowed===policyAllows("camera")&&!localStream;
   const capture=await capturePermittedMedia(audio,video,captureCurrent);
   const captured=capture.stream;
@@ -1315,7 +1351,7 @@ async function startWebRtcOnce(forceMedia=false){
     await api("/v1/realtime/webrtc/ice",{...body(),offer_id:offer.offer_id,candidate:candidate.candidate,sdp_mid:candidate.sdpMid,sdp_mline_index:candidate.sdpMLineIndex});
   };
   pc.ondatachannel=event=>attachE2eeDataChannel(event.channel);
-  pc.ontrack=event=>{event.track.stop();ui.status.textContent="Unexpected RTP track rejected; conference media must use endpoint E2EE transport.";};
+  pc.ontrack=event=>{event.track.stop();if(typeof e2eeAdapterReady==="undefined"||!e2eeAdapterReady)ui.status.textContent="Unexpected RTP track rejected; conference media must use endpoint E2EE transport.";};
   pc.onicecandidate=event=>{
     if(!event.candidate||!sessionActive)return;
     if(!remoteDescriptionAccepted){pendingCandidates.push(event.candidate);return;}
@@ -1426,9 +1462,17 @@ async function activateAdmittedMedia(){
   if(!sessionActive||mediaActive)return;
   const generation=sessionLifecycleGeneration;
   requireCanonicalMediaHostReady();
+  if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
+  if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=true;
+  if(typeof ensureLocalMedia==="function")ensureLocalMedia(false).catch(()=>{});
   await ensureEndpointMlsReady();
-  if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive)return;
-  mediaActive=true;ui.state.textContent="Connecting";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
+  if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive){
+    if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=false;
+    return;
+  }
+  mediaActive=true;
+  if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=false;
+  ui.state.textContent="Connecting";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
   if(!reactionTimer){reactionTimer=setInterval(()=>{pollReactions().catch(()=>{});},1000);}
   if(!chatTimer){chatTimer=setInterval(()=>{pollChat().catch(()=>{});},1000);}
   pollReactions().catch(()=>{});
@@ -2031,13 +2075,26 @@ async function refreshLocalRoomEndpointAuthority(){
     if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive||!e2eeAdapterReady||restarting)return;
     const fingerprint=endpointAuthorityFingerprint(context);
     if(fingerprint===localRoomAuthorityFingerprint)return;
-    // The installed adapter keeps the epoch and trusted-key roster from the
-    // moment it started. A later join advances MLS and adds a signer, so this
-    // endpoint must retire that adapter and restore MLS from the new chain.
-    startWebRtc.retireEndpointMls=true;
-    webrtcNeedsPeerRebuild=true;
+    // Membership changed. Advance MLS and install a new adapter on the open
+    // DataChannel. Rebuilding the peer would wait for ICE again.
+    const channel=e2eeChannel;
+    e2eeAdapterReady=false;
+    const adapter=e2eeAdapter();
+    if(adapter&&typeof adapter.stop==="function"){
+      try{await Promise.resolve(adapter.stop());}catch(_){}
+    }
+    if(adapter&&window.ucrE2eeEndpoint===adapter)delete window.ucrE2eeEndpoint;
+    if(adapter&&adapter===e2eeManagedAdapter)e2eeManagedAdapter=null;
+    retireEndpointMlsState();
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive||
+       channel!==e2eeChannel||channel?.readyState!=="open"){
+      startWebRtc.retireEndpointMls=true;
+      webrtcNeedsPeerRebuild=true;
+      await restartWebRtc(false);
+      return;
+    }
     ui.status.textContent="A participant joined. Refreshing encrypted media for the new conference epoch.";
-    await restartWebRtc(false);
+    await activateE2eeAdapter();
   })();
   localRoomAuthorityRefresh=run;
   try{await run;}finally{if(localRoomAuthorityRefresh===run)localRoomAuthorityRefresh=null;}
@@ -2045,6 +2102,14 @@ async function refreshLocalRoomEndpointAuthority(){
 function installLocalRoomMediaHost(){
   if(sessionStorage.getItem("ucrLocalRoom")!=="1")return;
   localRoomMediaHost=true;
+  if(!installLocalRoomMediaHost.watching){
+    installLocalRoomMediaHost.watching=true;
+    setInterval(()=>{
+      if(sessionActive&&mediaActive&&e2eeAdapterReady){
+        refreshLocalRoomEndpointAuthority().catch(e=>{if(sessionActive)ui.status.textContent="Encrypted media membership refresh failed: "+e.message;});
+      }
+    },300);
+  }
   const roomApi=sessionStorage.getItem("ucrRoomApi")||"";
   if(!roomApi)throw new Error("Local room API address is missing");
   const roomPost=async(path,payload)=>{
@@ -2154,7 +2219,9 @@ try{
   }
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
   installLocalRoomMediaHost();
-  if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
+  if(sessionStorage.getItem("ucrLocalRoom")==="1"){
+    if(!scheduleWaitingRoom())join().catch(e=>{fail(e.message);});
+  }else if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
 }catch(e){fail(e.message);}
 // Hosts installing trust before client startup benefit from an idle preload.
 // Hosts installing trust later may call this hook once authorized.

@@ -1067,17 +1067,17 @@ async fn create_live_peer_connection(
             .create_offer(None)
             .await
             .map_err(|_| WebRtcProviderError::Internal)?;
-        let mut gathering_complete = peer_connection.gathering_complete_promise().await;
+        let gathering_complete = peer_connection.gathering_complete_promise().await;
         peer_connection
             .set_local_description(offer)
             .await
             .map_err(|_| WebRtcProviderError::Internal)?;
-        tokio::time::timeout(
-            Duration::from_secs(LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS),
-            gathering_complete.recv(),
+        finish_local_ice_gather(
+            &peer_connection,
+            gathering_complete,
+            config.ice_transport_policy,
         )
-        .await
-        .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?;
+        .await?;
         let local = peer_connection
             .local_description()
             .await
@@ -1133,17 +1133,17 @@ async fn restart_live_peer_connection(
         .create_offer(None)
         .await
         .map_err(|_| WebRtcProviderError::Internal)?;
-    let mut gathering_complete = peer_connection.gathering_complete_promise().await;
+    let gathering_complete = peer_connection.gathering_complete_promise().await;
     peer_connection
         .set_local_description(offer)
         .await
         .map_err(|_| WebRtcProviderError::Conflict)?;
-    tokio::time::timeout(
-        Duration::from_secs(LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS),
-        gathering_complete.recv(),
+    finish_local_ice_gather(
+        peer_connection,
+        gathering_complete,
+        config.ice_transport_policy,
     )
-    .await
-    .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?;
+    .await?;
     let local = peer_connection
         .local_description()
         .await
@@ -1153,6 +1153,34 @@ async fn restart_live_peer_connection(
         sdp_type: ucr_model::WebRtcSdpType::Offer,
         sdp: local.sdp,
     })
+}
+
+async fn finish_local_ice_gather(
+    peer_connection: &RTCPeerConnection,
+    mut gathering_complete: tokio::sync::mpsc::Receiver<()>,
+    policy: IceTransportPolicy,
+) -> Result<(), WebRtcProviderError> {
+    let deadline = tokio::time::sleep(Duration::from_secs(LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS));
+    tokio::pin!(deadline);
+    loop {
+        // A same-machine call only needs a host address. Waiting for a TURN relay
+        // that never answers blocks the offer for the whole gather budget.
+        if policy == IceTransportPolicy::All
+            && peer_connection
+                .local_description()
+                .await
+                .is_some_and(|local| local.sdp.contains("typ host"))
+        {
+            return Ok(());
+        }
+        tokio::select! {
+            () = &mut deadline => return Err(WebRtcProviderError::TemporarilyUnavailable),
+            // Gathering completion drops the sender. `recv` then returns
+            // `None`; that closed channel is success, the same as the old wait.
+            _ = gathering_complete.recv() => return Ok(()),
+            () = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+    }
 }
 
 fn engine_ice_server(server: &IceServerConfig) -> RTCIceServer {

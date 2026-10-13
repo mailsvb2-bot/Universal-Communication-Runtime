@@ -42,6 +42,23 @@ button:disabled{opacity:.55;cursor:progress}
 const status = document.querySelector("#status");
 const submit = document.querySelector("#submit");
 const api = "%%UCR_ROOM_API%%";
+const rememberedDeviceKey = "ucrRoomDevice";
+const runtimeReady = Promise.all([
+  import("./endpoint-wasm/ucr_endpoint_wasm.js"),
+  import("./endpoint-media/reference_browser_media_installer.js"),
+]).catch(() => null);
+
+function readRememberedDevice() {
+  try {
+    const raw = localStorage.getItem(rememberedDeviceKey);
+    if (!raw) return null;
+    const value = JSON.parse(raw);
+    if (!value || typeof value.externalUserId !== "string" || typeof value.role !== "string") return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
 
 function bytesToBase64(bytes) {
   let binary = "";
@@ -72,22 +89,37 @@ document.querySelector("#enter").addEventListener("submit", async (event) => {
   submit.disabled = true;
   try {
     status.textContent = "Создаём устройство…";
-    const reserved = await post("/v1/room/reserve", {displayName: name, role});
-    const module = await import("./endpoint-media/reference_browser_media_installer.js");
+    const remembered = readRememberedDevice();
+    const reserved = await post("/v1/room/reserve", {
+      displayName: name,
+      role,
+      externalUserId: remembered && remembered.role === role ? remembered.externalUserId : undefined,
+    });
+    const loaded = await runtimeReady;
+    const module = loaded ? loaded[1] : await import("./endpoint-media/reference_browser_media_installer.js");
     const vault = module.createUcrBrowserProtectedDeviceVault();
     const signer = await vault.stageNew({
       tenantId: reserved.tenantId,
       namespaceId: reserved.namespaceId,
       deviceId: reserved.deviceId,
     });
-    status.textContent = "Подтверждаем ключ устройства…";
-    await post("/v1/room/trust", {
-      externalUserId: reserved.externalUserId,
-      keyId: signer.keyId,
-      publicKeyBase64: bytesToBase64(signer.publicKey),
-    });
+    const inspected = await post("/v1/room/inspect", {deviceId: reserved.deviceId});
+    const trusted = inspected.deviceActive === true && inspected.keyId === signer.keyId;
+    if (!trusted) {
+      status.textContent = "Подтверждаем ключ устройства…";
+      await post("/v1/room/trust", {
+        externalUserId: reserved.externalUserId,
+        keyId: signer.keyId,
+        publicKeyBase64: bytesToBase64(signer.publicKey),
+      });
+    }
     status.textContent = "Открываем комнату…";
     const joined = await post("/v1/room/join", {externalUserId: reserved.externalUserId});
+    localStorage.setItem(rememberedDeviceKey, JSON.stringify({
+      externalUserId: reserved.externalUserId,
+      deviceId: reserved.deviceId,
+      role,
+    }));
     sessionStorage.setItem("ucrLocalRoom", "1");
     sessionStorage.setItem("ucrRoomApi", api);
     sessionStorage.setItem("ucrRoomUser", reserved.externalUserId);

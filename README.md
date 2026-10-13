@@ -114,6 +114,10 @@ UCR_REALTIME_WEB_BIND=127.0.0.1:43124 \
 Open <http://127.0.0.1:43124/room> in two browser windows, enter a name, and choose a role.
 Signing seeds stay in the browser. The room API on `127.0.0.1:43123` stores only public keys.
 `ucr dev --room` prints the exact `UCR_ROOM_API` value for the address given to `--room-bind`.
+The lobby preloads the endpoint runtime while the name is typed and reuses this browser's
+device key for the same role until the development process restarts. The conference group is
+created when the room server starts, and the conference page joins itself after the signed
+grant. A second participant refreshes the encrypted epoch on the already open media channel.
 
 The browser page also needs the endpoint package built from this revision. Those files are
 generated, not committed:
