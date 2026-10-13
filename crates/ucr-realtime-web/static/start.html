@@ -12,8 +12,8 @@
 main{max-width:900px;margin:0 auto}h1{font-size:1.7rem}h2{font-size:1.2rem;margin-top:0}
 section{border:1px solid #36415a;border-radius:15px;padding:20px;margin:16px 0;background:#111b31}
 p{line-height:1.55;color:#c5d0e4}
-input,button{font:inherit;border-radius:8px;padding:10px 12px}
-input{max-width:100%;background:#0b1222;color:#fff;border:1px solid #60718a}
+input,button,textarea{font:inherit;border-radius:8px;padding:10px 12px}
+input,textarea{max-width:100%;background:#0b1222;color:#fff;border:1px solid #60718a}textarea{width:100%;resize:vertical}
 button{background:#7ac0ff;color:#00172d;border:0;cursor:pointer;font-weight:650}
 button.secondary{background:#384961;color:#eef3ff}
 button:focus-visible,input:focus-visible{outline:3px solid white;outline-offset:2px}
@@ -45,6 +45,32 @@ small{color:#9aaaca;line-height:1.5;display:block}
   </form>
   <small>Вход возможен только с ранее зарегистрированным Device и его сохранённым ключом. Новый Device требует отдельного подтверждения или восстановления — идентификатор сам по себе не даёт доступа.</small>
   <div class="actions"><button type="button" id="retry" class="secondary">Повторить проверку входа</button></div>
+</section>
+<section aria-label="Регистрация и восстановление">
+  <h2>Новая учётная запись</h2>
+  <p>Создание постоянного Identity и первого защищённого устройства. Не требуется ранее выданный идентификатор.</p>
+  <div class="actions"><button type="button" id="signup">Создать учётную запись и первое устройство</button></div>
+  <h2>Второе устройство и восстановление</h2>
+  <p>На новом устройстве укажите свой Identity ID и текущий одноразовый код восстановления. После привязки выдаётся новый код.</p>
+  <form id="recover-form">
+    <input id="recover-identity" aria-label="Identity ID для восстановления" maxlength="120" placeholder="Identity ID" required>
+    <input id="recover-code" aria-label="Одноразовый код восстановления" maxlength="80" placeholder="Код восстановления" required autocomplete="off">
+    <button type="submit">Привязать это устройство</button>
+  </form>
+  <div id="recovery-output" hidden>
+    <p><strong>Сохраните новый код восстановления. Он показывается только сейчас; старый код больше не действует.</strong></p>
+    <textarea id="recovery-code" aria-label="Новый код восстановления" rows="2" readonly spellcheck="false"></textarea>
+    <div class="actions"><button type="button" id="copy-recovery">Копировать код</button></div>
+  </div>
+  <small>Создаётся псевдонимная Identity, а не проверка паспорта/реального имени. Код восстановления эквивалентен праву добавить новое устройство: храните его отдельно и никому не передавайте.</small>
+</section>
+<section aria-label="Мои доверенные устройства">
+  <h2>Управление устройствами</h2>
+  <ul id="devices" aria-label="Доверенные и отозванные устройства"></ul>
+  <div class="actions">
+    <button type="button" id="rotate-recovery" class="secondary">Заменить код восстановления</button>
+    <button type="button" id="logout" class="secondary">Выйти</button>
+  </div>
 </section>
 <section>
   <h2>Контакты</h2>
