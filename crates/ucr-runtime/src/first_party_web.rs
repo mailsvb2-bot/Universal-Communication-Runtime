@@ -961,10 +961,12 @@ mod tests {
 
         // An SDK mock that accepts the bare binding would lie about live BFF interoperability.
         assert!(parse::<BoundRequest>(&serde_json::to_vec(&binding).unwrap()).is_err());
-        assert!(parse::<BoundRequest>(
-            &serde_json::to_vec(&json!({"binding": binding, "extra": true})).unwrap()
-        )
-        .is_err());
+        assert!(
+            parse::<BoundRequest>(
+                &serde_json::to_vec(&json!({"binding": binding, "extra": true})).unwrap()
+            )
+            .is_err()
+        );
     }
 
     #[test]
