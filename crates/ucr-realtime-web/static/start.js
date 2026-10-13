@@ -1,6 +1,7 @@
 import {
   createUcrBrowserProtectedDeviceVault,
   createUcrFirstPartyHttpHost,
+  authenticateUcrFirstPartyDevice,
   createUcrContactCallJourney,
 } from "/endpoint-media/reference_browser_media_installer.js";
 
@@ -210,6 +211,25 @@ async function initialize() {
   },2500);
   message("Учётная запись подтверждена. Исходящие и входящие проверяются каноническим сервером.");
 }
+el("device-login").addEventListener("submit", event => {
+  event.preventDefault();
+  void run(async () => {
+    const binding = {
+      tenantId:el("login-tenant").value.trim(),
+      namespaceId:el("login-namespace").value.trim() || null,
+      participantId:el("login-identity").value.trim(),
+      deviceId:el("login-device").value.trim(),
+    };
+    message("Проверка владения существующим защищённым Device…");
+    const verified = await authenticateUcrFirstPartyDevice(vault,{
+      origin:location.origin,
+    },binding);
+    if (principalScope(verified)!==principalScope(binding)) {
+      throw Error("сервер вернул другую Identity или Device");
+    }
+    await initialize();
+  });
+});
 el("retry").addEventListener("click",() => void run(initialize));
 el("new-contact").addEventListener("submit", event => {
   event.preventDefault();
