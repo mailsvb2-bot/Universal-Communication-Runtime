@@ -444,14 +444,19 @@ mod tests {
         let again = SqliteLocalStore::open(&db.0).unwrap();
         for identity in [&one, &two] {
             assert_eq!(
-                again.devices_for_identity(&scope(), identity, 64).unwrap().len(),
+                again
+                    .devices_for_identity(&scope(), identity, 64)
+                    .unwrap()
+                    .len(),
                 2
             );
         }
         assert_eq!(
-            again.active_trusted_signing_key(
-                &scope(), &DeviceId::from_opaque(id("user-two-second"))
-            ).unwrap().unwrap().public_key,
+            again
+                .active_trusted_signing_key(&scope(), &DeviceId::from_opaque(id("user-two-second")))
+                .unwrap()
+                .unwrap()
+                .public_key,
             vec![29; 32]
         );
         assert_eq!(again.schema_version(), Ok(crate::SQLITE_SCHEMA_VERSION));
