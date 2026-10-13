@@ -74,6 +74,10 @@ pub(super) fn verify_v52_objects(connection: &Connection) -> Result<(), DurableS
 impl SqliteLocalStore {
     /// All canonical owner rows + a single recovery verifier commit atomically.
     /// Only callers that verified a fresh Device signer proof may invoke this.
+    ///
+    /// # Errors
+    /// Rejects invalid identifiers, conflicting owners or keys, failed transactions,
+    /// and storage corruption without leaving partially registered accounts.
     pub fn first_party_register_account(
         &self,
         scope: &TenantScope,
@@ -175,7 +179,11 @@ impl SqliteLocalStore {
 
     /// One-time 256-bit recovery credential, consumed transactionally while
     /// adding a NEW canonical Device and signer. The next credential replaces
-    /// the old one in that SAME SQLite commit, so replay cannot add devices.
+    /// the old one in that SAME `SQLite` commit, so replay cannot add devices.
+    ///
+    /// # Errors
+    /// Rejects incorrect or previously spent verifiers, revoked/reused Device IDs,
+    /// conflicting keys, missing canonical Identity, and durable failures.
     pub fn first_party_recover_device(
         &self,
         scope: &TenantScope,
@@ -255,6 +263,10 @@ impl SqliteLocalStore {
     }
 
     /// Authenticated, active Device session only; caller checks authority.
+    ///
+    /// # Errors
+    /// Denies identities without a recovery credential and propagates any
+    /// canonical `SQLite` storage failure.
     pub fn first_party_rotate_recovery(
         &self,
         scope: &TenantScope,
