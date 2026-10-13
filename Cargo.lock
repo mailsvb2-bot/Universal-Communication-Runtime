@@ -4115,9 +4115,18 @@ dependencies = [
 name = "ucr-runtime"
 version = "0.0.1"
 dependencies = [
+ "base64",
+ "bytes",
+ "ed25519-dalek",
+ "getrandom",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "rcgen",
  "rusqlite",
  "rustls",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
