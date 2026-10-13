@@ -97,11 +97,12 @@ See `spec/dev-mode.md` for the trust boundary and nonclaims.
 stays on the server so each browser can hold its own device key. Two speakers are a two-way
 call. A speaker plus an attendee is a webinar: the attendee watches and listens, and does not
 publish a camera. The room starts coturn on `127.0.0.1:53478`. `turnserver` must be on `PATH`. About eight
-seconds after two people are in the call, ciphertext is written into an encrypted archive
-under the system temp directory. Someone who arrives after that archive has started is
-refused, because an active recording only admits people already covered by its consent
-snapshot. This is not Production 1.0 and it is not a horizontal SFU: those stay fail-closed
-until the repository's own release evidence exists.
+seconds after two people have open realtime sessions, ciphertext is written into an
+encrypted archive under the system temp directory. Accepted membership alone does not
+start that archive, so a slow conference page can still open the camera. A person who
+arrives after the archive has started ends it and can enter; a new archive begins once
+two people are live again. This is not Production 1.0 and it is not a horizontal SFU:
+those stay fail-closed until the repository's own release evidence exists.
 
 ```bash
 cargo run -p ucr-dev -- dev --room

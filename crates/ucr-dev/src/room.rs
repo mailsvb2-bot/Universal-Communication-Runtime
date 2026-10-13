@@ -21,11 +21,12 @@ use tonic::Request;
 use ucr_api_grpc::pb;
 use ucr_core::{
     DeviceLifecycleStore, GroupCallLookupStore, IdentityDeviceLookupStore,
-    PrincipalIdentityBindingStore, TrustedSigningKeyStore, UniversalConferenceStore,
+    MAX_ACTIVE_RECORDINGS_PER_CALL, PrincipalIdentityBindingStore, RecordingStore,
+    TrustedSigningKeyStore, UniversalConferenceStore, recording_allows_realtime_participant,
 };
 use ucr_model::{
-    CallParticipantState, ConferenceParticipantRole, DeviceId, DeviceLifecycleState, GroupId,
-    IntegrationId, OpaqueId, RecordingId,
+    CallSession, ConferenceParticipantRole, DeviceId, DeviceLifecycleState, GroupId, IntegrationId,
+    OpaqueId, PrincipalRef, RecordingId, RecordingSession, RecordingState,
 };
 use ucr_protocol::{ALGORITHM_VERSION, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID};
 
@@ -43,12 +44,17 @@ struct RoomHost {
     /// Two creators would mint different schedules and conflict, and a second
     /// join must not request Waiting after the conference is already Live.
     open_gate: AsyncMutex<()>,
+    /// Serializes archive start and stop so a newcomer and the watcher cannot
+    /// seal and unseal the same recording at once.
+    recording_gate: AsyncMutex<()>,
     edge: Option<Arc<super::room_edge::RoomEdge>>,
 }
 
 struct RoomState {
     conference_id: Option<pb::OpaqueId>,
     opened: bool,
+    /// Next archive id. The first one keeps the historical `room-recording` label.
+    recording_seq: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,8 +119,10 @@ pub async fn spawn(
         state: Mutex::new(RoomState {
             conference_id: None,
             opened: false,
+            recording_seq: 0,
         }),
         open_gate: AsyncMutex::new(()),
+        recording_gate: AsyncMutex::new(()),
         edge,
     });
     let prewarm_host = Arc::clone(&host);
@@ -326,8 +334,11 @@ async fn join(host: &Arc<RoomHost>, body: &[u8]) -> Result<Vec<u8>, String> {
     let request: JoinRequest =
         serde_json::from_slice(body).map_err(|_| "invalid join request".to_owned())?;
     let conference_id = conference_id(host)?;
-    let _identity =
-        participant_identity(host, &conference_id, request.external_user_id.as_bytes())?;
+    let identity = participant_identity(host, &conference_id, request.external_user_id.as_bytes())?;
+    // An active archive only admits people already in its consent snapshot.
+    // A later person used to die on realtime join with "realtime join rejected"
+    // before the camera opened. End that archive first so the room stays usable.
+    release_recording_for_newcomer(host, &conference_id, &identity.participant).await?;
     prepare_runtime(host, &conference_id).await?;
     if open_live(host, &conference_id).await? && host.edge.is_some() {
         let host = Arc::clone(host);
@@ -618,36 +629,88 @@ async fn watch_room_recording(host: Arc<RoomHost>) -> Result<(), String> {
         .as_ref()
         .ok_or_else(|| "recording edge is missing".to_owned())?
         .clone();
-    let mut last_error = None;
-    let mut previous_accepted = 0_usize;
+    let mut previous_live = 0_usize;
     let mut stable_polls = 0_u32;
-    for _ in 0..3_000 {
+    let mut quiet_polls = 0_u32;
+    loop {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let conference = conference_id(&host)?;
-        let accepted = accepted_participant_count(&host, &conference)?;
-        let humans = accepted.saturating_sub(1);
-        if humans >= 2 && accepted == previous_accepted {
-            stable_polls = stable_polls.saturating_add(1);
-        } else {
-            stable_polls = 0;
-            previous_accepted = accepted;
-        }
-        // The consent snapshot is fixed when recording becomes active. Wait until two
-        // people have been in the call long enough for a second window to finish joining.
-        if humans >= 2 && stable_polls >= 40 {
-            match start_room_recording(&host, &edge, &conference).await {
-                Ok(()) => return Ok(()),
-                Err(error) => last_error = Some(error),
+        let conference = match conference_id(&host) {
+            Ok(conference) => conference,
+            Err(error) => {
+                eprintln!("ucr room recording: {error}");
+                continue;
             }
+        };
+        let call = match active_call(&host, &conference) {
+            Ok(call) => call,
+            Err(error) => {
+                eprintln!("ucr room recording: {error}");
+                continue;
+            }
+        };
+        let Some(call) = call else {
+            previous_live = 0;
+            stable_polls = 0;
+            quiet_polls = 0;
+            continue;
+        };
+        let live = match host.env.connected_realtime_participants(&call.call_id) {
+            Ok(live) => live,
+            Err(error) => {
+                eprintln!("ucr room recording: {error}");
+                continue;
+            }
+        };
+        let _gate = host.recording_gate.lock().await;
+        let recordings = match active_room_recordings(&host, &call.call_id) {
+            Ok(recordings) => recordings,
+            Err(error) => {
+                eprintln!("ucr room recording: {error}");
+                continue;
+            }
+        };
+        if recordings.is_empty() {
+            quiet_polls = 0;
+            if live >= 2 && live == previous_live {
+                stable_polls = stable_polls.saturating_add(1);
+            } else {
+                stable_polls = 0;
+                previous_live = live;
+            }
+            // Membership on the call is not enough: the conference page still has to
+            // finish realtime join. Seal only after two open media sessions stay up.
+            if live >= 2 && stable_polls >= 40 {
+                if let Err(error) = start_room_recording(&host, &edge, &conference).await {
+                    eprintln!("ucr room recording: {error}");
+                    stable_polls = 0;
+                } else {
+                    stable_polls = 0;
+                }
+            }
+        } else if live < 2 {
+            previous_live = live;
+            stable_polls = 0;
+            quiet_polls = quiet_polls.saturating_add(1);
+            if quiet_polls >= 15 {
+                for recording in &recordings {
+                    if let Err(error) = stop_room_recording(&host, recording).await {
+                        eprintln!("ucr room recording: {error}");
+                    }
+                }
+                quiet_polls = 0;
+            }
+        } else {
+            quiet_polls = 0;
+            previous_live = live;
+            stable_polls = 0;
         }
     }
-    Err(last_error.unwrap_or_else(|| "recording waited for two people to join".to_owned()))
 }
 
-fn accepted_participant_count(
+fn active_call(
     host: &RoomHost,
     conference_id: &pb::OpaqueId,
-) -> Result<usize, String> {
+) -> Result<Option<CallSession>, String> {
     let group_id = GroupId::from_opaque(
         OpaqueId::from_wire_bytes(&conference_id.value)
             .map_err(|_| "invalid conference id".to_owned())?,
@@ -657,17 +720,58 @@ fn accepted_participant_count(
         .store
         .active_calls_for_group(&host.env.scope, &group_id, 2)
         .map_err(|error| format!("call lookup: {error:?}"))?;
-    let [call] = calls.as_slice() else {
-        return Ok(0);
+    match calls.as_slice() {
+        [] => Ok(None),
+        [call] => Ok(Some(call.clone())),
+        _ => Err("room does not have exactly one active call".to_owned()),
+    }
+}
+
+fn active_room_recordings(
+    host: &RoomHost,
+    call_id: &ucr_model::CallId,
+) -> Result<Vec<RecordingSession>, String> {
+    host.env
+        .store
+        .active_recordings_for_call(host.env.scope(), call_id, MAX_ACTIVE_RECORDINGS_PER_CALL)
+        .map_err(|error| format!("recording lookup: {error:?}"))
+}
+
+async fn release_recording_for_newcomer(
+    host: &RoomHost,
+    conference_id: &pb::OpaqueId,
+    participant: &PrincipalRef,
+) -> Result<(), String> {
+    let Some(call) = active_call(host, conference_id)? else {
+        return Ok(());
     };
-    Ok(call
-        .participants
+    let _gate = host.recording_gate.lock().await;
+    let recordings = active_room_recordings(host, &call.call_id)?;
+    let blocking = recordings
         .iter()
-        .filter(|participant| {
-            participant.state == CallParticipantState::Accepted
-                && participant.left_revision.is_none()
-        })
-        .count())
+        .filter(|recording| !recording_allows_realtime_participant(recording, participant))
+        .collect::<Vec<_>>();
+    if blocking.is_empty() {
+        return Ok(());
+    }
+    for recording in blocking {
+        stop_room_recording(host, recording).await?;
+    }
+    Ok(())
+}
+
+fn allocate_recording_label(host: &RoomHost) -> Result<String, String> {
+    let mut state = host
+        .state
+        .lock()
+        .map_err(|_| "room state lock poisoned".to_owned())?;
+    let seq = state.recording_seq.saturating_add(1);
+    state.recording_seq = seq;
+    if seq == 1 {
+        Ok("room-recording".to_owned())
+    } else {
+        Ok(format!("room-recording-{seq}"))
+    }
 }
 
 async fn start_room_recording(
@@ -675,20 +779,12 @@ async fn start_room_recording(
     edge: &super::room_edge::RoomEdge,
     conference_id: &pb::OpaqueId,
 ) -> Result<(), String> {
-    let group_id = GroupId::from_opaque(
-        OpaqueId::from_wire_bytes(&conference_id.value)
-            .map_err(|_| "invalid conference id".to_owned())?,
-    );
-    let calls = host
-        .env
-        .store
-        .active_calls_for_group(&host.env.scope, &group_id, 2)
-        .map_err(|error| format!("call lookup: {error:?}"))?;
-    let [call] = calls.as_slice() else {
-        return Err("room does not have exactly one active call".to_owned());
-    };
+    let call = active_call(host, conference_id)?
+        .ok_or_else(|| "room does not have exactly one active call".to_owned())?;
     let canonical_call_id = call.call_id.clone();
-    let recording_opaque = opaque("room-recording");
+    let label = allocate_recording_label(host)?;
+    let recording_opaque =
+        OpaqueId::new(&label).map_err(|_| format!("invalid recording id {label}"))?;
     let recording_id = pb::OpaqueId {
         value: recording_opaque.as_wire_bytes().to_vec(),
     };
@@ -717,7 +813,7 @@ async fn start_room_recording(
         scope: Some(pb_scope(&host.env.scope)),
         recording_id: Some(recording_id),
         expected_revision: session.revision,
-        idempotency_key: Some("room-recording-start".to_owned()),
+        idempotency_key: Some(format!("room-recording-start-{label}")),
     });
     attach_dev_credential(&mut start, &host.env);
     let started = recording
@@ -741,6 +837,57 @@ async fn start_room_recording(
         session.revision
     );
     Ok(())
+}
+
+async fn stop_room_recording(host: &RoomHost, session: &RecordingSession) -> Result<(), String> {
+    if session.state != RecordingState::Active
+        && session.state != RecordingState::Ready
+        && session.state != RecordingState::WaitingForConsent
+    {
+        return Ok(());
+    }
+    let mut recording = recording_client(host).await?;
+    let mut stop = Request::new(pb::RecordingStopRequest {
+        scope: Some(pb_scope(&host.env.scope)),
+        recording_id: Some(pb::OpaqueId {
+            value: session.recording_id.as_opaque().as_wire_bytes().to_vec(),
+        }),
+        expected_revision: session.revision,
+        idempotency_key: Some(format!("room-recording-stop-{}", session.revision)),
+    });
+    attach_dev_credential(&mut stop, &host.env);
+    let stopped = recording
+        .stop_recording(stop)
+        .await
+        .map_err(|error| format!("stop recording: {error}"))?
+        .into_inner();
+    let stopped_session =
+        recording_session(stopped.result.map(stop_result), "recording stop was denied")?;
+    if let Some(edge) = &host.edge
+        && let Err(error) = edge
+            .recorder
+            .end(&session.recording_id, stopped_session.revision)
+    {
+        eprintln!("ucr room recording archive stop: {error}");
+    }
+    println!(
+        "UCR_ROOM_RECORDING_STATE=stopped revision={}",
+        stopped_session.revision
+    );
+    Ok(())
+}
+
+fn stop_result(
+    result: pb::recording_stop_response::Result,
+) -> pb::recording_request_response::Result {
+    match result {
+        pb::recording_stop_response::Result::Recording(recording) => {
+            pb::recording_request_response::Result::Recording(recording)
+        }
+        pb::recording_stop_response::Result::Error(error) => {
+            pb::recording_request_response::Result::Error(error)
+        }
+    }
 }
 
 fn start_result(
@@ -774,6 +921,7 @@ fn recording_session(
 struct ParticipantIdentity {
     participant_id: String,
     device_id: String,
+    participant: PrincipalRef,
 }
 
 fn participant_identity(
@@ -814,6 +962,7 @@ fn participant_identity(
     Ok(ParticipantIdentity {
         participant_id: wire_text(profile.participant.principal_id.as_opaque()),
         device_id: wire_text(device.device_id.as_opaque()),
+        participant: profile.participant,
     })
 }
 
