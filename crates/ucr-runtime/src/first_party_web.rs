@@ -1,5 +1,5 @@
 //! First-party same-origin BFF for independently proved canonical human Devices.
-//! This module shares the production SQLite and JoinTokenIssuer with realtime.
+//! This module shares the production `SQLite` and `JoinTokenIssuer` with realtime.
 //! It deliberately does not bootstrap Root Identities or silently trust a new Device.
 
 use std::{
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, CallStore, ConversationStore, DeviceLifecycleStore, IdentityStore,
+    AuthorizedDurableRuntime, DeviceLifecycleStore, IdentityStore,
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, TrustedSigningKeyStore,
     generate_opaque_id,
 };
@@ -44,7 +44,7 @@ const MAX_BODY: usize = 16 * 1024;
 const MAX_PENDING: usize = 512;
 const MAX_SESSIONS: usize = 2048;
 const CHALLENGE_TTL: Duration = Duration::from_secs(90);
-const SESSION_TTL: Duration = Duration::from_secs(1800);
+const SESSION_TTL: Duration = Duration::from_mins(30);
 const COOKIE_NAME: &str = "__Host-ucr_fp";
 type HttpResponse = Response<Full<Bytes>>;
 
@@ -54,7 +54,8 @@ struct Binding {
     tenant_id: String,
     namespace_id: Option<String>,
     participant_id: String,
-    device_id: String,
+    #[serde(rename = "deviceId")]
+    device: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,10 +240,10 @@ fn reply(status: StatusCode, body: &Value, cookie: Option<&str>) -> HttpResponse
         .header("Content-Security-Policy", "default-src 'none'")
         .body(Full::new(Bytes::from(bytes)))
         .expect("static response headers");
-    if let Some(value) = cookie {
-        if let Ok(cookie) = hyper::header::HeaderValue::from_str(value) {
-            result.headers_mut().insert(SET_COOKIE, cookie);
-        }
+    if let Some(value) = cookie
+        && let Ok(cookie) = hyper::header::HeaderValue::from_str(value)
+    {
+        result.headers_mut().insert(SET_COOKIE, cookie);
     }
     result
 }
@@ -276,7 +277,7 @@ fn identity(binding: &Binding) -> Result<IdentityId, StatusCode> {
 }
 
 fn device(binding: &Binding) -> Result<DeviceId, StatusCode> {
-    Ok(DeviceId::from_opaque(opaque(&binding.device_id)?))
+    Ok(DeviceId::from_opaque(opaque(&binding.device)?))
 }
 
 fn now_unix_ms() -> Result<i64, StatusCode> {
@@ -418,10 +419,10 @@ fn consume(
     Ok(challenge)
 }
 
-fn encoded_proof(prefix: &str, context: Value) -> Result<String, StatusCode> {
+fn encoded_proof(prefix: &str, context: &Value) -> Result<String, StatusCode> {
     Ok(format!(
         "{prefix}\0{}",
-        serde_json::to_string(&context).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        serde_json::to_string(context).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     ))
 }
 
@@ -468,8 +469,7 @@ fn authenticated(state: &State, request: &Request<Incoming>) -> Result<Session, 
     }
     let token = raw
         .split(';')
-        .filter_map(|part| part.trim().strip_prefix(&format!("{COOKIE_NAME}=")))
-        .next()
+        .find_map(|part| part.trim().strip_prefix(&format!("{COOKIE_NAME}=")))
         .ok_or(StatusCode::UNAUTHORIZED)?;
     if token.len() != 43
         || !token
@@ -502,10 +502,10 @@ fn authenticated(state: &State, request: &Request<Incoming>) -> Result<Session, 
 }
 
 fn ensure_binding(requested: &Binding, session: &Session) -> Result<(), StatusCode> {
-    if requested != &session.binding {
-        Err(StatusCode::FORBIDDEN)
-    } else {
+    if requested == &session.binding {
         Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
     }
 }
 
@@ -573,7 +573,7 @@ fn get_call(state: &State, session: &Session, id: &str) -> Result<CallSession, S
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-fn start_call(state: &State, session: &Session, intent: StartIntent) -> Result<Value, StatusCode> {
+fn start_call(state: &State, session: &Session, intent: &StartIntent) -> Result<Value, StatusCode> {
     if intent.peer_identity_id == session.binding.participant_id {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -653,7 +653,7 @@ fn start_call(state: &State, session: &Session, intent: StartIntent) -> Result<V
     to_call(state, &current)
 }
 
-fn signal_call(state: &State, session: &Session, req: SignalRequest) -> Result<Value, StatusCode> {
+fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<Value, StatusCode> {
     let before = get_call(state, session, &req.call_id)?;
     if before.revision != req.expected_revision {
         return Err(StatusCode::CONFLICT);
@@ -684,7 +684,7 @@ fn signal_call(state: &State, session: &Session, req: SignalRequest) -> Result<V
     to_call(state, &current)
 }
 
-fn issue_join(state: &State, session: &Session, req: JoinRequest) -> Result<Value, StatusCode> {
+fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Value, StatusCode> {
     let call = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
         .first_party_call_join_admission(
             &session.subject,
@@ -718,7 +718,7 @@ fn issue_join(state: &State, session: &Session, req: JoinRequest) -> Result<Valu
         "tenantId": binding.tenant_id,
         "namespaceId": binding.namespace_id,
         "participantId": binding.participant_id,
-        "deviceId": binding.device_id,
+        "deviceId": binding.device,
         "callId": req.call_id,
         "sessionId": grant.claims.session_id.as_opaque().as_str(),
         "joinFragment": fragment,
@@ -751,21 +751,7 @@ async fn dispatch(
         return Err(StatusCode::METHOD_NOT_ALLOWED);
     }
     if method == Method::POST {
-        if request.headers().get(ORIGIN).and_then(|v| v.to_str().ok())
-            != Some(state.origin.as_str())
-            || request
-                .headers()
-                .get("X-UCR-First-Party-Request")
-                .and_then(|v| v.to_str().ok())
-                != Some("v1")
-            || !request
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v == "application/json")
-        {
-            return Err(StatusCode::FORBIDDEN);
-        }
+        require_post_headers(&request, &state.origin)?;
     }
     let session = if matches!(
         path,
@@ -800,26 +786,77 @@ async fn dispatch(
     }
     // Typed decoding rejects extraneous fields; account/scope is verified against
     // the independent server session on every route.
+    // Typed decoding rejects extraneous fields; account/scope is verified against
+    // the independent server session on every route.
+    let response = dispatch_post(state, path, &body, session.as_ref())?;
+    body.clear();
+    Ok(response)
+}
+
+fn require_post_headers(request: &Request<Incoming>, origin: &str) -> Result<(), StatusCode> {
+    let headers = request.headers();
+    if headers.get(ORIGIN).and_then(|v| v.to_str().ok()) == Some(origin)
+        && headers
+            .get("X-UCR-First-Party-Request")
+            .and_then(|v| v.to_str().ok())
+            == Some("v1")
+        && headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok())
+            == Some("application/json")
+    {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
+fn dispatch_post(
+    state: &State,
+    path: &str,
+    body: &[u8],
+    session: Option<&Session>,
+) -> Result<(Value, Option<String>), StatusCode> {
+    if matches!(
+        path,
+        "/v1/first-party/login/challenge" | "/v1/first-party/login/verify"
+    ) {
+        return login_route(state, path, body);
+    }
+    let auth = session.ok_or(StatusCode::UNAUTHORIZED)?;
+    let response = if path.starts_with("/v1/first-party/device/") {
+        device_route(state, auth, path, body)?
+    } else if path.starts_with("/v1/first-party/call/") {
+        call_route(state, auth, path, body)?
+    } else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    Ok((response, None))
+}
+
+fn login_route(
+    state: &State,
+    path: &str,
+    body: &[u8],
+) -> Result<(Value, Option<String>), StatusCode> {
     let response = match path {
         "/v1/first-party/login/challenge" => {
-            let binding: Binding = parse(&body)?;
+            let binding: Binding = parse(body)?;
             scope(&binding)?;
             identity(&binding)?;
             device(&binding)?;
             challenge(state, binding, "login", None, None)?
         }
         "/v1/first-party/login/verify" => {
-            let proof: LoginProof = parse(&body)?;
+            let proof: LoginProof = parse(body)?;
             let pending = consume(state, &proof.binding, &proof.challenge_id, "login")?;
             let subject = subject_for(state, &proof.binding)?;
             let (key_id, public_key) = trusted_key(state, &proof.binding)?;
             let signed = encoded_proof(
                 "ucr-first-party-device-login.v1",
-                json!([
+                &json!([
                     proof.binding.tenant_id,
                     proof.binding.namespace_id,
                     proof.binding.participant_id,
-                    proof.binding.device_id,
+                    proof.binding.device,
                     pending.id,
                     pending.nonce,
                 ]),
@@ -828,9 +865,20 @@ async fn dispatch(
             let (value, cookie) = issue_session(state, proof.binding, subject, key_id, public_key)?;
             return Ok((value, Some(cookie)));
         }
+                _ => return Err(StatusCode::NOT_FOUND),
+    };
+    Ok((response, None))
+}
+
+fn device_route(
+    state: &State,
+    auth: &Session,
+    path: &str,
+    body: &[u8],
+) -> Result<Value, StatusCode> {
+    let response = match path {
         "/v1/first-party/device/inspect" => {
-            let input: BoundRequest = parse(&body)?;
-            let auth = session.as_ref().ok_or(StatusCode::UNAUTHORIZED)?;
+            let input: BoundRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             let (key_id, public_key) = trusted_key(state, &auth.binding)?;
             json!({"deviceActive": true, "deviceRevoked": false,
@@ -838,8 +886,7 @@ async fn dispatch(
                               "publicKeyBase64Url": URL_SAFE_NO_PAD.encode(public_key)}})
         }
         "/v1/first-party/device/challenge" => {
-            let input: DeviceChallenge = parse(&body)?;
-            let auth = session.as_ref().ok_or(StatusCode::UNAUTHORIZED)?;
+            let input: DeviceChallenge = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             opaque(&input.key_id)?;
             let public_key = URL_SAFE_NO_PAD
@@ -855,8 +902,7 @@ async fn dispatch(
             )?
         }
         "/v1/first-party/device/approve" => {
-            let input: DeviceApproval = parse(&body)?;
-            let auth = session.as_ref().ok_or(StatusCode::UNAUTHORIZED)?;
+            let input: DeviceApproval = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             let pending = consume(state, &input.binding, &input.challenge_id, "device")?;
             if pending.key_id.as_deref() != Some(&input.key_id)
@@ -873,11 +919,11 @@ async fn dispatch(
             }
             let signed = encoded_proof(
                 "ucr-first-party-device-enrollment.v1",
-                json!([
+                &json!([
                     input.binding.tenant_id,
                     input.binding.namespace_id,
                     input.binding.participant_id,
-                    input.binding.device_id,
+                    input.binding.device,
                     input.key_id,
                     input.public_key_base64_url,
                     pending.id,
@@ -887,21 +933,30 @@ async fn dispatch(
             verify_ed25519(key, &signed, &input.signature_base64_url)?;
             json!({"approved": true})
         }
+                _ => return Err(StatusCode::NOT_FOUND),
+    };
+    Ok(response)
+}
+
+fn call_route(
+    state: &State,
+    auth: &Session,
+    path: &str,
+    body: &[u8],
+) -> Result<Value, StatusCode> {
+    let response = match path {
         "/v1/first-party/call/start" => {
-            let input: StartRequest = parse(&body)?;
-            let auth = session.as_ref().ok_or(StatusCode::UNAUTHORIZED)?;
+            let input: StartRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
-            start_call(state, auth, input.intent)?
+            start_call(state, auth, &input.intent)?
         }
         "/v1/first-party/call/get" => {
-            let input: GetRequest = parse(&body)?;
-            let auth = session.as_ref().ok_or(StatusCode::UNAUTHORIZED)?;
+            let input: GetRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             to_call(state, &get_call(state, auth, &input.call_id)?)?
         }
         "/v1/first-party/call/incoming" => {
-            let input: BoundRequest = parse(&body)?;
-            let auth = session.as_ref().ok_or(StatusCode::UNAUTHORIZED)?;
+            let input: BoundRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             let calls = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
                 .first_party_call_incoming(&auth.subject, &device(&auth.binding)?, 64)
@@ -913,27 +968,24 @@ async fn dispatch(
             json!(calls)
         }
         "/v1/first-party/call/signal" => {
-            let input: SignalRequest = parse(&body)?;
-            let auth = session.as_ref().ok_or(StatusCode::UNAUTHORIZED)?;
+            let input: SignalRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
-            signal_call(state, auth, input)?
+            signal_call(state, auth, &input)?
         }
         "/v1/first-party/call/join-accepted" => {
-            let input: JoinRequest = parse(&body)?;
-            let auth = session.as_ref().ok_or(StatusCode::UNAUTHORIZED)?;
+            let input: JoinRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
-            issue_join(state, auth, input)?
+            issue_join(state, auth, &input)?
         }
         "/v1/first-party/call/join" => {
             // A bare device binding cannot establish accepted Call authority.
             return Err(StatusCode::FORBIDDEN);
         }
-        _ => return Err(StatusCode::NOT_FOUND),
+                _ => return Err(StatusCode::NOT_FOUND),
     };
-    // Prevent accidental retention of arbitrary untrusted request bytes.
-    body.clear();
-    Ok((response, None))
+    Ok(response)
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -973,7 +1025,7 @@ mod tests {
     fn challenge_signature_proof_is_domain_separated_and_ordered() {
         let proof = encoded_proof(
             "ucr-first-party-device-login.v1",
-            json!(["tenant", null, "identity", "device", "id", "nonce"]),
+            &json!(["tenant", null, "identity", "device", "id", "nonce"]),
         )
         .unwrap();
         assert!(proof.starts_with("ucr-first-party-device-login.v1\0["));
