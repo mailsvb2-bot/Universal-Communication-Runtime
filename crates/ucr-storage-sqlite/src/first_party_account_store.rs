@@ -397,14 +397,62 @@ mod tests {
             ),
             Err(DurableStoreError::Conflict)
         );
+        // Two newly created independent canonical People, each with a first
+        // Device and a separately recovered second Device. Both rows of the
+        // SAME canonical Identity/Device/Trust owners survive restart.
+        let two = IdentityId::from_opaque(id("self-service-identity-two"));
+        let second_user_first = DeviceDescriptor {
+            device_id: DeviceId::from_opaque(id("user-two-first")),
+            identity_id: two.clone(),
+            state: DeviceLifecycleState::Active,
+        };
+        let second_user_second = DeviceDescriptor {
+            device_id: DeviceId::from_opaque(id("user-two-second")),
+            identity_id: two.clone(),
+            state: DeviceLifecycleState::Active,
+        };
+        store
+            .first_party_register_account(
+                &scope(),
+                &two,
+                &second_user_first,
+                &key("user-two-first", "user-two-key-one", 25),
+                [22; 32],
+            )
+            .unwrap();
+        store
+            .first_party_recover_device(
+                &scope(),
+                &one,
+                &descriptor("user-one-second"),
+                &key("user-one-second", "user-one-key-two", 19),
+                [21; 32],
+                [31; 32],
+            )
+            .unwrap();
+        store
+            .first_party_recover_device(
+                &scope(),
+                &two,
+                &second_user_second,
+                &key("user-two-second", "user-two-key-two", 29),
+                [22; 32],
+                [32; 32],
+            )
+            .unwrap();
         drop(store);
         let again = SqliteLocalStore::open(&db.0).unwrap();
+        for identity in [&one, &two] {
+            assert_eq!(
+                again.devices_for_identity(&scope(), identity, 64).unwrap().len(),
+                2
+            );
+        }
         assert_eq!(
-            again
-                .devices_for_identity(&scope(), &one, 64)
-                .unwrap()
-                .len(),
-            1
+            again.active_trusted_signing_key(
+                &scope(), &DeviceId::from_opaque(id("user-two-second"))
+            ).unwrap().unwrap().public_key,
+            vec![29; 32]
         );
         assert_eq!(again.schema_version(), Ok(crate::SQLITE_SCHEMA_VERSION));
     }
