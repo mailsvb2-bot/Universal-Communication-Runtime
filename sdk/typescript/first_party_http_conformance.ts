@@ -260,4 +260,84 @@ assert.equal(inflight, true);
 guard.release(reply(binding));
 assert.deepEqual(await waiting, binding);
 
+// Actual first-party Rust BFF requires a recipient-accepted Call before Join.
+// Mocking a successful bare /call/join response above tests a legacy SDK seam,
+// NOT a route that exists on the real server. Verify the live BFF's direct Call
+// request envelopes and fail-closed unscoped-Join contract independently.
+const direct = {
+  ...binding, callId:"fp-v-call-token-42", callerIdentityId:binding.participantId,
+  calleeIdentityId:"peer-other", media:"video" as const,
+  state:"active" as const, revision:7,
+};
+const authenticatedRoutes: string[] = [];
+const canonicalHttp = createUcrFirstPartyHttpHost(first.vault, {
+  origin,
+  fetchImpl: async (url, init) => {
+    const path = new URL(String(url)).pathname;
+    authenticatedRoutes.push(path);
+    if (path === "/v1/first-party/session") return reply(binding);
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(body.binding, binding, "live Rust BFF checks session-scoped binding");
+    if (path === "/v1/first-party/device/inspect") {
+      assert.deepEqual(Object.keys(body), ["binding"], "no naked Device JSON");
+      return reply(first.trust);
+    }
+    if (path === "/v1/first-party/call/start") {
+      assert.deepEqual(body.intent, {
+        peerIdentityId: "peer-other", media:"video", idempotencyKey:"call-token-42",
+      });
+      return reply({...direct, state:"inviting"});
+    }
+    if (path === "/v1/first-party/call/get") {
+      assert.equal(body.callId, direct.callId);
+      return reply(direct);
+    }
+    if (path === "/v1/first-party/call/incoming") {
+      assert.deepEqual(Object.keys(body), ["binding"]);
+      return reply([]);
+    }
+    if (path === "/v1/first-party/call/signal") {
+      assert.deepEqual({
+        callId:body.callId, expectedRevision:body.expectedRevision, action:body.action,
+      }, {callId:direct.callId,expectedRevision:7,action:"hangup"});
+      return reply({...direct,state:"terminated",revision:8});
+    }
+    if (path === "/v1/first-party/call/join-accepted") {
+      assert.equal(body.callId,direct.callId);
+      assert.equal(body.expectedRevision,7);
+      return reply({
+        ...binding,callId:direct.callId,sessionId:"session-42",
+        joinFragment:"#ucr_join="+encode(new TextEncoder().encode("fake-claims"))+
+          "."+encode(new TextEncoder().encode("fake-signature")),
+      });
+    }
+    if (path === "/v1/first-party/call/join") {
+      // This endpoint is always forbidden by the live Rust BFF.
+      return reply({error:"forbidden"},403);
+    }
+    return reply({error:"unknown canonical route"},404);
+  },
+});
+assert.deepEqual(await canonicalHttp.resumeAuthenticatedDevice(),binding);
+await canonicalHttp.inspect(binding);
+const started = await canonicalHttp.startDirectCall(binding,{
+  peerIdentityId:"peer-other",media:"video",idempotencyKey:"call-token-42",
+});
+assert.equal(started.state,"inviting");
+assert.equal((await canonicalHttp.getDirectCall(binding,direct.callId)).revision,7);
+assert.deepEqual(await canonicalHttp.listIncomingDirectCalls(binding),[]);
+assert.equal((await canonicalHttp.signalDirectCall(binding,{
+  callId:direct.callId,expectedRevision:7,action:"hangup",
+})).state,"terminated");
+assert.equal((await canonicalHttp.issueSignedJoinForAcceptedCall(binding,{
+  callId:direct.callId,expectedRevision:7,
+})).sessionId,"session-42");
+await assert.rejects(canonicalHttp.issueSignedDeviceJoin(binding),/HTTP 403/);
+for (const route of [
+  "device/inspect","call/start","call/get","call/incoming",
+  "call/signal","call/join-accepted","call/join",
+]) {
+  assert.ok(authenticatedRoutes.includes("/v1/first-party/"+route),route);
+}
+
 console.log("RT0 first-party HTTP authenticated Device -> possession -> signed Join conformance passed");
