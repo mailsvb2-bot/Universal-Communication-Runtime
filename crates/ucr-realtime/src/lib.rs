@@ -919,6 +919,36 @@ impl RealtimeSessionRegistry {
             .count())
     }
 
+    /// Returns how many participants still have an open downlink on one canonical Call.
+    ///
+    /// A registry entry can outlive the browser tab. A closed downlink means that tab is gone, so
+    /// the local room must not treat it as someone still in the call.
+    ///
+    /// # Errors
+    /// Fails when the bounded registry state is unavailable.
+    pub fn connected_call_participant_count_at(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        now_unix_ms: i64,
+    ) -> Result<usize, RealtimeRegistryError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        self.prune_expired(&mut entries, now_unix_ms)?;
+        let mut participants = std::collections::BTreeSet::new();
+        for entry in entries.iter() {
+            if entry.claims.scope == *scope
+                && entry.claims.call_id == *call_id
+                && !entry.sender.is_closed()
+            {
+                participants.insert(entry.claims.participant.principal_id.clone());
+            }
+        }
+        Ok(participants.len())
+    }
+
     /// Returns whether the exact signed session is already active.
     ///
     /// This is used by admission policy to distinguish a first entry from a reconnect when a

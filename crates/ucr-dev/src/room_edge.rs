@@ -186,6 +186,39 @@ impl RoomRecorder {
             });
         Ok(())
     }
+
+    pub(crate) fn end(
+        &self,
+        recording_id: &RecordingId,
+        lifecycle_revision: u64,
+    ) -> Result<(), String> {
+        let context = {
+            let mut active = self
+                .active
+                .lock()
+                .map_err(|_| "recording lock poisoned".to_owned())?;
+            let Some(context) = active.clone() else {
+                return Ok(());
+            };
+            if context.recording_id != *recording_id {
+                return Ok(());
+            }
+            active.take();
+            context
+        };
+        let request = RecordingProviderRequest {
+            scope: context.scope,
+            recording_id: context.recording_id,
+            call_id: context.call_id,
+            lifecycle_revision,
+            operation: RecordingProviderOperation::Stop,
+            expires_at_unix_ms: context.expires_at_unix_ms,
+        };
+        self.provider
+            .apply(&request)
+            .map_err(|error| format!("stop recording archive: {error:?}"))?;
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for RoomRecorder {

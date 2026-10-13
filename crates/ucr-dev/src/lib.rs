@@ -397,6 +397,20 @@ impl DevEnvironment {
         &self.scope
     }
 
+    /// Participants whose realtime downlink is still open for this call.
+    ///
+    /// # Errors
+    /// Returns an error when the clock or the session registry is unavailable.
+    pub(crate) fn connected_realtime_participants(
+        &self,
+        call_id: &ucr_model::CallId,
+    ) -> Result<usize, String> {
+        let now = system_time_unix_ms("room realtime roster")?;
+        self.realtime_registry
+            .connected_call_participant_count_at(&self.scope, call_id, now)
+            .map_err(|error| format!("realtime roster: {error:?}"))
+    }
+
     #[must_use]
     pub const fn credential_id(&self) -> &ServiceCredentialId {
         &self.credential_id
