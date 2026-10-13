@@ -764,7 +764,9 @@ fn migrate_v51_to_v52(connection: &mut Connection) -> Result<(), DurableStoreErr
     transaction
         .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
         .map_err(|error| map_sqlite_error(&error))?;
-    transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v52(connection)
 }
 
