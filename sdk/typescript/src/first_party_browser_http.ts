@@ -245,6 +245,84 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 }
 
 /**
+ * Opens a new first-party human session using independently verified possession
+ * of the ALREADY TRUSTED canonical Device signer. This is not Device enrollment:
+ * a missing local signer requires explicit existing-account recovery/pairing.
+ * Neither a Join URL nor browser-entered identity fields authorize themselves.
+ */
+export async function authenticateUcrFirstPartyDevice(
+  vault: UcrCanonicalDeviceKeyVault,
+  options: UcrFirstPartyHttpOptions,
+  binding: UcrAuthenticatedFirstEntry,
+): Promise<UcrAuthenticatedFirstEntry> {
+  const origin = validateOrigin(options.origin);
+  const auth = parseBinding(binding);
+  const scope: UcrDeviceVaultScope = {
+    tenantId:auth.tenantId, namespaceId:auth.namespaceId, deviceId:auth.deviceId,
+  };
+  const signer = await vault.load(scope);
+  if (!signer || !signer.publicKey || signer.publicKey.length!==32) {
+    throw new Error("registered protected Device signer unavailable; account recovery required");
+  }
+  const http = options.fetchImpl ?? globalThis.fetch;
+  if (typeof http!=="function") throw new Error("fetch API unavailable");
+  const post = async (path:string,body:unknown):Promise<unknown> => {
+    const data = JSON.stringify(body);
+    if (new TextEncoder().encode(data).length>MAX_REQUEST_BYTES) {
+      throw new Error("first-party authentication request exceeds limit");
+    }
+    const response = await http(new URL(path,origin),{
+      method:"POST",credentials:"same-origin",redirect:"error",cache:"no-store",
+      referrerPolicy:"no-referrer",mode:"same-origin",
+      headers:{
+        "Accept":REQUIRED_CONTENT_TYPE,
+        "Content-Type":REQUIRED_CONTENT_TYPE,
+        "X-UCR-First-Party-Request":"v1",
+      },
+      body:data,
+    });
+    if (response.redirected || response.url &&
+        new URL(response.url).origin!==origin.origin) {
+      throw new Error("first-party authentication redirect refused");
+    }
+    if (!response.ok) throw new Error("Device authentication denied: HTTP "+response.status);
+    return readBoundedJson(response);
+  };
+  const challengeResponse = await post("/v1/first-party/login/challenge",auth);
+  if (!isObject(challengeResponse)) throw new Error("missing Device login challenge");
+  exactKeys(challengeResponse,["challengeId","challengeBytesBase64Url"]);
+  const challengeId = requiredId(challengeResponse.challengeId,"login challenge");
+  const nonce = decodeBase64Url(challengeResponse.challengeBytesBase64Url,32);
+  const signed = new TextEncoder().encode(
+    "ucr-first-party-device-login.v1\u0000"+
+    JSON.stringify([
+      auth.tenantId,auth.namespaceId,auth.participantId,auth.deviceId,
+      challengeId,encodeBase64Url(nonce),
+    ]),
+  );
+  const signature = await vault.signChallenge(scope,signed.slice());
+  if (!(signature instanceof Uint8Array) || signature.length!==64) {
+    throw new Error("protected Device refused login signature");
+  }
+  const key = await globalThis.crypto.subtle.importKey(
+    "raw", signer.publicKey as Uint8Array<ArrayBuffer>,
+    {name:"Ed25519"},false,["verify"],
+  );
+  if (!await globalThis.crypto.subtle.verify(
+    "Ed25519",key,signature as Uint8Array<ArrayBuffer>,signed,
+  )) {
+    throw new Error("Device login signer does not match protected public key");
+  }
+  const result = parseBinding(await post("/v1/first-party/login/verify",{
+    binding:auth,challengeId,signatureBase64Url:encodeBase64Url(signature),
+  }));
+  if (!sameBinding(auth,result)) {
+    throw new Error("first-party server authenticated a different Identity or Device");
+  }
+  return result;
+}
+
+/**
  * Consumes existing first-party session cookies on SAME origin only. No OAuth
  * machine secrets are exposed to JS, and redirects are forbidden.
  *
