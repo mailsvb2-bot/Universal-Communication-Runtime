@@ -2468,9 +2468,8 @@ impl ProductionRuntime {
                     .map_err(|error| format!("local realtime API server: {error}")),
             }
         };
-        let public_and_first_party = async move {
-            tokio::try_join!(public_and_operator, first_party_listener).map(|_| ())
-        };
+        let public_and_first_party =
+            async move { tokio::try_join!(public_and_operator, first_party_listener).map(|_| ()) };
         let server_result = match (sfu_node_media_config, sfu_node_media_service) {
             (Some(config), Some(service)) => tokio::try_join!(
                 public_and_first_party,
