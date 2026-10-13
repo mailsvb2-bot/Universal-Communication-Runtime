@@ -17,18 +17,18 @@ use tonic::{Request, transport::Server};
 use ucr_api_grpc::{
     GrpcAttachmentService, GrpcCallService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
     GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
-    GrpcUniversalConferenceService, attach_service_credential, attachment_service_server,
-    call_service_server, device_service_server, event_service_server, group_service_server,
-    integration_service_server, pb, realtime_service_server, store_forward_service_server,
-    sync_service_server, universal_conference_service_server,
+    GrpcUniversalConferenceService, RealtimeWebRtcDependencies, attach_service_credential,
+    attachment_service_server, call_service_server, device_service_server, event_service_server,
+    group_service_server, integration_service_server, pb, realtime_service_server,
+    store_forward_service_server, sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
-    CanonicalTransportError, ClassifiedTransportFailure, DeviceLifecycleStore, IdentityStore,
-    PermissionGrantStore, RouteCandidate, ServiceCredentialSecret, ServiceCredentialStore,
-    ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore, StorageProvider,
-    SystemEventDeliveryClock, SystemServiceQuotaClock, TransportHealth, TransportProvider,
-    issue_service_credential,
+    CallStore, CanonicalTransportError, ClassifiedTransportFailure, DeviceLifecycleStore,
+    IdentityStore, PermissionGrantStore, RouteCandidate, ServiceCredentialSecret,
+    ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore,
+    StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock, TransportHealth,
+    TransportProvider, issue_service_credential,
 };
 use ucr_model::{
     CapabilityDescriptor, CapabilityMaturity, DeviceDescriptor, DeviceId, DeviceLifecycleState,
@@ -40,7 +40,11 @@ use ucr_protocol::{RUNTIME_PERMISSION_IDS, attachment_content_id};
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_storage_sqlite::SqliteLocalStore;
 
+mod live_media;
+mod room;
+
 pub const DEFAULT_DEV_BIND: &str = "127.0.0.1:50051";
+pub const DEFAULT_ROOM_BIND: &str = "127.0.0.1:43123";
 pub const DEV_TRANSPORT_CAPABILITY: &str = "ucr.transport.test.dev";
 
 static DEV_STORE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -491,6 +495,66 @@ impl DevEnvironment {
             .map_err(|_| "debug event lock poisoned".to_owned())
     }
 
+    /// Starts the loopback gRPC API and the local call/webinar room on a second loopback port.
+    ///
+    /// # Errors
+    /// Non-loopback binds and listener/server failures fail closed.
+    pub async fn serve_local_room(
+        self: Arc<Self>,
+        grpc_bind: SocketAddr,
+        room_bind: SocketAddr,
+    ) -> Result<(), String> {
+        room::spawn(Arc::clone(&self), grpc_bind, room_bind).await?;
+        self.serve(grpc_bind).await
+    }
+
+    fn dev_realtime_service<C>(
+        clock: Arc<C>,
+        authorization: Arc<SqliteLocalStore>,
+        store: Arc<SqliteLocalStore>,
+        join_issuer: Arc<JoinTokenIssuer>,
+        registry: Arc<RealtimeSessionRegistry>,
+        conference_state: Arc<ConferenceRuntimeState>,
+        webrtc: RealtimeWebRtcDependencies,
+    ) -> GrpcRealtimeService<C, SqliteLocalStore, SqliteLocalStore> {
+        GrpcRealtimeService::with_webrtc(
+            clock,
+            authorization,
+            Arc::clone(&store),
+            join_issuer,
+            registry,
+            conference_state,
+            webrtc,
+        )
+        .with_mls_bootstrap_store(Arc::clone(&store))
+        .with_mls_admission_store(store)
+    }
+
+    fn dev_live_realtime<C>(
+        clock: Arc<C>,
+        authorization: Arc<SqliteLocalStore>,
+        store: Arc<SqliteLocalStore>,
+        join_issuer: Arc<JoinTokenIssuer>,
+        registry: Arc<RealtimeSessionRegistry>,
+        conference_state: Arc<ConferenceRuntimeState>,
+    ) -> Result<GrpcRealtimeService<C, SqliteLocalStore, SqliteLocalStore>, String>
+    where
+        C: ucr_core::ServiceQuotaClock + 'static,
+    {
+        let (webrtc, provider, ingress) = live_media::start()?;
+        let service = Self::dev_realtime_service(
+            clock,
+            authorization,
+            store,
+            join_issuer,
+            Arc::clone(&registry),
+            conference_state,
+            webrtc,
+        );
+        live_media::spawn_bridge(ingress, provider, registry, service.clone());
+        Ok(service)
+    }
+
     /// Starts the public loopback gRPC dev API on the requested loopback address.
     ///
     /// # Errors
@@ -577,14 +641,14 @@ impl DevEnvironment {
                     Arc::clone(&join_issuer),
                 ),
             ))
-            .add_service(realtime_service_server(GrpcRealtimeService::new(
+            .add_service(realtime_service_server(Self::dev_live_realtime(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
                 Arc::clone(&store),
                 join_issuer,
                 realtime_registry,
                 conference_state,
-            )))
+            )?))
             .add_service(store_forward_service_server(GrpcStoreForwardService::new(
                 clock,
                 authorization,
@@ -798,14 +862,17 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
                     Arc::clone(&join_issuer),
                 ),
             ))
-            .add_service(realtime_service_server(GrpcRealtimeService::new(
-                clock,
-                authorization,
-                store,
-                join_issuer,
-                realtime_registry,
-                conference_state,
-            )))
+            .add_service(realtime_service_server(
+                DevEnvironment::dev_realtime_service(
+                    clock,
+                    authorization,
+                    store,
+                    join_issuer,
+                    realtime_registry,
+                    conference_state,
+                    RealtimeWebRtcDependencies::prepared(),
+                ),
+            ))
             .serve_with_incoming(incoming)
             .await
     });
@@ -1077,6 +1144,7 @@ async fn verify_universal_conference_round_trip(
     let (token, claims, session_id) =
         issue_dev_join_grant(&mut conference, env, &conference_id, &integration_id, clock).await?;
     join_and_leave_dev_realtime(endpoint, env, &token, &claims, &session_id).await?;
+    verify_dev_call_has_media_negotiation(env, &claims.call_id)?;
     verify_dev_attendance_projection(&mut events, env, &subscription_id).await?;
     verify_foreign_attendance_isolation(
         &mut foreign_events,
@@ -1788,6 +1856,27 @@ async fn attempt_realtime_join(
         .await
         .map(tonic::Response::into_inner)
         .map_err(|error| format!("self-check boundary JoinRealtime: {error}"))
+}
+
+fn verify_dev_call_has_media_negotiation(
+    env: &DevEnvironment,
+    call_id: &ucr_model::CallId,
+) -> Result<(), String> {
+    // The dev service account is not a Call participant, so public GetCall
+    // correctly refuses this conference call. The assertion reads the canonical
+    // Call the realtime join just updated.
+    let call = env
+        .store
+        .call(&env.scope, call_id)
+        .map_err(|error| format!("self-check call load: {error:?}"))?
+        .ok_or_else(|| "self-check call missing after realtime join".to_owned())?;
+    if call.media_negotiation_ref.is_none() || call.media_negotiation_generation != 1 {
+        return Err(format!(
+            "live call is missing canonical media negotiation (generation={})",
+            call.media_negotiation_generation
+        ));
+    }
+    Ok(())
 }
 
 async fn issue_dev_join_grant(

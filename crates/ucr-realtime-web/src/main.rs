@@ -33,6 +33,7 @@ const MAX_SIGNALING_SDP_BYTES: usize = 256 * 1024;
 const MAX_SIGNALING_ICE_CANDIDATE_BYTES: usize = 4096;
 const MAX_SIGNALING_ICE_MID_BYTES: usize = 256;
 const CLIENT_HTML: &str = include_str!("../static/client.html");
+const ROOM_HTML: &str = include_str!("../static/room.html");
 
 // Generated endpoint-only public code: no secrets, grants or MLS state in these
 // artifacts. The gateway serves only an explicit allowlist, never a directory.
@@ -325,10 +326,24 @@ struct MlsKeyPackageRequest {
 }
 
 #[derive(Debug, Serialize)]
+struct TrustedDeviceKeyResponse {
+    device_id: String,
+    key_id: String,
+    public_key_base64: String,
+}
+
+#[derive(Debug, Serialize)]
 struct MlsAdmissionContextResponse {
     ok: bool,
     group_id: String,
     endpoint_state_mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_negotiation_ref: Option<String>,
+    media_negotiation_generation: u64,
+    group_crypto_epoch: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_crypto_state_ref: Option<String>,
+    trusted_device_keys: Vec<TrustedDeviceKeyResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -489,6 +504,9 @@ async fn handle_request(
 
     if method == Method::GET && path == "/healthz" {
         return Ok(text_response(StatusCode::OK, "ok"));
+    }
+    if method == Method::GET && path == "/room" {
+        return Ok(html_response(StatusCode::OK, ROOM_HTML));
     }
     if method == Method::GET
         && matches!(
@@ -838,14 +856,48 @@ async fn get_mls_admission_context(
                         }
                     };
                 match String::from_utf8(group_id.value) {
-                    Ok(group_id) => json_response(
-                        StatusCode::OK,
-                        &MlsAdmissionContextResponse {
-                            ok: true,
-                            group_id,
-                            endpoint_state_mode: mode,
-                        },
-                    ),
+                    Ok(group_id) => {
+                        let media_negotiation_ref = context
+                            .media_negotiation_ref
+                            .and_then(|value| String::from_utf8(value.value).ok());
+                        let group_crypto_state_ref = context
+                            .group_crypto_state_ref
+                            .and_then(|value| String::from_utf8(value.value).ok());
+                        let mut trusted_device_keys = Vec::new();
+                        for key in context.trusted_device_keys {
+                            let (Some(device_id), Some(key_id)) = (key.device_id, key.key_id)
+                            else {
+                                continue;
+                            };
+                            let (Ok(device_id), Ok(key_id)) = (
+                                String::from_utf8(device_id.value),
+                                String::from_utf8(key_id.value),
+                            ) else {
+                                continue;
+                            };
+                            if key.public_key.len() != 32 {
+                                continue;
+                            }
+                            trusted_device_keys.push(TrustedDeviceKeyResponse {
+                                device_id,
+                                key_id,
+                                public_key_base64: STANDARD.encode(key.public_key),
+                            });
+                        }
+                        json_response(
+                            StatusCode::OK,
+                            &MlsAdmissionContextResponse {
+                                ok: true,
+                                group_id,
+                                endpoint_state_mode: mode,
+                                media_negotiation_ref,
+                                media_negotiation_generation: context.media_negotiation_generation,
+                                group_crypto_epoch: context.group_crypto_epoch,
+                                group_crypto_state_ref,
+                                trusted_device_keys,
+                            },
+                        )
+                    }
                     Err(_) => GatewayFailure::new(
                         StatusCode::BAD_GATEWAY,
                         "invalid_mls_context",

@@ -2003,6 +2003,113 @@ ui.cameraToggle.addEventListener("click",async()=>{try{let track=localStream&&lo
 ui.screenToggle.addEventListener("click",async()=>{try{if(screenStream){await stopScreenShare(true);ui.status.textContent="Screen sharing stopped.";}else{await startScreenShare();ui.status.textContent="Screen sharing active through the endpoint E2EE adapter.";}}catch(e){ui.status.textContent="Screen sharing failed: "+e.message;}});
 ui.mic.addEventListener("change",()=>{if(sessionActive&&mediaActive)replaceLocalTrack("audio").catch(e=>{ui.status.textContent="Microphone switch failed: "+e.message;});});
 ui.camera.addEventListener("change",()=>{if(sessionActive&&mediaActive)replaceLocalTrack("camera").catch(e=>{ui.status.textContent="Camera switch failed: "+e.message;});});
+function bytesToBase64(bytes){
+  let binary="";
+  for(let offset=0;offset<bytes.length;offset+=0x8000){
+    binary+=String.fromCharCode(...bytes.subarray(offset,Math.min(bytes.length,offset+0x8000)));
+  }
+  return btoa(binary);
+}
+function installLocalRoomMediaHost(){
+  if(sessionStorage.getItem("ucrLocalRoom")!=="1")return;
+  const roomApi=sessionStorage.getItem("ucrRoomApi")||"";
+  if(!roomApi)throw new Error("Local room API address is missing");
+  const roomPost=async(path,payload)=>{
+    const response=await fetch(roomApi+path,{
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify(payload)
+    });
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.message||"Local room request failed");
+    return data;
+  };
+  window.ucrCanonicalDeviceAuthority={
+    async inspect(binding){
+      const data=await roomPost("/v1/room/inspect",{deviceId:binding.deviceId});
+      return {
+        deviceActive:data.deviceActive===true,
+        deviceRevoked:data.deviceRevoked===true,
+        activeKey:data.keyId&&data.publicKeyBase64?{
+          keyId:data.keyId,
+          publicKey:endpointBase64ToBytes(data.publicKeyBase64)
+        }:null
+      };
+    },
+    async approveNewDevice(binding,signer){
+      await roomPost("/v1/room/trust",{
+        externalUserId:sessionStorage.getItem("ucrRoomUser")||"",
+        keyId:signer.keyId,
+        publicKeyBase64:bytesToBase64(signer.publicKey)
+      });
+    }
+  };
+  window.ucrCanonicalMediaAdmissionResolver=async bootstrap=>{
+    const context=await fetchEndpointMlsContext();
+    if(!context.media_negotiation_ref||!context.media_negotiation_generation){
+      throw new Error("Canonical media negotiation is not active yet");
+    }
+    const epoch=bootstrap.state.crypto_epoch();
+    if(BigInt(context.group_crypto_epoch)!==BigInt(epoch)){
+      throw new Error("Endpoint MLS epoch differs from the canonical conference epoch");
+    }
+    const keys=Array.isArray(context.trusted_device_keys)?context.trusted_device_keys:[];
+    const local=keys.find(key=>key.device_id===bootstrap.claims.deviceId);
+    if(!local)throw new Error("This device has no active trusted signing key");
+    if(!window.ucrProtectedDeviceKeyVault){
+      const module=await import("./endpoint-media/reference_browser_media_installer.js");
+      window.ucrProtectedDeviceKeyVault=module.createUcrBrowserProtectedDeviceVault();
+    }
+    const vault=window.ucrProtectedDeviceKeyVault;
+    const scope={
+      tenantId:bootstrap.claims.tenantId,
+      namespaceId:bootstrap.claims.namespaceId,
+      deviceId:bootstrap.claims.deviceId
+    };
+    let bridgeInstalled=false;
+    const seed=await vault.withAuthorizedSeed(
+      scope,
+      async()=>sessionActive,
+      async value=>value.slice(),
+      ()=>{bridgeInstalled=true;}
+    );
+    if(bridgeInstalled)throw new Error("Canonical device trust changed before media start");
+    const audioContext=window.ucrLocalRoomAudioContext||new AudioContext();
+    window.ucrLocalRoomAudioContext=audioContext;
+    if(audioContext.state==="suspended")await audioContext.resume();
+    const keyById=new Map(keys.map(key=>[key.key_id,endpointBase64ToBytes(key.public_key_base64)]));
+    return {
+      sessionId:bootstrap.claims.sessionId,
+      deviceId:bootstrap.claims.deviceId,
+      participantId:bootstrap.claims.participantId,
+      principalKindCode:bootstrap.claims.participantKind,
+      binding:{
+        tenantId:bootstrap.claims.tenantId,
+        namespaceId:bootstrap.claims.namespaceId,
+        callId:bootstrap.claims.callId,
+        groupId:bootstrap.groupId,
+        negotiationRef:context.media_negotiation_ref,
+        negotiationGeneration:BigInt(context.media_negotiation_generation),
+        cryptoEpoch:BigInt(epoch)
+      },
+      signingKeyId:local.key_id,
+      signingSeed:seed,
+      trustedLocalVerifyingKey:endpointBase64ToBytes(local.public_key_base64),
+      trustedKeys:{
+        resolve(_header,keyId){
+          const key=keyById.get(keyId);
+          if(!key)throw new Error("Unknown device signing key");
+          return key;
+        }
+      },
+      audioContext,
+      remoteVideoCanvas:document.getElementById("remote-e2ee-canvas"),
+      isCurrent:()=>sessionActive&&!!claims&&claims.session_id===bootstrap.claims.sessionId,
+      authorizeFrame:()=>sessionActive,
+      authorizePublish:()=>sessionActive
+    };
+  };
+}
 try{
   const params=new URLSearchParams(location.hash.slice(1));applyBrandingFromFragment(params);token=params.get("ucr_join")||"";
   // Signed fragment grants are not shared media secrets.
@@ -2012,6 +2119,7 @@ try{
     window.history.replaceState(window.history.state,"",location.pathname+location.search);
   }
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
+  installLocalRoomMediaHost();
   if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
 }catch(e){fail(e.message);}
 // Hosts installing trust before client startup benefit from an idle preload.

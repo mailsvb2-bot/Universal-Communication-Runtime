@@ -91,6 +91,42 @@ It provides the authenticated `ucr dev` gRPC API on host loopback, ephemeral tes
 the reference browser client, a local test TURN service and a bounded webhook receiver example.
 See `spec/dev-mode.md` for the trust boundary and nonclaims.
 
+## Local call and webinar room
+
+`ucr dev --room` opens one loopback webinar on the development API. A hidden technical owner
+stays on the server so each browser can hold its own device key. Two speakers are a two-way
+call. A speaker plus an attendee is a webinar: the attendee watches and listens, and does not
+publish a camera. This is a local loopback room. It is not Production 1.0, a public TURN
+deployment, recording, or a horizontal SFU.
+
+```bash
+cargo run -p ucr-dev -- dev --room
+UCR_REALTIME_WEB_BIND=127.0.0.1:43124 \
+  UCR_REALTIME_GRPC_UPSTREAM=http://127.0.0.1:50051 \
+  cargo run -p ucr-realtime-web
+```
+
+Open <http://127.0.0.1:43124/room> in two browser windows, enter a name, and choose a role.
+Signing seeds stay in the browser. The room API on `127.0.0.1:43123` stores only public keys.
+
+The browser page also needs the endpoint package built from this revision. Those files are
+generated, not committed:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.128 --locked
+cargo build --release --manifest-path crates/ucr-endpoint-wasm/Cargo.toml --target wasm32-unknown-unknown
+mkdir -p crates/ucr-realtime-web/static/endpoint-wasm crates/ucr-realtime-web/static/endpoint-media
+wasm-bindgen crates/ucr-endpoint-wasm/target/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm \
+  --target web \
+  --out-dir crates/ucr-realtime-web/static/endpoint-wasm \
+  --out-name ucr_endpoint_wasm
+npm exec --yes --package=esbuild@0.25.5 -- \
+  esbuild sdk/typescript/src/reference_browser_media_installer.ts \
+  --bundle --platform=browser --format=esm --target=es2022 \
+  --outfile=crates/ucr-realtime-web/static/endpoint-media/reference_browser_media_installer.js
+```
+
 ## Quality gate
 
 ```bash

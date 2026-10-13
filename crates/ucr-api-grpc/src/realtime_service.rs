@@ -15,7 +15,8 @@ use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
     DurableStoreError, EventJournalStore, GroupMessageStore, GroupStore, IdentityDeviceLookupStore,
     MAX_ACTIVE_RECORDINGS_PER_CALL, PrincipalIdentityBindingStore, RecordingStore,
-    ServiceQuotaStore, UniversalConferenceStore, recording_allows_realtime_participant,
+    ServiceQuotaStore, TrustedSigningKeyStore, UniversalConferenceStore,
+    recording_allows_realtime_participant,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_group_mls::{
@@ -532,6 +533,8 @@ where
         + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + TrustedSigningKeyStore
         + TrustedSigningKeyResolver
         + EventJournalStore
         + UniversalConferenceStore
@@ -554,6 +557,8 @@ where
         + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + TrustedSigningKeyStore
         + TrustedSigningKeyResolver
         + EventJournalStore
         + UniversalConferenceStore
@@ -733,19 +738,35 @@ where
                     self.registry
                         .heartbeat(&claims, self.now()?)
                         .map_err(map_registry_error)?;
-                    self.mls_admission_context(&claims)
+                    let (group_id, mode) = self.mls_admission_context(&claims)?;
+                    let binding = self.live_media_binding(&claims);
+                    Ok(pb::RealtimeMlsAdmissionContext {
+                        group_id: Some(pb_opaque(group_id.as_opaque())),
+                        endpoint_state_mode: mode as i32,
+                        media_negotiation_ref: binding
+                            .as_ref()
+                            .and_then(|value| value.negotiation_ref.clone())
+                            .map(|value| pb_opaque(&value)),
+                        media_negotiation_generation: binding
+                            .as_ref()
+                            .map_or(0, |value| value.negotiation_generation),
+                        group_crypto_epoch: binding
+                            .as_ref()
+                            .map_or(0, |value| value.group_crypto_epoch),
+                        group_crypto_state_ref: binding
+                            .as_ref()
+                            .map(|value| pb_opaque(&value.group_crypto_state_ref)),
+                        trusted_device_keys: binding
+                            .map(|value| value.trusted_device_keys)
+                            .unwrap_or_default(),
+                    })
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimeGetMlsAdmissionContextResponse {
             result: Some(match result {
-                Ok((group_id, mode)) => {
-                    pb::realtime_get_mls_admission_context_response::Result::Context(
-                        pb::RealtimeMlsAdmissionContext {
-                            group_id: Some(pb_opaque(group_id.as_opaque())),
-                            endpoint_state_mode: mode as i32,
-                        },
-                    )
+                Ok(context) => {
+                    pb::realtime_get_mls_admission_context_response::Result::Context(context)
                 }
                 Err(error) => {
                     pb::realtime_get_mls_admission_context_response::Result::Error(pb_error(error))
@@ -1819,6 +1840,8 @@ where
         + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + TrustedSigningKeyStore
         + TrustedSigningKeyResolver
         + EventJournalStore
         + UniversalConferenceStore
@@ -2167,6 +2190,7 @@ where
                 .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
             match participant.state {
                 CallParticipantState::Accepted => {
+                    self.ensure_canonical_media_negotiation(claims)?;
                     return self.require_active_universal_participant(claims, &snapshot.group_id);
                 }
                 CallParticipantState::Invited | CallParticipantState::Ringing => {}
@@ -2189,7 +2213,8 @@ where
                 kind: CallSignalKind::Accept,
             };
             match self.store.apply_call_signal(&actor, &signal) {
-                Ok(_) | Err(DurableStoreError::Conflict) => {}
+                Ok(_) => self.ensure_canonical_media_negotiation(claims)?,
+                Err(DurableStoreError::Conflict) => {}
                 Err(error) => return Err(map_store_error(error)),
             }
         }
@@ -2261,6 +2286,106 @@ where
             UniversalConferenceLifecycle::Scheduled
             | UniversalConferenceLifecycle::Ending
             | UniversalConferenceLifecycle::Ended => pb::RealtimeAdmissionState::Closed,
+        })
+    }
+
+    /// Binds an Active conference Call to one canonical media negotiation.
+    ///
+    /// Universal conference creation leaves negotiation empty. Encrypted SFU
+    /// frames are rejected until the Call carries the exact reference and
+    /// generation the endpoints will use. The initiator applies one idempotent
+    /// `MediaRenegotiation` the first time the Call becomes Active.
+    fn ensure_canonical_media_negotiation(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), CanonicalError> {
+        for _ in 0..4 {
+            let call = self
+                .store
+                .call(&claims.scope, &claims.call_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+            if call.media_negotiation_ref.is_some() {
+                return Ok(());
+            }
+            if call.signalling_state != CallSignallingState::Active {
+                return Ok(());
+            }
+            let initiator = ScopedPrincipal {
+                scope: claims.scope.clone(),
+                principal: call.initiated_by.clone(),
+            };
+            let signal = CallSignal {
+                event_id: EventId::from_opaque(canonical_negotiation_event_id(&call.call_id)?),
+                scope: claims.scope.clone(),
+                call_id: call.call_id.clone(),
+                expected_revision: call.revision,
+                kind: CallSignalKind::MediaRenegotiation {
+                    negotiation_ref: canonical_negotiation_ref(&call.call_id)?,
+                },
+            };
+            match self.store.apply_call_signal(&initiator, &signal) {
+                Ok(_) => return Ok(()),
+                Err(DurableStoreError::Conflict) => {}
+                Err(error) => return Err(map_store_error(error)),
+            }
+        }
+        Err(CanonicalError::new(CanonicalErrorCode::Conflict))
+    }
+
+    fn live_media_binding(&self, claims: &RealtimeSessionClaims) -> Option<LiveMediaBinding> {
+        let snapshot = conference_runtime(self)
+            .snapshot(&actor_for(claims), &claims.scope, &claims.call_id)
+            .ok()?;
+        let negotiation_ref = snapshot.call.media_negotiation_ref.clone();
+        let negotiation_generation = snapshot.call.media_negotiation_generation;
+        let mut trusted_device_keys = Vec::new();
+        for participant in &snapshot.call.participants {
+            if participant.state != CallParticipantState::Accepted
+                || participant.left_revision.is_some()
+            {
+                continue;
+            }
+            let Some(binding) = self
+                .store
+                .principal_identity_binding(&claims.scope, &participant.principal)
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            let Ok(devices) =
+                self.store
+                    .active_devices_for_identity(&claims.scope, &binding.identity_id, 2)
+            else {
+                continue;
+            };
+            let [device] = devices.as_slice() else {
+                continue;
+            };
+            let Some(key) = self
+                .store
+                .active_trusted_signing_key(&claims.scope, &device.device_id)
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            if key.public_key.len() != 32 {
+                continue;
+            }
+            trusted_device_keys.push(pb::RealtimeEndpointTrustKey {
+                device_id: Some(pb_opaque(device.device_id.as_opaque())),
+                key_id: Some(pb_opaque(key.key_id.as_opaque())),
+                public_key: key.public_key,
+            });
+        }
+        Some(LiveMediaBinding {
+            negotiation_ref,
+            negotiation_generation,
+            group_crypto_epoch: snapshot.group_crypto_epoch,
+            group_crypto_state_ref: snapshot.group_crypto_state_ref,
+            trusted_device_keys,
         })
     }
 
@@ -3501,6 +3626,28 @@ fn attendance_actor(claims: &RealtimeSessionClaims) -> ActorRef {
         kind,
         on_behalf_of,
     }
+}
+
+struct LiveMediaBinding {
+    negotiation_ref: Option<OpaqueId>,
+    negotiation_generation: u64,
+    group_crypto_epoch: u64,
+    group_crypto_state_ref: OpaqueId,
+    trusted_device_keys: Vec<pb::RealtimeEndpointTrustKey>,
+}
+
+fn canonical_negotiation_ref(call_id: &CallId) -> Result<OpaqueId, CanonicalError> {
+    negotiation_token("mn", call_id)
+}
+
+fn canonical_negotiation_event_id(call_id: &CallId) -> Result<OpaqueId, CanonicalError> {
+    negotiation_token("mne", call_id)
+}
+
+fn negotiation_token(prefix: &str, call_id: &CallId) -> Result<OpaqueId, CanonicalError> {
+    let suffix: String = call_id.as_opaque().as_str().chars().take(48).collect();
+    OpaqueId::new(format!("{prefix}-{suffix}"))
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
 }
 
 fn actor_for(claims: &RealtimeSessionClaims) -> ScopedPrincipal {

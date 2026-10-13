@@ -3909,6 +3909,9 @@ dependencies = [
 name = "ucr-dev"
 version = "0.0.1"
 dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -3918,7 +3921,9 @@ dependencies = [
  "ucr-model",
  "ucr-protocol",
  "ucr-realtime",
+ "ucr-sfu",
  "ucr-storage-sqlite",
+ "ucr-webrtc",
 ]
 
 [[package]]
