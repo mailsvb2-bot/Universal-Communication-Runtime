@@ -101,6 +101,25 @@ impl SqliteLocalStore {
         ).map_err(|e|map_sqlite_error(&e))?;
         device_store::insert_device(&tx,scope,descriptor)?;
         trusted_key_store::insert_active_key(&tx,scope,key)?;
+        // A self-service person may exercise ONLY the canonical first-party
+        // direct-call journey. Grants live in the existing PermissionGrant owner.
+        // No wildcard, Service Principal or administrative rights are issued.
+        for permission in [
+            ucr_protocol::CALL_START_PERMISSION,
+            ucr_protocol::CALL_OBSERVE_PERMISSION,
+            ucr_protocol::CALL_SIGNAL_PERMISSION,
+            ucr_protocol::CONVERSATION_WRITE_PERMISSION,
+        ] {
+            tx.execute(
+                "INSERT INTO permission_grants
+                 (grantee_tenant_id,grantee_namespace_present,grantee_namespace_id,
+                  principal_id,principal_kind,permission,scope_kind,
+                  resource_tenant_id,resource_namespace_present,resource_namespace_id)
+                 VALUES (?1,?2,?3,?4,'person',?5,'exact',?1,?2,?3)",
+                params![scope.tenant_id.as_opaque().as_str(),ns.present,ns.value,
+                    principal_id,permission],
+            ).map_err(|e|map_sqlite_error(&e))?;
+        }
         tx.execute(
             "INSERT INTO first_party_recovery_credentials
              (tenant_id,namespace_present,namespace_id,identity_id,verifier,generation)
