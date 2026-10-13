@@ -102,7 +102,7 @@ pub async fn spawn(
     println!("UCR_ROOM_READY api=http://{address}");
     println!("UCR_ROOM_PAGE=http://127.0.0.1:43124/room");
     println!(
-        "UCR_ROOM_REALTIME=UCR_REALTIME_WEB_BIND=127.0.0.1:43124 UCR_REALTIME_GRPC_UPSTREAM=http://{grpc_bind} ucr-realtime-web"
+        "UCR_ROOM_REALTIME=UCR_REALTIME_WEB_BIND=127.0.0.1:43124 UCR_REALTIME_GRPC_UPSTREAM=http://{grpc_bind} UCR_ROOM_API=http://{address} ucr-realtime-web"
     );
     let host = Arc::new(RoomHost {
         env,
@@ -841,8 +841,15 @@ fn origin_allowed(origin: Option<&str>) -> bool {
     let Some(rest) = origin.strip_prefix("http://") else {
         return false;
     };
-    let host = rest.split(':').next().unwrap_or(rest);
-    host == "127.0.0.1" || host == "localhost"
+    let host = if let Some(bracketed) = rest.strip_prefix('[') {
+        let Some((host, _)) = bracketed.split_once(']') else {
+            return false;
+        };
+        host
+    } else {
+        rest.split(':').next().unwrap_or(rest)
+    };
+    host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
 struct HttpRequest {
@@ -932,4 +939,21 @@ async fn write_response(
         .await
         .map_err(|error| format!("write room response: {error}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::origin_allowed;
+
+    #[test]
+    fn room_accepts_ipv4_ipv6_and_localhost_loopback_origins() {
+        assert!(origin_allowed(None));
+        assert!(origin_allowed(Some("http://127.0.0.1:43124")));
+        assert!(origin_allowed(Some("http://localhost:43124")));
+        assert!(origin_allowed(Some("http://[::1]:43124")));
+        assert!(!origin_allowed(Some("http://[::1")));
+        assert!(!origin_allowed(Some("http://192.168.1.1:43124")));
+        assert!(!origin_allowed(Some("https://127.0.0.1:43124")));
+        assert!(!origin_allowed(Some("https://[::1]:43124")));
+    }
 }
