@@ -358,7 +358,15 @@ async fn join(host: &Arc<RoomHost>, body: &[u8]) -> Result<Vec<u8>, String> {
         use_policy: pb::JoinGrantUsePolicy::Reusable as i32,
         not_before_unix_ms: None,
         not_after_unix_ms: None,
-        idempotency_key: format!("room-join-{}", request.external_user_id),
+        // A signed grant lasts at most 15 minutes. Replaying one idempotency
+        // key after that returns Conflict and the same person cannot re-enter.
+        // The same minute reuses the current grant; the next minute can mint
+        // a fresh one before the open session expires.
+        idempotency_key: format!(
+            "room-join-{}-{}",
+            request.external_user_id,
+            unix_time_ms()?.div_euclid(60_000)
+        ),
     });
     attach_dev_credential(&mut issue, &host.env);
     let issued = conference
@@ -392,11 +400,7 @@ async fn ensure_conference(host: &RoomHost) -> Result<pb::OpaqueId, String> {
     if let Ok(existing) = conference_id(host) {
         return Ok(existing);
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| format!("clock: {error}"))?
-        .as_millis();
-    let now = i64::try_from(now).map_err(|_| "clock exceeds i64".to_owned())?;
+    let now = unix_time_ms()?;
     let mut conference = conference_client(host).await?;
     let integration_id = integration_id();
     let mut create = Request::new(pb::UniversalCreateConferenceRequest {
@@ -405,11 +409,15 @@ async fn ensure_conference(host: &RoomHost) -> Result<pb::OpaqueId, String> {
         external_conference_id: CONFERENCE_EXTERNAL_ID.to_vec(),
         idempotency_key: "room-create".to_owned(),
         mode: pb::UniversalConferenceMode::Webinar as i32,
+        // The development room lives as long as this process. A planned end
+        // rejects the next 15-minute grant once that grant would extend past
+        // the window, so a room left running for about an hour stops admitting
+        // people with "join grant was denied".
         schedule: Some(pb::ConferenceScheduleMetadata {
-            starts_at_unix_ms: now.saturating_add(60_000),
-            planned_end_unix_ms: Some(now.saturating_add(3_600_000)),
+            starts_at_unix_ms: now,
+            planned_end_unix_ms: None,
             join_before_seconds: 900,
-            join_after_seconds: 300,
+            join_after_seconds: 0,
             timezone: Some("UTC".to_owned()),
         }),
         metadata: Vec::new(),
@@ -1064,6 +1072,14 @@ fn reserve_body(
         "displayName": display_name,
     }))
     .map_err(|error| format!("encode reserve response: {error}"))
+}
+
+fn unix_time_ms() -> Result<i64, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("clock: {error}"))?
+        .as_millis();
+    i64::try_from(now).map_err(|_| "clock exceeds i64".to_owned())
 }
 
 fn conference_id(host: &RoomHost) -> Result<pb::OpaqueId, String> {

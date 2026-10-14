@@ -254,6 +254,7 @@ async function api(path,payload,signal,keepalive=false){
     let detail=null;try{detail=await r.clone().json();}catch(_){}
     const error=new Error(detail&&detail.message?detail.message:"Request failed: "+r.status);
     error.code=detail&&detail.code?detail.code:"request_failed";
+    error.status=r.status;
     throw error;
   }
   return r;
@@ -1099,9 +1100,13 @@ async function openStream(){
       }
     }
   }catch(e){
-    if(e.name!=="AbortError"&&sessionActive)ui.status.textContent="Realtime stream interrupted: "+e.message;
+    // This plaintext downlink is not the encrypted call. A missing stream must
+    // not replace the E2EE status, and a 404 must not retry for the whole grant.
+    const encrypted=typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady;
+    if(e.name!=="AbortError"&&sessionActive&&!encrypted)ui.status.textContent="Realtime stream interrupted: "+e.message;
+    if(e.status===404)openStream.missing=true;
   }finally{
-    if(streamAbort===controller){streamAbort=null;if(sessionActive)scheduleStreamRetry();}
+    if(streamAbort===controller){streamAbort=null;if(sessionActive&&!openStream.missing)scheduleStreamRetry();}
   }
 }
 // Prefer real Full HD source capture where the camera and browser can provide it.
@@ -1479,7 +1484,8 @@ async function activateAdmittedMedia(){
   pollChat().catch(()=>{});
   // Quality sampling must start only after activateE2eeAdapter succeeds.
   ui.status.textContent=policyAllows("audio")||policyAllows("camera")?"The host has started the conference. Requesting permitted camera/microphone access…":"The host has started the conference. Viewing mode does not request camera or microphone access.";
-  openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive)ui.status.textContent="Realtime stream closed: "+e.message;});
+  openStream.missing=false;
+  openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive&&!(typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady))ui.status.textContent="Realtime stream closed: "+e.message;});
   try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
   await startActiveSpeakerMonitoring();
 }
@@ -1527,6 +1533,7 @@ async function heartbeat(){
     if(current()&&mediaActive&&e2eeAdapterReady){
       syncReceiveSubscriptions().catch(e=>{if(current()&&e2eeAdapterReady)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
     }
+    if(current()&&typeof renewLocalRoomGrant==="function")renewLocalRoomGrant().catch(()=>{});
   }catch(error){
     // A failed heartbeat from a retired/replaced session must not invoke the
     // UI's heartbeat_rejected handler and terminate a newer active session.
@@ -2145,6 +2152,69 @@ function holdRoomPresence(){
     all[id]=Date.now();
     localStorage.setItem("ucrRoomPresence",JSON.stringify(all));
   }catch(_){}
+}
+// A local-room grant cannot be extended in place. Ask for the next
+// one-minute issuance before this one expires, then move the open call
+// onto that session without dropping the camera the page already holds.
+async function renewLocalRoomGrant(){
+  if(typeof sessionStorage==="undefined"||typeof fetch!=="function")return;
+  if(sessionStorage.getItem("ucrLocalRoom")!=="1"||!sessionActive||!claims)return;
+  const remaining=claims.expires-Date.now();
+  if(!(remaining>0&&remaining<=120000)||renewLocalRoomGrant.busy)return;
+  const roomApi=sessionStorage.getItem("ucrRoomApi");
+  const user=sessionStorage.getItem("ucrRoomUser");
+  if(!roomApi||!user)return;
+  renewLocalRoomGrant.busy=true;
+  const generation=sessionLifecycleGeneration;
+  try{
+    const response=await fetch(roomApi+"/v1/room/join",{
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({externalUserId:user})
+    });
+    const data=await response.json().catch(()=>null);
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!response.ok||!data||data.ok!==true)return;
+    const fragment=typeof data.joinFragment==="string"?data.joinFragment:"";
+    const next=new URLSearchParams(fragment.startsWith("#")?fragment.slice(1):fragment).get("ucr_join");
+    if(!next||next===token)return;
+    let nextClaims;
+    try{nextClaims=readGrant(next);}catch(_){return;}
+    if(!nextClaims||nextClaims.session_id===claims.session_id||nextClaims.expires<=claims.expires)return;
+    if(generation!==sessionLifecycleGeneration||!sessionActive)return;
+    // Drop in-flight heartbeats before the session id changes. join() advances
+    // the generation again for the replacement session.
+    ++sessionLifecycleGeneration;
+    const handoff=sessionLifecycleGeneration;
+    const oldToken=token;
+    const oldBody=body();
+    await closeServerPeer();
+    teardownPeer();
+    retireEndpointMlsState();
+    mediaActive=false;
+    if(streamAbort){streamAbort.abort();streamAbort=null;}
+    if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
+    if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+    try{
+      await fetch("/v1/realtime/leave",{
+        method:"POST",
+        headers:{"Authorization":"Bearer "+oldToken,"Content-Type":"application/json"},
+        body:JSON.stringify(oldBody),
+        keepalive:true
+      });
+    }catch(_){}
+    if(handoff!==sessionLifecycleGeneration)return;
+    token=next;
+    claims=nextClaims;
+    sessionActive=false;
+    if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
+    ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
+    ui.status.textContent="Renewing room access before the signed grant expires.";
+    await join();
+  }catch(e){
+    if(generation===sessionLifecycleGeneration&&sessionActive)ui.status.textContent="Room access renewal failed: "+e.message;
+  }finally{
+    renewLocalRoomGrant.busy=false;
+  }
 }
 function releaseRoomPresence(){
   try{

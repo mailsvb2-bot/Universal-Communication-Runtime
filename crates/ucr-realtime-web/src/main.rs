@@ -1853,24 +1853,33 @@ async fn subscribe_media(state: &AppState, token: &str, input: SessionRequest) -
     let mut stream = response.into_inner();
     let (sender, receiver) = mpsc::channel::<Bytes>(32);
     tokio::spawn(async move {
+        // Encrypted media does not travel on this plaintext downlink, so the
+        // loop can sit in message() forever. Without watching the HTTP
+        // consumer, a closed tab keeps the realtime session "connected"
+        // until its grant expires.
         loop {
-            match stream.message().await {
-                Ok(Some(message)) => {
-                    let payload = STANDARD.encode(message.encode_to_vec());
-                    let event = Bytes::from(format!("event: media\ndata: {payload}\n\n"));
-                    if sender.send(event).await.is_err() {
-                        break;
+            tokio::select! {
+                message = stream.message() => {
+                    match message {
+                        Ok(Some(message)) => {
+                            let payload = STANDARD.encode(message.encode_to_vec());
+                            let event = Bytes::from(format!("event: media\ndata: {payload}\n\n"));
+                            if sender.send(event).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            let _ = sender
+                                .send(Bytes::from_static(
+                                    b"event: error\ndata: realtime stream closed\n\n",
+                                ))
+                                .await;
+                            break;
+                        }
                     }
                 }
-                Ok(None) => break,
-                Err(_) => {
-                    let _ = sender
-                        .send(Bytes::from_static(
-                            b"event: error\ndata: realtime stream closed\n\n",
-                        ))
-                        .await;
-                    break;
-                }
+                () = sender.closed() => break,
             }
         }
     });

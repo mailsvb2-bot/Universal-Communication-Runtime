@@ -119,8 +119,10 @@ The lobby preloads the endpoint runtime while the name is typed and reuses this 
 device key for the same name and role until the development process restarts. A second
 window that is already in the room, or a different name, gets its own device so it does
 not take over the first participant's media session. The conference group is
-created when the room server starts, and the conference page joins itself after the signed
-grant. Camera permission is requested from the lobby click, because the next page no longer
+created when the room server starts and stays open for the life of that process.
+The conference page joins itself after the signed grant. A grant lasts 15 minutes;
+the open page requests the next one before expiry and keeps the camera it already
+has. Camera permission is requested from the lobby click, because the next page no longer
 has that gesture. A second participant refreshes the encrypted epoch on the already open
 media channel.
 
