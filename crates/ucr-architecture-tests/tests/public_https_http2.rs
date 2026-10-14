@@ -16,10 +16,29 @@ fn public_https_edge_upstreams_remain_dual_http_protocol() {
         "crates/ucr-realtime-web/Cargo.toml",
     ] {
         let manifest = read(cargo);
-        assert!(
-            manifest.contains(r#"features = ["http1", "http2", "server"]"#),
-            "{cargo} must keep Hyper HTTP/1.1 + HTTP/2 enabled"
-        );
+        // Check the server transport capabilities, not an incidental ordering
+        // of Cargo features. The realtime gateway also needs Hyper's client
+        // feature for forwarding first-party requests to its loopback BFF.
+        let hyper_line = manifest
+            .lines()
+            .find(|line| line.trim_start().starts_with("hyper = {"))
+            .unwrap_or_else(|| panic!("{cargo} must declare the Hyper server dependency"));
+        let features = hyper_line
+            .split_once("features = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(features, _)| {
+                features
+                    .split(',')
+                    .map(|feature| feature.trim().trim_matches('"'))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| panic!("{cargo} must specify Hyper transport features"));
+        for required in ["http1", "http2", "server"] {
+            assert!(
+                features.contains(&required),
+                "{cargo} must keep Hyper {required} enabled"
+            );
+        }
         assert!(
             manifest.contains(r#"features = ["server-auto", "tokio"]"#),
             "{cargo} must keep Hyper auto protocol detection enabled"
