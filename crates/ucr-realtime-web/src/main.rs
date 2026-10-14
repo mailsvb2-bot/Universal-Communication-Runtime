@@ -661,8 +661,8 @@ async fn forward_first_party(
 }
 
 // Opening a TCP port is not proof that the BFF is alive: require an actual
-// HTTP 200 from the canonical /healthz handler before reporting readiness.
-async fn first_party_health(bff: SocketAddr) -> Result<bool, ()> {
+// HTTP 200 from the scoped bootstrap endpoint before reporting readiness.
+async fn first_party_bootstrap_ready(bff: SocketAddr) -> Result<bool, ()> {
     use hyper::client::conn::http1;
     let stream = TcpStream::connect(bff).await.map_err(|_| ())?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
@@ -673,7 +673,7 @@ async fn first_party_health(bff: SocketAddr) -> Result<bool, ()> {
     });
     let request = Request::builder()
         .method(Method::GET)
-        .uri("/healthz")
+        .uri("/v1/first-party/bootstrap")
         .header(HOST, bff.to_string())
         .body(Full::new(Bytes::new()))
         .map_err(|_| ())?;
@@ -697,13 +697,13 @@ async fn browser_ready_response(state: &AppState) -> HttpResponse {
         );
     };
     if !matches!(
-        tokio::time::timeout(Duration::from_secs(2), first_party_health(bff)).await,
+        tokio::time::timeout(Duration::from_secs(2), first_party_bootstrap_ready(bff)).await,
         Ok(Ok(true))
     ) {
         return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "first_party_unreachable",
-            "The canonical first-party BFF did not pass HTTP health check",
+            "The canonical first-party BFF is unreachable or self-service registration is unconfigured",
         );
     }
     text_response(StatusCode::OK, "ready")
@@ -3420,7 +3420,7 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn bff_readiness_requires_http_200_not_merely_open_tcp_port() {
+    async fn bff_readiness_requires_scoped_bootstrap_http_200() {
         use bytes::Bytes;
         use http_body_util::Full;
         use hyper::{Request, Response, StatusCode, service::service_fn};
@@ -3433,7 +3433,7 @@ mod tests {
             for expected in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK] {
                 let (tcp, _) = listener.accept().await.unwrap();
                 let service = service_fn(move |request: Request<hyper::body::Incoming>| async move {
-                    assert_eq!(request.uri().path(), "/healthz");
+                    assert_eq!(request.uri().path(), "/v1/first-party/bootstrap");
                     Ok::<_, Infallible>(Response::builder().status(expected)
                         .body(Full::new(Bytes::from_static(b"ok"))).unwrap())
                 });
@@ -3441,8 +3441,8 @@ mod tests {
                     .serve_connection(TokioIo::new(tcp), service).await.unwrap();
             }
         });
-        assert_eq!(super::first_party_health(addr).await, Ok(false));
-        assert_eq!(super::first_party_health(addr).await, Ok(true));
+        assert_eq!(super::first_party_bootstrap_ready(addr).await, Ok(false));
+        assert_eq!(super::first_party_bootstrap_ready(addr).await, Ok(true));
         task.abort();
     }
 
