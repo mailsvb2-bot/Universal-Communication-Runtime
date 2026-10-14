@@ -86,6 +86,24 @@ struct JoinRequest {
     external_user_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnterRequest {
+    phase: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    external_user_id: Option<String>,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    key_id: Option<String>,
+    #[serde(default)]
+    public_key_base64: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RoomError {
@@ -215,6 +233,7 @@ async fn dispatch(
         "/v1/room/trust" => trust(host, body).await,
         "/v1/room/inspect" => inspect(host, body),
         "/v1/room/join" => join(host, body).await,
+        "/v1/room/enter" => enter(host, body).await,
         _ => Err("unknown room route".to_owned()),
     }
 }
@@ -313,16 +332,23 @@ fn inspect(host: &RoomHost, body: &[u8]) -> Result<Vec<u8>, String> {
         .store
         .active_trusted_signing_key(&host.env.scope, &device_id)
         .map_err(|error| format!("trusted key lookup: {error:?}"))?;
-    let (key_id, public_key_base64) = match key {
+    let (key_id, public_key_base64) = match key.as_ref() {
         Some(descriptor) => (
             Some(wire_text(descriptor.key_id.as_opaque())),
-            Some(STANDARD.encode(descriptor.public_key)),
+            Some(STANDARD.encode(&descriptor.public_key)),
         ),
         None => (None, None),
     };
+    // EnsureParticipantDevice marks the conference slot active before any
+    // signer exists. Canonical enrollment treats "active, but no key" as a
+    // recovery case and will not attach a first key. This read is the trust
+    // projection: a slot is active only once it has a trusted signing key.
+    // Revocation stays revocation. After the possession proof, approve reads
+    // this again and must observe that same key.
+    let trusted = key.is_some() && device.state == DeviceLifecycleState::Active;
     serde_json::to_vec(&serde_json::json!({
         "ok": true,
-        "deviceActive": device.state == DeviceLifecycleState::Active,
+        "deviceActive": trusted,
         "deviceRevoked": device.state == DeviceLifecycleState::Revoked,
         "keyId": key_id,
         "publicKeyBase64": public_key_base64,
@@ -393,6 +419,169 @@ async fn join(host: &Arc<RoomHost>, body: &[u8]) -> Result<Vec<u8>, String> {
         "joinFragment": fragment,
     }))
     .map_err(|error| format!("encode join response: {error}"))
+}
+
+/// One browser round trip for the opening trust image, then one for the signed
+/// grant and the confirming image. The possession proof stays in the browser
+/// between those two calls. This does not skip the post-sign re-read: commit
+/// refuses to return a grant whose device no longer matches the proved key.
+async fn enter(host: &Arc<RoomHost>, body: &[u8]) -> Result<Vec<u8>, String> {
+    let request: EnterRequest =
+        serde_json::from_slice(body).map_err(|_| "invalid enter request".to_owned())?;
+    match request.phase.as_str() {
+        "open" => enter_open(host, &request).await,
+        "commit" => enter_commit(host, &request).await,
+        _ => Err("enter phase must be open or commit".to_owned()),
+    }
+}
+
+async fn enter_open(host: &RoomHost, request: &EnterRequest) -> Result<Vec<u8>, String> {
+    let reserved = reserve(
+        host,
+        &serde_json::to_vec(&serde_json::json!({
+            "displayName": request.display_name.as_deref().unwrap_or(""),
+            "role": request.role.as_deref().unwrap_or(""),
+            "externalUserId": request.external_user_id,
+        }))
+        .map_err(|error| format!("encode reserve request: {error}"))?,
+    )
+    .await?;
+    let mut opened: serde_json::Value = serde_json::from_slice(&reserved)
+        .map_err(|error| format!("decode reserve response: {error}"))?;
+    let device_id = opened
+        .get("deviceId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "device id is missing".to_owned())?
+        .to_owned();
+    let image = inspect_value(host, &device_id)?;
+    let Some(object) = opened.as_object_mut() else {
+        return Err("reserve response is malformed".to_owned());
+    };
+    object.insert("phase".to_owned(), serde_json::json!("open"));
+    copy_trust_fields(object, &image);
+    serde_json::to_vec(&opened).map_err(|error| format!("encode enter response: {error}"))
+}
+
+async fn enter_commit(host: &Arc<RoomHost>, request: &EnterRequest) -> Result<Vec<u8>, String> {
+    let external_user_id = request
+        .external_user_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "enter commit requires the room participant".to_owned())?;
+    let device_id = request
+        .device_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "enter commit requires the room device".to_owned())?;
+    let key_id = request
+        .key_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "enter commit requires the proved device key".to_owned())?;
+    let public_key_base64 = request
+        .public_key_base64
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "enter commit requires the proved device key".to_owned())?;
+    let public_key = STANDARD
+        .decode(public_key_base64.trim())
+        .map_err(|_| "invalid public key".to_owned())?;
+    if public_key.len() != 32 {
+        return Err("device public key must be 32 bytes".to_owned());
+    }
+    let conference_id = conference_id(host)?;
+    let identity = participant_identity(host, &conference_id, external_user_id.as_bytes())?;
+    if identity.device_id != device_id {
+        return Err("enter commit is for a different device".to_owned());
+    }
+    let before = inspect_value(host, device_id)?;
+    if before
+        .get("deviceRevoked")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Err("canonical Device revoked or trust unavailable".to_owned());
+    }
+    let already_trusted = trust_image_matches(&before, key_id, &public_key);
+    if !already_trusted
+        && (before
+            .get("keyId")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+            || before
+                .get("deviceActive")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true))
+    {
+        return Err("device signer does not match the trusted key".to_owned());
+    }
+    if !already_trusted {
+        trust(
+            host,
+            &serde_json::to_vec(&serde_json::json!({
+                "externalUserId": external_user_id,
+                "keyId": key_id,
+                "publicKeyBase64": public_key_base64,
+            }))
+            .map_err(|error| format!("encode trust request: {error}"))?,
+        )
+        .await?;
+    }
+    let joined = join(
+        host,
+        &serde_json::to_vec(&serde_json::json!({
+            "externalUserId": external_user_id,
+        }))
+        .map_err(|error| format!("encode join request: {error}"))?,
+    )
+    .await?;
+    let mut committed: serde_json::Value = serde_json::from_slice(&joined)
+        .map_err(|error| format!("decode join response: {error}"))?;
+    let after = inspect_value(host, device_id)?;
+    if !trust_image_matches(&after, key_id, &public_key) {
+        return Err("canonical Device trust changed during signing".to_owned());
+    }
+    let Some(object) = committed.as_object_mut() else {
+        return Err("join response is malformed".to_owned());
+    };
+    object.insert("phase".to_owned(), serde_json::json!("commit"));
+    copy_trust_fields(object, &after);
+    serde_json::to_vec(&committed).map_err(|error| format!("encode enter response: {error}"))
+}
+
+fn inspect_value(host: &RoomHost, device_id: &str) -> Result<serde_json::Value, String> {
+    let body = serde_json::to_vec(&serde_json::json!({ "deviceId": device_id }))
+        .map_err(|error| format!("encode inspect request: {error}"))?;
+    let bytes = inspect(host, &body)?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("decode inspect response: {error}"))
+}
+
+fn copy_trust_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    image: &serde_json::Value,
+) {
+    for key in ["deviceActive", "deviceRevoked", "keyId", "publicKeyBase64"] {
+        if let Some(value) = image.get(key) {
+            object.insert(key.to_owned(), value.clone());
+        }
+    }
+}
+
+fn trust_image_matches(image: &serde_json::Value, key_id: &str, public_key: &[u8]) -> bool {
+    image
+        .get("deviceActive")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && image
+            .get("deviceRevoked")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        && image.get("keyId").and_then(serde_json::Value::as_str) == Some(key_id)
+        && image
+            .get("publicKeyBase64")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|encoded| STANDARD.decode(encoded.trim()).ok())
+            .is_some_and(|decoded| decoded == public_key)
 }
 
 async fn ensure_conference(host: &RoomHost) -> Result<pb::OpaqueId, String> {
@@ -1260,7 +1449,29 @@ async fn write_response(
 
 #[cfg(test)]
 mod tests {
-    use super::origin_allowed;
+    use base64::Engine as _;
+
+    use super::{origin_allowed, trust_image_matches};
+
+    #[test]
+    fn confirming_trust_image_must_match_the_proved_key() {
+        let key = [7_u8; 32];
+        let encoded = super::STANDARD.encode(key);
+        let image = serde_json::json!({
+            "deviceActive": true,
+            "deviceRevoked": false,
+            "keyId": "device-key",
+            "publicKeyBase64": encoded,
+        });
+        assert!(trust_image_matches(&image, "device-key", &key));
+        assert!(!trust_image_matches(&image, "other-key", &key));
+        let mut revoked = image.clone();
+        revoked["deviceRevoked"] = serde_json::json!(true);
+        assert!(!trust_image_matches(&revoked, "device-key", &key));
+        let mut inactive = image.clone();
+        inactive["deviceActive"] = serde_json::json!(false);
+        assert!(!trust_image_matches(&inactive, "device-key", &key));
+    }
 
     #[test]
     fn room_accepts_ipv4_ipv6_and_localhost_loopback_origins() {
