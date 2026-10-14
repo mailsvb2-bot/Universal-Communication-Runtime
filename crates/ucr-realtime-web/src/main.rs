@@ -3498,9 +3498,8 @@ mod tests {
 
     #[test]
     fn browser_media_readiness_requires_all_pinned_files() {
-        let root = std::env::temp_dir().join(format!(
-            "ucr-browser-media-ready-{}", std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ucr-browser-media-ready-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for (_, file, _) in super::REFERENCE_MEDIA_ASSETS {
             let destination = root.join(file);
