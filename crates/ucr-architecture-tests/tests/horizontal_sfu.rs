@@ -263,7 +263,21 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
     assert!(realtime.contains("leave_realtime_session_with_sfu_placement"));
     assert!(realtime.contains("sfu_placement_transition_guard"));
     assert!(realtime.contains("release_sfu_call_placement_if_inactive"));
-    assert!(realtime.contains("rollback_realtime_join(&claims, now).await"));
+    // Rollback is now a generation-fenced operation. A stale async failure
+    // must never evict a newer Join or release its shared SFU placement.
+    assert!(
+        realtime.contains("rollback_realtime_join(&claims, outcome.join_generation, now)"),
+        "only the generation created by this Join may be rolled back"
+    );
+    assert!(
+        realtime.contains("leave_if_sequence(claims, expected_join_generation, now_unix_ms)"),
+        "rollback must atomically check the canonical registry Join fence"
+    );
+    assert!(
+        registry.contains("pub fn current_join_generation(")
+            && registry.contains("join_generation: u64"),
+        "connection leases must be distinct from mutable attendance sequence"
+    );
     assert!(realtime.contains("release_sfu_call_placement_if_inactive"));
     assert!(registry.contains("pub fn active_call_session_count_at"));
     assert!(registry.contains("with_expired_call_cleanup"));

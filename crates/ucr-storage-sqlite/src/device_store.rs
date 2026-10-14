@@ -1,12 +1,13 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{
-    DeviceLifecycleStore, DeviceReverificationProof, DurableStoreError, IdentityDeviceLookupStore,
-    ReverifiedDeviceActivationStore,
+    AtomicTrustedDeviceEnrollmentStore, DeviceLifecycleStore, DeviceReverificationProof,
+    DurableStoreError, IdentityDeviceLookupStore, ReverifiedDeviceActivationStore,
 };
 use ucr_model::{
-    DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, OpaqueId, TenantScope,
+    DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, OpaqueId, PublicKeyDescriptor,
+    TenantScope, TrustedSigningKeyState,
 };
-use ucr_protocol::device_allows_protected_access;
+use ucr_protocol::{device_allows_protected_access, validate_trusted_signing_key_descriptor};
 
 use super::{
     SqliteLocalStore, map_schema_change_error, map_sqlite_error, namespace_storage_key,
@@ -48,6 +49,68 @@ pub(super) fn verify_schema_v15(connection: &Connection) -> Result<(), DurableSt
         ],
     )?;
     verify_rows(connection)
+}
+
+/// The canonical `Device` and signing-key tables share exactly one `SQLite`
+/// transaction. An authenticated first-party handler must separately prove
+/// user/Identity ownership and verify an unexpired one-time Ed25519 challenge
+/// BEFORE invoking this persistence operation.
+impl AtomicTrustedDeviceEnrollmentStore for SqliteLocalStore {
+    fn enroll_new_trusted_device(
+        &self,
+        scope: &TenantScope,
+        device: &DeviceDescriptor,
+        signing_key: &PublicKeyDescriptor,
+    ) -> Result<(), DurableStoreError> {
+        if device.state != DeviceLifecycleState::Active || signing_key.device_id != device.device_id
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        validate_trusted_signing_key_descriptor(signing_key)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        if !super::identity_store::identity_exists_in(&transaction, scope, &device.identity_id)? {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        if let Some(existing) = load_device(&transaction, scope, &device.device_id)? {
+            // A known unkeyed Device cannot be silently "completed" through
+            // first-entry enrollment. That requires the explicitly authorized
+            // recovery flow. Revoked/stale Devices must never be resurrected.
+            if existing != *device {
+                return Err(DurableStoreError::Conflict);
+            }
+            let active =
+                super::trusted_key_store::active_key_id(&transaction, scope, &device.device_id)?;
+            if active.as_ref() != Some(&signing_key.key_id) {
+                return Err(DurableStoreError::Conflict);
+            }
+            let record = super::trusted_key_store::load_key_record(
+                &transaction,
+                scope,
+                &signing_key.key_id,
+            )?
+            .ok_or(DurableStoreError::Corrupt)?;
+            if record.state != TrustedSigningKeyState::Active || record.descriptor != *signing_key {
+                return Err(DurableStoreError::Conflict);
+            }
+        } else {
+            // First-entry register and trusted signer publication cannot
+            // race with Device revoke, rebind, or an existing key ID.
+            if super::trusted_key_store::load_key_record(&transaction, scope, &signing_key.key_id)?
+                .is_some()
+            {
+                return Err(DurableStoreError::Conflict);
+            }
+            insert_device(&transaction, scope, device)?;
+            super::trusted_key_store::insert_active_key(&transaction, scope, signing_key)?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))
+    }
 }
 
 impl DeviceLifecycleStore for SqliteLocalStore {
@@ -471,15 +534,16 @@ mod tests {
 
     use rusqlite::Connection;
     use ucr_core::{
-        DeviceLifecycleStore, DeviceReverificationGate, DeviceReverificationVerificationError,
-        DeviceReverificationVerifier, DurableStoreError, IdentityDeviceLookupStore,
-        ReverifiedDeviceActivationStore, StorageProvider, TrustedSigningKeyStore,
-        authorize_and_activate_reverified_device,
+        AtomicTrustedDeviceEnrollmentStore, DeviceLifecycleStore, DeviceReverificationGate,
+        DeviceReverificationVerificationError, DeviceReverificationVerifier, DurableStoreError,
+        IdentityDeviceLookupStore, IdentityStore, ReverifiedDeviceActivationStore, StorageProvider,
+        TrustedSigningKeyStore, authorize_and_activate_reverified_device,
     };
     use ucr_crypto::{TrustedKeyResolutionError, TrustedSigningKeyResolver};
     use ucr_model::{
-        DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, KeyId, KeyPurpose,
-        NamespaceId, OpaqueId, PublicKeyDescriptor, TenantId, TenantScope, TrustedSigningKeyState,
+        DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityEvidence, IdentityId,
+        IdentityOwnership, IdentityRecord, KeyId, KeyPurpose, NamespaceId, OpaqueId,
+        PublicKeyDescriptor, TenantId, TenantScope, TrustedSigningKeyState,
     };
     use ucr_protocol::{ALGORITHM_VERSION, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID};
 
@@ -553,6 +617,173 @@ mod tests {
         ) -> Result<(), DeviceReverificationVerificationError> {
             Ok(())
         }
+    }
+
+    fn seed_owner_identity(store: &SqliteLocalStore, scope: &TenantScope) {
+        store
+            .persist_identity(&IdentityRecord {
+                scope: scope.clone(),
+                identity_id: IdentityId::from_opaque(oid("identity-a")),
+                ownership: IdentityOwnership::UcrNative,
+                evidence: IdentityEvidence::SelfAsserted,
+                expires_at_unix_ms: None,
+            })
+            .expect("persist existing canonical Identity");
+    }
+
+    #[test]
+    fn first_party_trusted_device_enrollment_is_atomic_and_idempotent() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let scope = scope();
+        let active = device(DeviceLifecycleState::Active);
+        let signer = key("first-party-device-key", 67);
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &active, &signer),
+            Err(DurableStoreError::PermissionDenied),
+            "new Device cannot invent its own parent Identity"
+        );
+        assert_eq!(store.device(&scope, &active.device_id), Ok(None));
+        seed_owner_identity(&store, &scope);
+
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &active, &signer),
+            Ok(())
+        );
+        assert_eq!(
+            store.device(&scope, &active.device_id),
+            Ok(Some(active.clone()))
+        );
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &active.device_id),
+            Ok(Some(signer.clone()))
+        );
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &active, &signer),
+            Ok(()),
+            "exact Device AND signed-key descriptor is an idempotent retry"
+        );
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(
+            reopened.active_trusted_signing_key(&scope, &active.device_id),
+            Ok(Some(signer))
+        );
+    }
+
+    #[test]
+    fn first_party_trusted_device_enrollment_rejects_key_conflict_and_partial_devices() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let scope = scope();
+        seed_owner_identity(&store, &scope);
+        let active = device(DeviceLifecycleState::Active);
+        let signer = key("first-party-valid-key", 11);
+        let mut invalid = signer.clone();
+        invalid.device_id = DeviceId::from_opaque(oid("other-device"));
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &active, &invalid),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(store.device(&scope, &active.device_id), Ok(None));
+
+        // Existing unkeyed Device must use explicit recovery, not silently
+        // self-approve the proposed key just because the scope matches.
+        store
+            .register_device(&scope, &active)
+            .expect("legacy unkeyed registration");
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &active, &signer),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &active.device_id),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn first_party_trusted_device_enrollment_rejects_revoked_and_rebound_records() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let scope = scope();
+        seed_owner_identity(&store, &scope);
+        let active = device(DeviceLifecycleState::Active);
+        let signer = key("first-party-key", 23);
+        store
+            .enroll_new_trusted_device(&scope, &active, &signer)
+            .expect("first enrollment");
+        let conflicting = key("second-key", 24);
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &active, &conflicting),
+            Err(DurableStoreError::Conflict)
+        );
+        let mut reassigned = active.clone();
+        reassigned.identity_id = IdentityId::from_opaque(oid("other-identity"));
+        assert!(
+            store
+                .enroll_new_trusted_device(&scope, &reassigned, &signer)
+                .is_err(),
+            "key cannot transfer to another canonical Identity"
+        );
+        store
+            .revoke_device(&scope, &active.device_id, &active.identity_id)
+            .expect("revoke");
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &active, &signer),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &active.device_id),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn concurrent_first_party_enrollments_are_fenced_at_one_trusted_key() {
+        let db = TestDb::new();
+        let scope = scope();
+        let active = device(DeviceLifecycleState::Active);
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        seed_owner_identity(&store, &scope);
+        drop(store);
+        let barrier = Arc::new(Barrier::new(3));
+        let mut joins = Vec::new();
+        for (key_id, byte) in [("candidate-a", 71), ("candidate-b", 72)] {
+            let path = db.path().to_owned();
+            let scope = scope.clone();
+            let device = active.clone();
+            let lock = Arc::clone(&barrier);
+            joins.push(thread::spawn(move || {
+                let store = SqliteLocalStore::open(path).expect("open parallel store");
+                let candidate = key(key_id, byte);
+                lock.wait();
+                store.enroll_new_trusted_device(&scope, &device, &candidate)
+            }));
+        }
+        barrier.wait();
+        let results: Vec<_> = joins
+            .into_iter()
+            .map(|join| join.join().expect("thread"))
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == Err(DurableStoreError::Conflict))
+                .count(),
+            1
+        );
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(
+            reopened.device(&scope, &active.device_id),
+            Ok(Some(active.clone()))
+        );
+        assert!(
+            reopened
+                .active_trusted_signing_key(&scope, &active.device_id)
+                .expect("key lookup")
+                .is_some()
+        );
     }
 
     #[test]

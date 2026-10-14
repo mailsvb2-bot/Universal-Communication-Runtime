@@ -13,15 +13,16 @@ use std::{
 };
 
 use ucr_core::{
-    AntiEntropyStore, AttachmentStore, AuthorizationEvaluator, BridgeActionStore,
-    BridgeRegistrationStore, CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore,
-    ConferenceJoinGrantStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
-    DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
-    IdentityDeviceLookupStore, IdentityStore, LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE,
-    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_ACTIVE_RECORDINGS_PER_CALL, MAX_ATOMIC_EVENT_BATCH,
-    MAX_RECORDING_PROVIDER_OPERATION_BATCH, MAX_RECORDING_RETENTION_BATCH, MessageStore,
-    PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
+    AntiEntropyStore, AtomicTrustedDeviceEnrollmentStore, AttachmentStore, AuthorizationEvaluator,
+    BridgeActionStore, BridgeRegistrationStore, CommandAcceptanceStore, CommandOutcomeStore,
+    CommunicationIntentStore, ConferenceJoinGrantStore, ConversationStore, DeliveryStore,
+    DeviceLifecycleStore, DeviceReverificationProof, DurableRecordStatus, DurableStoreError,
+    EventAppendStatus, EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore,
+    FederationPeerStore, IdentityDeviceLookupStore, IdentityStore,
+    LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE, LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD,
+    MAX_ACTIVE_RECORDINGS_PER_CALL, MAX_ATOMIC_EVENT_BATCH, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+    MAX_RECORDING_RETENTION_BATCH, MessageStore, PermissionGrantStore,
+    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     RecordingConsentProviderStopRequest, RecordingProviderOperation,
     RecordingProviderOperationRecord, RecordingProviderOperationState,
     RecordingProviderOperationStore, RecordingProviderRequest, RecordingStore,
@@ -720,6 +721,75 @@ impl ServiceAuditStore for MemoryLocalStore {
             .collect::<Vec<_>>();
         records.reverse();
         Ok(records)
+    }
+}
+
+/// The in-memory canonical owner implements the SAME atomic enrollment
+/// semantics as `SQLite`. One `Mutex` guards `Identity`, `Device` and `TrustedKey`
+/// together so concurrent first-entry requests cannot observe partial state.
+impl AtomicTrustedDeviceEnrollmentStore for MemoryLocalStore {
+    fn enroll_new_trusted_device(
+        &self,
+        scope: &TenantScope,
+        device: &DeviceDescriptor,
+        signing_key: &PublicKeyDescriptor,
+    ) -> Result<(), DurableStoreError> {
+        if device.state != DeviceLifecycleState::Active || signing_key.device_id != device.device_id
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        validate_trusted_signing_key_descriptor(signing_key)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let device_ref = device_key(scope, &device.device_id);
+        let signer_ref = trusted_key_ref(scope, &signing_key.key_id);
+        let active_ref = trusted_device_ref(scope, &device.device_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if !state
+            .identities
+            .contains_key(&identity_key(scope, &device.identity_id))
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        if let Some(existing) = state.devices.get(&device_ref) {
+            if existing != device {
+                return Err(DurableStoreError::Conflict);
+            }
+            if state.active_trusted_signing_keys.get(&active_ref)
+                != Some(&signing_key.key_id.as_opaque().as_str().to_owned())
+            {
+                return Err(DurableStoreError::Conflict);
+            }
+            let current = state
+                .trusted_signing_keys
+                .get(&signer_ref)
+                .ok_or(DurableStoreError::Corrupt)?;
+            return if current.state == TrustedSigningKeyState::Active
+                && current.descriptor == *signing_key
+            {
+                Ok(())
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if state.trusted_signing_keys.contains_key(&signer_ref)
+            || state.active_trusted_signing_keys.contains_key(&active_ref)
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        state.devices.insert(device_ref, device.clone());
+        state.trusted_signing_keys.insert(
+            signer_ref,
+            TrustedSigningKeyRecord {
+                scope: scope.clone(),
+                descriptor: signing_key.clone(),
+                state: TrustedSigningKeyState::Active,
+            },
+        );
+        state.active_trusted_signing_keys.insert(
+            active_ref,
+            signing_key.key_id.as_opaque().as_str().to_owned(),
+        );
+        Ok(())
     }
 }
 
@@ -3435,13 +3505,16 @@ impl CommandOutcomeStore for MemoryLocalStore {
 #[cfg(test)]
 mod tests {
     use ucr_core::{
-        CommandAcceptanceStore, CommandOutcomeStore, DurableStoreError, EventAppendStatus,
-        EventJournalStore, StorageProvider,
+        AtomicTrustedDeviceEnrollmentStore, CommandAcceptanceStore, CommandOutcomeStore,
+        DeviceLifecycleStore, DurableStoreError, EventAppendStatus, EventJournalStore,
+        IdentityStore, StorageProvider, TrustedSigningKeyStore,
     };
     use ucr_model::{
-        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
-        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolExtension,
-        ProtocolVersion, TenantId, TenantScope,
+        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext,
+        DeviceDescriptor, DeviceId, DeviceLifecycleState, DeviceRef, EventEnvelope, EventId,
+        IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, KeyId, KeyPurpose,
+        NamespaceId, OpaqueId, ProtocolExtension, ProtocolVersion, PublicKeyDescriptor, TenantId,
+        TenantScope,
     };
     use ucr_protocol::CommandReceiptStatus;
 
@@ -3496,6 +3569,73 @@ mod tests {
             integrity_metadata: Vec::new(),
             extensions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn atomic_first_entry_matches_sqlite_owner_without_partial_trust() {
+        let store = MemoryLocalStore::default();
+        let scope = command("identity-scope", "key", b"").scope;
+        let identity_id = IdentityId::from_opaque(opaque("identity-first-party"));
+        let device = DeviceDescriptor {
+            device_id: DeviceId::from_opaque(opaque("device-first-party")),
+            identity_id: identity_id.clone(),
+            state: DeviceLifecycleState::Active,
+        };
+        let signing_key = PublicKeyDescriptor {
+            key_id: KeyId::from_opaque(opaque("trusted-key-first-party")),
+            device_id: device.device_id.clone(),
+            purpose: KeyPurpose::Signing,
+            algorithm_id: ucr_protocol::SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ucr_protocol::ALGORITHM_VERSION,
+            key_format_version: ucr_protocol::KEY_FORMAT_VERSION,
+            public_key: vec![42; 32],
+        };
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &device, &signing_key),
+            Err(DurableStoreError::PermissionDenied),
+            "no client may invent its own parent Identity",
+        );
+        assert_eq!(store.device(&scope, &device.device_id), Ok(None));
+        store
+            .persist_identity(&IdentityRecord {
+                scope: scope.clone(),
+                identity_id: identity_id.clone(),
+                ownership: IdentityOwnership::UcrNative,
+                evidence: IdentityEvidence::SelfAsserted,
+                expires_at_unix_ms: None,
+            })
+            .expect("canonical owner");
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &device, &signing_key),
+            Ok(())
+        );
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &device.device_id),
+            Ok(Some(signing_key.clone()))
+        );
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &device, &signing_key),
+            Ok(()),
+            "same Device+trusted descriptor only",
+        );
+        let mut foreign_key = signing_key.clone();
+        foreign_key.public_key = vec![43; 32];
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &device, &foreign_key),
+            Err(DurableStoreError::Conflict),
+        );
+        store
+            .revoke_device(&scope, &device.device_id, &identity_id)
+            .expect("revoke");
+        assert_eq!(
+            store.enroll_new_trusted_device(&scope, &device, &signing_key),
+            Err(DurableStoreError::Conflict),
+            "re-enrollment may not resurrect revoked devices",
+        );
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &device.device_id),
+            Ok(None),
+        );
     }
 
     #[test]

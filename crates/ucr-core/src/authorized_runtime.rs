@@ -1,12 +1,13 @@
 use ucr_model::{
-    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CallId, CallSession, CallSignal,
-    CommandEnvelope, CommandId, ConversationId, ConversationKind, ConversationRecord,
-    DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
-    EventConsumerCursor, EventDeadLetter, EventDeliveryFailureKind, EventEnvelope, EventId,
-    EventPollResult, EventReconciliation, EventSubscription, EventSubscriptionId, EventSummary,
+    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CallId, CallParticipantState,
+    CallSession, CallSignal, CallSignallingState, CommandEnvelope, CommandId, ConversationId,
+    ConversationKind, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
+    DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventConsumerCursor,
+    EventDeadLetter, EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult,
+    EventReconciliation, EventSubscription, EventSubscriptionId, EventSummary,
     ExternalIdentityBinding, GroupChange, GroupId, GroupMemberState, GroupMembership, GroupRecord,
-    IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
-    PermissionGrant, PermissionScope, PrincipalKind, PublicKeyDescriptor, RecoveryPlan,
+    IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId, KeyPurpose, MessageEnvelope,
+    MessageId, PermissionGrant, PermissionScope, PrincipalKind, PublicKeyDescriptor, RecoveryPlan,
     RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
     ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy, ServiceResourceQuotaPolicy,
     SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
@@ -39,8 +40,8 @@ use crate::{
     CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore, ConversationStore,
     DeliveryStore, DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, GroupMessageStore,
-    GroupStore, IdentityStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
-    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore, SyncStore,
+    GroupStore, IdentityStore, MessageStore, PermissionGrantStore, PrincipalIdentityBindingStore,
+    RecoveryPlanStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore, SyncStore,
     TrustedSigningKeyStore,
 };
 
@@ -1498,6 +1499,23 @@ where
             .map_err(AuthorizedMutationError::Store)
     }
 
+    /// Lists a bounded recipient-only direct Call inbox under canonical
+    /// observation policy. This is a read projection, not an event queue
+    /// or a second Call lifecycle owner.
+    ///
+    /// # Errors
+    /// Returns authorization, invalid-limit or canonical durable-store failures.
+    pub fn incoming_direct_calls(
+        &self,
+        recipient: &ScopedPrincipal,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, AuthorizedMutationError> {
+        self.require(recipient, &recipient.scope, CALL_OBSERVE_PERMISSION)?;
+        self.store
+            .incoming_direct_calls(recipient, max_items)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
     /// Applies one idempotent Call signalling fact through the atomic canonical owner.
     ///
     /// # Errors
@@ -1512,5 +1530,190 @@ where
         self.store
             .apply_call_signal(subject, signal)
             .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+/// First-party human-device Call admission is not a login endpoint.
+///
+/// The embedding first-party server MUST authenticate a real user and verify
+/// possession of that user's current trusted Device signing key before it
+/// constructs the `ScopedPrincipal` and invokes these methods. No browser-
+/// provided identity field, Service Principal token or Join fragment is proof.
+/// Every operation also rechecks current canonical Identity/Device/Trust and
+/// original participant permissions. This does not create a new auth or Call
+/// persistence owner.
+///
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore + PrincipalIdentityBindingStore + DeviceLifecycleStore + TrustedSigningKeyStore,
+{
+    fn require_current_first_party_device(
+        &self,
+        subject: &ScopedPrincipal,
+        device_id: &DeviceId,
+    ) -> Result<(), AuthorizedMutationError> {
+        let deny = || {
+            AuthorizedMutationError::Authorization(ucr_protocol::CanonicalError::new(
+                ucr_protocol::CanonicalErrorCode::PermissionDenied,
+            ))
+        };
+        if subject.principal.kind != PrincipalKind::Person {
+            return Err(deny());
+        }
+        let binding = self
+            .store
+            .principal_identity_binding(&subject.scope, &subject.principal)
+            .map_err(AuthorizedMutationError::Store)?
+            .ok_or_else(deny)?;
+        if binding.scope != subject.scope || binding.principal != subject.principal {
+            return Err(deny());
+        }
+        let device = self
+            .store
+            .device(&subject.scope, device_id)
+            .map_err(AuthorizedMutationError::Store)?
+            .ok_or_else(deny)?;
+        if device.device_id != *device_id
+            || device.identity_id != binding.identity_id
+            || device.state != DeviceLifecycleState::Active
+        {
+            return Err(deny());
+        }
+        let trusted = self
+            .store
+            .active_trusted_signing_key(&subject.scope, device_id)
+            .map_err(AuthorizedMutationError::Store)?
+            .ok_or_else(deny)?;
+        if trusted.device_id != *device_id || trusted.purpose != KeyPurpose::Signing {
+            return Err(deny());
+        }
+        Ok(())
+    }
+
+    /// Starts a Call as an independently authenticated human using a currently
+    /// trusted, canonically bound Device. Never uses a Service Principal as actor.
+    ///
+    /// # Errors
+    /// Fails closed on missing binding/trust, denied policy or durable errors.
+    pub fn first_party_call_start(
+        &self,
+        subject: &ScopedPrincipal,
+        device_id: &DeviceId,
+        session: &CallSession,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &session.scope, CALL_START_PERMISSION)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        let status = self
+            .store
+            .create_call(subject, session)
+            .map_err(AuthorizedMutationError::Store)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        Ok(status)
+    }
+
+    /// Reads only a participant-owned Call for the authenticated human Device.
+    ///
+    /// # Errors
+    /// Fails closed on revoked Device, missing participant or denied policy.
+    pub fn first_party_call_get(
+        &self,
+        subject: &ScopedPrincipal,
+        device_id: &DeviceId,
+        call_id: &CallId,
+    ) -> Result<Option<CallSession>, AuthorizedMutationError> {
+        self.require(subject, &subject.scope, CALL_OBSERVE_PERMISSION)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        let call = self
+            .store
+            .call_for_participant(subject, &subject.scope, call_id)
+            .map_err(AuthorizedMutationError::Store)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        Ok(call)
+    }
+
+    /// Returns only the authenticated recipient's pending direct Calls, never
+    /// a global Call directory or an unauthenticated polling endpoint.
+    ///
+    /// # Errors
+    /// Fails closed on revoked Device, denied policy or invalid bound.
+    pub fn first_party_call_incoming(
+        &self,
+        subject: &ScopedPrincipal,
+        device_id: &DeviceId,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, AuthorizedMutationError> {
+        self.require(subject, &subject.scope, CALL_OBSERVE_PERMISSION)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        let calls = self
+            .store
+            .incoming_direct_calls(subject, max_items)
+            .map_err(AuthorizedMutationError::Store)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        Ok(calls)
+    }
+
+    /// Commits a Call signal only as its authenticated human participant.
+    /// A stale revision is handled by the canonical atomic Call owner.
+    ///
+    /// # Errors
+    /// Fails closed on lost Device trust, conflict or denied signalling.
+    pub fn first_party_call_signal(
+        &self,
+        subject: &ScopedPrincipal,
+        device_id: &DeviceId,
+        signal: &CallSignal,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &signal.scope, CALL_SIGNAL_PERMISSION)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        let status = self
+            .store
+            .apply_call_signal(subject, signal)
+            .map_err(AuthorizedMutationError::Store)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        Ok(status)
+    }
+
+    /// Gates later Conference Join issuance on an already ACTIVE canonical
+    /// two-person direct Call, both Accepted participants and current trust.
+    /// A successful return is NOT a Join token or proof of media connectivity.
+    ///
+    /// # Errors
+    /// Denies pending/terminated/foreign/group Calls and inactive Devices.
+    pub fn first_party_call_join_admission(
+        &self,
+        subject: &ScopedPrincipal,
+        device_id: &DeviceId,
+        call_id: &CallId,
+        expected_revision: u64,
+    ) -> Result<CallSession, AuthorizedMutationError> {
+        self.require(subject, &subject.scope, CALL_OBSERVE_PERMISSION)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        let call = self
+            .store
+            .call_for_participant(subject, &subject.scope, call_id)
+            .map_err(AuthorizedMutationError::Store)?
+            .ok_or_else(|| {
+                AuthorizedMutationError::Authorization(ucr_protocol::CanonicalError::new(
+                    ucr_protocol::CanonicalErrorCode::PermissionDenied,
+                ))
+            })?;
+        if call.revision != expected_revision
+            || call.signalling_state != CallSignallingState::Active
+            || call.conversation.kind != ConversationKind::Direct
+            || call.participants.len() != 2
+            || !call
+                .participants
+                .iter()
+                .all(|participant| participant.state == CallParticipantState::Accepted)
+        {
+            return Err(AuthorizedMutationError::Authorization(
+                ucr_protocol::CanonicalError::new(
+                    ucr_protocol::CanonicalErrorCode::PermissionDenied,
+                ),
+            ));
+        }
+        self.require_current_first_party_device(subject, device_id)?;
+        Ok(call)
     }
 }

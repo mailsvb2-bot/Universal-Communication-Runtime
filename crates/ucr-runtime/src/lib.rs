@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod first_party_web;
+
 use std::{
     net::SocketAddr,
     path::Path,
@@ -2340,7 +2342,7 @@ impl ProductionRuntime {
         bind: SocketAddr,
         config: RealtimeRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_realtime_inner(bind, None, config, None).await
+        Box::pin(self.serve_realtime_inner(bind, None, config, None)).await
     }
 
     /// Serves realtime plus a separately bound private operator/SFU placement API.
@@ -2353,8 +2355,7 @@ impl ProductionRuntime {
         operator_bind: SocketAddr,
         config: RealtimeRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_realtime_inner(bind, Some(operator_bind), config, None)
-            .await
+        Box::pin(self.serve_realtime_inner(bind, Some(operator_bind), config, None)).await
     }
 
     /// Serves realtime plus Universal Conference with verifier-only machine Bearer support.
@@ -2367,8 +2368,7 @@ impl ProductionRuntime {
         config: RealtimeRuntimeConfig,
         machine_bearer: MachineBearerRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_realtime_inner(bind, None, config, Some(machine_bearer))
-            .await
+        Box::pin(self.serve_realtime_inner(bind, None, config, Some(machine_bearer))).await
     }
 
     /// Serves realtime with machine Bearer support and a separately bound private operator/SFU
@@ -2383,7 +2383,7 @@ impl ProductionRuntime {
         config: RealtimeRuntimeConfig,
         machine_bearer: MachineBearerRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_realtime_inner(bind, Some(operator_bind), config, Some(machine_bearer))
+        Box::pin(self.serve_realtime_inner(bind, Some(operator_bind), config, Some(machine_bearer)))
             .await
     }
 
@@ -2426,6 +2426,16 @@ impl ProductionRuntime {
                 store: Arc::clone(&store),
                 registry: Arc::clone(&self.recording_provider),
             });
+        let first_party_config = first_party_web::Configuration::from_env()?;
+        let first_party_store = Arc::clone(&store);
+        let first_party_issuer = Arc::clone(&join_issuer);
+        let first_party_listener = async move {
+            if let Some(config) = first_party_config {
+                first_party_web::serve(config, first_party_store, first_party_issuer).await
+            } else {
+                std::future::pending::<Result<(), String>>().await
+            }
+        };
         let services = RealtimeServerServices {
             clock,
             event_clock,
@@ -2456,13 +2466,15 @@ impl ProductionRuntime {
                     .map_err(|error| format!("local realtime API server: {error}")),
             }
         };
+        let public_and_first_party =
+            async move { tokio::try_join!(public_and_operator, first_party_listener).map(|_| ()) };
         let server_result = match (sfu_node_media_config, sfu_node_media_service) {
             (Some(config), Some(service)) => tokio::try_join!(
-                public_and_operator,
+                public_and_first_party,
                 serve_sfu_node_media_services(config, service)
             )
             .map(|_| ()),
-            (None, None) => public_and_operator.await,
+            (None, None) => public_and_first_party.await,
             _ => Err("SFU node media runtime configuration mismatch".to_owned()),
         };
         bridge_task.abort();

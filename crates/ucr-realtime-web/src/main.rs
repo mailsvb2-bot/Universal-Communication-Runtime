@@ -45,6 +45,8 @@ const MAX_SIGNALING_SDP_BYTES: usize = 256 * 1024;
 const MAX_SIGNALING_ICE_CANDIDATE_BYTES: usize = 4096;
 const MAX_SIGNALING_ICE_MID_BYTES: usize = 256;
 const CLIENT_HTML: &str = include_str!("../static/client.html");
+const FIRST_PARTY_START_HTML: &str = include_str!("../static/start.html");
+const FIRST_PARTY_START_JS: &str = include_str!("../static/start.js");
 
 // Generated endpoint-only public code: no secrets, grants or MLS state in these
 // artifacts. The gateway serves only an explicit allowlist, never a directory.
@@ -114,6 +116,13 @@ struct WebRtcCloseRequest {
     #[serde(flatten)]
     session: SessionRequest,
     offer_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaveRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    expected_session_sequence: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -419,6 +428,13 @@ impl From<pb::RealtimeMediaPolicy> for BrowserMediaPolicyResponse {
     }
 }
 
+#[derive(Default)]
+struct RealtimeResponseState {
+    admission_state: Option<&'static str>,
+    media_policy: Option<BrowserMediaPolicyResponse>,
+    session_sequence: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 struct ApiResponse {
     ok: bool,
@@ -427,6 +443,8 @@ struct ApiResponse {
     expires_at_unix_ms: Option<i64>,
     heartbeat_interval_ms: Option<u64>,
     accepted_recipient_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_sequence: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     admission_state: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -518,6 +536,12 @@ async fn handle_request(
     if method == Method::GET && path == "/healthz" {
         return Ok(text_response(StatusCode::OK, "ok"));
     }
+    if method == Method::GET && matches!(path.as_str(), "/start" | "/start.html") {
+        return Ok(first_party_start_response());
+    }
+    if method == Method::GET && path == "/start.js" {
+        return Ok(first_party_start_js_response());
+    }
     if method == Method::GET && path == "/room" {
         return Ok(html_body_response(StatusCode::OK, room_page()));
     }
@@ -606,7 +630,7 @@ async fn handle_post_route(state: &AppState, token: &str, path: &str, body: &[u8
             Ok(input) => heartbeat(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/leave" => match decode_json::<SessionRequest>(body) {
+        "/v1/realtime/leave" => match decode_json::<LeaveRequest>(body) {
             Ok(input) => leave(state, token, input).await,
             Err(error) => error.into_response(),
         },
@@ -793,14 +817,24 @@ async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpRespo
         Ok(response) => match response.into_inner().result {
             Some(pb::realtime_join_response::Result::Session(session)) => {
                 let media_policy = session.media_policy.map(BrowserMediaPolicyResponse::from);
+                if session.session_sequence == 0 {
+                    return api_error(
+                        StatusCode::BAD_GATEWAY,
+                        "invalid_join_sequence",
+                        "realtime upstream did not bind the Join to a session generation",
+                    );
+                }
                 api_ok_with_realtime_state(
                     "joined",
                     "realtime session joined",
                     Some(session.expires_at_unix_ms),
                     Some(session.heartbeat_interval_ms),
                     None,
-                    admission_state_name(session.admission_state),
-                    media_policy,
+                    RealtimeResponseState {
+                        admission_state: admission_state_name(session.admission_state),
+                        media_policy,
+                        session_sequence: Some(session.session_sequence),
+                    },
                 )
             }
             Some(pb::realtime_join_response::Result::Error(error)) => join_error(&error),
@@ -853,8 +887,11 @@ async fn heartbeat(state: &AppState, token: &str, input: HeartbeatRequest) -> Ht
                         None,
                         None,
                         None,
-                        admission_state_name(response.admission_state),
-                        media_policy,
+                        RealtimeResponseState {
+                            admission_state: admission_state_name(response.admission_state),
+                            media_policy,
+                            ..RealtimeResponseState::default()
+                        },
                     )
                 }
                 Some(pb::realtime_heartbeat_response::Result::Error(_)) | None => api_error(
@@ -1157,12 +1194,20 @@ async fn load_mls_bootstrap(
     }
 }
 
-async fn leave(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+async fn leave(state: &AppState, token: &str, input: LeaveRequest) -> HttpResponse {
+    if input.expected_session_sequence == 0 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_session_sequence",
+            "Leave requires a nonzero authenticated Join generation",
+        );
+    }
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeLeaveRequest {
-        scope: Some(pb_scope(&input)),
-        call_id: Some(pb_id(&input.call)),
-        session_id: Some(pb_id(&input.session)),
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        expected_session_sequence: input.expected_session_sequence,
     });
     if let Err(error) = attach_bearer(&mut request, token) {
         return error.into_response();
@@ -2455,8 +2500,7 @@ fn api_ok(
         expires_at_unix_ms,
         heartbeat_interval_ms,
         accepted_recipient_count,
-        None,
-        None,
+        RealtimeResponseState::default(),
     )
 }
 
@@ -2466,8 +2510,7 @@ fn api_ok_with_realtime_state(
     expires_at_unix_ms: Option<i64>,
     heartbeat_interval_ms: Option<u64>,
     accepted_recipient_count: Option<u32>,
-    admission_state: Option<&'static str>,
-    media_policy: Option<BrowserMediaPolicyResponse>,
+    realtime_state: RealtimeResponseState,
 ) -> HttpResponse {
     json_response(
         StatusCode::OK,
@@ -2478,8 +2521,9 @@ fn api_ok_with_realtime_state(
             expires_at_unix_ms,
             heartbeat_interval_ms,
             accepted_recipient_count,
-            admission_state,
-            media_policy,
+            session_sequence: realtime_state.session_sequence,
+            admission_state: realtime_state.admission_state,
+            media_policy: realtime_state.media_policy,
         },
     )
 }
@@ -2511,6 +2555,7 @@ fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>)
             expires_at_unix_ms: None,
             heartbeat_interval_ms: None,
             accepted_recipient_count: None,
+            session_sequence: None,
             admission_state: None,
             media_policy: None,
         },
@@ -2561,6 +2606,33 @@ fn serve_reference_media_asset(path: &str) -> HttpResponse {
             "Authorized endpoint E2EE package not installed on the gateway",
         ),
     }
+}
+
+fn first_party_start_response() -> HttpResponse {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .header("X-Content-Type-Options", "nosniff")
+        .header(
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'self'; style-src 'unsafe-inline';              connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+        )
+        .body(full_body(Bytes::from_static(FIRST_PARTY_START_HTML.as_bytes())))
+        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+fn first_party_start_js_response() -> HttpResponse {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(full_body(Bytes::from_static(
+            FIRST_PARTY_START_JS.as_bytes(),
+        )))
+        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 fn html_response(status: StatusCode, html: &'static str) -> HttpResponse {
@@ -3133,6 +3205,143 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn first_party_contact_call_entry_has_complete_fail_closed_user_route() {
+        let html = super::FIRST_PARTY_START_HTML;
+        let js = super::FIRST_PARTY_START_JS;
+
+        // A first-party account and a contact book are required before
+        // the canonical owner will accept an outgoing or incoming call.
+        assert!(html.contains("lang=\"ru\""));
+        for element in [
+            "id=\"who\"",
+            "id=\"retry\"",
+            "id=\"new-contact\"",
+            "id=\"contact-name\"",
+            "id=\"contact-peer\"",
+            "id=\"contacts\"",
+            "id=\"incoming\"",
+            "id=\"call-state\"",
+            "id=\"cancel\"",
+            "id=\"status\"",
+        ] {
+            assert!(html.contains(element), "missing first-party UI: {element}");
+        }
+        assert!(html.contains("src=\"/start.js\""));
+        assert!(html.contains("name=\"referrer\" content=\"no-referrer\""));
+        assert!(html.contains("камера и микрофон не включаются"));
+
+        // One existing endpoint-owned signer, authenticated HTTP bridge and
+        // canonical Call coordinator. No manual grant, static Contact/Call
+        // authority or parallel browser-side permission store.
+        assert!(js.contains("createUcrBrowserProtectedDeviceVault()"));
+        assert!(js.contains("createUcrFirstPartyHttpHost(vault, {origin:location.origin})"));
+        assert!(js.contains("createUcrContactCallJourney(host,vault)"));
+        assert!(js.contains("await host.resumeAuthenticatedDevice()"));
+        assert!(js.contains("await calls.contacts()"));
+        assert!(js.contains("await calls.addContact(name,peer)"));
+        assert!(js.contains("await calls.start(contact.id,media,requestId)"));
+        assert!(js.contains("await calls.incoming()"));
+        assert!(js.contains("await calls.signal(call.callId,\"accept\")"));
+        assert!(js.contains("await calls.signal(call.callId,\"reject\")"));
+        assert!(js.contains("await calls.signal(active.call.callId,action)"));
+        assert!(js.contains("await calls.inspect(active.call.callId)"));
+        assert!(js.contains("if (accountScope !== principalScope(user))"));
+        assert!(js.contains("idempotency.clear()"));
+        assert!(js.contains("clearRetryKey(active.call)"));
+
+        // Browser media navigation requires a server-issued, recipient-
+        // accepted, exact-Call Join. It only enters the URL fragment and
+        // cannot leak through a query string or a server request.
+        let join = js
+            .find("const grant = await calls.join(callId)")
+            .expect("media entry must be authorized by canonical Call");
+        let bound = js
+            .find("grant.callId !== callId")
+            .expect("media Join must bind the exact selected Call");
+        let fragment = js
+            .find("next.hash = grant.joinFragment.slice(1)")
+            .expect("the signed grant must remain in the URL fragment");
+        let navigate = js
+            .find("location.replace(next.href)")
+            .expect("navigate only after canonical media authorization");
+        assert!(join < bound && bound < fragment && fragment < navigate);
+        assert!(js.contains("if (fresh.state === \"active\") await beginMedia(fresh.callId)"));
+        // A public Device binding hint is not a login credential. It
+        // permits re-authentication only by proving possession of the
+        // canonical protected signer against the server after restart.
+        assert!(js.contains("const HINT_KEY = \"ucr.first-party.last-device.v1\""));
+        assert!(js.contains("tenantId:binding.tenantId,namespaceId:binding.namespaceId"));
+        assert!(js.contains("participantId:binding.participantId,deviceId:binding.deviceId"));
+        assert!(js.contains("localStorage.setItem(HINT_KEY,JSON.stringify(publicHint))"));
+        assert!(js.contains("localStorage.removeItem(HINT_KEY)"));
+        assert!(!js.contains("localStorage.setItem(HINT_KEY,JSON.stringify(binding))"));
+        assert!(!js.contains("localStorage.setItem(HINT_KEY,JSON.stringify(result))"));
+        for forbidden in [
+            "createUcrFirstPartyCallEntry",
+            "client_secret",
+            "access_token",
+            "Authorization: Bearer",
+            "getUserMedia(",
+            "getDisplayMedia(",
+            "next.searchParams",
+        ] {
+            assert!(
+                !js.contains(forbidden),
+                "first-party entry must not expose credentials or capture media: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_party_contact_call_assets_are_no_store_and_refuse_cross_origin_embedding() {
+        let html = super::first_party_start_response();
+        assert_eq!(html.status(), super::StatusCode::OK);
+        assert_eq!(
+            html.headers()
+                .get(super::CACHE_CONTROL)
+                .expect("cache header"),
+            "no-store"
+        );
+        assert_eq!(
+            html.headers()
+                .get("Referrer-Policy")
+                .expect("referrer policy"),
+            "no-referrer"
+        );
+        assert_eq!(
+            html.headers()
+                .get("X-Content-Type-Options")
+                .expect("content sniffing policy"),
+            "nosniff"
+        );
+        let csp = html
+            .headers()
+            .get("Content-Security-Policy")
+            .expect("content security policy")
+            .to_str()
+            .expect("valid content security policy");
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("connect-src 'self'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("base-uri 'none'"));
+
+        let js = super::first_party_start_js_response();
+        assert_eq!(js.status(), super::StatusCode::OK);
+        assert_eq!(
+            js.headers()
+                .get(super::CACHE_CONTROL)
+                .expect("cache header"),
+            "no-store"
+        );
+        assert_eq!(
+            js.headers()
+                .get("X-Content-Type-Options")
+                .expect("content sniffing policy"),
+            "nosniff"
+        );
+    }
+
     use super::*;
 
     #[test]

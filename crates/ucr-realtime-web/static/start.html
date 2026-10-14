@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>UCR — Защищённые звонки</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui,sans-serif;background:#0b1222;color:#edf3ff}
+*{box-sizing:border-box}body{margin:0;padding:24px;min-height:100vh}
+main{max-width:900px;margin:0 auto}h1{font-size:1.7rem}h2{font-size:1.2rem;margin-top:0}
+section{border:1px solid #36415a;border-radius:15px;padding:20px;margin:16px 0;background:#111b31}
+p{line-height:1.55;color:#c5d0e4}
+input,button,textarea{font:inherit;border-radius:8px;padding:10px 12px}
+input,textarea{max-width:100%;background:#0b1222;color:#fff;border:1px solid #60718a}textarea{width:100%;resize:vertical}
+button{background:#7ac0ff;color:#00172d;border:0;cursor:pointer;font-weight:650}
+button.secondary{background:#384961;color:#eef3ff}
+button:focus-visible,input:focus-visible{outline:3px solid white;outline-offset:2px}
+button:disabled{opacity:.4;cursor:not-allowed}
+form{display:flex;gap:8px;flex-wrap:wrap}
+ul{list-style:none;padding:0;margin:0}li{padding:14px 0;border-bottom:1px solid #36415a}
+li:last-child{border-bottom:0}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
+.identity{color:#aebed6;overflow-wrap:anywhere;font-size:.85rem}
+#status{white-space:pre-wrap;min-height:2em}
+small{color:#9aaaca;line-height:1.5;display:block}
+[hidden]{display:none!important}
+</style>
+<script type="module" src="/start.js"></script>
+</head>
+<body>
+<main>
+<h1>UCR — Защищённые звонки</h1>
+<p>Контакт → один вызов → согласие собеседника → отдельное разрешение на защищённую медиасессию.</p>
+<section aria-label="Учётная запись">
+  <h2>Моё устройство</h2>
+  <p id="who" class="identity">Проверка независимой авторизации…</p>
+  <form id="device-login" aria-label="Вход с существующим защищённым устройством">
+    <input id="login-tenant" aria-label="Tenant ID" maxlength="120" placeholder="Tenant ID" required>
+    <input id="login-namespace" aria-label="Namespace ID" maxlength="120" placeholder="Namespace ID (необязательно)">
+    <input id="login-identity" aria-label="Мой Identity ID" maxlength="120" placeholder="Мой Identity ID" required>
+    <input id="login-device" aria-label="Мой Device ID" maxlength="120" placeholder="Мой Device ID" required>
+    <button type="submit">Войти с доверенного устройства</button>
+  </form>
+  <small>Вход возможен только с ранее зарегистрированным Device и его сохранённым ключом. Новый Device требует отдельного подтверждения или восстановления — идентификатор сам по себе не даёт доступа.</small>
+  <div class="actions"><button type="button" id="retry" class="secondary">Повторить проверку входа</button></div>
+</section>
+<section aria-label="Регистрация и восстановление">
+  <h2>Новая учётная запись</h2>
+  <p>Создание постоянного Identity и первого защищённого устройства. Не требуется ранее выданный идентификатор.</p>
+  <div class="actions"><button type="button" id="signup">Создать учётную запись и первое устройство</button></div>
+  <h2>Второе устройство и восстановление</h2>
+  <p>На новом устройстве укажите свой Identity ID и текущий одноразовый код восстановления. После привязки выдаётся новый код.</p>
+  <form id="recover-form">
+    <input id="recover-identity" aria-label="Identity ID для восстановления" maxlength="120" placeholder="Identity ID" required>
+    <input id="recover-code" aria-label="Одноразовый код восстановления" maxlength="80" placeholder="Код восстановления" required autocomplete="off">
+    <button type="submit">Привязать это устройство</button>
+  </form>
+  <div id="recovery-output" hidden>
+    <p><strong>Сохраните новый код восстановления. Он показывается только сейчас; старый код больше не действует.</strong></p>
+    <textarea id="recovery-code" aria-label="Новый код восстановления" rows="2" readonly spellcheck="false"></textarea>
+    <div class="actions"><button type="button" id="copy-recovery">Копировать код</button></div>
+  </div>
+  <small>Создаётся псевдонимная Identity, а не проверка паспорта/реального имени. Код восстановления эквивалентен праву добавить новое устройство: храните его отдельно и никому не передавайте.</small>
+</section>
+<section aria-label="Мои доверенные устройства">
+  <h2>Управление устройствами</h2>
+  <ul id="devices" aria-label="Доверенные и отозванные устройства"></ul>
+  <div class="actions">
+    <button type="button" id="rotate-recovery" class="secondary">Заменить код восстановления</button>
+    <button type="button" id="logout" class="secondary">Выйти</button>
+  </div>
+</section>
+<section>
+  <h2>Контакты</h2>
+  <form id="new-contact">
+    <input id="contact-name" aria-label="Имя" maxlength="128" placeholder="Имя" required>
+    <input id="contact-peer" aria-label="Проверенный идентификатор собеседника" maxlength="128" placeholder="Проверенный Identity ID" required>
+    <button type="submit">Добавить</button>
+  </form>
+  <small>Идентификатор собеседника необходимо независимо проверить. Имя и телефон не являются доказательством личности. Адресная книга зашифрована на устройстве.</small>
+  <ul id="contacts" aria-label="Мои контакты"></ul>
+</section>
+<section>
+  <h2>Входящие звонки</h2>
+  <ul id="incoming" aria-label="Входящие"></ul>
+  <small>В этом браузерном варианте входящие проверяются только при открытом приложении. Фоновые мобильные уведомления ещё требуют отдельного провайдера.</small>
+</section>
+<section>
+  <h2>Текущий вызов</h2>
+  <p id="call-state">Нет активного вызова.</p>
+  <div class="actions">
+    <button type="button" id="cancel" class="secondary" hidden>Отменить / завершить</button>
+  </div>
+</section>
+<section role="status" aria-live="polite">
+  <h2>Состояние защиты</h2>
+  <p id="status">До подтверждения учётной записи и Device камера и микрофон не включаются.</p>
+</section>
+</main>
+</body>
+</html>

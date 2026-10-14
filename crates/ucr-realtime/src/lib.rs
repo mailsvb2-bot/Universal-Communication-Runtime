@@ -2,13 +2,16 @@
 
 use core::fmt;
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use ucr_core::generate_opaque_id;
 use ucr_model::{
@@ -647,6 +650,9 @@ struct SessionEntry {
     sender: mpsc::Sender<SfuForwardEnvelope>,
     receiver: Option<mpsc::Receiver<SfuForwardEnvelope>>,
     sequence: u64,
+    // Connection lease fence: stable from this Join until the next actual Join.
+    // MediaReady and downlink reattachment only increment attendance sequence.
+    join_generation: u64,
     media_ready: bool,
     adaptive_stage: Option<AdaptiveMediaStage>,
     publisher_owner: Option<ScopedPrincipal>,
@@ -659,6 +665,7 @@ impl fmt::Debug for SessionEntry {
             .debug_struct("SessionEntry")
             .field("claims", &self.claims)
             .field("sequence", &self.sequence)
+            .field("join_generation", &self.join_generation)
             .field("media_ready", &self.media_ready)
             .field("adaptive_stage", &self.adaptive_stage)
             .field("publisher_active", &self.publisher_owner.is_some())
@@ -673,6 +680,9 @@ pub struct RealtimeSessionRegistry {
     expired_call_cleanup: Mutex<Vec<(TenantScope, CallId)>>,
     track_expired_call_cleanup: bool,
     bandwidth_usage: Mutex<Vec<BandwidthWindow>>,
+    // Monotonic within one running registry: Leave+Join cannot reuse a lease
+    // generation even when the previous entry was fully removed (ABA).
+    last_join_generation: AtomicU64,
     max_sessions: usize,
     queue_capacity: usize,
 }
@@ -681,6 +691,7 @@ pub struct RealtimeSessionRegistry {
 pub struct RealtimeJoinOutcome {
     pub claims: RealtimeSessionClaims,
     pub transition: AttendanceTransition,
+    pub join_generation: u64,
 }
 
 #[derive(Debug)]
@@ -703,6 +714,7 @@ impl RealtimeSessionRegistry {
             expired_call_cleanup: Mutex::new(Vec::new()),
             track_expired_call_cleanup: false,
             bandwidth_usage: Mutex::new(Vec::new()),
+            last_join_generation: AtomicU64::new(0),
             max_sessions,
             queue_capacity,
         }
@@ -720,6 +732,7 @@ impl RealtimeSessionRegistry {
             expired_call_cleanup: Mutex::new(Vec::new()),
             track_expired_call_cleanup: true,
             bandwidth_usage: Mutex::new(Vec::new()),
+            last_join_generation: AtomicU64::new(0),
             max_sessions,
             queue_capacity,
         }
@@ -1001,6 +1014,40 @@ impl RealtimeSessionRegistry {
             .any(|entry| same_session(entry, claims) && entry.claims == *claims))
     }
 
+    /// Allocates a unique connection lease fence. A CSPRNG-derived registry
+    /// incarnation prevents the ordinary ABA problem after an API restart:
+    /// sequence 1 on an old process must not represent sequence 1 on a new
+    /// process that reused the same unexpired Join grant.
+    ///
+    /// This is still only infrastructure state of the canonical session owner,
+    /// not another persistent Identity, Device, Call or Conference store.
+    fn next_join_generation(&self) -> Result<u64, RealtimeRegistryError> {
+        if self.last_join_generation.load(Ordering::Relaxed) == 0 {
+            // Native opaque ID has 128 bits from the OS CSPRNG; hash the entire
+            // random ID and use an unpredictable 63-bit initial generation.
+            // The top bit stays clear so one registry has ample counter space.
+            let nonce =
+                generate_opaque_id().map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+            let digest = Sha256::digest(nonce.as_wire_bytes());
+            let initial = u64::from_be_bytes([
+                digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
+                digest[7],
+            ]) & 0x7fff_ffff_ffff_ffff;
+            let _ = self.last_join_generation.compare_exchange(
+                0,
+                initial.max(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
+        self.last_join_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+                last.checked_add(1)
+            })
+            .map(|previous| previous + 1)
+            .map_err(|_| RealtimeRegistryError::SequenceOverflow)
+    }
+
     /// Opens or reconnects the exact signed session. Reconnect replaces the old downlink sender,
     /// causing the prior receiver to close rather than keeping two consumers for one session ID.
     ///
@@ -1034,6 +1081,8 @@ impl RealtimeSessionRegistry {
                 .sequence
                 .checked_add(1)
                 .ok_or(RealtimeRegistryError::SequenceOverflow)?;
+            let generation = self.next_join_generation()?;
+            entry.join_generation = generation;
             entry.media_ready = false;
             entry.publisher_owner = None;
             entry.last_seen_unix_ms = now_unix_ms;
@@ -1046,11 +1095,16 @@ impl RealtimeSessionRegistry {
                 session_sequence: entry.sequence,
                 occurred_at_unix_ms: now_unix_ms,
             };
-            return Ok(RealtimeJoinOutcome { claims, transition });
+            return Ok(RealtimeJoinOutcome {
+                claims,
+                transition,
+                join_generation: generation,
+            });
         }
         if entries.len() >= self.max_sessions {
             return Err(RealtimeRegistryError::CapacityExceeded);
         }
+        let generation = self.next_join_generation()?;
         let (sender, receiver) = mpsc::channel(self.queue_capacity);
         let transition = AttendanceTransition {
             kind: AttendanceTransitionKind::Joined,
@@ -1063,12 +1117,17 @@ impl RealtimeSessionRegistry {
             sender,
             receiver: Some(receiver),
             sequence: 1,
+            join_generation: generation,
             media_ready: false,
             adaptive_stage: None,
             publisher_owner: None,
             last_seen_unix_ms: now_unix_ms,
         });
-        Ok(RealtimeJoinOutcome { claims, transition })
+        Ok(RealtimeJoinOutcome {
+            claims,
+            transition,
+            join_generation: generation,
+        })
     }
 
     /// Attaches the one downlink consumer for the current connection.
@@ -1231,6 +1290,34 @@ impl RealtimeSessionRegistry {
         }
         entry.last_seen_unix_ms = now_unix_ms;
         Ok(entry.sequence)
+    }
+
+    /// Stable generation of the current Join, not the mutable attendance
+    /// sequence returned by heartbeat. Use this for external Leave fencing.
+    ///
+    /// # Errors
+    /// Fails closed if the signed claims have expired, changed or disappeared.
+    pub fn current_join_generation(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<u64, RealtimeRegistryError> {
+        if now_unix_ms >= claims.expires_at_unix_ms {
+            return Err(RealtimeRegistryError::Expired);
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        self.prune_expired(&mut entries, now_unix_ms)?;
+        let entry = entries
+            .iter()
+            .find(|entry| same_session(entry, claims))
+            .ok_or(RealtimeRegistryError::SessionUnavailable)?;
+        if entry.claims != *claims {
+            return Err(RealtimeRegistryError::ClaimMismatch);
+        }
+        Ok(entry.join_generation)
     }
 
     /// Applies one already-evaluated adaptive-media stage to the exact live realtime session.
@@ -1433,13 +1520,45 @@ impl RealtimeSessionRegistry {
         }))
     }
 
-    /// Removes the exact session and returns its durable-attendance transition data.
+    /// Removes an exact session for internal rollback and lifecycle cleanup.
+    ///
+    /// An external network Leave must use `leave_if_sequence`, because an
+    /// earlier connection's delayed Leave must never retire a new Join.
     ///
     /// # Errors
-    /// Fails for claim mismatch, missing session, unavailable state, or sequence overflow.
+    /// Fails for mismatch, missing session, unavailable state, or overflow.
     pub fn leave(
         &self,
         claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<AttendanceTransition, RealtimeRegistryError> {
+        self.leave_matching_sequence(claims, None, now_unix_ms)
+    }
+
+    /// Retires only the stable connection generation established by the matching Join.
+    /// `MediaReady` and downlink attendance events cannot invalidate this lease fence.
+    ///
+    /// The sequence comparison and removal happen under the same registry lock,
+    /// so a stale external Leave cannot remove an intervening reconnect.
+    ///
+    /// # Errors
+    /// Fails closed for a zero/stale sequence or absent/mismatched session.
+    pub fn leave_if_sequence(
+        &self,
+        claims: &RealtimeSessionClaims,
+        expected_session_sequence: u64,
+        now_unix_ms: i64,
+    ) -> Result<AttendanceTransition, RealtimeRegistryError> {
+        if expected_session_sequence == 0 {
+            return Err(RealtimeRegistryError::ClaimMismatch);
+        }
+        self.leave_matching_sequence(claims, Some(expected_session_sequence), now_unix_ms)
+    }
+
+    fn leave_matching_sequence(
+        &self,
+        claims: &RealtimeSessionClaims,
+        expected_session_sequence: Option<u64>,
         now_unix_ms: i64,
     ) -> Result<AttendanceTransition, RealtimeRegistryError> {
         let mut entries = self
@@ -1450,18 +1569,21 @@ impl RealtimeSessionRegistry {
             .iter()
             .position(|entry| same_session(entry, claims))
             .ok_or(RealtimeRegistryError::SessionUnavailable)?;
-        if entries[index].claims != *claims {
+        if entries[index].claims != *claims
+            || expected_session_sequence
+                .is_some_and(|generation| entries[index].join_generation != generation)
+        {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
-        let entry = entries.remove(index);
-        let sequence = entry
+        let next_sequence = entries[index]
             .sequence
             .checked_add(1)
             .ok_or(RealtimeRegistryError::SequenceOverflow)?;
+        entries.remove(index);
         Ok(AttendanceTransition {
             kind: AttendanceTransitionKind::Left,
             claims: claims.clone(),
-            session_sequence: sequence,
+            session_sequence: next_sequence,
             occurred_at_unix_ms: now_unix_ms,
         })
     }
@@ -1927,6 +2049,166 @@ mod tests {
                 .contains_active_session(&claims, claims.expires_at_unix_ms)
                 .expect("expired lookup")
         );
+    }
+
+    #[test]
+    fn independent_process_incarnations_use_distinct_randomized_join_fences() {
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("restart-lease-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("restart-lease-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let before_restart = RealtimeSessionRegistry::new(8, 4);
+        let first = before_restart
+            .join(claims.clone(), 18_001)
+            .expect("first process");
+        let after_restart = RealtimeSessionRegistry::new(8, 4);
+        let second = after_restart
+            .join(claims.clone(), 18_002)
+            .expect("restarted process");
+        assert_ne!(first.join_generation, second.join_generation);
+        assert!(
+            after_restart
+                .leave_if_sequence(&claims, first.join_generation, 18_003)
+                .is_err(),
+            "stale Leave from previous process may not retire the new process's connection"
+        );
+        after_restart
+            .leave_if_sequence(&claims, second.join_generation, 18_004)
+            .expect("new incarnation's participant can leave");
+    }
+
+    #[test]
+    fn leave_then_join_cannot_reuse_removed_lease_generation() {
+        let registry = RealtimeSessionRegistry::new(8, 4);
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("leave-rejoin-aba-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("leave-rejoin-aba-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let first = registry.join(claims.clone(), 18_001).expect("first");
+        registry
+            .leave_if_sequence(&claims, first.join_generation, 18_002)
+            .expect("leave");
+        let second = registry.join(claims.clone(), 18_003).expect("fresh Join");
+        assert_ne!(first.join_generation, second.join_generation);
+        assert!(
+            registry
+                .leave_if_sequence(&claims, first.join_generation, 18_004)
+                .is_err()
+        );
+        registry
+            .leave_if_sequence(&claims, second.join_generation, 18_005)
+            .expect("new owner can leave");
+    }
+
+    #[test]
+    fn media_ready_and_downlink_reattachment_do_not_invalidate_leave_generation() {
+        let registry = RealtimeSessionRegistry::new(8, 4);
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("stable-lease-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("stable-lease-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let joined = registry.join(claims.clone(), 18_001).expect("join");
+        let generation = joined.join_generation;
+        let media = registry
+            .mark_media_ready(&claims, 18_002)
+            .expect("media ready")
+            .expect("transition");
+        assert!(
+            media.session_sequence > joined.transition.session_sequence,
+            "MediaReady advances attendance, not the Join lease"
+        );
+        assert_eq!(
+            registry
+                .current_join_generation(&claims, 18_002)
+                .expect("current lease"),
+            generation,
+            "MediaReady must leave the authenticated Join generation unchanged"
+        );
+        let receiver = registry
+            .take_downlink(&claims, 18_003)
+            .expect("initial downlink");
+        drop(receiver);
+        let attachment = registry.attach_downlink(&claims, 18_004).expect("reattach");
+        assert!(
+            attachment
+                .transition
+                .expect("attendance reconnect")
+                .session_sequence
+                > media.session_sequence
+        );
+        assert_eq!(
+            registry.heartbeat(&claims, 18_005).expect("heartbeat"),
+            media.session_sequence + 1,
+            "attendance sequence may advance without replacing the Join"
+        );
+        registry
+            .leave_if_sequence(&claims, generation, 18_006)
+            .expect("the original Join lease must remain valid");
+        assert_eq!(registry.active_session_count(), 0);
+    }
+
+    #[test]
+    fn delayed_leave_cannot_retire_a_new_connection_generation() {
+        let registry = RealtimeSessionRegistry::new(8, 4);
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("leave-fence-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("leave-fence-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let first = registry.join(claims.clone(), 18_001).expect("first join");
+        let second = registry.join(claims.clone(), 18_002).expect("reconnect");
+        assert!(second.transition.session_sequence > first.transition.session_sequence);
+
+        assert_eq!(
+            registry.leave_if_sequence(&claims, 0, 18_003),
+            Err(RealtimeRegistryError::ClaimMismatch),
+            "unfenced external Leave must fail closed"
+        );
+        assert_eq!(
+            registry.leave_if_sequence(&claims, first.join_generation, 18_004),
+            Err(RealtimeRegistryError::ClaimMismatch),
+            "a delayed old Leave must not close a reconnected session"
+        );
+        assert_eq!(
+            registry
+                .heartbeat(&claims, 18_005)
+                .expect("new session still active"),
+            second.transition.session_sequence
+        );
+        assert_eq!(registry.active_session_count(), 1);
+
+        let retired = registry
+            .leave_if_sequence(&claims, second.join_generation, 18_006)
+            .expect("current Leave");
+        assert_eq!(retired.kind, AttendanceTransitionKind::Left);
+        assert_eq!(registry.active_session_count(), 0);
     }
 
     #[test]

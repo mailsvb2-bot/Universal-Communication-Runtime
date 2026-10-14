@@ -34,6 +34,12 @@ fn phase19_call_signalling_reuses_canonical_owners_and_is_restart_safe() {
     assert!(protocol.contains("pub fn apply_call_signal("));
     assert!(protocol.contains("pub fn call_signal_fingerprint("));
     assert!(core.contains("pub trait CallStore: StorageProvider + ConversationStore + GroupStore"));
+    assert!(core.contains("fn incoming_direct_calls("));
+    assert!(memory.contains("fn incoming_direct_calls("));
+    assert!(sqlite.contains("fn incoming_direct_calls("));
+    assert!(sqlite.contains("JOIN call_participants p"));
+    assert!(sqlite.contains("p.state IN ('invited','ringing')"));
+    assert!(sqlite.contains("c.conversation_kind='direct'"));
     assert!(core.contains("fn call_for_participant("));
     assert!(runtime.contains("CALL_START_PERMISSION"));
     assert!(runtime.contains("CALL_OBSERVE_PERMISSION"));

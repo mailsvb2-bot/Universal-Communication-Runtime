@@ -873,6 +873,230 @@ const done = arguments[arguments.length - 1];
         if full_hd_codec_probe.get("supported") and not full_hd_codec_probe.get("verified"):
             raise RuntimeError(f"Full HD codec encode/decode failed: {full_hd_codec_probe!r}")
 
+
+        # Execute the production page's real heartbeat/Leave/offline handlers in
+        # each desktop WebDriver browser. Only media tracks and HTTP are mocked:
+        # no device permissions, signed grants, or remote server are involved.
+        heartbeat_revocation_browser = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const pageScript = arguments[0];
+// Gecko WebDriver uses an isolated JS realm. Inject into the page realm so
+// the regression exercises the actual client.html lexical state/functions.
+const output = document.createElement("div");
+output.id = "__ucr_regression_result";
+output.hidden = true;
+document.body.appendChild(output);
+let finished = false;
+const finish = value => {
+  if (finished) return;
+  finished = true;
+  observer.disconnect();
+  output.remove();
+  done(value);
+};
+const observer = new MutationObserver(() => {
+  const value = output.getAttribute("data-result");
+  if (value !== null) {
+    try { finish(JSON.parse(value)); }
+    catch (error) { finish({ok:false,error:String(error)}); }
+  }
+});
+observer.observe(output, {attributes:true,attributeFilter:["data-result"]});
+const injected = document.createElement("script");
+injected.textContent = pageScript;
+document.documentElement.appendChild(injected);
+injected.remove();
+""",
+            ["""
+(async () => {
+  const previousApi = api;
+  const previousSetTimeout = window.setTimeout;
+  const previousClaims = claims;
+  const previousSignedGrantRetired = signedGrantRetired;
+  const previousActiveSessionSequence = activeSessionSequence;
+  const previousE2eeEndpoint = window.ucrE2eeEndpoint;
+  const deferred = () => {
+    let resolve, reject;
+    const promise = new Promise((res, rej) => {resolve = res; reject = rej;});
+    return {promise, resolve, reject};
+  };
+  const check = (ok, detail) => {if (!ok) throw new Error(detail);};
+  const events = [];
+  const track = name => ({stop() {events.push("stop:" + name);}});
+  const capture = label => {
+    const tracks = [track(label + ":microphone"), track(label + ":camera")];
+    localStream = {getTracks: () => tracks};
+    screenStream = {getTracks: () => [track(label + ":screen")]};
+    peer = {close() {events.push("peer:" + label);}};
+  };
+  const oldHeartbeat = deferred(), oldLeave = deferred(), oldClose = deferred();
+  let heartbeatCalls = 0, watchdog = null, closeOffer = null, joinCalls = 0;
+  let oldLeaveSequence = null, offlineLeaveSequence = null;
+  try {
+    claims = {tenant_id:"test-tenant",namespace_id:"test-namespace",
+      call_id:"test-call",session_id:"test-session",not_before:0};
+    window.setTimeout = function(fn, delay, ...args) {
+      if (delay === HEARTBEAT_AUTH_TIMEOUT_MS) {
+        watchdog = {fire: () => fn(...args), delay};
+        return 999999;
+      }
+      return previousSetTimeout.call(window, fn, delay, ...args);
+    };
+    api = async (path, payload) => {
+      if (path === "/v1/realtime/join") {joinCalls++; throw new Error("Retired grant tried to Join");}
+      if (path === "/v1/realtime/heartbeat") {
+        heartbeatCalls++;
+        return oldHeartbeat.promise;
+      }
+      if (path === "/v1/realtime/webrtc/close") {
+        closeOffer = payload.offer_id;
+        return oldClose.promise;
+      }
+      if (path === "/v1/realtime/leave") {
+        oldLeaveSequence = payload.expected_session_sequence;
+        return oldLeave.promise;
+      }
+      throw new Error("Unexpected HTTP path: " + path);
+    };
+    signedGrantRetired = false;
+    activeSessionSequence = 1;
+    sessionLifecycleGeneration++;
+    sessionActive = true;mediaActive = true;
+    heartbeatInFlight = false;
+    startWebRtc.offerId = "A".repeat(43);
+    ui.join.disabled = true;
+    capture("watchdog");
+    const pendingHeartbeat = heartbeat();
+    await heartbeat(); // A second tick must not create another request.
+    check(heartbeatCalls === 1, "overlapping heartbeat HTTP requests");
+    check(watchdog?.delay === 12000, "missing bounded 12-second watchdog");
+    watchdog.fire(); // Deterministically simulate a stalled HTTP authorization.
+    check(!sessionActive && !mediaActive, "watchdog did not revoke session");
+    check(signedGrantRetired && ui.join.disabled,
+      "retired signed grant must block same-token Join despite hung Leave");
+    await join();
+    check(ui.join.disabled && ui.status.textContent.includes("fresh authorized call link"),
+      "retired signed grant did not reject rejoin");
+    check(joinCalls === 0, "retired session grant issued a second server Join");
+    for (const name of ["microphone","camera","screen"]) {
+      check(events.includes("stop:watchdog:" + name), "watchdog kept " + name + " capturing");
+    }
+    check(events.includes("peer:watchdog"), "watchdog left WebRTC peer open");
+    check(closeOffer === "A".repeat(43), "old owned WebRTC offer not closed");
+    check(oldLeaveSequence === 1, "retired Leave missing original server generation");
+
+    // Emulate a separate, independently issued signed grant with a new
+    // canonical session identity, not reuse of the retired grant.
+    signedGrantRetired = false;
+    claims = {...claims,session_id:"fresh-server-issued-session"};
+    activeSessionSequence = 2;
+    // The old Leave and close requests remain pending during new admission.
+    // They must not erase the new peer's identity or overwrite its UI.
+    sessionLifecycleGeneration++;
+    sessionActive = true;mediaActive = true;
+    startWebRtc.offerId = "B".repeat(43);
+    ui.state.textContent = "New joined";
+    ui.status.textContent = "New session active";
+    ui.join.disabled = true;
+    oldClose.resolve({ok:true});
+    oldLeave.resolve({ok:true});
+    oldHeartbeat.resolve({json: async () => ({
+      admission_state:"admitted",media_policy:null
+    })});
+    await pendingHeartbeat;
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    check(startWebRtc.offerId === "B".repeat(43), "old close erased new offer");
+    check(sessionActive && mediaActive, "stale heartbeat revoked new session");
+    check(ui.state.textContent === "New joined" &&
+      ui.status.textContent === "New session active" && ui.join.disabled,
+      "late Leave overwrote new Join UI");
+
+    // Dispatch the browser's actual offline event, including a busy screen
+    // capture. Local tracks and the peer must stop before HTTP completes.
+    api = async (path, payload) => {
+      if (path === "/v1/realtime/webrtc/close") {
+        closeOffer = payload.offer_id;
+        return {ok:true};
+      }
+      if (path === "/v1/realtime/leave") {
+        offlineLeaveSequence = payload.expected_session_sequence;
+        return {ok:true};
+      }
+      throw new Error("Unexpected offline HTTP path: " + path);
+    };
+    capture("offline");
+    screenShareBusy = true;
+    window.dispatchEvent(new Event("offline"));
+    check(!sessionActive && !mediaActive, "offline retained media authorization");
+    check(offlineLeaveSequence === 2, "offline Leave did not use new Join generation");
+    for (const name of ["microphone","camera","screen"]) {
+      check(events.includes("stop:offline:" + name), "offline kept " + name + " capturing");
+    }
+    check(events.includes("peer:offline"), "offline left WebRTC peer open");
+    window.dispatchEvent(new Event("online"));
+    check(!sessionActive, "online silently reauthorized revoked session");
+    check(signedGrantRetired && ui.join.disabled,
+      "offline termination must retire the consumed signed grant");
+
+    // A retiring E2EE adapter may reject its asynchronous stop after a fresh
+    // Join has replaced the old session. Its error must not corrupt the UI.
+    const retiredAdapterStop = deferred();
+    window.ucrE2eeEndpoint = {stop: () => retiredAdapterStop.promise};
+    sessionLifecycleGeneration++;
+    sessionActive = true;
+    closeE2eeTransport();
+    sessionLifecycleGeneration++;
+    sessionActive = true;
+    ui.status.textContent = "New encrypted session active";
+    retiredAdapterStop.reject(new Error("retired adapter stop failed"));
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    check(ui.status.textContent === "New encrypted session active",
+      "late E2EE teardown error overwrote newly joined session");
+
+    // A cleanup failure belonging to the current live session must still be
+    // reported, rather than suppressed by the lifecycle guard.
+    window.ucrE2eeEndpoint = {stop() {throw new Error("active adapter stop failed");}};
+    sessionLifecycleGeneration++;
+    sessionActive = true;
+    ui.status.textContent = "Active encrypted session";
+    closeE2eeTransport();
+    check(ui.status.textContent === "Encrypted media cleanup failed; rejoin required.",
+      "current E2EE teardown error was hidden");
+    return {ok:true,heartbeatCalls,watchdogMs:watchdog.delay,
+      localCaptureStopped:true,screenCaptureStopped:true,
+      ownedPeerClosed:true,staleLeaveJoinGuarded:true,
+      offlineStopped:true,onlineDidNotReauthorize:true,
+      lateE2eeCleanupGuarded:true,currentE2eeCleanupReported:true,
+      sequenceFencedLeave:true};
+  } finally {
+    api = previousApi;
+    window.setTimeout = previousSetTimeout;
+    claims = previousClaims;
+    signedGrantRetired = previousSignedGrantRetired;
+    activeSessionSequence = previousActiveSessionSequence;
+    if (previousE2eeEndpoint === undefined) delete window.ucrE2eeEndpoint;
+    else window.ucrE2eeEndpoint = previousE2eeEndpoint;
+    screenShareBusy = false;
+    sessionActive = false;mediaActive = false;
+    startWebRtc.offerId = null;
+  }
+})().then(result => {
+  document.getElementById("__ucr_regression_result").setAttribute(
+    "data-result", JSON.stringify(result));
+}).catch(error => {
+  document.getElementById("__ucr_regression_result").setAttribute(
+    "data-result", JSON.stringify({ok:false,error:String(error)}));
+});
+"""],
+        )
+        if not isinstance(heartbeat_revocation_browser, dict) or not heartbeat_revocation_browser.get("ok"):
+            raise RuntimeError(
+                f"{args.browser} failed heartbeat/offline browser regression: "
+                f"{heartbeat_revocation_browser!r}"
+            )
+
         branding_failures = []
         if probe.get("brandName") != "UCR Browser Probe":
             branding_failures.append("brandName")
@@ -940,6 +1164,7 @@ const done = arguments[arguments.length - 1];
             failures.append(f"endpointWrappingKeyVault:{vault_after!r}")
         evidence = {
             "schema": "ucr.browser-compatibility.v1",
+            "heartbeat_revocation_browser": heartbeat_revocation_browser,
             "browser_requested": args.browser,
             "browser_name": reported.get("browserName"),
             "browser_version": reported.get("browserVersion"),

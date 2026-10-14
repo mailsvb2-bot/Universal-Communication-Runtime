@@ -70,7 +70,14 @@ export { createUcrCanonicalDevicePreparation } from "./canonical_device_enrollme
 // It never grants canonical Device trust or acts as a second authority.
 export { createUcrBrowserProtectedDeviceVault } from "./canonical_device_seed_vault.ts";
 
-// First-party one-click coordinator: independently authenticate a user BEFORE
-// local Device signer preparation and BEFORE the canonical signed join grant.
-// The real first-party authenticated BFF must still be supplied by UCR.
-export { createUcrFirstPartyCallEntry } from "./canonical_first_party_call_entry.ts";
+// The legacy Device-only createUcrFirstPartyCallEntry intentionally is NOT
+// included in the reference-browser bundle: it cannot obtain admission from
+// the real BFF because an accepted canonical Call is mandatory. The reusable
+// SDK module remains available for transport-neutral integrations, but the
+// shipped first-party UI exposes only the single contact -> Call route.
+// Same-origin authenticated first-party HTTP transport; server remains canonical.
+export { createUcrFirstPartyHttpHost, authenticateUcrFirstPartyDevice, registerUcrFirstPartyUser, recoverUcrFirstPartyDevice } from "./first_party_browser_http.ts";
+
+// Authenticated contact picker -> canonical direct Call -> accepted, Device-bound Join.
+// This is an SDK coordinator, not a second Call or cryptographic owner.
+export { createUcrContactCallJourney } from "./contact_call_journey.ts";

@@ -69,6 +69,7 @@ jobs:
             --bundle --format=esm --platform=browser --target=es2022 \
             --outfile=crates/ucr-realtime-web/static/endpoint-media/reference_browser_media_installer.js
           test -s crates/ucr-realtime-web/static/endpoint-media/reference_browser_media_installer.js
+          grep -F 'createUcrFirstPartyHttpHost' sdk/typescript/src/reference_browser_media_installer.ts
       - name: Enable Safari WebDriver
         if: matrix.browser == 'safari'
         run: sudo safaridriver --enable
