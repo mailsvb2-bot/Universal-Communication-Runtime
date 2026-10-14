@@ -2628,7 +2628,11 @@ async fn admit_room_chat(state: &AppState, token: &str) -> Result<(), HttpRespon
     {
         Ok(Ok((status, _))) if status.is_success() => Ok(()),
         Ok(Ok((status, payload))) => Err(json_bytes_response(status, payload)),
-        _ => Ok(()),
+        _ => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "moderation_unavailable",
+            "room moderation check unavailable",
+        )),
     }
 }
 
@@ -2668,6 +2672,32 @@ fn viewing_directory() -> std::path::PathBuf {
     room_state_dir().join("viewing")
 }
 
+fn ensure_private_viewing_dir(directory: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory)?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn write_private_viewing(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
 fn store_viewing(id: Option<&str>, body: &[u8]) -> HttpResponse {
     let Some(id) = id else {
         return api_error(
@@ -2684,7 +2714,7 @@ fn store_viewing(id: Option<&str>, body: &[u8]) -> HttpResponse {
         );
     }
     let directory = viewing_directory();
-    if std::fs::create_dir_all(&directory).is_err() {
+    if ensure_private_viewing_dir(&directory).is_err() {
         return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "viewing_unavailable",
@@ -2693,7 +2723,7 @@ fn store_viewing(id: Option<&str>, body: &[u8]) -> HttpResponse {
     }
     let webm = directory.join(format!("{id}.webm"));
     let temporary = directory.join(format!("{id}.webm.tmp"));
-    if std::fs::write(&temporary, body).is_err() {
+    if write_private_viewing(&temporary, body).is_err() {
         return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "viewing_unavailable",
@@ -2713,7 +2743,10 @@ fn store_viewing(id: Option<&str>, body: &[u8]) -> HttpResponse {
         "bytes": body.len(),
         "updatedAt": unix_time_ms(),
     });
-    let _ = std::fs::write(directory.join(format!("{id}.json")), meta.to_string());
+    if write_private_viewing(&directory.join(format!("{id}.json")), meta.to_string().as_bytes()).is_err() {
+        let _ = std::fs::remove_file(&webm);
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "viewing_unavailable", "viewing metadata could not be stored");
+    }
     json_response(StatusCode::OK, &serde_json::json!({"ok": true, "id": id}))
 }
 
