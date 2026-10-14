@@ -3458,10 +3458,9 @@ mod tests {
         });
 
         let tcp = TcpStream::connect(gateway_address).await.unwrap();
-        let (mut client, connection) =
-            hyper::client::conn::http1::handshake(TokioIo::new(tcp))
-                .await
-                .unwrap();
+        let (mut client, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+            .await
+            .unwrap();
         let drive_client = tokio::spawn(async move {
             let _ = connection.await;
         });
