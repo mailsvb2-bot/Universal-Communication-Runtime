@@ -324,4 +324,3 @@ fn verify_revoked_device_stays_revoked(
     );
     signed_login(&revoked, alice, alice_signer);
 }
-
