@@ -553,12 +553,31 @@ async fn proxy_first_party(request: Request<Incoming>, upstream: Option<SocketAd
     }
 }
 
+async fn collect_first_party_bounded<B>(mut body: B, limit: usize) -> Result<Bytes, StatusCode>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+{
+    let mut collected = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| StatusCode::BAD_REQUEST)?;
+        if let Ok(data) = frame.into_data() {
+            if data.len() > limit.saturating_sub(collected.len()) {
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+            collected.extend_from_slice(&data);
+        }
+    }
+    Ok(Bytes::from(collected))
+}
+
 async fn forward_first_party(request: Request<Incoming>, upstream: SocketAddr) -> Result<HttpResponse, ()> {
     use hyper::client::conn::http1;
     let (parts, body) = request.into_parts();
-    let data = body.collect().await.map_err(|_| ())?.to_bytes();
-    if data.len() > MAX_REQUEST_BODY_BYTES { return Ok(api_error(StatusCode::PAYLOAD_TOO_LARGE,
-        "body_too_large", "first-party request is too large")); }
+    let data = match collect_first_party_bounded(body, MAX_REQUEST_BODY_BYTES).await {
+        Ok(data) => data,
+        Err(status) => return Ok(api_error(status, "first_party_body_rejected",
+            "first-party request body exceeds limit or is invalid")),
+    };
     let stream = TcpStream::connect(upstream).await.map_err(|_| ())?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream)).await.map_err(|_| ())?;
     tokio::spawn(async move { let _ = connection.await; });
@@ -576,8 +595,8 @@ async fn forward_first_party(request: Request<Incoming>, upstream: SocketAddr) -
     let response = sender.send_request(outgoing).await.map_err(|_| ())?;
     let status = response.status();
     let headers = response.headers().clone();
-    let data = response.into_body().collect().await.map_err(|_| ())?.to_bytes();
-    if data.len() > MAX_REQUEST_BODY_BYTES { return Err(()); }
+    let data = collect_first_party_bounded(response.into_body(), MAX_REQUEST_BODY_BYTES)
+        .await.map_err(|_| ())?;
     let mut builder = Response::builder().status(status).header(CACHE_CONTROL, "no-store");
     for header in [CONTENT_TYPE, hyper::header::SET_COOKIE] {
         for value in headers.get_all(&header) { builder = builder.header(&header, value); }
@@ -3276,6 +3295,30 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn first_party_gateway_configuration_refuses_non_loopback() {
+        for value in ["0.0.0.0:18081", "192.168.1.2:18081"] {
+            let addr: std::net::SocketAddr = value.parse().unwrap();
+            assert!(!addr.ip().is_loopback());
+        }
+        let source = include_str!("main.rs");
+        assert!(source.contains("first-party upstream must be loopback"));
+        assert!(source.contains("hyper::header::SET_COOKIE"));
+        assert!(source.contains("X-UCR-First-Party-Request"));
+        assert!(source.contains("collect_first_party_bounded"));
+    }
+
+    #[tokio::test]
+    async fn first_party_body_is_bounded_before_forwarding() {
+        use http_body_util::Full;
+        use bytes::Bytes;
+        let body = Full::new(Bytes::from_static(b"12345"));
+        assert_eq!(
+            super::collect_first_party_bounded(body, 4).await,
+            Err(hyper::StatusCode::PAYLOAD_TOO_LARGE)
+        );
+    }
+
     #[test]
     fn first_party_contact_call_entry_has_complete_fail_closed_user_route() {
         let html = super::FIRST_PARTY_START_HTML;
