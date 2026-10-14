@@ -1223,7 +1223,7 @@ fn device_approve(state: &State, auth: &Session, body: &[u8]) -> Result<Value, S
             ]),
         )?;
         verify_ed25519(key, &signed, &input.signature_base64_url)?;
-        json!({"approved": true})
+        Ok(json!({"approved": true}))
 }
 
 fn call_route(state: &State, auth: &Session, path: &str, body: &[u8]) -> Result<Value, StatusCode> {
