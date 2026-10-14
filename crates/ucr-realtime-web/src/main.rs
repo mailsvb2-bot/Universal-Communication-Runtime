@@ -97,6 +97,7 @@ struct AppState {
     upstream: Channel,
     allowed_origins: Vec<String>,
     room_api: SocketAddr,
+    first_party_api: Option<SocketAddr>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,6 +480,7 @@ async fn run() -> Result<(), String> {
         upstream: channel,
         allowed_origins,
         room_api: room_api_socket()?,
+        first_party_api: first_party_socket()?,
     };
 
     let listener = TcpListener::bind(bind)
@@ -516,6 +518,71 @@ fn validate_loopback_bind(bind: SocketAddr) -> Result<(), String> {
                 .to_owned(),
         )
     }
+}
+
+// The canonical first-party Identity/Device/Call owner remains in ucr-runtime.
+// This gateway only forwards its exact namespace to a loopback BFF. Deploy
+// the browser gateway behind a trusted HTTPS edge: Secure session cookies
+// must never be exposed through a public plaintext listener.
+fn first_party_socket() -> Result<Option<SocketAddr>, String> {
+    let Ok(value) = std::env::var("UCR_FIRST_PARTY_UPSTREAM") else {
+        return Ok(None);
+    };
+    let addr: SocketAddr = value.parse().map_err(|_| "invalid UCR_FIRST_PARTY_UPSTREAM")?;
+    if !addr.ip().is_loopback() {
+        return Err("first-party upstream must be loopback".into());
+    }
+    Ok(Some(addr))
+}
+
+async fn proxy_first_party(request: Request<Incoming>, upstream: Option<SocketAddr>) -> HttpResponse {
+    let Some(upstream) = upstream else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "first_party_unconfigured",
+            "First-party Identity/Device/Call server is not connected");
+    };
+    if request.method() != Method::GET && request.method() != Method::POST {
+        return api_error(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed", "first-party method denied");
+    }
+    if request.uri().query().is_some() {
+        return api_error(StatusCode::BAD_REQUEST, "query_denied", "first-party query strings are not supported");
+    }
+    match tokio::time::timeout(ROOM_PROXY_TIMEOUT, forward_first_party(request, upstream)).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => api_error(StatusCode::BAD_GATEWAY, "first_party_unreachable", "first-party BFF did not answer"),
+        Err(_) => api_error(StatusCode::GATEWAY_TIMEOUT, "first_party_timeout", "first-party BFF timed out"),
+    }
+}
+
+async fn forward_first_party(request: Request<Incoming>, upstream: SocketAddr) -> Result<HttpResponse, ()> {
+    use hyper::client::conn::http1;
+    let (parts, body) = request.into_parts();
+    let data = body.collect().await.map_err(|_| ())?.to_bytes();
+    if data.len() > MAX_REQUEST_BODY_BYTES { return Ok(api_error(StatusCode::PAYLOAD_TOO_LARGE,
+        "body_too_large", "first-party request is too large")); }
+    let stream = TcpStream::connect(upstream).await.map_err(|_| ())?;
+    let (mut sender, connection) = http1::handshake(TokioIo::new(stream)).await.map_err(|_| ())?;
+    tokio::spawn(async move { let _ = connection.await; });
+    let mut builder = Request::builder().method(parts.method).uri(parts.uri.path());
+    // Forward only the headers required by first-party CSRF, request encoding
+    // and HttpOnly session authentication. Never forward untrusted routing headers.
+    for header in [ORIGIN, CONTENT_TYPE, hyper::header::COOKIE, hyper::header::ACCEPT] {
+        if let Some(value) = parts.headers.get(&header) { builder = builder.header(header, value); }
+    }
+    if let Some(value) = parts.headers.get("X-UCR-First-Party-Request") {
+        builder = builder.header("X-UCR-First-Party-Request", value);
+    }
+    let outgoing = builder.header(HOST, upstream.to_string())
+        .body(Full::new(data)).map_err(|_| ())?;
+    let response = sender.send_request(outgoing).await.map_err(|_| ())?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    let data = response.into_body().collect().await.map_err(|_| ())?.to_bytes();
+    if data.len() > MAX_REQUEST_BODY_BYTES { return Err(()); }
+    let mut builder = Response::builder().status(status).header(CACHE_CONTROL, "no-store");
+    for header in [CONTENT_TYPE, hyper::header::SET_COOKIE] {
+        for value in headers.get_all(&header) { builder = builder.header(&header, value); }
+    }
+    builder.body(full_body(data)).map_err(|_| ())
 }
 
 async fn handle_request(
@@ -574,6 +641,10 @@ async fn handle_request(
             store_viewing(viewing_id.as_deref(), &body),
             origin.as_deref(),
         ));
+    }
+
+    if path.starts_with("/v1/first-party/") {
+        return Ok(proxy_first_party(request, state.first_party_api).await);
     }
 
     if method != Method::POST {
