@@ -32,7 +32,9 @@ impl RoomPolicy {
     pub(crate) fn load(path: &Path) -> Result<Self, String> {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
             Err(error) => return Err(format!("read room moderation policy: {error}")),
         };
         serde_json::from_slice(&bytes)
@@ -216,10 +218,15 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("moderation.json");
-        assert_eq!(RoomPolicy::load(&path).expect("new policy"), RoomPolicy::default());
+        assert_eq!(
+            RoomPolicy::load(&path).expect("new policy"),
+            RoomPolicy::default()
+        );
         fs::write(&path, b"{truncated").expect("corrupt policy");
-        assert!(RoomPolicy::load(&path).is_err(), "corruption must not unblock users");
+        assert!(
+            RoomPolicy::load(&path).is_err(),
+            "corruption must not unblock users"
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
-
 }
