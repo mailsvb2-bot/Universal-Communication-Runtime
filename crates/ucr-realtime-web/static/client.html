@@ -17,6 +17,11 @@ p{color:var(--ucr-muted);line-height:1.45}
 #room-lobby{display:grid;gap:8px;margin:12px 0 4px}
 #room-lobby.hidden{display:none}
 #room-lobby input,#room-lobby select,#room-lobby button{width:100%;box-sizing:border-box}
+#room-people,#room-viewings{display:grid;gap:8px;margin:12px 0}
+#room-people.hidden,#room-viewings.hidden{display:none}
+.person,.viewing{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--ucr-panel);border-radius:12px;padding:10px}
+.person button,.viewing button{width:auto}
+.viewing video{width:min(100%,420px);background:#000;border-radius:10px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:16px 0}
 .metric{background:var(--ucr-panel);border-radius:12px;padding:12px}
 .metric b{display:block;font-size:1.2rem}
@@ -45,7 +50,7 @@ canvas.remote-media.hidden{display:none}
 <p id="intro">Secure realtime session. Join credentials remain in this page fragment and are never placed in the request URL.</p>
 <form id="room-lobby" class="hidden">
   <h2>Войти в эфир</h2>
-  <p>Локальная комната. Спикер публикует камеру и микрофон. Зритель только слушает и смотрит. Камера открывается здесь и остаётся картинкой этого звонка: отдельной страницы, которая заново спрашивает устройство, нет. Второе окно с другим именем входит как другой человек.</p>
+  <p>Локальная комната. Спикер публикует камеру и микрофон и показывает экран кнопкой «Показать экран». Зритель только слушает и смотрит. Камера открывается здесь и остаётся картинкой этого звонка: отдельной страницы, которая заново спрашивает устройство, нет. Второе окно с другим именем входит как другой человек. Спикер может выгнать зрителя, заблокировать его или запретить чат на время.</p>
   <label for="room-name">Имя</label>
   <input id="room-name" name="name" maxlength="40" autocomplete="nickname" required placeholder="Аня">
   <label for="room-role">Роль</label>
@@ -55,6 +60,15 @@ canvas.remote-media.hidden{display:none}
   </select>
   <button id="room-submit" class="primary" type="submit">Подключиться</button>
 </form>
+<section id="room-people" class="hidden" aria-label="Участники">
+  <h2>Участники</h2>
+  <div id="room-people-list" class="small">Список появится после входа.</div>
+</section>
+<section id="room-viewings" class="hidden" aria-label="Записи">
+  <h2>Записи</h2>
+  <p class="small">Это просмотр уже расшифрованной картинки в браузере. Канонический архив комнаты остаётся зашифрованным.</p>
+  <div id="room-viewings-list" class="small">Пока нет записи просмотра.</div>
+</section>
 <div class="grid">
 <div class="metric"><span id="state-label">State</span><b id="state">Ready</b></div>
 <div class="metric"><span id="webrtc-label">WebRTC</span><b id="webrtc-state">Idle</b></div>
@@ -635,11 +649,17 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
         identity.tenant_id,identity.namespace_id??undefined,context.group_id,identity.device_id
       );
       const keyPackage=state.key_package();
-      await api("/v1/realtime/mls-key-package",{
+      const registered=await api("/v1/realtime/mls-key-package",{
         ...body(),key_package_base64:endpointBytesToBase64(keyPackage)
       },signal);
       requireCurrent();
-      bootstrap=await fetchEndpointMlsBootstrap(signal);
+      const folded=registered&&typeof registered.json==="function"?await registered.json():null;
+      requireCurrent();
+      if(folded&&typeof folded.welcome_base64==="string"&&folded.welcome_base64.length>0){
+        bootstrap=folded;
+      }else{
+        bootstrap=await fetchEndpointMlsBootstrap(signal);
+      }
       requireCurrent();
       if(bootstrap.group_id!==context.group_id)throw new Error("MLS bootstrap Group does not match admission context");
       state.join_from_welcome(
@@ -1503,6 +1523,8 @@ async function activateAdmittedMedia(){
   }
   mediaActive=true;
   if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=false;
+  if(typeof startRoomViewingCopy==="function")startRoomViewingCopy();
+  if(typeof startRoomRoster==="function")startRoomRoster();
   ui.state.textContent="Connecting";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
   if(!reactionTimer){reactionTimer=setInterval(()=>{pollReactions().catch(()=>{});},1000);}
   if(!chatTimer){chatTimer=setInterval(()=>{pollChat().catch(()=>{});},1000);}
@@ -1520,6 +1542,7 @@ async function applyAdmissionState(state){
     // Withdrawal must stop real camera/microphone capture, not just the E2EE
     // transport. A later re-admission can request devices afresh.
     mediaActive=false;teardownPeer();retireEndpointMlsState();stopLocalCapture();
+    if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();
     if(streamAbort){streamAbort.abort();streamAbort=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
@@ -1528,7 +1551,7 @@ async function applyAdmissionState(state){
     return;
   }
   if(state==="closed"){
-    mediaActive=false;teardownPeer();retireEndpointMlsState();stopLocalCapture();ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
+    mediaActive=false;teardownPeer();retireEndpointMlsState();stopLocalCapture();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(streamAbort){streamAbort.abort();streamAbort=null;}
@@ -1746,6 +1769,7 @@ async function leave(){
   const wasActive=sessionActive;
   // Invalidate late joins, heartbeats and permission prompts synchronously.
   ++sessionLifecycleGeneration;++mediaCaptureGeneration;mediaActive=false;
+  if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();
   retireEndpointMlsState();
   if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
   if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
@@ -2526,6 +2550,231 @@ function resumeLocalRoomPlayback(){
   const resumed=audioContext.resume();
   if(resumed&&typeof resumed.catch==="function")resumed.catch(()=>{});
 }
+let roomRosterTimer=null;
+let viewingRecorder=null;
+let viewingStream=null;
+let viewingOwned=[];
+let viewingChunks=[];
+let viewingBytes=0;
+let viewingTimer=null;
+let viewingCopyStarting=false;
+function startRoomRoster(){
+  if(typeof sessionStorage==="undefined"||sessionStorage.getItem("ucrLocalRoom")!=="1")return;
+  if(roomRosterTimer)return;
+  refreshRoomRoster().catch(()=>{});
+  roomRosterTimer=setInterval(()=>{refreshRoomRoster().catch(()=>{});},3000);
+}
+async function refreshRoomRoster(){
+  if(!token)return;
+  const list=document.getElementById("room-people-list");
+  if(!list)return;
+  const response=await fetch(localRoomRequestUrl("/v1/room/roster"),{
+    method:"POST",
+    headers:{"content-type":"application/json","authorization":"Bearer "+token},
+    body:"{}"
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok||!data.ok){
+    list.textContent=data.message||"Список участников недоступен";
+    return;
+  }
+  list.replaceChildren();
+  const people=Array.isArray(data.people)?data.people:[];
+  const selfId=sessionStorage.getItem("ucrRoomUser");
+  if(data.selfRole&&selfId&&sessionActive){
+    const self=people.find(person=>person.externalUserId===selfId);
+    if(!self||self.active===false){
+      const blocked=!!(self&&self.blocked);
+      if(typeof leave==="function")leave().catch(()=>{});
+      ui.state.textContent="Access ended";
+      ui.status.textContent=blocked?"Вас заблокировали в этой комнате.":"Вас выгнали из комнаты.";
+      return;
+    }
+  }
+  if(!people.length){
+    list.textContent="В комнате пока только вы.";
+    return;
+  }
+  for(const person of people){
+    const row=document.createElement("div");
+    row.className="person";
+    const name=document.createElement("b");
+    name.textContent=person.displayName||person.externalUserId||"Участник";
+    row.appendChild(name);
+    const meta=document.createElement("span");
+    const role=person.role==="speaker"?"спикер":"зритель";
+    const flags=[];
+    if(person.blocked)flags.push("заблокирован");
+    else if(person.active)flags.push("в эфире");
+    else flags.push("не в эфире");
+    if(typeof person.silencedUntil==="number"&&person.silencedUntil>Date.now()){
+      flags.push("чат до "+new Date(person.silencedUntil).toLocaleTimeString());
+    }
+    meta.textContent=" · "+role+" · "+flags.join(", ");
+    row.appendChild(meta);
+    if(data.selfRole==="speaker"&&person.role==="attendee"){
+      const actions=person.blocked?[["unblock","Разблокировать"]]:[
+        ["kick","Выгнать"],
+        ["block","Заблокировать"],
+        ["silence","Чат на 5 мин",5],
+        ["silence","Чат на 15 мин",15],
+        ["silence","Чат на 60 мин",60],
+        ["unsilence","Разрешить чат"]
+      ];
+      for(const [action,label,minutes] of actions){
+        const button=document.createElement("button");
+        button.type="button";
+        button.className="secondary";
+        button.textContent=label;
+        button.addEventListener("click",()=>{
+          roomModerate(action,person.externalUserId,minutes).catch(error=>{
+            ui.status.textContent=error&&error.message?error.message:"Комната не ответила";
+          });
+        });
+        row.appendChild(button);
+      }
+    }
+    list.appendChild(row);
+  }
+}
+async function roomModerate(action,externalUserId,silenceMinutes){
+  const response=await fetch(localRoomRequestUrl("/v1/room/moderate"),{
+    method:"POST",
+    headers:{"content-type":"application/json","authorization":"Bearer "+token},
+    body:JSON.stringify({action,externalUserId,silenceMinutes})
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok||!data.ok)throw new Error(data.message||"Комната не ответила");
+  await refreshRoomRoster();
+}
+function viewingCopyId(){
+  const raw=claims&&typeof claims.session_id==="string"?claims.session_id:"";
+  const id=raw.replace(/[^A-Za-z0-9_-]/g,"").slice(0,80);
+  return id;
+}
+function startRoomViewingCopy(){
+  if(typeof sessionStorage==="undefined"||sessionStorage.getItem("ucrLocalRoom")!=="1")return;
+  if(viewingRecorder||viewingCopyStarting)return;
+  if(typeof MediaRecorder==="undefined")return;
+  viewingCopyStarting=true;
+  const generation=sessionLifecycleGeneration;
+  const waitAndRecord=async()=>{
+    for(let attempt=0;attempt<10;attempt++){
+      if(!mediaActive||generation!==sessionLifecycleGeneration)return;
+      const canvas=ui.remoteCanvas;
+      if(canvas&&!canvas.classList.contains("hidden"))break;
+      if(attempt>=6&&localStream&&localStream.getVideoTracks().length)break;
+      await new Promise(resolve=>setTimeout(resolve,500));
+    }
+    if(!mediaActive||generation!==sessionLifecycleGeneration||viewingRecorder)return;
+    const tracks=[];
+    viewingOwned=[];
+    const canvas=ui.remoteCanvas;
+    let video=null;
+    if(canvas&&!canvas.classList.contains("hidden")&&typeof canvas.captureStream==="function"){
+      const captured=canvas.captureStream(15);
+      viewingOwned.push(captured);
+      video=captured.getVideoTracks()[0]||null;
+    }
+    if(!video&&localStream)video=localStream.getVideoTracks()[0]||null;
+    if(video&&typeof video.clone==="function")tracks.push(video.clone());
+    const remoteAudio=typeof remoteStream!=="undefined"&&remoteStream?remoteStream.getAudioTracks()[0]:null;
+    const localAudio=localStream?localStream.getAudioTracks()[0]:null;
+    const audio=remoteAudio||localAudio;
+    if(audio&&typeof audio.clone==="function")tracks.push(audio.clone());
+    if(!tracks.length)return;
+    const stream=new MediaStream(tracks);
+    let recorder;
+    try{
+      const mime=MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")?"video/webm;codecs=vp8,opus":"video/webm";
+      recorder=new MediaRecorder(stream,{mimeType:mime});
+    }catch(_){
+      try{recorder=new MediaRecorder(stream);}catch(__){stream.getTracks().forEach(track=>track.stop());return;}
+    }
+    viewingChunks=[];
+    viewingBytes=0;
+    recorder.ondataavailable=event=>{
+      if(!event.data||!event.data.size)return;
+      if(viewingBytes+event.data.size>32*1024*1024)return;
+      viewingChunks.push(event.data);
+      viewingBytes+=event.data.size;
+    };
+    if(!mediaActive||generation!==sessionLifecycleGeneration){
+      stream.getTracks().forEach(track=>{if(track.readyState==="live")track.stop();});
+      return;
+    }
+    recorder.start(4000);
+    viewingRecorder=recorder;
+    viewingStream=stream;
+    viewingTimer=setInterval(()=>{uploadViewingCopy().catch(()=>{});},8000);
+    if(!mediaActive||generation!==sessionLifecycleGeneration)stopRoomViewingCopy();
+  };
+  waitAndRecord().catch(()=>{}).finally(()=>{viewingCopyStarting=false;});
+}
+async function uploadViewingCopy(){
+  if(!viewingChunks.length)return;
+  const id=viewingCopyId();
+  if(!id)return;
+  const blob=new Blob(viewingChunks,{type:"video/webm"});
+  await fetch("/v1/room/viewing",{
+    method:"POST",
+    headers:{"content-type":"video/webm","x-ucr-viewing-id":id},
+    body:blob
+  });
+  refreshRoomViewings().catch(()=>{});
+}
+function stopRoomViewingCopy(){
+  if(viewingTimer){clearInterval(viewingTimer);viewingTimer=null;}
+  const recorder=viewingRecorder;
+  const stream=viewingStream;
+  const owned=viewingOwned;
+  viewingRecorder=null;
+  viewingStream=null;
+  viewingOwned=[];
+  const release=()=>{
+    if(stream)stream.getTracks().forEach(track=>{if(track.readyState==="live")track.stop();});
+    for(const item of owned){
+      if(item&&typeof item.getTracks==="function")item.getTracks().forEach(track=>{if(track.readyState==="live")track.stop();});
+    }
+    uploadViewingCopy().catch(()=>{});
+  };
+  if(recorder&&recorder.state!=="inactive"){
+    recorder.onstop=release;
+    recorder.stop();
+    return;
+  }
+  release();
+}
+async function refreshRoomViewings(){
+  const list=document.getElementById("room-viewings-list");
+  if(!list)return;
+  const response=await fetch("/room/viewings");
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok||!data.ok||!Array.isArray(data.viewings)){
+    list.textContent="Записи просмотра недоступны.";
+    return;
+  }
+  list.replaceChildren();
+  if(!data.viewings.length){
+    list.textContent="Пока нет записи просмотра.";
+    return;
+  }
+  for(const item of data.viewings){
+    if(!item||typeof item.id!=="string"||!/^[A-Za-z0-9_-]{1,80}$/.test(item.id))continue;
+    const row=document.createElement("div");
+    row.className="viewing";
+    const title=document.createElement("span");
+    const when=typeof item.updatedAt==="number"?new Date(item.updatedAt).toLocaleString():item.id;
+    title.textContent="Просмотр "+when;
+    row.appendChild(title);
+    const video=document.createElement("video");
+    video.controls=true;
+    video.playsInline=true;
+    video.src="/room/viewings/"+item.id;
+    row.appendChild(video);
+    list.appendChild(row);
+  }
+}
 function beginLocalRoomLobby(){
   const api=configuredLocalRoomApi();
   const lobby=document.getElementById("room-lobby");
@@ -2535,11 +2784,16 @@ function beginLocalRoomLobby(){
   ui.brandName.textContent="Комната UCR";
   lobby.classList.remove("hidden");
   ui.join.classList.add("hidden");
-  ui.footerNote.textContent="Камера и микрофон спикера открываются этим нажатием и остаются на этой странице.";
+  ui.footerNote.textContent="Камера и микрофон спикера открываются этим нажатием и остаются на этой странице. Экран спикер показывает кнопкой «Показать экран».";
   ui.status.textContent="Откройте эту страницу во втором окне, чтобы второй человек вошёл в ту же комнату.";
   // Compile the endpoint runtime while the name is typed, beside the click,
   // not after a second document has thrown the first camera away.
   loadEndpointWasmModule().catch(()=>{});
+  const people=document.getElementById("room-people");
+  const viewings=document.getElementById("room-viewings");
+  if(people)people.classList.remove("hidden");
+  if(viewings)viewings.classList.remove("hidden");
+  refreshRoomViewings().catch(()=>{});
   const installerReady=import("./endpoint-media/reference_browser_media_installer.js");
   lobby.addEventListener("submit",event=>{
     submitLocalRoom(event,api,installerReady).catch(error=>{
@@ -2607,7 +2861,8 @@ async function submitLocalRoom(event,api,installerReady){
     phase:"open",
     displayName:name,
     role,
-    externalUserId:samePerson?remembered.externalUserId:undefined
+    externalUserId:samePerson?remembered.externalUserId:undefined,
+    deviceId:remembered&&typeof remembered.deviceId==="string"?remembered.deviceId:undefined
   });
   if(!opened.deviceId||!opened.participantId||!opened.tenantId||!opened.externalUserId){
     throw new Error("Комната не выдала устройство");
@@ -2673,6 +2928,7 @@ async function submitLocalRoom(event,api,installerReady){
   token=next;
   claims=issued;
   entered=true;
+  if(typeof startRoomRoster==="function")startRoomRoster();
   localRoomTrustReceipt={
     deviceId:claims.device_id,
     sessionId:claims.session_id,
@@ -2700,6 +2956,9 @@ async function submitLocalRoom(event,api,installerReady){
     releaseRoomPresence();
     localRoomTrustReceipt=null;
     if(!entered){
+      // The camera opened on the click. A failed enrollment has to release
+      // those tracks; this page no longer navigates away from them.
+      stopLocalCapture();
       if(lobby)lobby.classList.remove("hidden");
       ui.join.classList.add("hidden");
       submit.disabled=false;

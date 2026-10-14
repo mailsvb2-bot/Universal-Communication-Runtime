@@ -64,7 +64,11 @@ async fn run() -> Result<(), String> {
     if room && !room_bind.ip().is_loopback() {
         return Err("ucr dev room refuses non-loopback bind addresses".to_owned());
     }
-    let env = Arc::new(DevEnvironment::new()?);
+    let env = Arc::new(if room {
+        DevEnvironment::open_room()?
+    } else {
+        DevEnvironment::new()?
+    });
     if let Some(scenario) = scenario {
         env.simulate(scenario)?;
     }

@@ -98,7 +98,7 @@ stays on the server so each browser can hold its own device key. Two speakers ar
 call. A speaker plus an attendee is a webinar: the attendee watches and listens, and does not
 publish a camera. The room starts coturn on `127.0.0.1:53478`. `turnserver` must be on `PATH`. About eight
 seconds after two people have open realtime sessions, ciphertext is written into an
-encrypted archive under the system temp directory. Accepted membership alone does not
+encrypted archive under the room state directory. Accepted membership alone does not
 start that archive, so a slow conference page can still open the camera. A person who
 arrives after the archive has started ends it and can enter; a new archive begins once
 two people are live again. This is not Production 1.0 and it is not a horizontal SFU:
@@ -124,10 +124,17 @@ the signed grant together with the confirming trust image. Status stays on that
 enrollment until encrypted media is actually up. The page does not navigate to a
 second document and it does not open the camera again after MLS.
 The endpoint runtime is preloaded while the name is typed. This browser's device key
-is reused for the same name and role until the development process restarts. A second
+is reused for the same name and role. A second
 window that is already in the room, or a different name, gets its own device so it does
-not take over the first participant's media session. The conference group is
-created when the room server starts and stays open for the life of that process.
+not take over the first participant's media session. `ucr dev --room` keeps the
+conference, trusted devices, service credential and encrypted archive in
+`UCR_ROOM_STATE` (otherwise `~/.local/share/ucr-room`). The next start continues
+that room. Realtime sessions and the TURN secret stay in memory. The web process
+uses the same directory for the playable viewing copy: the browser records the
+picture it has already decrypted and uploads that WebM. The canonical archive is
+still ciphertext. A speaker shows the screen with «Показать экран». A speaker can
+remove an attendee, block that person from entering again, or stop their chat for
+5, 15 or 60 minutes. The block is checked before a new participant id is minted.
 A grant lasts 15 minutes; the open page requests the next one before expiry and keeps
 the camera it already has. A second participant refreshes the encrypted epoch on the
 already open media channel.

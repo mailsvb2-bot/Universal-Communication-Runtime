@@ -7,6 +7,7 @@
 use std::{
     io::Read,
     net::SocketAddr,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -34,7 +35,8 @@ use super::{DevEnvironment, attach_dev_credential, opaque, pb_id, pb_scope, wire
 
 const OWNER_EXTERNAL_ID: &[u8] = b"room-owner";
 const CONFERENCE_EXTERNAL_ID: &[u8] = b"local-room";
-const MAX_HTTP_BYTES: usize = 16 * 1024;
+const MAX_HTTP_BYTES: usize = 24 * 1024;
+const MAX_AUTHORIZATION_BYTES: usize = 4 * 1024;
 
 struct RoomHost {
     env: Arc<DevEnvironment>,
@@ -48,6 +50,8 @@ struct RoomHost {
     /// seal and unseal the same recording at once.
     recording_gate: AsyncMutex<()>,
     edge: Option<Arc<super::room_edge::RoomEdge>>,
+    policy: Mutex<super::room_policy::RoomPolicy>,
+    policy_path: PathBuf,
 }
 
 struct RoomState {
@@ -116,6 +120,7 @@ pub async fn spawn(
     grpc_bind: SocketAddr,
     room_bind: SocketAddr,
     edge: Option<Arc<super::room_edge::RoomEdge>>,
+    state_dir: PathBuf,
 ) -> Result<(), String> {
     if !room_bind.ip().is_loopback() {
         return Err("local room refuses non-loopback bind addresses".to_owned());
@@ -142,6 +147,10 @@ pub async fn spawn(
         open_gate: AsyncMutex::new(()),
         recording_gate: AsyncMutex::new(()),
         edge,
+        policy: Mutex::new(super::room_policy::RoomPolicy::load(
+            &state_dir.join("moderation.json"),
+        )),
+        policy_path: state_dir.join("moderation.json"),
     });
     let prewarm_host = Arc::clone(&host);
     tokio::spawn(async move {
@@ -177,6 +186,7 @@ async fn handle_connection(host: Arc<RoomHost>, mut stream: TcpStream) -> Result
         method,
         path,
         origin,
+        authorization,
         body,
     } = loop {
         if buffer.len() > MAX_HTTP_BYTES {
@@ -207,10 +217,10 @@ async fn handle_connection(host: Arc<RoomHost>, mut stream: TcpStream) -> Result
     if method == "OPTIONS" {
         return write_response(&mut stream, 204, origin.as_deref(), b"").await;
     }
-    let result = dispatch(&host, &method, &path, &body).await;
+    let result = dispatch(&host, &method, &path, authorization.as_deref(), &body).await;
     let (status, payload) = match result {
         Ok(payload) => (200, payload),
-        Err(message) => (400, error_body(&message)),
+        Err((status, message)) => (status, error_body(&message)),
     };
     write_response(&mut stream, status, origin.as_deref(), &payload).await
 }
@@ -219,23 +229,31 @@ async fn dispatch(
     host: &Arc<RoomHost>,
     method: &str,
     path: &str,
+    authorization: Option<&str>,
     body: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, (u16, String)> {
     if method == "GET" && path == "/healthz" {
         let turn = host.edge.is_some();
         return Ok(format!(r#"{{"ok":true,"turn":{turn},"recording":{turn}}}"#).into_bytes());
     }
     if method != "POST" {
-        return Err("only POST is supported".to_owned());
+        return Err((405, "only POST is supported".to_owned()));
     }
     match path {
-        "/v1/room/reserve" => reserve(host, body).await,
-        "/v1/room/trust" => trust(host, body).await,
-        "/v1/room/inspect" => inspect(host, body),
-        "/v1/room/join" => join(host, body).await,
-        "/v1/room/enter" => enter(host, body).await,
-        _ => Err("unknown room route".to_owned()),
+        "/v1/room/reserve" => reserve(host, body).await.map_err(room_failure),
+        "/v1/room/trust" => trust(host, body).await.map_err(room_failure),
+        "/v1/room/inspect" => inspect(host, body).map_err(room_failure),
+        "/v1/room/join" => join(host, body).await.map_err(room_failure),
+        "/v1/room/enter" => enter(host, body).await.map_err(room_failure),
+        "/v1/room/roster" => roster(host, authorization),
+        "/v1/room/moderate" => moderate(host, authorization, body).await,
+        "/v1/room/chat-admit" => chat_admit(host, authorization),
+        _ => Err((400, "unknown room route".to_owned())),
     }
+}
+
+fn room_failure(message: String) -> (u16, String) {
+    (400, message)
 }
 
 async fn reserve(host: &RoomHost, body: &[u8]) -> Result<Vec<u8>, String> {
@@ -253,7 +271,16 @@ async fn reserve(host: &RoomHost, body: &[u8]) -> Result<Vec<u8>, String> {
         .as_deref()
         .filter(|value| reusable_external_id(value))
     {
+        ensure_not_blocked(host, Some(existing), None)?;
         if let Some(identity) = returning_human(host, &conference_id, existing, role)? {
+            ensure_not_blocked(host, Some(existing), Some(&identity.device_id))?;
+            remember_person(
+                host,
+                existing,
+                request.display_name.trim(),
+                &request.role,
+                &identity.device_id,
+            );
             return reserve_body(host, existing, &identity, &request.display_name);
         }
         random_external_id()?
@@ -262,6 +289,13 @@ async fn reserve(host: &RoomHost, body: &[u8]) -> Result<Vec<u8>, String> {
     };
     ensure_human(host, &conference_id, external_user_id.as_bytes(), role).await?;
     let identity = participant_identity(host, &conference_id, external_user_id.as_bytes())?;
+    remember_person(
+        host,
+        &external_user_id,
+        request.display_name.trim(),
+        &request.role,
+        &identity.device_id,
+    );
     reserve_body(host, &external_user_id, &identity, &request.display_name)
 }
 
@@ -359,8 +393,14 @@ fn inspect(host: &RoomHost, body: &[u8]) -> Result<Vec<u8>, String> {
 async fn join(host: &Arc<RoomHost>, body: &[u8]) -> Result<Vec<u8>, String> {
     let request: JoinRequest =
         serde_json::from_slice(body).map_err(|_| "invalid join request".to_owned())?;
+    ensure_not_blocked(host, Some(&request.external_user_id), None)?;
     let conference_id = conference_id(host)?;
     let identity = participant_identity(host, &conference_id, request.external_user_id.as_bytes())?;
+    ensure_not_blocked(
+        host,
+        Some(&request.external_user_id),
+        Some(&identity.device_id),
+    )?;
     // An active archive only admits people already in its consent snapshot.
     // A later person used to die on realtime join with "realtime join rejected"
     // before the camera opened. End that archive first so the room stays usable.
@@ -436,6 +476,11 @@ async fn enter(host: &Arc<RoomHost>, body: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 async fn enter_open(host: &RoomHost, request: &EnterRequest) -> Result<Vec<u8>, String> {
+    ensure_not_blocked(
+        host,
+        request.external_user_id.as_deref(),
+        request.device_id.as_deref(),
+    )?;
     let reserved = reserve(
         host,
         &serde_json::to_vec(&serde_json::json!({
@@ -587,6 +632,13 @@ fn trust_image_matches(image: &serde_json::Value, key_id: &str, public_key: &[u8
 async fn ensure_conference(host: &RoomHost) -> Result<pb::OpaqueId, String> {
     let _gate = host.open_gate.lock().await;
     if let Ok(existing) = conference_id(host) {
+        return Ok(existing);
+    }
+    if let Some(existing) = stored_conference_id(host)? {
+        host.state
+            .lock()
+            .map_err(|_| "room state lock poisoned".to_owned())?
+            .conference_id = Some(existing.clone());
         return Ok(existing);
     }
     let now = unix_time_ms()?;
@@ -1362,6 +1414,7 @@ struct HttpRequest {
     method: String,
     path: String,
     origin: Option<String>,
+    authorization: Option<String>,
     body: Vec<u8>,
 }
 
@@ -1389,6 +1442,7 @@ fn parse_http(buffer: &[u8]) -> Result<Option<HttpRequest>, String> {
     }
     let mut content_length = 0_usize;
     let mut origin = None;
+    let mut authorization = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -1400,6 +1454,8 @@ fn parse_http(buffer: &[u8]) -> Result<Option<HttpRequest>, String> {
                 .map_err(|_| "invalid content length".to_owned())?;
         } else if name.eq_ignore_ascii_case("origin") {
             origin = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("authorization") {
+            authorization = accept_authorization(value.trim());
         }
     }
     if content_length > MAX_HTTP_BYTES {
@@ -1413,8 +1469,20 @@ fn parse_http(buffer: &[u8]) -> Result<Option<HttpRequest>, String> {
         method,
         path,
         origin,
+        authorization,
         body: buffer[body_start..body_start + content_length].to_vec(),
     }))
+}
+
+fn accept_authorization(value: &str) -> Option<String> {
+    if value.len() > MAX_AUTHORIZATION_BYTES || !value.starts_with("Bearer ") {
+        return None;
+    }
+    let token = value.trim_start_matches("Bearer ").trim();
+    if token.is_empty() || token.bytes().any(|byte| byte <= 0x20 || byte == 0x7f) {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 async fn write_response(
@@ -1433,7 +1501,7 @@ async fn write_response(
     };
     let allow_origin = origin.unwrap_or("http://127.0.0.1:43124");
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\naccess-control-allow-origin: {allow_origin}\r\naccess-control-allow-methods: GET, POST, OPTIONS\r\naccess-control-allow-headers: content-type\r\nvary: Origin\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\naccess-control-allow-origin: {allow_origin}\r\naccess-control-allow-methods: GET, POST, OPTIONS\r\naccess-control-allow-headers: content-type, authorization\r\nvary: Origin\r\nconnection: close\r\n\r\n",
         body.len()
     );
     stream
@@ -1447,11 +1515,357 @@ async fn write_response(
     Ok(())
 }
 
+fn stored_conference_id(host: &RoomHost) -> Result<Option<pb::OpaqueId>, String> {
+    let integration = IntegrationId::from_opaque(opaque("dev-service-principal"));
+    let profile = host
+        .env
+        .store
+        .universal_conference_profile_for_external(
+            &host.env.scope,
+            &integration,
+            CONFERENCE_EXTERNAL_ID,
+        )
+        .map_err(|error| format!("conference lookup: {error:?}"))?;
+    Ok(profile.map(|profile| pb::OpaqueId {
+        value: profile.conference_id.as_opaque().as_wire_bytes().to_vec(),
+    }))
+}
+
+fn ensure_not_blocked(
+    host: &RoomHost,
+    external_user_id: Option<&str>,
+    device_id: Option<&str>,
+) -> Result<(), String> {
+    let external_user_id = clean_id(external_user_id);
+    let device_id = clean_id(device_id);
+    let policy = host
+        .policy
+        .lock()
+        .map_err(|_| "room policy lock poisoned".to_owned())?;
+    if policy.is_blocked(external_user_id, device_id) {
+        return Err("Этот человек заблокирован в комнате.".to_owned());
+    }
+    Ok(())
+}
+
+fn clean_id(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn remember_person(host: &RoomHost, external_user_id: &str, name: &str, role: &str, device: &str) {
+    let Ok(mut policy) = host.policy.lock() else {
+        return;
+    };
+    policy.remember(external_user_id, name, role, device);
+    let _ = policy.save(&host.policy_path);
+}
+
+struct RoomMember {
+    external_user_id: String,
+    role: ConferenceParticipantRole,
+    active: bool,
+}
+
+fn conference_group(host: &RoomHost) -> Result<Option<GroupId>, String> {
+    let cached = host
+        .state
+        .lock()
+        .map_err(|_| "room state lock poisoned".to_owned())?
+        .conference_id
+        .clone();
+    if let Some(id) = cached {
+        return Ok(Some(group_from_pb(&id)?));
+    }
+    stored_conference_id(host)?
+        .map(|id| group_from_pb(&id))
+        .transpose()
+}
+
+fn group_from_pb(id: &pb::OpaqueId) -> Result<GroupId, String> {
+    Ok(GroupId::from_opaque(
+        OpaqueId::from_wire_bytes(&id.value).map_err(|_| "invalid conference id".to_owned())?,
+    ))
+}
+
+fn conference_people(
+    host: &RoomHost,
+) -> Result<Vec<ucr_model::UniversalConferenceParticipantProfile>, String> {
+    let Some(group) = conference_group(host)? else {
+        return Ok(Vec::new());
+    };
+    host.env
+        .store
+        .universal_conference_participants(&host.env.scope, &group, 64)
+        .map_err(|error| format!("participant list: {error:?}"))
+}
+
+fn authorization_token(value: Option<&str>) -> Option<&str> {
+    let value = value?.trim();
+    let token = value.strip_prefix("Bearer ")?.trim();
+    if token.is_empty()
+        || token.len() > MAX_AUTHORIZATION_BYTES
+        || token.bytes().any(|byte| byte <= 0x20)
+    {
+        return None;
+    }
+    Some(token)
+}
+
+fn room_member(host: &RoomHost, authorization: Option<&str>) -> Result<Option<RoomMember>, String> {
+    let Some(token) = authorization_token(authorization) else {
+        return Ok(None);
+    };
+    let now = unix_time_ms()?;
+    let Ok(claims) = host.env.join_issuer.verify_signed_claims(token, now) else {
+        return Ok(None);
+    };
+    if claims.scope != host.env.scope {
+        return Ok(None);
+    }
+    let people = conference_people(host)?;
+    let Some(profile) = people
+        .into_iter()
+        .find(|profile| profile.participant.principal_id == claims.participant.principal_id)
+    else {
+        return Ok(None);
+    };
+    let external_user_id = String::from_utf8(profile.external_user_id)
+        .map_err(|_| "participant id is not text".to_owned())?;
+    Ok(Some(RoomMember {
+        external_user_id,
+        role: profile.role,
+        active: profile.active,
+    }))
+}
+
+fn roster(host: &RoomHost, authorization: Option<&str>) -> Result<Vec<u8>, (u16, String)> {
+    let member = match room_member(host, authorization) {
+        Ok(member) => member,
+        Err(message) => return Err(room_failure(message)),
+    };
+    let Some(member) = member else {
+        return serde_json::to_vec(&serde_json::json!({
+            "ok": true,
+            "selfRole": "",
+            "people": [],
+        }))
+        .map_err(|error| room_failure(format!("encode roster: {error}")));
+    };
+    let self_role = role_name(member.role);
+    let people = conference_people(host).map_err(room_failure)?;
+    let policy = host
+        .policy
+        .lock()
+        .map_err(|_| (400, "room policy lock poisoned".to_owned()))?;
+    let mut listed = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for profile in &people {
+        let Ok(external) = String::from_utf8(profile.external_user_id.clone()) else {
+            continue;
+        };
+        if external == "room-owner" || profile.role == ConferenceParticipantRole::Owner {
+            continue;
+        }
+        let blocked = policy.is_blocked(Some(&external), None);
+        if !profile.active && !blocked {
+            continue;
+        }
+        seen.insert(external.clone());
+        listed.push(person_json(
+            &policy,
+            &external,
+            role_name(profile.role),
+            profile.active,
+            blocked,
+        ));
+    }
+    for external in policy.blocked_ids() {
+        if seen.contains(external) || external == "room-owner" {
+            continue;
+        }
+        if policy.role(external).is_some_and(|role| role != "attendee") {
+            continue;
+        }
+        listed.push(person_json(&policy, external, "attendee", false, true));
+    }
+    serde_json::to_vec(&serde_json::json!({
+        "ok": true,
+        "selfRole": self_role,
+        "people": listed,
+    }))
+    .map_err(|error| room_failure(format!("encode roster: {error}")))
+}
+
+fn person_json(
+    policy: &super::room_policy::RoomPolicy,
+    external: &str,
+    role: &str,
+    active: bool,
+    blocked: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "externalUserId": external,
+        "displayName": policy.display_name(external),
+        "role": role,
+        "active": active,
+        "blocked": blocked,
+        "silencedUntil": policy.silenced_until(external),
+    })
+}
+
+fn role_name(role: ConferenceParticipantRole) -> &'static str {
+    match role {
+        ConferenceParticipantRole::Attendee => "attendee",
+        ConferenceParticipantRole::Owner => "owner",
+        ConferenceParticipantRole::Speaker
+        | ConferenceParticipantRole::Host
+        | ConferenceParticipantRole::Moderator => "speaker",
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModerateRequest {
+    action: String,
+    external_user_id: String,
+    #[serde(default)]
+    silence_minutes: Option<u32>,
+}
+
+async fn moderate(
+    host: &Arc<RoomHost>,
+    authorization: Option<&str>,
+    body: &[u8],
+) -> Result<Vec<u8>, (u16, String)> {
+    let actor = match room_member(host, authorization) {
+        Ok(Some(member)) if member.active && member.role == ConferenceParticipantRole::Speaker => {
+            member
+        }
+        Ok(_) => {
+            return Err((403, "только спикер может управлять зрителями".to_owned()));
+        }
+        Err(message) => return Err(room_failure(message)),
+    };
+    let request: ModerateRequest =
+        serde_json::from_slice(body).map_err(|_| (400, "invalid moderate request".to_owned()))?;
+    if request.external_user_id == actor.external_user_id {
+        return Err((400, "можно управлять только зрителем".to_owned()));
+    }
+    require_attendee(host, &request.external_user_id)?;
+    match request.action.as_str() {
+        "kick" => remove_human(host, &request.external_user_id)
+            .await
+            .map_err(room_failure)?,
+        "block" => {
+            mutate_policy(host, |policy| policy.block(&request.external_user_id))?;
+            remove_human(host, &request.external_user_id)
+                .await
+                .map_err(room_failure)?;
+        }
+        "unblock" => mutate_policy(host, |policy| policy.unblock(&request.external_user_id))?,
+        "silence" => {
+            let minutes = request
+                .silence_minutes
+                .ok_or_else(|| (400, "укажите 5, 15 или 60 минут".to_owned()))?;
+            let until = super::room_policy::silence_deadline(
+                unix_time_ms().map_err(room_failure)?,
+                minutes,
+            )
+            .map_err(room_failure)?;
+            mutate_policy(host, |policy| {
+                policy.silence(&request.external_user_id, until);
+            })?;
+        }
+        "unsilence" => mutate_policy(host, |policy| policy.unsilence(&request.external_user_id))?,
+        _ => return Err((400, "неизвестное действие".to_owned())),
+    }
+    Ok(br#"{"ok":true}"#.to_vec())
+}
+
+fn require_attendee(host: &RoomHost, external_user_id: &str) -> Result<(), (u16, String)> {
+    if !reusable_external_id(external_user_id) {
+        return Err((400, "можно управлять только зрителем".to_owned()));
+    }
+    let people = conference_people(host).map_err(room_failure)?;
+    if let Some(profile) = people
+        .iter()
+        .find(|profile| profile.external_user_id == external_user_id.as_bytes())
+    {
+        if profile.role == ConferenceParticipantRole::Attendee {
+            return Ok(());
+        }
+        return Err((400, "можно управлять только зрителем".to_owned()));
+    }
+    let policy = host
+        .policy
+        .lock()
+        .map_err(|_| (400, "room policy lock poisoned".to_owned()))?;
+    if policy.role(external_user_id) == Some("attendee") {
+        return Ok(());
+    }
+    Err((400, "можно управлять только зрителем".to_owned()))
+}
+
+fn mutate_policy(
+    host: &RoomHost,
+    change: impl FnOnce(&mut super::room_policy::RoomPolicy),
+) -> Result<(), (u16, String)> {
+    let mut policy = host
+        .policy
+        .lock()
+        .map_err(|_| (400, "room policy lock poisoned".to_owned()))?;
+    change(&mut policy);
+    policy.save(&host.policy_path).map_err(room_failure)
+}
+
+async fn remove_human(host: &RoomHost, external_user_id: &str) -> Result<(), String> {
+    let conference_id = conference_id(host)?;
+    let mut conference = conference_client(host).await?;
+    let mut request = Request::new(pb::UniversalRemoveParticipantRequest {
+        scope: Some(pb_scope(&host.env.scope)),
+        conference_id: Some(conference_id),
+        external_user_id: external_user_id.as_bytes().to_vec(),
+        idempotency_key: format!("room-remove-{external_user_id}-{}", unix_time_ms()?),
+        integration_id: Some(integration_id()),
+    });
+    attach_dev_credential(&mut request, &host.env);
+    let removed = conference
+        .remove_participant(request)
+        .await
+        .map_err(|error| format!("remove participant: {error}"))?
+        .into_inner();
+    match removed.result {
+        Some(pb::universal_remove_participant_response::Result::Acknowledgement(_)) => Ok(()),
+        Some(pb::universal_remove_participant_response::Result::Error(error)) => {
+            let code = pb::ErrorCode::try_from(error.code)
+                .map_or_else(|_| error.code.to_string(), |code| format!("{code:?}"));
+            Err(format!("remove participant was denied: {code}"))
+        }
+        None => Err("remove participant was denied".to_owned()),
+    }
+}
+
+fn chat_admit(host: &RoomHost, authorization: Option<&str>) -> Result<Vec<u8>, (u16, String)> {
+    let Ok(Some(member)) = room_member(host, authorization) else {
+        return Ok(br#"{"ok":true}"#.to_vec());
+    };
+    let Ok(now) = unix_time_ms() else {
+        return Ok(br#"{"ok":true}"#.to_vec());
+    };
+    let Ok(policy) = host.policy.lock() else {
+        return Ok(br#"{"ok":true}"#.to_vec());
+    };
+    if let Some(message) = policy.silence_message(&member.external_user_id, now) {
+        return Err((403, message));
+    }
+    Ok(br#"{"ok":true}"#.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use base64::Engine as _;
 
-    use super::{origin_allowed, trust_image_matches};
+    use super::{authorization_token, origin_allowed, trust_image_matches};
 
     #[test]
     fn confirming_trust_image_must_match_the_proved_key() {
@@ -1483,5 +1897,16 @@ mod tests {
         assert!(!origin_allowed(Some("http://192.168.1.1:43124")));
         assert!(!origin_allowed(Some("https://127.0.0.1:43124")));
         assert!(!origin_allowed(Some("https://[::1]:43124")));
+    }
+
+    #[test]
+    fn authorization_header_keeps_only_a_bearer_token() {
+        assert_eq!(authorization_token(None), None);
+        assert_eq!(authorization_token(Some("Basic abc")), None);
+        assert_eq!(
+            authorization_token(Some("Bearer room-token")),
+            Some("room-token")
+        );
+        assert_eq!(authorization_token(Some("Bearer bad token")), None);
     }
 }
