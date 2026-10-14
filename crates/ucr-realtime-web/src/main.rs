@@ -2674,7 +2674,8 @@ fn viewing_directory() -> std::path::PathBuf {
 
 fn ensure_private_viewing_dir(directory: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(directory)?;
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
     }
@@ -2685,12 +2686,14 @@ fn write_private_viewing(path: &std::path::Path, bytes: &[u8]) -> std::io::Resul
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
@@ -2743,9 +2746,18 @@ fn store_viewing(id: Option<&str>, body: &[u8]) -> HttpResponse {
         "bytes": body.len(),
         "updatedAt": unix_time_ms(),
     });
-    if write_private_viewing(&directory.join(format!("{id}.json")), meta.to_string().as_bytes()).is_err() {
+    if write_private_viewing(
+        &directory.join(format!("{id}.json")),
+        meta.to_string().as_bytes(),
+    )
+    .is_err()
+    {
         let _ = std::fs::remove_file(&webm);
-        return api_error(StatusCode::SERVICE_UNAVAILABLE, "viewing_unavailable", "viewing metadata could not be stored");
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "viewing_unavailable",
+            "viewing metadata could not be stored",
+        );
     }
     json_response(StatusCode::OK, &serde_json::json!({"ok": true, "id": id}))
 }
