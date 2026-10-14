@@ -660,6 +660,27 @@ async fn forward_first_party(
     builder.body(full_body(data)).map_err(|_| ())
 }
 
+// Opening a TCP port is not proof that the BFF is alive: require an actual
+// HTTP 200 from the canonical /healthz handler before reporting readiness.
+async fn first_party_health(bff: SocketAddr) -> Result<bool, ()> {
+    use hyper::client::conn::http1;
+    let stream = TcpStream::connect(bff).await.map_err(|_| ())?;
+    let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|_| ())?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/healthz")
+        .header(HOST, bff.to_string())
+        .body(Full::new(Bytes::new()))
+        .map_err(|_| ())?;
+    let response = sender.send_request(request).await.map_err(|_| ())?;
+    Ok(response.status() == StatusCode::OK)
+}
+
 async fn browser_ready_response(state: &AppState) -> HttpResponse {
     if !browser_media_assets_present() {
         return api_error(
@@ -676,13 +697,13 @@ async fn browser_ready_response(state: &AppState) -> HttpResponse {
         );
     };
     if !matches!(
-        tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(bff)).await,
-        Ok(Ok(_))
+        tokio::time::timeout(Duration::from_secs(2), first_party_health(bff)).await,
+        Ok(Ok(true))
     ) {
         return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "first_party_unreachable",
-            "The canonical first-party BFF is not listening",
+            "The canonical first-party BFF did not pass HTTP health check",
         );
     }
     text_response(StatusCode::OK, "ready")
@@ -3398,6 +3419,33 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn bff_readiness_requires_http_200_not_merely_open_tcp_port() {
+        use bytes::Bytes;
+        use http_body_util::Full;
+        use hyper::{Request, Response, StatusCode, service::service_fn};
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use std::convert::Infallible;
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for expected in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK] {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let service = service_fn(move |request: Request<hyper::body::Incoming>| async move {
+                    assert_eq!(request.uri().path(), "/healthz");
+                    Ok::<_, Infallible>(Response::builder().status(expected)
+                        .body(Full::new(Bytes::from_static(b"ok"))).unwrap())
+                });
+                hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(tcp), service).await.unwrap();
+            }
+        });
+        assert_eq!(super::first_party_health(addr).await, Ok(false));
+        assert_eq!(super::first_party_health(addr).await, Ok(true));
+        task.abort();
+    }
+
     #[tokio::test]
     async fn first_party_proxy_roundtrip_preserves_csrf_and_secure_session_cookie() {
         use bytes::Bytes;
