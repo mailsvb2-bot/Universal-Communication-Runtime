@@ -1618,9 +1618,14 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
     if(!current())throw new Error("Device enrollment completed after conference session retired");
     const approved=localRoomTrustReceipt.publicKey;
     const currentKey=inspected&&inspected.activeKey&&inspected.activeKey.publicKey;
-    let sameKey=!approved||!currentKey||approved.length===currentKey.length;
-    if(sameKey&&approved&&currentKey){
-      for(let i=0;i<approved.length;i++)if(approved[i]!==currentKey[i])sameKey=false;
+    // A missing or malformed descriptor must never count as a matching
+    // canonical trust receipt. Fail closed even if the key IDs coincide.
+    let sameKey=approved instanceof Uint8Array&&currentKey instanceof Uint8Array&&
+      approved.length===32&&currentKey.length===32;
+    if(sameKey){
+      let difference=0;
+      for(let i=0;i<32;i++)difference|=approved[i]^currentKey[i];
+      sameKey=difference===0;
     }
     if(!inspected||inspected.deviceRevoked||!inspected.deviceActive||!inspected.activeKey||
        (localRoomTrustReceipt.keyId&&inspected.activeKey.keyId!==localRoomTrustReceipt.keyId)||
@@ -2538,6 +2543,11 @@ function beginLocalRoomLobby(){
   const installerReady=import("./endpoint-media/reference_browser_media_installer.js");
   lobby.addEventListener("submit",event=>{
     submitLocalRoom(event,api,installerReady).catch(error=>{
+      // The room is the same document as the preview: failed enrollment
+      // must not leave an open microphone/camera behind a retry button.
+      stopLocalCapture();
+      releaseRoomPresence();
+      localRoomTrustReceipt=null;
       ui.status.textContent=error&&error.message?error.message:"Комната не ответила";
       const submit=document.getElementById("room-submit");
       if(submit)submit.disabled=false;
@@ -2673,8 +2683,22 @@ async function submitLocalRoom(event,api,installerReady){
   ui.join.classList.remove("hidden");
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
   ui.status.textContent="Вход подтверждён. Подключаем защищённое медиа.";
-  if(!scheduleWaitingRoom())await join();
+  if(!scheduleWaitingRoom()){
+    await join();
+    // join() handles its own rejected admission. It can return without
+    // throwing (for example, when the media authority is unavailable).
+    // A rejected Join is not permission to keep the preview capturing.
+    if(!sessionActive&&
+       (ui.state.textContent==="Rejected"||ui.state.textContent==="Secure media unavailable")){
+      throw new Error(ui.status.textContent||"Защищённое подключение отклонено");
+    }
+  }
   }catch(error){
+    // Cancel an in-flight permission prompt as well as already-open tracks.
+    // The capture epoch prevents a late getUserMedia success from reviving it.
+    stopLocalCapture();
+    releaseRoomPresence();
+    localRoomTrustReceipt=null;
     if(!entered){
       if(lobby)lobby.classList.remove("hidden");
       ui.join.classList.add("hidden");
