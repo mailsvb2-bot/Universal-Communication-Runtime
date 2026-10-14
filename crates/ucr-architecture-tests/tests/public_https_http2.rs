@@ -26,13 +26,15 @@ fn public_https_edge_upstreams_remain_dual_http_protocol() {
         let features = hyper_line
             .split_once("features = [")
             .and_then(|(_, rest)| rest.split_once(']'))
-            .map(|(features, _)| {
-                features
-                    .split(',')
-                    .map(|feature| feature.trim().trim_matches('"'))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| panic!("{cargo} must specify Hyper transport features"));
+            .map_or_else(
+                || panic!("{cargo} must specify Hyper transport features"),
+                |(features, _)| {
+                    features
+                        .split(',')
+                        .map(|feature| feature.trim().trim_matches('"'))
+                        .collect::<Vec<_>>()
+                },
+            );
         for required in ["http1", "http2", "server"] {
             assert!(
                 features.contains(&required),
