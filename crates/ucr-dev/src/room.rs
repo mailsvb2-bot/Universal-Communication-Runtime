@@ -1012,7 +1012,8 @@ fn allocate_recording_label(_host: &RoomHost) -> Result<String, String> {
     let mut random = [0_u8; 16];
     let mut source = std::fs::File::open("/dev/urandom")
         .map_err(|error| format!("recording id random source: {error}"))?;
-    source.read_exact(&mut random)
+    source
+        .read_exact(&mut random)
         .map_err(|error| format!("recording id entropy: {error}"))?;
     Ok(format!("room-recording-{}", super::hex(&random)))
 }
