@@ -1593,16 +1593,20 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
   if(!beforeJoin&&!authority){
     throw new Error("Authenticated canonical Device/Trust authority required after Join");
   }
-  // A same-document first-party entry already proved this signer and re-read
-  // trust after the grant was issued. Redeeming that grant still re-reads the
-  // canonical descriptor so a revocation lands before media, and it does not
-  // start another Ed25519 ceremony. A pasted grant has no receipt and falls
-  // through to the full preparation below.
+  // The room commit already proved this signer and returned the confirming
+  // trust image with the grant. A seconds-fresh receipt for this session is
+  // enough before redeeming the grant. After Join, the canonical descriptor
+  // is still read once so a revocation lands before media, without another
+  // Ed25519 ceremony. A pasted grant has no receipt and falls through.
   if(authority&&typeof localRoomTrustReceipt!=="undefined"&&localRoomTrustReceipt&&
      localRoomTrustReceipt.deviceId===claims.device_id&&
      localRoomTrustReceipt.sessionId===claims.session_id&&
      typeof localRoomTrustReceipt.checkedAt==="number"&&
      Date.now()-localRoomTrustReceipt.checkedAt<60000){
+    if(beforeJoin){
+      requireCanonicalMediaHostReady();
+      return;
+    }
     const inspected=await authority.inspect({
       tenantId:claims.tenant_id,
       namespaceId:claims.namespace_id??null,
@@ -2248,7 +2252,7 @@ async function renewLocalRoomGrant(){
   renewLocalRoomGrant.busy=true;
   const generation=sessionLifecycleGeneration;
   try{
-    const response=await fetch(roomApi+"/v1/room/join",{
+    const response=await fetch(localRoomRequestUrl("/v1/room/join"),{
       method:"POST",
       headers:{"content-type":"application/json"},
       body:JSON.stringify({externalUserId:user})
@@ -2327,7 +2331,7 @@ function installLocalRoomMediaHost(){
   const roomApi=sessionStorage.getItem("ucrRoomApi")||"";
   if(!roomApi)throw new Error("Local room API address is missing");
   const roomPost=async(path,payload)=>{
-    const response=await fetch(roomApi+path,{
+    const response=await fetch(localRoomRequestUrl(path),{
       method:"POST",
       headers:{"content-type":"application/json"},
       body:JSON.stringify(payload)
@@ -2425,8 +2429,39 @@ function installLocalRoomMediaHost(){
 }
 // The room API is injected only into the /room document. A pasted conference
 // grant never sees a loopback address here, and this string is not a secret.
+function localRoomRequestUrl(path){
+  const api=typeof sessionStorage!=="undefined"?sessionStorage.getItem("ucrRoomApi")||"":"";
+  if(api==="same-origin")return path;
+  if(api.startsWith("http://"))return api+path;
+  return path;
+}
+function roomTrustImage(data){
+  const key=data&&data.keyId&&typeof data.publicKeyBase64==="string"?{
+    keyId:data.keyId,
+    publicKey:endpointBase64ToBytes(data.publicKeyBase64)
+  }:null;
+  return {
+    deviceActive:!!(data&&data.deviceActive===true),
+    deviceRevoked:!!(data&&data.deviceRevoked===true),
+    activeKey:key
+  };
+}
+function sameRoomTrustKey(proved,data){
+  if(!proved||!data||data.deviceActive!==true||data.deviceRevoked===true)return false;
+  if(data.keyId!==proved.keyId||typeof data.publicKeyBase64!=="string")return false;
+  const bytes=endpointBase64ToBytes(data.publicKeyBase64);
+  if(bytes.length!==proved.publicKey.length)return false;
+  let difference=0;
+  for(let i=0;i<bytes.length;i++)difference|=bytes[i]^proved.publicKey[i];
+  return difference===0;
+}
+// The room document posts to its own origin. The gateway forwards those
+// calls to the loopback room API, so the browser does not preflight each one.
+// An absolute loopback URL remains valid for a grant renewal that still has
+// the previous address stored.
 function configuredLocalRoomApi(){
   const configured = "%%UCR_ROOM_API%%";
+  if(configured==="same-origin")return configured;
   return configured.startsWith("http://")?configured:"";
 }
 function readRememberedRoomDevice(){
@@ -2517,8 +2552,13 @@ async function submitLocalRoom(event,api,installerReady){
   const submit=document.getElementById("room-submit");
   if(!name||!submit||submit.disabled)return;
   submit.disabled=true;
-  // Resume playback inside the gesture. After a document navigation the
-  // conference page no longer had it, so remote audio waited for another click.
+  const lobby=document.getElementById("room-lobby");
+  let entered=false;
+  try{
+  // The form leaves immediately. Status stays on enrollment until encrypted
+  // media is up; this is not a Connected claim. Playback resumes inside the
+  // gesture, and the speaker camera opens once at the call resolution.
+  if(lobby)lobby.classList.add("hidden");
   resumeLocalRoomPlayback();
   sessionStorage.setItem("ucrLocalRoom","1");
   sessionStorage.setItem("ucrRoomApi",api);
@@ -2528,17 +2568,15 @@ async function submitLocalRoom(event,api,installerReady){
   ui.state.textContent="Joining";
   ui.status.textContent="Подтверждаем ключ устройства. Камера, если вы спикер, уже открывается.";
   const module=await installerReady;
-  if(!module||typeof module.createUcrFirstPartyCallEntry!=="function"||
+  if(!module||typeof module.createUcrCanonicalDevicePreparation!=="function"||
      typeof module.createUcrBrowserProtectedDeviceVault!=="function"){
     throw new Error("Сборка медиаустройства недоступна");
   }
   if(!window.ucrProtectedDeviceKeyVault){
     window.ucrProtectedDeviceKeyVault=module.createUcrBrowserProtectedDeviceVault();
   }
-  let provedKey=null;
-  const authority=window.ucrCanonicalDeviceAuthority;
   const roomPost=async(path,payload)=>{
-    const response=await fetch(api+path,{
+    const response=await fetch(localRoomRequestUrl(path),{
       method:"POST",
       headers:{"content-type":"application/json"},
       body:JSON.stringify(payload)
@@ -2547,89 +2585,103 @@ async function submitLocalRoom(event,api,installerReady){
     if(!response.ok||!data.ok)throw new Error(data.message||"Комната не ответила");
     return data;
   };
-  const host={
-    async resumeAuthenticatedDevice(){
-      const remembered=readRememberedRoomDevice();
-      const own=sessionStorage.getItem("ucrRoomUser");
-      const samePerson=remembered&&remembered.role===role&&
-        (!remembered.displayName||remembered.displayName===name)&&
-        (own===remembered.externalUserId||!roomPresenceFresh(remembered.externalUserId));
-      const reserved=await roomPost("/v1/room/reserve",{
-        displayName:name,
-        role,
-        externalUserId:samePerson?remembered.externalUserId:undefined
-      });
-      if(!reserved.deviceId||!reserved.participantId||!reserved.tenantId){
-        throw new Error("Комната не выдала устройство");
-      }
-      sessionStorage.setItem("ucrRoomUser",reserved.externalUserId);
-      rememberRoomDevice({
-        externalUserId:reserved.externalUserId,
-        deviceId:reserved.deviceId,
-        role,
-        displayName:name
-      });
-      startRoomPresence();
+  const remembered=readRememberedRoomDevice();
+  const own=sessionStorage.getItem("ucrRoomUser");
+  const samePerson=remembered&&remembered.role===role&&
+    (!remembered.displayName||remembered.displayName===name)&&
+    (own===remembered.externalUserId||!roomPresenceFresh(remembered.externalUserId));
+  // Opening image and the later grant are two calls. The possession proof
+  // runs between them against the opening image. Commit is the authoritative
+  // re-read: its trust image has to match the key that was just proved.
+  const opened=await roomPost("/v1/room/enter",{
+    phase:"open",
+    displayName:name,
+    role,
+    externalUserId:samePerson?remembered.externalUserId:undefined
+  });
+  if(!opened.deviceId||!opened.participantId||!opened.tenantId||!opened.externalUserId){
+    throw new Error("Комната не выдала устройство");
+  }
+  sessionStorage.setItem("ucrRoomUser",opened.externalUserId);
+  rememberRoomDevice({
+    externalUserId:opened.externalUserId,
+    deviceId:opened.deviceId,
+    role,
+    displayName:name
+  });
+  startRoomPresence();
+  const binding=Object.freeze({
+    tenantId:opened.tenantId,
+    namespaceId:opened.namespaceId??null,
+    participantId:opened.participantId,
+    deviceId:opened.deviceId
+  });
+  let trustImage=roomTrustImage(opened);
+  const preparationAuthority={
+    async inspect(){
+      const key=trustImage.activeKey;
       return {
-        tenantId:reserved.tenantId,
-        namespaceId:reserved.namespaceId??null,
-        participantId:reserved.participantId,
-        deviceId:reserved.deviceId
+        deviceActive:trustImage.deviceActive===true,
+        deviceRevoked:trustImage.deviceRevoked===true,
+        activeKey:key?{keyId:key.keyId,publicKey:key.publicKey.slice()}:null
       };
     },
-    async inspect(binding){
-      const result=await authority.inspect(binding);
-      if(result&&result.activeKey&&typeof result.activeKey.keyId==="string"&&result.activeKey.publicKey){
-        provedKey={keyId:result.activeKey.keyId,publicKey:result.activeKey.publicKey.slice()};
+    async approveNewDevice(_binding,signer){
+      if(!signer||typeof signer.keyId!=="string"||!(signer.publicKey instanceof Uint8Array)||signer.publicKey.length!==32){
+        throw new Error("Ключ устройства не подтверждён");
       }
-      return result;
-    },
-    approveNewDevice(binding,signer){
-      return authority.approveNewDevice(binding,signer);
-    },
-    async issueSignedDeviceJoin(binding){
-      const user=sessionStorage.getItem("ucrRoomUser");
-      if(!user)throw new Error("Комната потеряла участника");
-      const joined=await roomPost("/v1/room/join",{externalUserId:user});
-      const fragment=typeof joined.joinFragment==="string"?joined.joinFragment:"";
-      const next=new URLSearchParams(fragment.startsWith("#")?fragment.slice(1):fragment).get("ucr_join");
-      if(!next)throw new Error("Сервер не выдал подписанный вход");
-      const issued=readGrant(next);
-      if(issued.device_id!==binding.deviceId||issued.participant_id!==binding.participantId){
-        throw new Error("Подписанный вход выдан другому устройству");
-      }
-      return {
-        tenantId:issued.tenant_id,
-        namespaceId:issued.namespace_id,
-        participantId:issued.participant_id,
-        deviceId:issued.device_id,
-        callId:issued.call_id,
-        sessionId:issued.session_id,
-        joinFragment:fragment
+      trustImage={
+        deviceActive:true,
+        deviceRevoked:false,
+        activeKey:{keyId:signer.keyId,publicKey:signer.publicKey.slice()}
       };
     }
   };
-  const enter=module.createUcrFirstPartyCallEntry(host,window.ucrProtectedDeviceKeyVault);
-  const issued=await enter();
-  if(!provedKey)throw new Error("Ключ устройства не подтверждён");
-  const fragment=issued.joinFragment;
+  const prepare=module.createUcrCanonicalDevicePreparation(
+    preparationAuthority,window.ucrProtectedDeviceKeyVault);
+  await prepare(binding);
+  const proved=trustImage.activeKey;
+  if(!proved)throw new Error("Ключ устройства не подтверждён");
+  const committed=await roomPost("/v1/room/enter",{
+    phase:"commit",
+    externalUserId:opened.externalUserId,
+    deviceId:opened.deviceId,
+    keyId:proved.keyId,
+    publicKeyBase64:bytesToBase64(proved.publicKey)
+  });
+  if(!sameRoomTrustKey(proved,committed)){
+    throw new Error("Ключ устройства не совпал с ответом комнаты");
+  }
+  const fragment=typeof committed.joinFragment==="string"?committed.joinFragment:"";
   const next=new URLSearchParams(fragment.startsWith("#")?fragment.slice(1):fragment).get("ucr_join");
-  token=next||"";
-  claims=readGrant(token);
-  if(Date.now()>=claims.expires)throw new Error("Join grant has expired");
+  if(!next)throw new Error("Сервер не выдал подписанный вход");
+  const issued=readGrant(next);
+  if(issued.device_id!==binding.deviceId||issued.participant_id!==binding.participantId){
+    throw new Error("Подписанный вход выдан другому устройству");
+  }
+  if(Date.now()>=issued.expires)throw new Error("Join grant has expired");
+  token=next;
+  claims=issued;
+  entered=true;
   localRoomTrustReceipt={
-    deviceId:issued.deviceId,
-    sessionId:issued.sessionId,
-    keyId:provedKey.keyId,
-    publicKey:provedKey.publicKey,
+    deviceId:claims.device_id,
+    sessionId:claims.session_id,
+    keyId:committed.keyId,
+    publicKey:endpointBase64ToBytes(committed.publicKeyBase64),
     checkedAt:Date.now()
   };
-  const lobby=document.getElementById("room-lobby");
-  if(lobby)lobby.classList.add("hidden");
   ui.join.classList.remove("hidden");
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
   ui.status.textContent="Вход подтверждён. Подключаем защищённое медиа.";
   if(!scheduleWaitingRoom())await join();
+  }catch(error){
+    if(!entered){
+      if(lobby)lobby.classList.remove("hidden");
+      ui.join.classList.add("hidden");
+      submit.disabled=false;
+    }
+    throw error;
+  }
 }
 try{
   const params=new URLSearchParams(location.hash.slice(1));applyBrandingFromFragment(params);token=params.get("ucr_join")||"";

@@ -116,9 +116,12 @@ Open <http://127.0.0.1:43124/room> in two browser windows, enter a name, and cho
 Signing seeds stay in the browser. The room API on `127.0.0.1:43123` stores only public keys.
 `ucr dev --room` prints the exact `UCR_ROOM_API` value for the address given to `--room-bind`.
 The room page is the call. The click resumes playback and opens the speaker camera
-once, at a small size, into the video element that stays on screen. Full HD is applied
-on that live track after the first picture. Device entry (possession proof, signed
-grant, trust recheck) runs beside that preview. The page does not navigate to a
+once, at the call resolution (1920×1080 ideal), into the video element that stays.
+The form hides on that click. The browser talks only to this page: enrollment is
+two room calls, with the Ed25519 possession proof between them. The first returns
+the opening trust image. The second stores the public key when needed and returns
+the signed grant together with the confirming trust image. Status stays on that
+enrollment until encrypted media is actually up. The page does not navigate to a
 second document and it does not open the camera again after MLS.
 The endpoint runtime is preloaded while the name is typed. This browser's device key
 is reused for the same name and role until the development process restarts. A second
