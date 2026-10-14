@@ -33,7 +33,6 @@ const MAX_SIGNALING_SDP_BYTES: usize = 256 * 1024;
 const MAX_SIGNALING_ICE_CANDIDATE_BYTES: usize = 4096;
 const MAX_SIGNALING_ICE_MID_BYTES: usize = 256;
 const CLIENT_HTML: &str = include_str!("../static/client.html");
-const ROOM_HTML: &str = include_str!("../static/room.html");
 
 // Generated endpoint-only public code: no secrets, grants or MLS state in these
 // artifacts. The gateway serves only an explicit allowlist, never a directory.
@@ -2497,7 +2496,10 @@ fn room_page() -> String {
     let api = room_api_base();
     let encoded =
         serde_json::to_string(&api).unwrap_or_else(|_| "\"http://127.0.0.1:43123\"".to_owned());
-    ROOM_HTML.replace("\"%%UCR_ROOM_API%%\"", &encoded)
+    // The lobby and the call are one document. Injecting the loopback room API
+    // here is what reveals the form; the conference routes keep the placeholder
+    // and therefore have no lobby and no room API address.
+    CLIENT_HTML.replace("\"%%UCR_ROOM_API%%\"", &encoded)
 }
 
 fn room_api_base() -> String {
@@ -2593,12 +2595,15 @@ mod tests {
         assert!(validate_room_api_base("http://192.168.1.10:43123").is_err());
         assert!(validate_room_api_base("https://127.0.0.1:43123").is_err());
         assert!(validate_room_api_base("http://127.0.0.1:43123/room").is_err());
-        let page = ROOM_HTML.replace(
+        let page = CLIENT_HTML.replace(
             "\"%%UCR_ROOM_API%%\"",
             &serde_json::to_string("http://127.0.0.1:43999").expect("json"),
         );
-        assert!(page.contains("const api = \"http://127.0.0.1:43999\";"));
+        assert!(page.contains("const configured = \"http://127.0.0.1:43999\";"));
         assert!(!page.contains("%%UCR_ROOM_API%%"));
+        assert!(page.contains("createUcrFirstPartyCallEntry"));
+        assert!(page.contains("id=\"room-lobby\""));
+        assert!(!page.contains("location.assign"));
     }
 
     #[test]

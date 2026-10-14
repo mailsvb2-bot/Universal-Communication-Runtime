@@ -313,16 +313,23 @@ fn inspect(host: &RoomHost, body: &[u8]) -> Result<Vec<u8>, String> {
         .store
         .active_trusted_signing_key(&host.env.scope, &device_id)
         .map_err(|error| format!("trusted key lookup: {error:?}"))?;
-    let (key_id, public_key_base64) = match key {
+    let (key_id, public_key_base64) = match key.as_ref() {
         Some(descriptor) => (
             Some(wire_text(descriptor.key_id.as_opaque())),
-            Some(STANDARD.encode(descriptor.public_key)),
+            Some(STANDARD.encode(&descriptor.public_key)),
         ),
         None => (None, None),
     };
+    // EnsureParticipantDevice marks the conference slot active before any
+    // signer exists. Canonical enrollment treats "active, but no key" as a
+    // recovery case and will not attach a first key. This read is the trust
+    // projection: a slot is active only once it has a trusted signing key.
+    // Revocation stays revocation. After the possession proof, approve reads
+    // this again and must observe that same key.
+    let trusted = key.is_some() && device.state == DeviceLifecycleState::Active;
     serde_json::to_vec(&serde_json::json!({
         "ok": true,
-        "deviceActive": device.state == DeviceLifecycleState::Active,
+        "deviceActive": trusted,
         "deviceRevoked": device.state == DeviceLifecycleState::Revoked,
         "keyId": key_id,
         "publicKeyBase64": public_key_base64,

@@ -115,16 +115,19 @@ UCR_REALTIME_WEB_BIND=127.0.0.1:43124 \
 Open <http://127.0.0.1:43124/room> in two browser windows, enter a name, and choose a role.
 Signing seeds stay in the browser. The room API on `127.0.0.1:43123` stores only public keys.
 `ucr dev --room` prints the exact `UCR_ROOM_API` value for the address given to `--room-bind`.
-The lobby preloads the endpoint runtime while the name is typed and reuses this browser's
-device key for the same name and role until the development process restarts. A second
+The room page is the call. The click resumes playback and opens the speaker camera
+once, at a small size, into the video element that stays on screen. Full HD is applied
+on that live track after the first picture. Device entry (possession proof, signed
+grant, trust recheck) runs beside that preview. The page does not navigate to a
+second document and it does not open the camera again after MLS.
+The endpoint runtime is preloaded while the name is typed. This browser's device key
+is reused for the same name and role until the development process restarts. A second
 window that is already in the room, or a different name, gets its own device so it does
 not take over the first participant's media session. The conference group is
 created when the room server starts and stays open for the life of that process.
-The conference page joins itself after the signed grant. A grant lasts 15 minutes;
-the open page requests the next one before expiry and keeps the camera it already
-has. Camera permission is requested from the lobby click, because the next page no longer
-has that gesture. A second participant refreshes the encrypted epoch on the already open
-media channel.
+A grant lasts 15 minutes; the open page requests the next one before expiry and keeps
+the camera it already has. A second participant refreshes the encrypted epoch on the
+already open media channel.
 
 The browser page also needs the endpoint package built from this revision. Those files are
 generated, not committed:
