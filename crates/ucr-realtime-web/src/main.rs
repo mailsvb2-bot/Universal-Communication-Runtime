@@ -3355,8 +3355,11 @@ mod tests {
     async fn first_party_proxy_roundtrip_preserves_csrf_and_secure_session_cookie() {
         use bytes::Bytes;
         use http_body_util::{BodyExt, Full};
-        use hyper::{Request, Response, StatusCode, header::{COOKIE, ORIGIN, SET_COOKIE}};
         use hyper::service::service_fn;
+        use hyper::{
+            Request, Response, StatusCode,
+            header::{COOKIE, ORIGIN, SET_COOKIE},
+        };
         use hyper_util::rt::TokioIo;
         use std::convert::Infallible;
         use tokio::net::{TcpListener, TcpStream};
@@ -3374,15 +3377,22 @@ mod tests {
                 assert!(req.headers().get("X-Forwarded-For").is_none());
                 let body = req.into_body().collect().await.unwrap().to_bytes();
                 assert_eq!(body.as_ref(), b"{}");
-                Ok::<_, Infallible>(Response::builder()
-                    .status(StatusCode::OK)
-                    .header(SET_COOKIE, "ucr_fp_session=rotated; Secure; HttpOnly; SameSite=Strict; Path=/")
-                    .header(hyper::header::CONTENT_TYPE, "application/json")
-                    .body(Full::new(Bytes::from_static(b"{\"ok\":true}")))
-                    .unwrap())
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(
+                            SET_COOKIE,
+                            "ucr_fp_session=rotated; Secure; HttpOnly; SameSite=Strict; Path=/",
+                        )
+                        .header(hyper::header::CONTENT_TYPE, "application/json")
+                        .body(Full::new(Bytes::from_static(b"{\"ok\":true}")))
+                        .unwrap(),
+                )
             });
             hyper::server::conn::http1::Builder::new()
-                .serve_connection(TokioIo::new(tcp), service).await.unwrap();
+                .serve_connection(TokioIo::new(tcp), service)
+                .await
+                .unwrap();
         });
 
         let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3393,13 +3403,18 @@ mod tests {
                 Ok::<_, Infallible>(super::proxy_first_party(request, Some(bff_address)).await)
             });
             hyper::server::conn::http1::Builder::new()
-                .serve_connection(TokioIo::new(tcp), service).await.unwrap();
+                .serve_connection(TokioIo::new(tcp), service)
+                .await
+                .unwrap();
         });
 
         let tcp = TcpStream::connect(gateway_address).await.unwrap();
-        let (mut client, connection) =
-            hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await.unwrap();
-        let drive_client = tokio::spawn(async move { let _ = connection.await; });
+        let (mut client, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+            .await
+            .unwrap();
+        let drive_client = tokio::spawn(async move {
+            let _ = connection.await;
+        });
         let request = Request::builder()
             .method("POST")
             .uri("/v1/first-party/signup/begin")
@@ -3411,15 +3426,25 @@ mod tests {
             .body(Full::new(Bytes::from_static(b"{}")))
             .unwrap();
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(5), client.send_request(request)
-        ).await.unwrap().unwrap();
+            std::time::Duration::from_secs(5),
+            client.send_request(request),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers()[SET_COOKIE],
             "ucr_fp_session=rotated; Secure; HttpOnly; SameSite=Strict; Path=/"
         );
         assert_eq!(
-            response.into_body().collect().await.unwrap().to_bytes().as_ref(),
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
             b"{\"ok\":true}"
         );
         drop(client);
