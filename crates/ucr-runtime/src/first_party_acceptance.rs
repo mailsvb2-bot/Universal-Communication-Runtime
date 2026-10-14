@@ -260,10 +260,24 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
     assert_eq!(restarted.sessions.lock().unwrap().len(), 4);
     // Revoke B's recovered Device via the canonical owner, then verify that
     // its old signer is rejected even after another complete server restart.
-    verify_revoked_device_stays_revoked(&db, restarted, &bob_two, &bob_second_signer, &alice, &alice_signer);
+    verify_revoked_device_stays_revoked(
+        &db,
+        restarted,
+        &bob_two,
+        &bob_second_signer,
+        &alice,
+        &alice_signer,
+    );
 }
 
-fn verify_revoked_device_stays_revoked(db: &TestDb, restarted: State, bob_two: &Binding, bob_second_signer: &SigningKey, alice: &Binding, alice_signer: &SigningKey) {
+fn verify_revoked_device_stays_revoked(
+    db: &TestDb,
+    restarted: State,
+    bob_two: &Binding,
+    bob_second_signer: &SigningKey,
+    alice: &Binding,
+    alice_signer: &SigningKey,
+) {
     restarted
         .store
         .revoke_device(
