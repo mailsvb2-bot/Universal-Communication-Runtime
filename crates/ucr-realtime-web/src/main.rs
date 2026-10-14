@@ -2752,9 +2752,14 @@ fn browser_media_assets_present() -> bool {
         || std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
         std::path::PathBuf::from,
     );
+    browser_media_assets_present_in(&root)
+}
+
+fn browser_media_assets_present_in(root: &std::path::Path) -> bool {
     REFERENCE_MEDIA_ASSETS.iter().all(|(_, file, _)| {
-        std::fs::metadata(root.join(file))
-            .is_ok_and(|metadata| metadata.is_file() && (1..=16 * 1024 * 1024).contains(&metadata.len()))
+        std::fs::metadata(root.join(file)).is_ok_and(|metadata| {
+            metadata.is_file() && (1..=16 * 1024 * 1024).contains(&metadata.len())
+        })
     })
 }
 
@@ -3502,16 +3507,9 @@ mod tests {
             std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
             std::fs::write(destination, b"media-bundle-test").unwrap();
         }
-        let check = |root: &std::path::Path| {
-            super::REFERENCE_MEDIA_ASSETS.iter().all(|(_, file, _)| {
-                std::fs::metadata(root.join(file)).is_ok_and(|metadata| {
-                    metadata.is_file() && (1..=16 * 1024 * 1024).contains(&metadata.len())
-                })
-            })
-        };
-        assert!(check(&root));
+        assert!(super::browser_media_assets_present_in(&root));
         std::fs::remove_file(root.join("endpoint-wasm/ucr_endpoint_wasm_bg.wasm")).unwrap();
-        assert!(!check(&root));
+        assert!(!super::browser_media_assets_present_in(&root));
         std::fs::remove_dir_all(root).unwrap();
     }
 
