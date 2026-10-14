@@ -1592,7 +1592,7 @@ async function heartbeat(){
     // heartbeat must never override a newer lifecycle or join generation.
     if(typeof renewLocalRoomGrant==="function")await renewLocalRoomGrant();
     if(!current())return;
-    const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:activeSessionSequence});
+    // Heartbeat compares the mutable attendance sequence, NOT the stable Join\n    // generation used to fence Leave. Zero means validate the authenticated\n    // live session without incorrectly comparing those different counters.\n    const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
     if(!current())return;
     const data=await r.json();
     if(!current())return;
