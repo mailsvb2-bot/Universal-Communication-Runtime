@@ -11,6 +11,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, transport::Server};
@@ -45,6 +46,7 @@ use ucr_webrtc::WebRtcSessionConfigFactory;
 mod live_media;
 mod room;
 mod room_edge;
+mod room_policy;
 
 pub const DEFAULT_DEV_BIND: &str = "127.0.0.1:50051";
 pub const DEFAULT_ROOM_BIND: &str = "127.0.0.1:43123";
@@ -53,13 +55,19 @@ pub const DEV_TRANSPORT_CAPABILITY: &str = "ucr.transport.test.dev";
 static DEV_STORE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
-struct DevStoreCleanup(PathBuf);
+struct DevStoreCleanup {
+    path: PathBuf,
+    persistent: bool,
+}
 
 impl Drop for DevStoreCleanup {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-        let _ = fs::remove_file(format!("{}-wal", self.0.display()));
-        let _ = fs::remove_file(format!("{}-shm", self.0.display()));
+        if self.persistent {
+            return;
+        }
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(format!("{}-wal", self.path.display()));
+        let _ = fs::remove_file(format!("{}-shm", self.path.display()));
     }
 }
 
@@ -328,6 +336,7 @@ pub struct DevEnvironment {
     conference_state: Arc<ConferenceRuntimeState>,
     realtime_registry: Arc<RealtimeSessionRegistry>,
     debug_events: Mutex<Vec<String>>,
+    state_dir: Option<PathBuf>,
 }
 
 impl DevEnvironment {
@@ -345,7 +354,10 @@ impl DevEnvironment {
             SqliteLocalStore::open(&store_path)
                 .map_err(|error| format!("open ephemeral dev store: {error:?}"))?,
         );
-        let store_cleanup = DevStoreCleanup(store_path);
+        let store_cleanup = DevStoreCleanup {
+            path: store_path,
+            persistent: false,
+        };
         let scope = dev_scope();
         let local_identity_id = identity_id("dev-local-identity");
         let local_device_id = device_id("dev-local-device");
@@ -389,6 +401,85 @@ impl DevEnvironment {
                 "dev.mock_peer.ready".to_owned(),
                 "dev.local_api.prepared".to_owned(),
             ]),
+            state_dir: None,
+        })
+    }
+
+    /// Opens the local room store in a directory that outlives this process.
+    ///
+    /// Devices, the conference and the service credential stay on disk. A second
+    /// start of `ucr dev --room` continues the same room instead of minting a
+    /// new empty database.
+    ///
+    /// # Errors
+    /// Returns an error when the directory, store or saved credential cannot be opened.
+    pub fn open_room() -> Result<Self, String> {
+        Self::open_room_at(default_room_state_dir())
+    }
+
+    /// Opens a room store at an explicit directory. Tests use a temporary path.
+    ///
+    /// # Errors
+    /// Returns an error when the directory, store or saved credential cannot be opened.
+    pub fn open_room_at(dir: PathBuf) -> Result<Self, String> {
+        fs::create_dir_all(&dir).map_err(|error| format!("create room state: {error}"))?;
+        let store_path = dir.join("store.sqlite3");
+        let store = Arc::new(
+            SqliteLocalStore::open(&store_path)
+                .map_err(|error| format!("open room store: {error:?}"))?,
+        );
+        let scope = dev_scope();
+        let local_identity_id = identity_id("dev-local-identity");
+        let local_device_id = device_id("dev-local-device");
+        let mock_peer_identity_id = identity_id("dev-mock-peer-identity");
+        let mock_peer_device_id = device_id("dev-mock-peer-device");
+        if store
+            .identity(&scope, &local_identity_id)
+            .map_err(|error| format!("local identity lookup: {error:?}"))?
+            .is_none()
+        {
+            seed_identity_and_device(&store, &scope, &local_identity_id, &local_device_id)?;
+        }
+        if store
+            .identity(&scope, &mock_peer_identity_id)
+            .map_err(|error| format!("peer identity lookup: {error:?}"))?
+            .is_none()
+        {
+            seed_identity_and_device(&store, &scope, &mock_peer_identity_id, &mock_peer_device_id)?;
+        }
+        let (credential_id, credential_secret) =
+            load_or_issue_room_credential(&store, &scope, &dir.join("service-credential.json"))?;
+        let join_issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([0x44_u8; 32]),
+                "https://join.ucr-dev.local/join",
+            )
+            .map_err(|error| format!("join issuer: {error:?}"))?,
+        );
+        Ok(Self {
+            store,
+            _store_cleanup: DevStoreCleanup {
+                path: store_path,
+                persistent: true,
+            },
+            transport: Arc::new(TestTransport::default()),
+            scope,
+            local_identity_id,
+            local_device_id,
+            mock_peer_identity_id,
+            mock_peer_device_id,
+            credential_id,
+            credential_secret,
+            join_issuer,
+            conference_state: Arc::new(ConferenceRuntimeState::new()),
+            realtime_registry: Arc::new(RealtimeSessionRegistry::default()),
+            debug_events: Mutex::new(vec![
+                "dev.identity.ready".to_owned(),
+                "dev.node.ready".to_owned(),
+                "dev.storage.ready".to_owned(),
+                "dev.room.persistent".to_owned(),
+            ]),
+            state_dir: Some(dir),
         })
     }
 
@@ -521,12 +612,18 @@ impl DevEnvironment {
         grpc_bind: SocketAddr,
         room_bind: SocketAddr,
     ) -> Result<(), String> {
-        let edge = Arc::new(room_edge::RoomEdge::start().await?);
+        let state_dir = self
+            .state_dir
+            .clone()
+            .ok_or_else(|| "local room requires a durable state directory".to_owned())?;
+        println!("UCR_ROOM_STATE={}", state_dir.display());
+        let edge = Arc::new(room_edge::RoomEdge::start(&state_dir).await?);
         room::spawn(
             Arc::clone(&self),
             grpc_bind,
             room_bind,
             Some(Arc::clone(&edge)),
+            state_dir,
         )
         .await?;
         self.serve_with(grpc_bind, Some(edge)).await
@@ -803,6 +900,104 @@ fn provision_dev_service_account(
         credential_id: record.credential_id,
         credential_secret,
     })
+}
+
+fn default_room_state_dir() -> PathBuf {
+    if let Ok(value) = std::env::var("UCR_ROOM_STATE")
+        && !value.is_empty()
+        && !value.contains('\0')
+    {
+        return PathBuf::from(value);
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home).join(".local/share/ucr-room");
+    }
+    std::env::temp_dir().join("ucr-room-state")
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredRoomCredential {
+    credential_id: String,
+    secret_hex: String,
+}
+
+fn load_or_issue_room_credential(
+    store: &SqliteLocalStore,
+    scope: &TenantScope,
+    path: &PathBuf,
+) -> Result<(ServiceCredentialId, ServiceCredentialSecret), String> {
+    if path.is_file() {
+        let bytes = fs::read(path).map_err(|error| format!("read room credential: {error}"))?;
+        let stored: StoredRoomCredential = serde_json::from_slice(&bytes)
+            .map_err(|_| "room credential file is invalid".to_owned())?;
+        let secret_bytes = unhex(&stored.secret_hex)?;
+        let secret_bytes: [u8; 32] = secret_bytes
+            .try_into()
+            .map_err(|_| "room credential secret is invalid".to_owned())?;
+        let credential_id = ServiceCredentialId::from_opaque(opaque(&stored.credential_id));
+        return Ok((
+            credential_id,
+            ServiceCredentialSecret::from_bytes(secret_bytes),
+        ));
+    }
+    let account = provision_dev_service_account(store, scope, "dev-service-principal")?;
+    let stored = StoredRoomCredential {
+        credential_id: wire_text(account.credential_id.as_opaque()),
+        secret_hex: hex(account.credential_secret.as_bytes()),
+    };
+    let bytes =
+        serde_json::to_vec(&stored).map_err(|error| format!("encode room credential: {error}"))?;
+    write_private_file(path, &bytes)?;
+    Ok((account.credential_id, account.credential_secret))
+}
+
+fn write_private_file(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("create room state: {error}"))?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("write room credential: {error}"))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("write room credential: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("write room credential: {error}"))?;
+    Ok(())
+}
+
+fn unhex(value: &str) -> Result<Vec<u8>, String> {
+    if !value.len().is_multiple_of(2) {
+        return Err("room credential secret is invalid".to_owned());
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let digits = value.as_bytes();
+    let mut index = 0;
+    while index < digits.len() {
+        let high = hex_digit(digits[index])?;
+        let low = hex_digit(digits[index + 1])?;
+        bytes.push((high << 4) | low);
+        index += 2;
+    }
+    Ok(bytes)
+}
+
+fn hex_digit(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err("room credential secret is invalid".to_owned()),
+    }
 }
 
 fn seed_identity_and_device(

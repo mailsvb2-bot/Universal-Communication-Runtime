@@ -49,7 +49,7 @@ struct StaticSecret {
 }
 
 impl RoomEdge {
-    pub(crate) async fn start() -> Result<Self, String> {
+    pub(crate) async fn start(state_dir: &std::path::Path) -> Result<Self, String> {
         let turn_secret = random_ascii_key()?;
         let (mut turn_process, turn_config) = spawn_turn(&turn_secret)?;
         if let Err(error) = wait_for_turn(&mut turn_process).await {
@@ -78,7 +78,7 @@ impl RoomEdge {
                 return Err(format!("TURN session config: {error:?}"));
             }
         };
-        let recorder = match RoomRecorder::start() {
+        let recorder = match RoomRecorder::start(state_dir) {
             Ok(recorder) => recorder,
             Err(error) => {
                 abandon_turn(&mut turn_process, &turn_config);
@@ -120,8 +120,15 @@ impl Drop for RoomEdge {
 }
 
 impl RoomRecorder {
-    fn start() -> Result<Arc<Self>, String> {
-        let root = std::env::temp_dir().join(format!("ucr-room-recordings-{}", std::process::id()));
+    fn start(state_dir: &std::path::Path) -> Result<Arc<Self>, String> {
+        let root = state_dir.join("archive");
+        // The archive provider accepts an existing directory only when it is
+        // already owner-only. Creating it here would leave the default mode
+        // and the provider would refuse it.
+        if root.is_dir() {
+            set_owner_only_dir(&root)?;
+        }
+        let key_bytes = load_or_create_recording_key(&state_dir.join("recording.key"))?;
         let handle = SecretHandle {
             secret_id: OpaqueId::new("room-recording-at-rest")
                 .map_err(|_| "recording secret id is invalid".to_owned())?,
@@ -130,7 +137,7 @@ impl RoomRecorder {
         let version = SecretVersion {
             version_id: OpaqueId::new("v1")
                 .map_err(|_| "recording secret version is invalid".to_owned())?,
-            material: SecretMaterial::new(random_ascii_key()?.into_bytes())
+            material: SecretMaterial::new(key_bytes)
                 .map_err(|_| "recording key was rejected".to_owned())?,
         };
         let provider = Arc::new(
@@ -321,6 +328,54 @@ fn stop_turn(process: &mut Child) {
 fn abandon_turn(process: &mut Child, config: &std::path::Path) {
     stop_turn(process);
     let _ = fs::remove_file(config);
+}
+
+fn set_owner_only_dir(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("recording archive permissions: {error}"))?;
+    }
+    Ok(())
+}
+
+fn load_or_create_recording_key(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    if path.is_file() {
+        let bytes = fs::read(path).map_err(|error| format!("read recording key: {error}"))?;
+        if bytes.len() != 32 {
+            return Err("recording key is invalid".to_owned());
+        }
+        return Ok(bytes);
+    }
+    let key = random_ascii_key()?.into_bytes();
+    if key.len() != 32 {
+        return Err("recording key must be 32 bytes".to_owned());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("recording key directory: {error}"))?;
+    }
+    write_private_bytes(path, &key)?;
+    Ok(key)
+}
+
+fn write_private_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("write recording key: {error}"))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("write recording key: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("write recording key: {error}"))?;
+    Ok(())
 }
 
 fn random_ascii_key() -> Result<String, String> {

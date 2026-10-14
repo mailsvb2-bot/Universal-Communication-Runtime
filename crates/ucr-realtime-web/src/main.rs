@@ -38,6 +38,7 @@ const DEFAULT_UPSTREAM: &str = "http://127.0.0.1:50051";
 const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ROOM_PROXY_BODY_BYTES: usize = 12 * 1024;
 const MAX_ROOM_PROXY_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_VIEWING_BYTES: usize = 32 * 1024 * 1024;
 const ROOM_PROXY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_BEARER_BYTES: usize = 4096;
 const MAX_SIGNALING_SDP_BYTES: usize = 256 * 1024;
@@ -531,6 +532,25 @@ async fn handle_request(
     if method == Method::GET && reference_media_asset(&path).is_some() {
         return Ok(serve_reference_media_asset(&path));
     }
+    if method == Method::GET && path == "/room/viewings" {
+        return Ok(with_cors(list_viewings(), origin.as_deref()));
+    }
+    if method == Method::GET
+        && let Some(id) = path.strip_prefix("/room/viewings/")
+    {
+        return Ok(with_cors(serve_viewing(id), origin.as_deref()));
+    }
+    if method == Method::POST && path == "/v1/room/viewing" {
+        let viewing_id = viewing_id_header(request.headers());
+        let body = match bounded_body_limit(request.into_body(), MAX_VIEWING_BYTES).await {
+            Ok(body) => body,
+            Err(error) => return Ok(error.into_response()),
+        };
+        return Ok(with_cors(
+            store_viewing(viewing_id.as_deref(), &body),
+            origin.as_deref(),
+        ));
+    }
 
     if method != Method::POST {
         return Ok(api_error(
@@ -542,8 +562,10 @@ async fn handle_request(
 
     // Room enrollment is not a realtime session. The browser stays on this
     // origin; only these exact paths are forwarded to the loopback room API.
-    // A bearer is not required and is not forwarded.
+    // A bearer is optional. When the browser sends one, it is forwarded so
+    // the room can tell a speaker from an attendee. It is not logged.
     if room_proxy_path(&path) {
+        let authorization = optional_authorization(request.headers());
         let body = match bounded_body(request.into_body()).await {
             Ok(body) => body,
             Err(error) => return Ok(error.into_response()),
@@ -555,7 +577,8 @@ async fn handle_request(
                 "room request is too large",
             ));
         }
-        let response = proxy_room_post(state.room_api, &path, &body).await;
+        let response =
+            proxy_room_post(state.room_api, &path, &body, authorization.as_deref()).await;
         return Ok(with_cors(response, origin.as_deref()));
     }
 
@@ -990,7 +1013,10 @@ async fn register_mls_key_package(
     match client.register_mls_key_package(request).await {
         Ok(response) => match response.into_inner().result {
             Some(pb::realtime_register_mls_key_package_response::Result::Acknowledgement(_)) => {
-                json_response(StatusCode::OK, &serde_json::json!({"ok": true}))
+                match load_mls_bootstrap(state, token, &session).await {
+                    Ok(bootstrap) => json_response(StatusCode::OK, &bootstrap),
+                    Err(_) => json_response(StatusCode::OK, &serde_json::json!({"ok": true})),
+                }
             }
             Some(pb::realtime_register_mls_key_package_response::Result::Error(error)) => {
                 canonical_error_response(
@@ -1087,34 +1113,47 @@ fn decode_mls_bootstrap(
 }
 
 async fn get_mls_bootstrap(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+    match load_mls_bootstrap(state, token, &input).await {
+        Ok(bootstrap) => json_response(StatusCode::OK, &bootstrap),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn load_mls_bootstrap(
+    state: &AppState,
+    token: &str,
+    input: &SessionRequest,
+) -> Result<MlsBootstrapResponse, GatewayFailure> {
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeGetMlsBootstrapRequest {
-        scope: Some(pb_scope(&input)),
+        scope: Some(pb_scope(input)),
         call_id: Some(pb_id(&input.call)),
         session_id: Some(pb_id(&input.session)),
     });
-    if let Err(error) = attach_bearer(&mut request, token) {
-        return error.into_response();
-    }
-
+    attach_bearer(&mut request, token)?;
     match client.get_mls_bootstrap(request).await {
         Ok(response) => match response.into_inner().result {
             Some(pb::realtime_get_mls_bootstrap_response::Result::Bootstrap(bootstrap)) => {
-                match decode_mls_bootstrap(bootstrap) {
-                    Ok(bootstrap) => json_response(StatusCode::OK, &bootstrap),
-                    Err(error) => error.into_response(),
-                }
+                decode_mls_bootstrap(bootstrap)
             }
             Some(pb::realtime_get_mls_bootstrap_response::Result::Error(error)) => {
-                canonical_error_response(
-                    &error,
+                Err(GatewayFailure::new(
+                    canonical_http_status(&error),
                     "mls_bootstrap_rejected",
                     "device-bound MLS bootstrap rejected",
-                )
+                ))
             }
-            None => empty_upstream(),
+            None => Err(GatewayFailure::new(
+                StatusCode::BAD_GATEWAY,
+                "invalid_upstream_response",
+                "realtime upstream returned an incomplete response",
+            )),
         },
-        Err(status) => grpc_error(&status),
+        Err(status) => Err(GatewayFailure::new(
+            grpc_http_status(&status),
+            "upstream_rejected",
+            "realtime upstream rejected the request",
+        )),
     }
 }
 
@@ -1301,6 +1340,9 @@ async fn send_chat_message(
     token: &str,
     input: SendChatMessageRequest,
 ) -> HttpResponse {
+    if let Err(response) = admit_room_chat(state, token).await {
+        return response;
+    }
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeSendChatMessageRequest {
         scope: Some(pb_scope(&input.session)),
@@ -2175,6 +2217,10 @@ async fn close_webrtc(state: &AppState, token: &str, input: WebRtcCloseRequest) 
 }
 
 async fn bounded_body(body: Incoming) -> Result<Bytes, GatewayFailure> {
+    bounded_body_limit(body, MAX_REQUEST_BODY_BYTES).await
+}
+
+async fn bounded_body_limit(body: Incoming, limit: usize) -> Result<Bytes, GatewayFailure> {
     let collected = body.collect().await.map_err(|_| {
         GatewayFailure::new(
             StatusCode::BAD_REQUEST,
@@ -2183,7 +2229,7 @@ async fn bounded_body(body: Incoming) -> Result<Bytes, GatewayFailure> {
         )
     })?;
     let bytes = collected.to_bytes();
-    if bytes.len() > MAX_REQUEST_BODY_BYTES {
+    if bytes.len() > limit {
         return Err(GatewayFailure::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             "body_too_large",
@@ -2331,12 +2377,8 @@ fn webrtc_offer_response(
     )
 }
 
-fn canonical_error_response(
-    error: &pb::ErrorEnvelope,
-    code: &'static str,
-    message: &'static str,
-) -> HttpResponse {
-    let status = match pb::ErrorCode::try_from(error.code) {
+fn canonical_http_status(error: &pb::ErrorEnvelope) -> StatusCode {
+    match pb::ErrorCode::try_from(error.code) {
         Ok(pb::ErrorCode::InvalidArgument | pb::ErrorCode::MalformedFrame) => {
             StatusCode::BAD_REQUEST
         }
@@ -2361,8 +2403,15 @@ fn canonical_error_response(
             pb::ErrorCode::IntegrityFailure | pb::ErrorCode::Internal | pb::ErrorCode::Unspecified,
         )
         | Err(_) => StatusCode::BAD_GATEWAY,
-    };
-    api_error(status, code, message)
+    }
+}
+
+fn canonical_error_response(
+    error: &pb::ErrorEnvelope,
+    code: &'static str,
+    message: &'static str,
+) -> HttpResponse {
+    api_error(canonical_http_status(error), code, message)
 }
 
 fn webrtc_error(
@@ -2373,8 +2422,8 @@ fn webrtc_error(
     canonical_error_response(error, code, message)
 }
 
-fn grpc_error(status: &tonic::Status) -> HttpResponse {
-    let http = match status.code() {
+fn grpc_http_status(status: &tonic::Status) -> StatusCode {
+    match status.code() {
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
         tonic::Code::Unauthenticated => StatusCode::UNAUTHORIZED,
         tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
@@ -2382,9 +2431,12 @@ fn grpc_error(status: &tonic::Status) -> HttpResponse {
         tonic::Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
         tonic::Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::BAD_GATEWAY,
-    };
+    }
+}
+
+fn grpc_error(status: &tonic::Status) -> HttpResponse {
     api_error(
-        http,
+        grpc_http_status(status),
         "upstream_rejected",
         "realtime upstream rejected the request",
     )
@@ -2531,6 +2583,247 @@ fn room_page() -> String {
     CLIENT_HTML.replace("\"%%UCR_ROOM_API%%\"", "\"same-origin\"")
 }
 
+fn optional_authorization(headers: &hyper::HeaderMap) -> Option<String> {
+    let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    if !forwardable_authorization(value) {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn forwarded_authorization(authorization: Option<&str>) -> String {
+    let Some(value) = authorization else {
+        return String::new();
+    };
+    if !forwardable_authorization(value) {
+        return String::new();
+    }
+    format!("Authorization: {value}\r\n")
+}
+
+fn forwardable_authorization(value: &str) -> bool {
+    value.len() <= MAX_BEARER_BYTES.saturating_add(7)
+        && value.starts_with("Bearer ")
+        && !value
+            .bytes()
+            .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
+}
+
+async fn admit_room_chat(state: &AppState, token: &str) -> Result<(), HttpResponse> {
+    if token.is_empty() || token.len() > MAX_BEARER_BYTES || token.chars().any(char::is_whitespace)
+    {
+        return Ok(());
+    }
+    let authorization = format!("Bearer {token}");
+    match tokio::time::timeout(
+        ROOM_PROXY_TIMEOUT,
+        read_room_proxy(
+            state.room_api,
+            "/v1/room/chat-admit",
+            b"{}",
+            Some(authorization.as_str()),
+        ),
+    )
+    .await
+    {
+        Ok(Ok((status, _))) if status.is_success() => Ok(()),
+        Ok(Ok((status, payload))) => Err(json_bytes_response(status, payload)),
+        _ => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "moderation_unavailable",
+            "room moderation check unavailable",
+        )),
+    }
+}
+
+fn viewing_id_header(headers: &hyper::HeaderMap) -> Option<String> {
+    let value = headers.get("x-ucr-viewing-id")?.to_str().ok()?;
+    viewing_id(value).map(str::to_owned)
+}
+
+fn viewing_id(value: &str) -> Option<&str> {
+    if (1..=80).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn room_state_dir() -> std::path::PathBuf {
+    if let Ok(value) = std::env::var("UCR_ROOM_STATE")
+        && !value.is_empty()
+        && !value.contains('\0')
+    {
+        return std::path::PathBuf::from(value);
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return std::path::PathBuf::from(home).join(".local/share/ucr-room");
+    }
+    std::env::temp_dir().join("ucr-room-state")
+}
+
+fn viewing_directory() -> std::path::PathBuf {
+    room_state_dir().join("viewing")
+}
+
+fn ensure_private_viewing_dir(directory: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn write_private_viewing(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn store_viewing(id: Option<&str>, body: &[u8]) -> HttpResponse {
+    let Some(id) = id else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_viewing",
+            "viewing id is invalid",
+        );
+    };
+    if body.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_viewing",
+            "viewing copy is empty",
+        );
+    }
+    let directory = viewing_directory();
+    if ensure_private_viewing_dir(&directory).is_err() {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "viewing_unavailable",
+            "viewing copy could not be stored",
+        );
+    }
+    let webm = directory.join(format!("{id}.webm"));
+    let temporary = directory.join(format!("{id}.webm.tmp"));
+    if write_private_viewing(&temporary, body).is_err() {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "viewing_unavailable",
+            "viewing copy could not be stored",
+        );
+    }
+    if std::fs::rename(&temporary, &webm).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "viewing_unavailable",
+            "viewing copy could not be stored",
+        );
+    }
+    let meta = serde_json::json!({
+        "id": id,
+        "bytes": body.len(),
+        "updatedAt": unix_time_ms(),
+    });
+    if write_private_viewing(
+        &directory.join(format!("{id}.json")),
+        meta.to_string().as_bytes(),
+    )
+    .is_err()
+    {
+        let _ = std::fs::remove_file(&webm);
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "viewing_unavailable",
+            "viewing metadata could not be stored",
+        );
+    }
+    json_response(StatusCode::OK, &serde_json::json!({"ok": true, "id": id}))
+}
+
+fn list_viewings() -> HttpResponse {
+    let mut viewings = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(viewing_directory()) {
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if viewing_id(id).is_none() {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            viewings.push(value);
+        }
+    }
+    viewings.sort_by_key(|item| std::cmp::Reverse(viewing_time(item)));
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({"ok": true, "viewings": viewings}),
+    )
+}
+
+fn viewing_time(value: &serde_json::Value) -> i64 {
+    value
+        .get("updatedAt")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+}
+
+fn serve_viewing(id: &str) -> HttpResponse {
+    let Some(id) = viewing_id(id) else {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "viewing copy not found");
+    };
+    let path = viewing_directory().join(format!("{id}.webm"));
+    match std::fs::read(&path) {
+        Ok(bytes) if !bytes.is_empty() && bytes.len() <= MAX_VIEWING_BYTES => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "video/webm")
+            .header(CACHE_CONTROL, "no-store")
+            .header("X-Content-Type-Options", "nosniff")
+            .body(full_body(Bytes::from(bytes)))
+            .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR)),
+        _ => api_error(StatusCode::NOT_FOUND, "not_found", "viewing copy not found"),
+    }
+}
+
+fn unix_time_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis()),
+    )
+    .unwrap_or(i64::MAX)
+}
+
 fn room_proxy_path(path: &str) -> bool {
     matches!(
         path,
@@ -2539,6 +2832,9 @@ fn room_proxy_path(path: &str) -> bool {
             | "/v1/room/inspect"
             | "/v1/room/join"
             | "/v1/room/enter"
+            | "/v1/room/roster"
+            | "/v1/room/moderate"
+            | "/v1/room/chat-admit"
     )
 }
 
@@ -2577,11 +2873,21 @@ fn parse_room_api_socket(base: &str) -> Result<SocketAddr, String> {
     Ok(SocketAddr::new(ip, port_number))
 }
 
-async fn proxy_room_post(addr: SocketAddr, path: &str, body: &[u8]) -> HttpResponse {
+async fn proxy_room_post(
+    addr: SocketAddr,
+    path: &str,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
     if !room_proxy_path(path) {
         return api_error(StatusCode::NOT_FOUND, "not_found", "room route not found");
     }
-    match tokio::time::timeout(ROOM_PROXY_TIMEOUT, read_room_proxy(addr, path, body)).await {
+    match tokio::time::timeout(
+        ROOM_PROXY_TIMEOUT,
+        read_room_proxy(addr, path, body, authorization),
+    )
+    .await
+    {
         Ok(Ok((status, payload))) => json_bytes_response(status, payload),
         Ok(Err(error)) => error.into_response(),
         Err(_) => api_error(
@@ -2596,6 +2902,7 @@ async fn read_room_proxy(
     addr: SocketAddr,
     path: &str,
     body: &[u8],
+    authorization: Option<&str>,
 ) -> Result<(StatusCode, Vec<u8>), GatewayFailure> {
     let mut stream = TcpStream::connect(addr).await.map_err(|_| {
         GatewayFailure::new(
@@ -2605,7 +2912,8 @@ async fn read_room_proxy(
         )
     })?;
     let header = format!(
-        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        forwarded_authorization(authorization),
         body.len()
     );
     stream.write_all(header.as_bytes()).await.map_err(|_| {
@@ -2859,6 +3167,10 @@ mod tests {
         assert!(parse_room_api_socket("http://192.168.1.10:43123").is_err());
         assert!(room_proxy_path("/v1/room/enter"));
         assert!(room_proxy_path("/v1/room/reserve"));
+        assert!(room_proxy_path("/v1/room/roster"));
+        assert!(room_proxy_path("/v1/room/moderate"));
+        assert!(room_proxy_path("/v1/room/chat-admit"));
+        assert!(!room_proxy_path("/v1/room/viewing"));
         assert!(!room_proxy_path("/v1/room/enter/"));
         assert!(!room_proxy_path("/v1/room/../enter"));
         assert!(!room_proxy_path("/v1/realtime/join"));
@@ -2872,6 +3184,9 @@ mod tests {
         assert!(!page.contains("%%UCR_ROOM_API%%"));
         assert!(page.contains("/v1/room/enter"));
         assert!(page.contains("createUcrCanonicalDevicePreparation"));
+        assert!(page.contains("id=\"room-people\""));
+        assert!(page.contains("id=\"room-viewings\""));
+        assert!(page.contains("Показать экран"));
         assert!(!page.contains("createUcrFirstPartyCallEntry"));
         assert!(!page.contains("fastCameraPreview"));
         assert!(page.contains("id=\"room-lobby\""));
