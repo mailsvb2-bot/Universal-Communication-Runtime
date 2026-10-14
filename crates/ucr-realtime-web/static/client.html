@@ -1520,6 +1520,10 @@ async function heartbeat(){
   const current=()=>sessionActive&&generation===sessionLifecycleGeneration&&
     request===heartbeatRequestGeneration;
   try{
+    // A suspended tab can wake after the grant has already expired. Renew
+    // before this heartbeat, or the rejection handler will leave the room.
+    if(typeof renewLocalRoomGrant==="function")await renewLocalRoomGrant();
+    if(!current())return;
     const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
     if(!current())return;
     const data=await r.json();
@@ -1533,10 +1537,14 @@ async function heartbeat(){
     if(current()&&mediaActive&&e2eeAdapterReady){
       syncReceiveSubscriptions().catch(e=>{if(current()&&e2eeAdapterReady)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
     }
-    if(current()&&typeof renewLocalRoomGrant==="function")renewLocalRoomGrant().catch(()=>{});
   }catch(error){
     // A failed heartbeat from a retired/replaced session must not invoke the
     // UI's heartbeat_rejected handler and terminate a newer active session.
+    const grantExpired=claims&&typeof claims.expires==="number"&&Date.now()>=claims.expires;
+    if(current()&&grantExpired&&typeof renewLocalRoomGrant==="function"){
+      await renewLocalRoomGrant();
+      if(!current()||(sessionActive&&Date.now()<claims.expires))return;
+    }
     if(current())throw error;
   }
 }
@@ -1628,7 +1636,18 @@ async function join(){
     if(generation!==sessionLifecycleGeneration)return;
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
-    heartbeatTimer=setInterval(()=>{heartbeat().catch(async e=>{if(e.code==="heartbeat_rejected"){await leave();ui.state.textContent="Access ended";ui.status.textContent="Conference access ended by host or server policy.";return;}ui.status.textContent="Heartbeat failed: "+e.message;});},interval);
+    heartbeatTimer=setInterval(()=>{heartbeat().catch(async e=>{
+      if(e.code==="heartbeat_rejected"){
+        const grantExpired=claims&&typeof claims.expires==="number"&&Date.now()>=claims.expires;
+        const localRoom=typeof sessionStorage!=="undefined"&&sessionStorage.getItem("ucrLocalRoom")==="1";
+        if(grantExpired&&localRoom&&typeof renewLocalRoomGrant==="function"){
+          await renewLocalRoomGrant();
+          if(sessionActive&&claims&&Date.now()<claims.expires)return;
+        }
+        await leave();ui.state.textContent="Access ended";ui.status.textContent="Conference access ended by host or server policy.";return;
+      }
+      ui.status.textContent="Heartbeat failed: "+e.message;
+    });},interval);
     await applyAdmissionState(data.admission_state);
   }catch(e){
     if(generation!==sessionLifecycleGeneration)return;
@@ -2159,8 +2178,11 @@ function holdRoomPresence(){
 async function renewLocalRoomGrant(){
   if(typeof sessionStorage==="undefined"||typeof fetch!=="function")return;
   if(sessionStorage.getItem("ucrLocalRoom")!=="1"||!sessionActive||!claims)return;
+  if(typeof claims.expires!=="number"||renewLocalRoomGrant.busy)return;
+  // Also run after expiry. A sleeping laptop misses the last two minutes,
+  // and the next heartbeat is rejected before the old end-of-success hook.
   const remaining=claims.expires-Date.now();
-  if(!(remaining>0&&remaining<=120000)||renewLocalRoomGrant.busy)return;
+  if(remaining>120000)return;
   const roomApi=sessionStorage.getItem("ucrRoomApi");
   const user=sessionStorage.getItem("ucrRoomUser");
   if(!roomApi||!user)return;
