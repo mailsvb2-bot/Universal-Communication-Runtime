@@ -53,3 +53,33 @@ translate HTTP-localhost testing into a production HTTPS authentication proof.
 
 Green unit tests, `LISTENING` ports, and the fact that `/start` renders
 **do not** substitute for steps 3–6.
+
+## Windows 10 local media preparation
+
+The `/start` HTML alone is insufficient. Media assets are intentionally
+**gitignored** and must be generated from the checked-out source revision.
+After installing a supported Rust/Node toolchain, run PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/build-browser-media.ps1
+```
+
+The script pins wasm-bindgen-cli 0.2.128 and esbuild 0.25.5, builds the
+endpoint WASM and the local first-party SDK module and verifies all three
+nonempty output files. It never invents device signers, recovery keys or
+Join grants. The generated files are excluded from Git commits.
+
+### Readiness is not a call proof
+
+- `GET /healthz` checks only the running browser gateway.
+- `GET /readyz` returns 503 until **all** browser media assets exist,
+  `UCR_FIRST_PARTY_UPSTREAM` is configured, and the BFF is reachable on
+  loopback; returns 200 `ready` otherwise.
+- `/readyz` does not claim the HTTPS terminator, ICE/TURN, SFU placement,
+  authenticated Identity, device trust, or any actual media call works.
+
+On the Windows 10 1607 smoke machine, initially the browser displayed
+`Проверка независимой авторизации…`. This is consistent with absent
+browser media assets, but a browser developer-console or network trace
+must confirm the missing module response; do not mistake that UI symptom
+alone for an authenticated or unauthenticated server result.
