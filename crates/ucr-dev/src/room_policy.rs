@@ -204,4 +204,22 @@ mod tests {
         assert!(loaded.silence_message("user-bbbbbbbb", i64::MAX).is_none());
         let _ = fs::remove_dir_all(dir);
     }
+    #[test]
+    fn missing_policy_is_empty_but_corrupt_policy_fails_closed() {
+        let dir = std::env::temp_dir().join(format!(
+            "ucr-room-policy-invalid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("moderation.json");
+        assert_eq!(RoomPolicy::load(&path).expect("new policy"), RoomPolicy::default());
+        fs::write(&path, b"{truncated").expect("corrupt policy");
+        assert!(RoomPolicy::load(&path).is_err(), "corruption must not unblock users");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
 }
