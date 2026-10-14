@@ -1,4 +1,4 @@
-//! Full in-process BFF -> durable canonical SQLite acceptance.
+//! Full in-process BFF -> durable canonical `SQLite` acceptance.
 //! Not a simulated HTTP transport and not a real public TLS deployment.
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
@@ -68,7 +68,7 @@ fn proof(
     let challenge_id = challenge["challengeId"]
         .as_str()
         .expect("server challenge id");
-    let signed = encoded_proof(
+    let signed_payload = encoded_proof(
         domain,
         &json!([
             binding.tenant_id,
@@ -87,7 +87,7 @@ fn proof(
         "keyId": key_id,
         "publicKeyBase64Url": public_key_base64_url,
         "challengeId": challenge_id,
-        "signatureBase64Url": URL_SAFE_NO_PAD.encode(signer.sign(signed.as_bytes()).to_bytes())
+        "signatureBase64Url": URL_SAFE_NO_PAD.encode(signer.sign(signed_payload.as_bytes()).to_bytes())
     })
 }
 
@@ -166,7 +166,7 @@ fn signed_login(state: &State, binding: &Binding, signer: &SigningKey) {
         &serde_json::to_vec(binding).unwrap(),
     )
     .expect("login challenge");
-    let signed = encoded_proof(
+    let signed_payload = encoded_proof(
         "ucr-first-party-device-login.v1",
         &json!([
             binding.tenant_id,
@@ -181,7 +181,7 @@ fn signed_login(state: &State, binding: &Binding, signer: &SigningKey) {
     let proof = json!({
         "binding": binding,
         "challengeId": issued["challengeId"],
-        "signatureBase64Url": URL_SAFE_NO_PAD.encode(signer.sign(signed.as_bytes()).to_bytes())
+        "signatureBase64Url": URL_SAFE_NO_PAD.encode(signer.sign(signed_payload.as_bytes()).to_bytes())
     });
     let (response, cookie) = login_route(
         state,
@@ -260,12 +260,16 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
     assert_eq!(restarted.sessions.lock().unwrap().len(), 4);
     // Revoke B's recovered Device via the canonical owner, then verify that
     // its old signer is rejected even after another complete server restart.
+    verify_revoked_device_stays_revoked(&db, restarted, &bob_two, &bob_second_signer, &alice, &alice_signer);
+}
+
+fn verify_revoked_device_stays_revoked(db: &TestDb, restarted: State, bob_two: &Binding, bob_second_signer: &SigningKey, alice: &Binding, alice_signer: &SigningKey) {
     restarted
         .store
         .revoke_device(
-            &scope(&bob_two).unwrap(),
-            &device(&bob_two).unwrap(),
-            &identity(&bob_two).unwrap(),
+            &scope(bob_two).unwrap(),
+            &device(bob_two).unwrap(),
+            &identity(bob_two).unwrap(),
         )
         .unwrap();
     drop(restarted);
@@ -274,10 +278,10 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
     let (challenge, _) = login_route(
         &revoked,
         "/v1/first-party/login/challenge",
-        &serde_json::to_vec(&bob_two).unwrap(),
+        &serde_json::to_vec(bob_two).unwrap(),
     )
     .unwrap();
-    let signed = encoded_proof(
+    let signed_payload = encoded_proof(
         "ucr-first-party-device-login.v1",
         &json!([
             bob_two.tenant_id,
@@ -293,7 +297,7 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
         "binding": bob_two,
         "challengeId": challenge["challengeId"],
         "signatureBase64Url": URL_SAFE_NO_PAD.encode(
-            bob_second_signer.sign(signed.as_bytes()).to_bytes())
+            bob_second_signer.sign(signed_payload.as_bytes()).to_bytes())
     });
     assert_eq!(
         login_route(
@@ -304,5 +308,6 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
         .err(),
         Some(StatusCode::UNAUTHORIZED)
     );
-    signed_login(&revoked, &alice, &alice_signer);
+    signed_login(&revoked, alice, alice_signer);
 }
+
