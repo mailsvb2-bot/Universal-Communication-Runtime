@@ -959,112 +959,118 @@ fn account_route(
             device(&binding)?;
             Ok((challenge(state, binding, "recover", None, None)?, None))
         }
-        "/v1/first-party/signup/finish" | "/v1/first-party/recover/finish" => account_finish(state, public, path, body),
+        "/v1/first-party/signup/finish" | "/v1/first-party/recover/finish" => {
+            account_finish(state, public, path, body)
+        }
         _ => Err(StatusCode::NOT_FOUND),
     }
 }
 
-fn account_finish(state: &State, public: &TenantScope, path: &str, body: &[u8]) -> Result<(Value, Option<String>), StatusCode> {
-        let input: AccountFinish = parse(body)?;
-        let registration = path.ends_with("/signup/finish");
-        let purpose = if registration { "signup" } else { "recover" };
-        if &scope(&input.binding)? != public {
-            return Err(StatusCode::FORBIDDEN);
-        }
-        let pending = consume(state, &input.binding, &input.challenge_id, purpose)?;
-        let key_id = KeyId::from_opaque(opaque(&input.key_id)?);
-        let public_key = URL_SAFE_NO_PAD
-            .decode(&input.public_key_base64_url)
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
-        if public_key.len() != 32
-            || URL_SAFE_NO_PAD.encode(&public_key) != input.public_key_base64_url
-        {
+fn account_finish(
+    state: &State,
+    public: &TenantScope,
+    path: &str,
+    body: &[u8],
+) -> Result<(Value, Option<String>), StatusCode> {
+    let input: AccountFinish = parse(body)?;
+    let registration = path.ends_with("/signup/finish");
+    let purpose = if registration { "signup" } else { "recover" };
+    if &scope(&input.binding)? != public {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let pending = consume(state, &input.binding, &input.challenge_id, purpose)?;
+    let key_id = KeyId::from_opaque(opaque(&input.key_id)?);
+    let public_key = URL_SAFE_NO_PAD
+        .decode(&input.public_key_base64_url)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if public_key.len() != 32 || URL_SAFE_NO_PAD.encode(&public_key) != input.public_key_base64_url
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let signed = encoded_proof(
+        if registration {
+            "ucr-first-party-signup.v1"
+        } else {
+            "ucr-first-party-recover.v1"
+        },
+        &json!([
+            input.binding.tenant_id,
+            input.binding.namespace_id,
+            input.binding.participant_id,
+            input.binding.device,
+            input.key_id,
+            input.public_key_base64_url,
+            pending.id,
+            pending.nonce,
+        ]),
+    )?;
+    let verifier_key: [u8; 32] = public_key
+        .clone()
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    verify_ed25519(verifier_key, &signed, &input.signature_base64_url)?;
+    let account = identity(&input.binding)?;
+    let device_id = device(&input.binding)?;
+    let descriptor = DeviceDescriptor {
+        device_id: device_id.clone(),
+        identity_id: account.clone(),
+        state: DeviceLifecycleState::Active,
+    };
+    let signing_key = PublicKeyDescriptor {
+        key_id,
+        device_id,
+        purpose: KeyPurpose::Signing,
+        algorithm_id: "ed25519".to_owned(),
+        algorithm_version: 1,
+        key_format_version: 1,
+        public_key,
+    };
+    let next_code = nonce()?;
+    let next_verifier = recovery_verifier(&next_code)?;
+    if registration {
+        if input.recovery_code.is_some() {
             return Err(StatusCode::BAD_REQUEST);
         }
-        let signed = encoded_proof(
-            if registration {
-                "ucr-first-party-signup.v1"
-            } else {
-                "ucr-first-party-recover.v1"
-            },
-            &json!([
-                input.binding.tenant_id,
-                input.binding.namespace_id,
-                input.binding.participant_id,
-                input.binding.device,
-                input.key_id,
-                input.public_key_base64_url,
-                pending.id,
-                pending.nonce,
-            ]),
-        )?;
-        let verifier_key: [u8; 32] = public_key
-            .clone()
-            .try_into()
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
-        verify_ed25519(verifier_key, &signed, &input.signature_base64_url)?;
-        let account = identity(&input.binding)?;
-        let device_id = device(&input.binding)?;
-        let descriptor = DeviceDescriptor {
-            device_id: device_id.clone(),
-            identity_id: account.clone(),
-            state: DeviceLifecycleState::Active,
-        };
-        let signing_key = PublicKeyDescriptor {
-            key_id,
-            device_id,
-            purpose: KeyPurpose::Signing,
-            algorithm_id: "ed25519".to_owned(),
-            algorithm_version: 1,
-            key_format_version: 1,
-            public_key,
-        };
-        let next_code = nonce()?;
-        let next_verifier = recovery_verifier(&next_code)?;
-        if registration {
-            if input.recovery_code.is_some() {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            state
-                .store
-                .first_party_register_account(
-                    public,
-                    &account,
-                    &descriptor,
-                    &signing_key,
-                    next_verifier,
-                )
-                .map_err(|_| StatusCode::CONFLICT)?;
-        } else {
-            let existing = input
-                .recovery_code
-                .as_deref()
-                .ok_or(StatusCode::FORBIDDEN)?;
-            let verifier = recovery_verifier(existing)?;
-            state
-                .store
-                .first_party_recover_device(
-                    public,
-                    &account,
-                    &descriptor,
-                    &signing_key,
-                    verifier,
-                    next_verifier,
-                )
-                .map_err(|_| StatusCode::FORBIDDEN)?;
-        }
-        let subject = subject_for(state, &input.binding)?;
-        let (value, cookie) = issue_session(
-            state,
-            input.binding,
-            subject,
-            signing_key.key_id.as_opaque().as_str().to_owned(),
-            verifier_key,
-        )?;
-        Ok((
-            json!({"binding": value, "recoveryCode": next_code}),
-            Some(cookie),
-        ))
+        state
+            .store
+            .first_party_register_account(
+                public,
+                &account,
+                &descriptor,
+                &signing_key,
+                next_verifier,
+            )
+            .map_err(|_| StatusCode::CONFLICT)?;
+    } else {
+        let existing = input
+            .recovery_code
+            .as_deref()
+            .ok_or(StatusCode::FORBIDDEN)?;
+        let verifier = recovery_verifier(existing)?;
+        state
+            .store
+            .first_party_recover_device(
+                public,
+                &account,
+                &descriptor,
+                &signing_key,
+                verifier,
+                next_verifier,
+            )
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+    }
+    let subject = subject_for(state, &input.binding)?;
+    let (value, cookie) = issue_session(
+        state,
+        input.binding,
+        subject,
+        signing_key.key_id.as_opaque().as_str().to_owned(),
+        verifier_key,
+    )?;
+    Ok((
+        json!({"binding": value, "recoveryCode": next_code}),
+        Some(cookie),
+    ))
 }
 
 fn login_route(
@@ -1194,36 +1200,36 @@ fn device_route(
 }
 
 fn device_approve(state: &State, auth: &Session, body: &[u8]) -> Result<Value, StatusCode> {
-        let input: DeviceApproval = parse(body)?;
-        ensure_binding(&input.binding, auth)?;
-        let pending = consume(state, &input.binding, &input.challenge_id, "device")?;
-        if pending.key_id.as_deref() != Some(&input.key_id)
-            || pending.public_key.map(|x| URL_SAFE_NO_PAD.encode(x))
-                != Some(input.public_key_base64_url.clone())
-        {
-            return Err(StatusCode::FORBIDDEN);
-        }
-        let (key_id, key) = trusted_key(state, &input.binding)?;
-        if key_id != input.key_id || pending.public_key != Some(key) {
-            // New device enrollment requires independent, existing account
-            // authority. Never let a logged-in device self-provision a new signer.
-            return Err(StatusCode::FORBIDDEN);
-        }
-        let signed = encoded_proof(
-            "ucr-first-party-device-enrollment.v1",
-            &json!([
-                input.binding.tenant_id,
-                input.binding.namespace_id,
-                input.binding.participant_id,
-                input.binding.device,
-                input.key_id,
-                input.public_key_base64_url,
-                pending.id,
-                pending.nonce,
-            ]),
-        )?;
-        verify_ed25519(key, &signed, &input.signature_base64_url)?;
-        Ok(json!({"approved": true}))
+    let input: DeviceApproval = parse(body)?;
+    ensure_binding(&input.binding, auth)?;
+    let pending = consume(state, &input.binding, &input.challenge_id, "device")?;
+    if pending.key_id.as_deref() != Some(&input.key_id)
+        || pending.public_key.map(|x| URL_SAFE_NO_PAD.encode(x))
+            != Some(input.public_key_base64_url.clone())
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let (key_id, key) = trusted_key(state, &input.binding)?;
+    if key_id != input.key_id || pending.public_key != Some(key) {
+        // New device enrollment requires independent, existing account
+        // authority. Never let a logged-in device self-provision a new signer.
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let signed = encoded_proof(
+        "ucr-first-party-device-enrollment.v1",
+        &json!([
+            input.binding.tenant_id,
+            input.binding.namespace_id,
+            input.binding.participant_id,
+            input.binding.device,
+            input.key_id,
+            input.public_key_base64_url,
+            pending.id,
+            pending.nonce,
+        ]),
+    )?;
+    verify_ed25519(key, &signed, &input.signature_base64_url)?;
+    Ok(json!({"approved": true}))
 }
 
 fn call_route(state: &State, auth: &Session, path: &str, body: &[u8]) -> Result<Value, StatusCode> {
