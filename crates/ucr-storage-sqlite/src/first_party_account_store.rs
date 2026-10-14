@@ -544,7 +544,7 @@ mod tests {
         assert_eq!(
             again.first_party_recover_device(
                 &scope(),
-                &identity,
+                identity,
                 &descriptor("device-third"),
                 &key("device-third", "key-third", 22),
                 [11; 32],
@@ -555,7 +555,7 @@ mod tests {
         again
             .first_party_recover_device(
                 &scope(),
-                &identity,
+                identity,
                 &descriptor("device-third"),
                 &key("device-third", "key-third", 22),
                 [40; 32],
@@ -564,7 +564,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             again
-                .active_devices_for_identity(&scope(), &identity, 64)
+                .active_devices_for_identity(&scope(), identity, 64)
                 .unwrap()
                 .len(),
             2
