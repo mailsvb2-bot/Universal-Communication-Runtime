@@ -678,6 +678,33 @@ async fn handle_request(
     if method == Method::GET && path == "/healthz" {
         return Ok(text_response(StatusCode::OK, "ok"));
     }
+    if method == Method::GET && path == "/readyz" {
+        if !browser_media_assets_present() {
+            return Ok(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "endpoint_media_asset_missing",
+                "Build the pinned endpoint WASM and browser installer before making calls",
+            ));
+        }
+        let Some(bff) = state.first_party_api else {
+            return Ok(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "first_party_unconfigured",
+                "Set UCR_FIRST_PARTY_UPSTREAM to the canonical loopback BFF",
+            ));
+        };
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(bff)).await,
+            Ok(Ok(_))
+        ) {
+            return Ok(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "first_party_unreachable",
+                "The canonical first-party BFF is not listening",
+            ));
+        }
+        return Ok(text_response(StatusCode::OK, "ready"));
+    }
     if method == Method::GET && matches!(path.as_str(), "/start" | "/start.html") {
         return Ok(first_party_start_response());
     }
@@ -2720,6 +2747,17 @@ fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> HttpResponse 
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
+fn browser_media_assets_present() -> bool {
+    let root = std::env::var_os("UCR_REALTIME_WEB_ASSET_DIR").map_or_else(
+        || std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
+        std::path::PathBuf::from,
+    );
+    REFERENCE_MEDIA_ASSETS.iter().all(|(_, file, _)| {
+        std::fs::metadata(root.join(file))
+            .is_ok_and(|metadata| metadata.is_file() && (1..=16 * 1024 * 1024).contains(&metadata.len()))
+    })
+}
+
 fn reference_media_asset(path: &str) -> Option<(&'static str, &'static str)> {
     REFERENCE_MEDIA_ASSETS
         .iter()
@@ -3451,6 +3489,30 @@ mod tests {
         drive_client.abort();
         gateway_task.abort();
         bff_task.abort();
+    }
+
+    #[test]
+    fn browser_media_readiness_requires_all_pinned_files() {
+        let root = std::env::temp_dir().join(format!(
+            "ucr-browser-media-ready-{}", std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for (_, file, _) in super::REFERENCE_MEDIA_ASSETS {
+            let destination = root.join(file);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::write(destination, b"media-bundle-test").unwrap();
+        }
+        let check = |root: &std::path::Path| {
+            super::REFERENCE_MEDIA_ASSETS.iter().all(|(_, file, _)| {
+                std::fs::metadata(root.join(file)).is_ok_and(|metadata| {
+                    metadata.is_file() && (1..=16 * 1024 * 1024).contains(&metadata.len())
+                })
+            })
+        };
+        assert!(check(&root));
+        std::fs::remove_file(root.join("endpoint-wasm/ucr_endpoint_wasm_bg.wasm")).unwrap();
+        assert!(!check(&root));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
