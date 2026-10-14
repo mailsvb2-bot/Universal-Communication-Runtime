@@ -568,7 +568,7 @@ async fn proxy_first_party(
     }
     match tokio::time::timeout(ROOM_PROXY_TIMEOUT, forward_first_party(request, upstream)).await {
         Ok(Ok(response)) => response,
-        Ok(Err(_)) => api_error(
+        Ok(Err(())) => api_error(
             StatusCode::BAD_GATEWAY,
             "first_party_unreachable",
             "first-party BFF did not answer",
@@ -660,6 +660,34 @@ async fn forward_first_party(
     builder.body(full_body(data)).map_err(|_| ())
 }
 
+async fn browser_ready_response(state: &AppState) -> HttpResponse {
+    if !browser_media_assets_present() {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "endpoint_media_asset_missing",
+            "Build the pinned endpoint WASM and browser installer before making calls",
+        );
+    }
+    let Some(bff) = state.first_party_api else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "first_party_unconfigured",
+            "Set UCR_FIRST_PARTY_UPSTREAM to the canonical loopback BFF",
+        );
+    };
+    if !matches!(
+        tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(bff)).await,
+        Ok(Ok(_))
+    ) {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "first_party_unreachable",
+            "The canonical first-party BFF is not listening",
+        );
+    }
+    text_response(StatusCode::OK, "ready")
+}
+
 async fn handle_request(
     request: Request<Incoming>,
     state: AppState,
@@ -679,31 +707,7 @@ async fn handle_request(
         return Ok(text_response(StatusCode::OK, "ok"));
     }
     if method == Method::GET && path == "/readyz" {
-        if !browser_media_assets_present() {
-            return Ok(api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "endpoint_media_asset_missing",
-                "Build the pinned endpoint WASM and browser installer before making calls",
-            ));
-        }
-        let Some(bff) = state.first_party_api else {
-            return Ok(api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "first_party_unconfigured",
-                "Set UCR_FIRST_PARTY_UPSTREAM to the canonical loopback BFF",
-            ));
-        };
-        if !matches!(
-            tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(bff)).await,
-            Ok(Ok(_))
-        ) {
-            return Ok(api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "first_party_unreachable",
-                "The canonical first-party BFF is not listening",
-            ));
-        }
-        return Ok(text_response(StatusCode::OK, "ready"));
+        return Ok(browser_ready_response(&state).await);
     }
     if method == Method::GET && matches!(path.as_str(), "/start" | "/start.html") {
         return Ok(first_party_start_response());
