@@ -602,7 +602,7 @@ async fn forward_first_party(
     request: Request<Incoming>,
     upstream: SocketAddr,
 ) -> Result<HttpResponse, ()> {
-    use hyper_client::client::conn::http1;
+    use hyper::client::conn::http1;
     let (parts, body) = request.into_parts();
     let data = match collect_first_party_bounded(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(data) => data,
@@ -3458,7 +3458,7 @@ mod tests {
         });
 
         let tcp = TcpStream::connect(gateway_address).await.unwrap();
-        let (mut client, connection) = hyper_client::client::conn::http1::handshake(TokioIo::new(tcp))
+        let (mut client, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
             .await
             .unwrap();
         let drive_client = tokio::spawn(async move {
