@@ -528,11 +528,15 @@ fn first_party_socket() -> Result<Option<SocketAddr>, String> {
     let Ok(value) = std::env::var("UCR_FIRST_PARTY_UPSTREAM") else {
         return Ok(None);
     };
+    parse_first_party_upstream(&value).map(Some)
+}
+
+fn parse_first_party_upstream(value: &str) -> Result<SocketAddr, String> {
     let addr: SocketAddr = value.parse().map_err(|_| "invalid UCR_FIRST_PARTY_UPSTREAM")?;
     if !addr.ip().is_loopback() {
         return Err("first-party upstream must be loopback".into());
     }
-    Ok(Some(addr))
+    Ok(addr)
 }
 
 async fn proxy_first_party(request: Request<Incoming>, upstream: Option<SocketAddr>) -> HttpResponse {
@@ -3296,16 +3300,12 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn first_party_gateway_configuration_refuses_non_loopback() {
-        for value in ["0.0.0.0:18081", "192.168.1.2:18081"] {
-            let addr: std::net::SocketAddr = value.parse().unwrap();
-            assert!(!addr.ip().is_loopback());
+    fn first_party_upstream_rejects_public_and_invalid_addresses() {
+        assert!(super::parse_first_party_upstream("127.0.0.1:18081").is_ok());
+        assert!(super::parse_first_party_upstream("[::1]:18081").is_ok());
+        for address in ["0.0.0.0:18081", "192.168.1.2:18081", "https://example.org", ""] {
+            assert!(super::parse_first_party_upstream(address).is_err(), "{address}");
         }
-        let source = include_str!("main.rs");
-        assert!(source.contains("first-party upstream must be loopback"));
-        assert!(source.contains("hyper::header::SET_COOKIE"));
-        assert!(source.contains("X-UCR-First-Party-Request"));
-        assert!(source.contains("collect_first_party_bounded"));
     }
 
     #[tokio::test]
