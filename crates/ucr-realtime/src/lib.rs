@@ -28,6 +28,13 @@ pub const DEFAULT_JOIN_TTL_SECONDS: u32 = 300;
 pub const DEFAULT_REALTIME_QUEUE_CAPACITY: usize = 64;
 pub const MAX_REALTIME_SESSIONS: usize = 4096;
 pub const MAX_JOIN_GRANTS: usize = 4096;
+/// How long a session stays on the live roster after its last heartbeat.
+///
+/// The downlink sender stays open while this process still holds the receiver,
+/// so a tab that never attached — or whose leave never arrived — would otherwise
+/// count as present until the 15-minute grant expired. Heartbeats are every 15
+/// seconds; two minutes covers a timer delayed by a background tab.
+pub const CONNECTED_HEARTBEAT_GRACE_MS: i64 = 120_000;
 const BANDWIDTH_WINDOW_MS: i64 = 1_000;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -649,6 +656,7 @@ struct SessionEntry {
     media_ready: bool,
     adaptive_stage: Option<AdaptiveMediaStage>,
     publisher_owner: Option<ScopedPrincipal>,
+    last_seen_unix_ms: i64,
 }
 
 impl fmt::Debug for SessionEntry {
@@ -932,6 +940,58 @@ impl RealtimeSessionRegistry {
             .count())
     }
 
+    /// Returns how many participants still have an open downlink on one canonical Call.
+    ///
+    /// A registry entry can outlive the browser tab. A closed downlink means that tab is gone, so
+    /// the local room must not treat it as someone still in the call.
+    ///
+    /// # Errors
+    /// Fails when the bounded registry state is unavailable.
+    pub fn connected_call_participant_count_at(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        now_unix_ms: i64,
+    ) -> Result<usize, RealtimeRegistryError> {
+        Ok(self
+            .connected_call_participants_at(scope, call_id, now_unix_ms)?
+            .len())
+    }
+
+    /// Participants whose downlink is still open and who have heartbeated recently.
+    ///
+    /// Accepted membership outlives a closed tab. Receive rosters use this set so a
+    /// subscriber is not pinned to someone who is no longer in the room. A join
+    /// counts as the first heartbeat: a fresh session is live before its first
+    /// timer, and a crashed tab leaves the roster after `CONNECTED_HEARTBEAT_GRACE_MS`.
+    ///
+    /// # Errors
+    /// Fails when the bounded registry state is unavailable.
+    pub fn connected_call_participants_at(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        now_unix_ms: i64,
+    ) -> Result<std::collections::BTreeSet<PrincipalId>, RealtimeRegistryError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        self.prune_expired(&mut entries, now_unix_ms)?;
+        let mut participants = std::collections::BTreeSet::new();
+        for entry in entries.iter() {
+            if entry.claims.scope == *scope
+                && entry.claims.call_id == *call_id
+                && !entry.sender.is_closed()
+                && now_unix_ms.saturating_sub(entry.last_seen_unix_ms)
+                    <= CONNECTED_HEARTBEAT_GRACE_MS
+            {
+                participants.insert(entry.claims.participant.principal_id.clone());
+            }
+        }
+        Ok(participants)
+    }
+
     /// Returns whether the exact signed session is already active.
     ///
     /// This is used by admission policy to distinguish a first entry from a reconnect when a
@@ -1025,6 +1085,7 @@ impl RealtimeSessionRegistry {
             entry.join_generation = generation;
             entry.media_ready = false;
             entry.publisher_owner = None;
+            entry.last_seen_unix_ms = now_unix_ms;
             let (sender, receiver) = mpsc::channel(self.queue_capacity);
             entry.sender = sender;
             entry.receiver = Some(receiver);
@@ -1060,6 +1121,7 @@ impl RealtimeSessionRegistry {
             media_ready: false,
             adaptive_stage: None,
             publisher_owner: None,
+            last_seen_unix_ms: now_unix_ms,
         });
         Ok(RealtimeJoinOutcome {
             claims,
@@ -1220,12 +1282,13 @@ impl RealtimeSessionRegistry {
             .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
         self.prune_expired(&mut entries, now_unix_ms)?;
         let entry = entries
-            .iter()
+            .iter_mut()
             .find(|entry| same_session(entry, claims))
             .ok_or(RealtimeRegistryError::SessionUnavailable)?;
         if entry.claims != *claims {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
+        entry.last_seen_unix_ms = now_unix_ms;
         Ok(entry.sequence)
     }
 
@@ -2701,6 +2764,48 @@ mod tests {
         assert_eq!(transition.kind, AttendanceTransitionKind::Reconnected);
         assert_eq!(transition.session_sequence, 2);
         assert_eq!(registry.active_session_count(), 1);
+    }
+
+    #[test]
+    fn connected_roster_forgets_a_tab_that_stops_heartbeating() {
+        let issuer = issuer();
+        let claims = issuer
+            .issue(
+                scope(),
+                CallId::from_opaque(id("call")),
+                participant(),
+                None,
+                300,
+                30_000,
+            )
+            .expect("issue")
+            .claims;
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        let now = 40_000;
+        registry.join(claims.clone(), now).expect("join");
+        let live = registry
+            .connected_call_participants_at(&claims.scope, &claims.call_id, now)
+            .expect("fresh join is live");
+        assert!(live.contains(&claims.participant.principal_id));
+        let stale = registry
+            .connected_call_participants_at(
+                &claims.scope,
+                &claims.call_id,
+                now + CONNECTED_HEARTBEAT_GRACE_MS + 1,
+            )
+            .expect("stale roster");
+        assert!(stale.is_empty());
+        registry
+            .heartbeat(&claims, now + CONNECTED_HEARTBEAT_GRACE_MS + 1)
+            .expect("heartbeat restores liveness");
+        let restored = registry
+            .connected_call_participants_at(
+                &claims.scope,
+                &claims.call_id,
+                now + CONNECTED_HEARTBEAT_GRACE_MS + 1,
+            )
+            .expect("restored roster");
+        assert!(restored.contains(&claims.participant.principal_id));
     }
 
     #[test]

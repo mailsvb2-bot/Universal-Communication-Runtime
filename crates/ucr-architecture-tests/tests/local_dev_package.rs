@@ -73,7 +73,7 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
         "universal_conference_service_server",
         "realtime_service_server",
         "GrpcUniversalConferenceService::with_state_and_join_issuer",
-        "GrpcRealtimeService::new",
+        "GrpcRealtimeService::with_webrtc",
         "verify_universal_conference_round_trip",
         "CreateConference exact idempotent retry",
         "attendance Event projection",

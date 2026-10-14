@@ -99,9 +99,24 @@ enum RealtimeMlsEndpointStateMode {
   REALTIME_MLS_ENDPOINT_STATE_MODE_LEGACY_SERVER_OWNED = 3;
 }
 
+message RealtimeEndpointTrustKey {
+  OpaqueId device_id = 1;
+  OpaqueId key_id = 2;
+  bytes public_key = 3;
+}
+
 message RealtimeMlsAdmissionContext {
   OpaqueId group_id = 1;
   RealtimeMlsEndpointStateMode endpoint_state_mode = 2;
+  // Present once the canonical Call is Active. Endpoints must use this exact
+  // binding; they must not invent a negotiation reference.
+  optional OpaqueId media_negotiation_ref = 3;
+  uint64 media_negotiation_generation = 4;
+  uint64 group_crypto_epoch = 5;
+  optional OpaqueId group_crypto_state_ref = 6;
+  // Active trusted Ed25519 public keys for accepted Call participants.
+  // Private signing seeds never appear here.
+  repeated RealtimeEndpointTrustKey trusted_device_keys = 7;
 }
 
 message RealtimeGetMlsAdmissionContextResponse {

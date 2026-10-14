@@ -3,7 +3,7 @@ name: Browser Compatibility
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, cursor/local-room-1b1d]
   workflow_dispatch:
 
 permissions:

@@ -14,6 +14,14 @@ main{width:min(94vw,980px);padding:24px}
 .brand-logo{display:block;max-width:160px;max-height:48px;object-fit:contain}
 h1{margin:0;font-size:clamp(1.6rem,5vw,2.4rem)}
 p{color:var(--ucr-muted);line-height:1.45}
+#room-lobby{display:grid;gap:8px;margin:12px 0 4px}
+#room-lobby.hidden{display:none}
+#room-lobby input,#room-lobby select,#room-lobby button{width:100%;box-sizing:border-box}
+#room-people,#room-viewings{display:grid;gap:8px;margin:12px 0}
+#room-people.hidden,#room-viewings.hidden{display:none}
+.person,.viewing{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--ucr-panel);border-radius:12px;padding:10px}
+.person button,.viewing button{width:auto}
+.viewing video{width:min(100%,420px);background:#000;border-radius:10px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:16px 0}
 .metric{background:var(--ucr-panel);border-radius:12px;padding:12px}
 .metric b{display:block;font-size:1.2rem}
@@ -40,6 +48,27 @@ canvas.remote-media.hidden{display:none}
 <section class="card">
 <div class="brand"><img id="brand-logo" class="brand-logo hidden" alt="" referrerpolicy="no-referrer"><h1 id="brand-name">UCR Conference</h1></div>
 <p id="intro">Secure realtime session. Join credentials remain in this page fragment and are never placed in the request URL.</p>
+<form id="room-lobby" class="hidden">
+  <h2>Войти в эфир</h2>
+  <p>Локальная комната. Спикер публикует камеру и микрофон и показывает экран кнопкой «Показать экран». Зритель только слушает и смотрит. Камера открывается здесь и остаётся картинкой этого звонка: отдельной страницы, которая заново спрашивает устройство, нет. Второе окно с другим именем входит как другой человек. Спикер может выгнать зрителя, заблокировать его или запретить чат на время.</p>
+  <label for="room-name">Имя</label>
+  <input id="room-name" name="name" maxlength="40" autocomplete="nickname" required placeholder="Аня">
+  <label for="room-role">Роль</label>
+  <select id="room-role" name="role">
+    <option value="speaker">Спикер</option>
+    <option value="attendee">Зритель</option>
+  </select>
+  <button id="room-submit" class="primary" type="submit">Подключиться</button>
+</form>
+<section id="room-people" class="hidden" aria-label="Участники">
+  <h2>Участники</h2>
+  <div id="room-people-list" class="small">Список появится после входа.</div>
+</section>
+<section id="room-viewings" class="hidden" aria-label="Записи">
+  <h2>Записи</h2>
+  <p class="small">Это просмотр уже расшифрованной картинки в браузере. Канонический архив комнаты остаётся зашифрованным.</p>
+  <div id="room-viewings-list" class="small">Пока нет записи просмотра.</div>
+</section>
 <div class="grid">
 <div class="metric"><span id="state-label">State</span><b id="state">Ready</b></div>
 <div class="metric"><span id="webrtc-label">WebRTC</span><b id="webrtc-state">Idle</b></div>
@@ -99,6 +128,7 @@ const ui={
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false,adaptiveMediaGeneration=0;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
+let localMediaPromise=null,earlyLocalCapture=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
 let heartbeatInFlight=false,heartbeatWatchdog=null;
@@ -141,6 +171,7 @@ const STREAM_RETRY_MS=1500;
 // Recovery is bounded; only a newly authenticated E2EE DataChannel resets it.
 const WEBRTC_RETRY_DELAYS_MS=[250,500,1000,2000,4000,8000,15000];
 let webrtcRecoveryAttempt=0,webrtcNeedsPeerRebuild=false;
+let localRoomMediaHost=false,localRoomAuthorityFingerprint=null,localRoomAuthorityRefresh=null,localRoomTrustReceipt=null,roomGestureEpoch=0;
 const BRANDING_FRAGMENT_KEY="ucr_brand";
 const BRANDING_MAX_JSON_BYTES=4096;
 const BRAND_NAME_MAX=80;
@@ -257,6 +288,7 @@ async function api(path,payload,signal,keepalive=false){
     let detail=null;try{detail=await r.clone().json();}catch(_){}
     const error=new Error(detail&&detail.message?detail.message:"Request failed: "+r.status);
     error.code=detail&&detail.code?detail.code:"request_failed";
+    error.status=r.status;
     throw error;
   }
   return r;
@@ -622,11 +654,17 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
         identity.tenant_id,identity.namespace_id??undefined,context.group_id,identity.device_id
       );
       const keyPackage=state.key_package();
-      await api("/v1/realtime/mls-key-package",{
+      const registered=await api("/v1/realtime/mls-key-package",{
         ...body(),key_package_base64:endpointBytesToBase64(keyPackage)
       },signal);
       requireCurrent();
-      bootstrap=await fetchEndpointMlsBootstrap(signal);
+      const folded=registered&&typeof registered.json==="function"?await registered.json():null;
+      requireCurrent();
+      if(folded&&typeof folded.welcome_base64==="string"&&folded.welcome_base64.length>0){
+        bootstrap=folded;
+      }else{
+        bootstrap=await fetchEndpointMlsBootstrap(signal);
+      }
       requireCurrent();
       if(bootstrap.group_id!==context.group_id)throw new Error("MLS bootstrap Group does not match admission context");
       state.join_from_welcome(
@@ -976,22 +1014,48 @@ async function activateE2eeAdapter(){
   if(!e2eeAdapter()){
     const install=await requireAuthorizedMediaInstaller();
     if(!isCurrent())throw new Error("Encrypted media session retired before installer load");
-    const mls=await ensureEndpointMlsReady();
-    if(!mls)throw new Error("Endpoint-owned MLS required for encrypted media");
-    const installed=await install(Object.freeze({
-      state:mls,
-      claims:Object.freeze({
-        tenantId:claims.tenant_id,
-        namespaceId:claims.namespace_id??null,
-        callId:claims.call_id,
-        deviceId:claims.device_id,
-        participantId:claims.participant_id,
-        participantKind:claims.participant_kind,
-        sessionId:claims.session_id
-      }),
-      groupId:endpointMlsGroupId,
-      loadWasm:loadEndpointWasmModule
-    }));
+    let installed=null;
+    for(let attempt=0;attempt<3;attempt++){
+      const mls=await ensureEndpointMlsReady();
+      if(!mls)throw new Error("Endpoint-owned MLS required for encrypted media");
+      // A second participant can advance the group epoch while this handshake
+      // is still running. Roll the local MLS state forward before the adapter
+      // is built, and retry if the epoch moves again during installation.
+      if(typeof fetchEndpointMlsContext==="function"){
+        const context=await fetchEndpointMlsContext();
+        if(!isCurrent())throw new Error("Encrypted media session retired before installer load");
+        if(BigInt(context.group_crypto_epoch)!==BigInt(mls.crypto_epoch())){
+          if(attempt===2)throw new Error("Endpoint MLS epoch differs from the canonical conference epoch");
+          if(typeof retireEndpointMlsState==="function")retireEndpointMlsState();
+          continue;
+        }
+      }
+      if(!isCurrent())throw new Error("Encrypted media session retired before installer load");
+      try{
+        installed=await install(Object.freeze({
+          state:mls,
+          claims:Object.freeze({
+            tenantId:claims.tenant_id,
+            namespaceId:claims.namespace_id??null,
+            callId:claims.call_id,
+            deviceId:claims.device_id,
+            participantId:claims.participant_id,
+            participantKind:claims.participant_kind,
+            sessionId:claims.session_id
+          }),
+          groupId:endpointMlsGroupId,
+          loadWasm:loadEndpointWasmModule
+        }));
+        break;
+      }catch(error){
+        const message=String(error&&error.message||error);
+        if(attempt===2||!/epoch/.test(message))throw error;
+        if(installed&&typeof installed.stop==="function"){try{await installed.stop();}catch(_){}}
+        if(installed&&window.ucrE2eeEndpoint===installed)delete window.ucrE2eeEndpoint;
+        installed=null;
+        if(typeof retireEndpointMlsState==="function")retireEndpointMlsState();
+      }
+    }
     if(!isCurrent()){
       if(installed&&typeof installed.stop==="function")await installed.stop();
       if(window.ucrE2eeEndpoint===installed)delete window.ucrE2eeEndpoint;
@@ -1082,9 +1146,13 @@ async function openStream(){
       }
     }
   }catch(e){
-    if(e.name!=="AbortError"&&sessionActive)ui.status.textContent="Realtime stream interrupted: "+e.message;
+    // This plaintext downlink is not the encrypted call. A missing stream must
+    // not replace the E2EE status, and a 404 must not retry for the whole grant.
+    const encrypted=typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady;
+    if(e.name!=="AbortError"&&sessionActive&&!encrypted)ui.status.textContent="Realtime stream interrupted: "+e.message;
+    if(e.status===404)openStream.missing=true;
   }finally{
-    if(streamAbort===controller){streamAbort=null;if(sessionActive)scheduleStreamRetry();}
+    if(streamAbort===controller){streamAbort=null;if(sessionActive&&!openStream.missing)scheduleStreamRetry();}
   }
 }
 // Prefer real Full HD source capture where the camera and browser can provide it.
@@ -1115,10 +1183,26 @@ async function capturePermittedMedia(audio,video,isCurrent){
   }
 }
 async function ensureLocalMedia(force=false){
-  if(!mediaActive)throw new Error("Conference media is not admitted yet");
+  const early=typeof earlyLocalCapture!=="undefined"&&earlyLocalCapture;
+  if(!mediaActive&&!early)throw new Error("Conference media is not admitted yet");
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("Camera/microphone access is unavailable in this browser");
   if(localStream&&!force)return localStream;
-  if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;}
+  // The room click may already be opening this document's camera. Wait for
+  // that stream. If it was cancelled or failed, capture once more.
+  if(typeof localMediaPromise!=="undefined"&&localMediaPromise&&!force){
+    const pending=localMediaPromise;
+    await pending;
+    if(localStream&&!force)return localStream;
+    if(localMediaPromise===pending)localMediaPromise=null;
+  }
+  if(localStream&&!force)return localStream;
+  const run=captureLocalMedia(force);
+  if(typeof localMediaPromise==="undefined")return run;
+  localMediaPromise=run;
+  try{return await run;}finally{if(localMediaPromise===run)localMediaPromise=null;}
+}
+async function captureLocalMedia(force){
+  if(force&&localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;}
   const audioAllowed=policyAllows("audio"),cameraAllowed=policyAllows("camera");
   if(!audioAllowed&&!cameraAllowed){
     localStream=new MediaStream();ui.localVideo.srcObject=localStream;refreshLocalMediaControls();return localStream;
@@ -1126,7 +1210,8 @@ async function ensureLocalMedia(force=false){
   const audio=audioAllowed?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):false;
   const video=cameraAllowed?preferredCameraCapture(ui.camera.value):false;
   const generation=mediaCaptureGeneration;
-  const captureCurrent=()=>generation===mediaCaptureGeneration&&sessionActive&&mediaActive&&
+  const captureCurrent=()=>generation===mediaCaptureGeneration&&sessionActive&&
+    (mediaActive||(typeof earlyLocalCapture!=="undefined"&&earlyLocalCapture))&&
     audioAllowed===policyAllows("audio")&&cameraAllowed===policyAllows("camera")&&!localStream;
   const capture=await capturePermittedMedia(audio,video,captureCurrent);
   const captured=capture.stream;
@@ -1209,6 +1294,9 @@ function applyToggleLabels(){
 }
 function stopLocalCapture(){
   ++mediaCaptureGeneration;
+  if(typeof roomGestureEpoch==="number")roomGestureEpoch++;
+  if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=false;
+  if(typeof localMediaPromise!=="undefined")localMediaPromise=null;
   if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;}
   ui.localVideo.srcObject=null;
 }
@@ -1269,6 +1357,10 @@ async function startWebRtc(forceMedia=false){
 }
 async function startWebRtcOnce(forceMedia=false){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
+  if(startWebRtc.retireEndpointMls){
+    startWebRtc.retireEndpointMls=false;
+    retireEndpointMlsState();
+  }
   if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
   const generation=mediaCaptureGeneration;
   const ensureCurrent=()=>{
@@ -1321,7 +1413,7 @@ async function startWebRtcOnce(forceMedia=false){
     await api("/v1/realtime/webrtc/ice",{...body(),offer_id:offer.offer_id,candidate:candidate.candidate,sdp_mid:candidate.sdpMid,sdp_mline_index:candidate.sdpMLineIndex});
   };
   pc.ondatachannel=event=>attachE2eeDataChannel(event.channel);
-  pc.ontrack=event=>{event.track.stop();ui.status.textContent="Unexpected RTP track rejected; conference media must use endpoint E2EE transport.";};
+  pc.ontrack=event=>{event.track.stop();if(typeof e2eeAdapterReady==="undefined"||!e2eeAdapterReady)ui.status.textContent="Unexpected RTP track rejected; conference media must use endpoint E2EE transport.";};
   pc.onicecandidate=event=>{
     if(!event.candidate||!sessionActive)return;
     if(!remoteDescriptionAccepted){pendingCandidates.push(event.candidate);return;}
@@ -1432,16 +1524,27 @@ async function activateAdmittedMedia(){
   if(!sessionActive||mediaActive)return;
   const generation=sessionLifecycleGeneration;
   requireCanonicalMediaHostReady();
+  if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
+  if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=true;
+  if(typeof ensureLocalMedia==="function")ensureLocalMedia(false).catch(()=>{});
   await ensureEndpointMlsReady();
-  if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive)return;
-  mediaActive=true;ui.state.textContent="Connecting";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
+  if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive){
+    if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=false;
+    return;
+  }
+  mediaActive=true;
+  if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=false;
+  if(typeof startRoomViewingCopy==="function")startRoomViewingCopy();
+  if(typeof startRoomRoster==="function")startRoomRoster();
+  ui.state.textContent="Connecting";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
   if(!reactionTimer){reactionTimer=setInterval(()=>{pollReactions().catch(()=>{});},1000);}
   if(!chatTimer){chatTimer=setInterval(()=>{pollChat().catch(()=>{});},1000);}
   pollReactions().catch(()=>{});
   pollChat().catch(()=>{});
   // Quality sampling must start only after activateE2eeAdapter succeeds.
   ui.status.textContent=policyAllows("audio")||policyAllows("camera")?"The host has started the conference. Requesting permitted camera/microphone access…":"The host has started the conference. Viewing mode does not request camera or microphone access.";
-  openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive)ui.status.textContent="Realtime stream closed: "+e.message;});
+  openStream.missing=false;
+  openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive&&!(typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady))ui.status.textContent="Realtime stream closed: "+e.message;});
   try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
   await startActiveSpeakerMonitoring();
 }
@@ -1450,6 +1553,7 @@ async function applyAdmissionState(state){
     // Withdrawal must stop real camera/microphone capture, not just the E2EE
     // transport. A later re-admission can request devices afresh.
     mediaActive=false;teardownPeer();retireEndpointMlsState();stopLocalCapture();
+    if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();
     if(streamAbort){streamAbort.abort();streamAbort=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
@@ -1458,7 +1562,7 @@ async function applyAdmissionState(state){
     return;
   }
   if(state==="closed"){
-    mediaActive=false;teardownPeer();retireEndpointMlsState();stopLocalCapture();ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
+    mediaActive=false;teardownPeer();retireEndpointMlsState();stopLocalCapture();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(streamAbort){streamAbort.abort();streamAbort=null;}
@@ -1484,6 +1588,10 @@ async function heartbeat(){
   const current=()=>sessionActive&&generation===sessionLifecycleGeneration&&
     request===heartbeatRequestGeneration;
   try{
+    // A sleeping local room may require a refreshed grant, but a stale
+    // heartbeat must never override a newer lifecycle or join generation.
+    if(typeof renewLocalRoomGrant==="function")await renewLocalRoomGrant();
+    if(!current())return;
     const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:activeSessionSequence});
     if(!current())return;
     const data=await r.json();
@@ -1491,12 +1599,20 @@ async function heartbeat(){
     await applyMediaPolicy(data.media_policy);
     if(!current())return;
     await applyAdmissionState(data.admission_state);
+    if(current()&&mediaActive&&e2eeAdapterReady&&typeof refreshLocalRoomEndpointAuthority==="function"){
+      refreshLocalRoomEndpointAuthority().catch(e=>{if(current())ui.status.textContent="Encrypted media membership refresh failed: "+e.message;});
+    }
     if(current()&&mediaActive&&e2eeAdapterReady){
       syncReceiveSubscriptions().catch(e=>{if(current()&&e2eeAdapterReady)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
     }
   }catch(error){
     // A failed heartbeat from a retired/replaced session must not invoke the
     // UI's heartbeat_rejected handler and terminate a newer active session.
+    const grantExpired=claims&&typeof claims.expires==="number"&&Date.now()>=claims.expires;
+    if(current()&&grantExpired&&typeof renewLocalRoomGrant==="function"){
+      await renewLocalRoomGrant();
+      if(!current()||(sessionActive&&Date.now()<claims.expires))return;
+    }
     if(current())throw error;
   }finally{
     if(generation===sessionLifecycleGeneration&&request===heartbeatRequestGeneration){
@@ -1522,6 +1638,48 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
   // authority and never invoke a caller-supplied enrollment override.
   if(!beforeJoin&&!authority){
     throw new Error("Authenticated canonical Device/Trust authority required after Join");
+  }
+  // The room commit already proved this signer and returned the confirming
+  // trust image with the grant. A seconds-fresh receipt for this session is
+  // enough before redeeming the grant. After Join, the canonical descriptor
+  // is still read once so a revocation lands before media, without another
+  // Ed25519 ceremony. A pasted grant has no receipt and falls through.
+  if(authority&&typeof localRoomTrustReceipt!=="undefined"&&localRoomTrustReceipt&&
+     localRoomTrustReceipt.deviceId===claims.device_id&&
+     localRoomTrustReceipt.sessionId===claims.session_id&&
+     typeof localRoomTrustReceipt.checkedAt==="number"&&
+     Date.now()-localRoomTrustReceipt.checkedAt<60000){
+    if(beforeJoin){
+      requireCanonicalMediaHostReady();
+      return;
+    }
+    const inspected=await authority.inspect({
+      tenantId:claims.tenant_id,
+      namespaceId:claims.namespace_id??null,
+      deviceId:claims.device_id,
+      participantId:claims.participant_id,
+      callId:claims.call_id,
+      sessionId:claims.session_id
+    });
+    if(!current())throw new Error("Device enrollment completed after conference session retired");
+    const approved=localRoomTrustReceipt.publicKey;
+    const currentKey=inspected&&inspected.activeKey&&inspected.activeKey.publicKey;
+    // A missing or malformed descriptor must never count as a matching
+    // canonical trust receipt. Fail closed even if the key IDs coincide.
+    let sameKey=approved instanceof Uint8Array&&currentKey instanceof Uint8Array&&
+      approved.length===32&&currentKey.length===32;
+    if(sameKey){
+      let difference=0;
+      for(let i=0;i<32;i++)difference|=approved[i]^currentKey[i];
+      sameKey=difference===0;
+    }
+    if(!inspected||inspected.deviceRevoked||!inspected.deviceActive||!inspected.activeKey||
+       (localRoomTrustReceipt.keyId&&inspected.activeKey.keyId!==localRoomTrustReceipt.keyId)||
+       !sameKey){
+      throw new Error("canonical Device revoked or trust unavailable");
+    }
+    requireCanonicalMediaHostReady();
+    return;
   }
   if(authority&&(!beforeJoin||typeof prepare!=="function")){
     // The host must provide independently authenticated Device/Trust
@@ -1601,7 +1759,23 @@ async function join(){
     if(generation!==sessionLifecycleGeneration)return;
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
-    heartbeatTimer=setInterval(()=>{const generation=sessionLifecycleGeneration;heartbeat().catch(e=>{void endUnverifiedMedia(generation,e.code==="heartbeat_rejected"?"Conference access ended by host or server policy.":"Conference authorization could not be verified; media capture stopped.");});},interval);
+    heartbeatTimer=setInterval(()=>{
+      const generation=sessionLifecycleGeneration;
+      heartbeat().catch(e=>{
+        // Re-authorize before a rejected heartbeat when the room's grant expired.
+        // Never allow an old response to retain capture after a newer Leave.
+        const expired=claims&&typeof claims.expires==="number"&&Date.now()>=claims.expires;
+        const localRoom=typeof sessionStorage!=="undefined"&&sessionStorage.getItem("ucrLocalRoom")==="1";
+        if(e.code==="heartbeat_rejected"&&expired&&localRoom&&typeof renewLocalRoomGrant==="function"){
+          void renewLocalRoomGrant().then(()=>{
+            if(generation!==sessionLifecycleGeneration||!sessionActive)return;
+            heartbeat().catch(()=>endUnverifiedMedia(generation,"Conference authorization could not be verified; media capture stopped."));
+          }).catch(()=>endUnverifiedMedia(generation,"Conference access ended by host or server policy."));
+          return;
+        }
+        void endUnverifiedMedia(generation,e.code==="heartbeat_rejected"?"Conference access ended by host or server policy.":"Conference authorization could not be verified; media capture stopped.");
+      });
+    },interval);
     await applyAdmissionState(data.admission_state);
   }catch(e){
     if(generation!==sessionLifecycleGeneration)return;
@@ -1651,6 +1825,7 @@ async function leave(){
   ++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;mediaActive=false;
   const leaveGeneration=sessionLifecycleGeneration;
   clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;
+  if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();
   retireEndpointMlsState();
   if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
   if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
@@ -2067,16 +2242,816 @@ ui.cameraToggle.addEventListener("click",async()=>{try{let track=localStream&&lo
 ui.screenToggle.addEventListener("click",async()=>{try{if(screenStream){await stopScreenShare(true);ui.status.textContent="Screen sharing stopped.";}else{await startScreenShare();ui.status.textContent="Screen sharing active through the endpoint E2EE adapter.";}}catch(e){ui.status.textContent="Screen sharing failed: "+e.message;}});
 ui.mic.addEventListener("change",()=>{if(sessionActive&&mediaActive)replaceLocalTrack("audio").catch(e=>{ui.status.textContent="Microphone switch failed: "+e.message;});});
 ui.camera.addEventListener("change",()=>{if(sessionActive&&mediaActive)replaceLocalTrack("camera").catch(e=>{ui.status.textContent="Camera switch failed: "+e.message;});});
+function bytesToBase64(bytes){
+  let binary="";
+  for(let offset=0;offset<bytes.length;offset+=0x8000){
+    binary+=String.fromCharCode(...bytes.subarray(offset,Math.min(bytes.length,offset+0x8000)));
+  }
+  return btoa(binary);
+}
+function endpointAuthorityFingerprint(context){
+  const keys=Array.isArray(context.trusted_device_keys)?context.trusted_device_keys:[];
+  const roster=keys.map(key=>[key.device_id,key.key_id,key.public_key_base64].join(":")).sort().join("|");
+  return String(context.group_crypto_epoch)+"|"+roster;
+}
+async function refreshLocalRoomEndpointAuthority(){
+  if(localRoomAuthorityRefresh||restarting||!sessionActive||!mediaActive||!e2eeAdapterReady)return;
+  const generation=sessionLifecycleGeneration;
+  const run=(async()=>{
+    const context=await fetchEndpointMlsContext();
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive||!e2eeAdapterReady||restarting)return;
+    const fingerprint=endpointAuthorityFingerprint(context);
+    if(fingerprint===localRoomAuthorityFingerprint)return;
+    // Membership changed. Advance MLS and install a new adapter on the open
+    // DataChannel. Rebuilding the peer would wait for ICE again.
+    const channel=e2eeChannel;
+    e2eeAdapterReady=false;
+    const adapter=e2eeAdapter();
+    if(adapter&&typeof adapter.stop==="function"){
+      try{await Promise.resolve(adapter.stop());}catch(_){}
+    }
+    if(adapter&&window.ucrE2eeEndpoint===adapter)delete window.ucrE2eeEndpoint;
+    if(adapter&&adapter===e2eeManagedAdapter)e2eeManagedAdapter=null;
+    retireEndpointMlsState();
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive||
+       channel!==e2eeChannel||channel?.readyState!=="open"){
+      startWebRtc.retireEndpointMls=true;
+      webrtcNeedsPeerRebuild=true;
+      await restartWebRtc(false);
+      return;
+    }
+    ui.status.textContent="A participant joined. Refreshing encrypted media for the new conference epoch.";
+    try{
+      await activateE2eeAdapter();
+    }catch(error){
+      if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive)return;
+      // The DataChannel stays open, so nothing else will reconnect encryption.
+      // Rebuild the peer; its retry loop keeps going if this attempt fails.
+      startWebRtc.retireEndpointMls=true;
+      webrtcNeedsPeerRebuild=true;
+      ui.status.textContent="Encrypted media refresh failed. Reconnecting the protected transport: "+(error&&error.message||error);
+      if(restarting){scheduleWebRtcRetry();return;}
+      await restartWebRtc(false);
+    }
+  })();
+  localRoomAuthorityRefresh=run;
+  try{await run;}finally{if(localRoomAuthorityRefresh===run)localRoomAuthorityRefresh=null;}
+}
+function resumeRoomAudio(audioContext){
+  if(!audioContext||audioContext.state==="closed")return;
+  // resume() stays pending forever when this document has no user gesture.
+  // Waiting here blocks the encrypted camera and microphone.
+  const attempt=()=>{
+    const pending=audioContext.resume();
+    if(pending&&typeof pending.catch==="function")pending.catch(()=>{});
+  };
+  attempt();
+  if(resumeRoomAudio.bound===audioContext)return;
+  resumeRoomAudio.bound=audioContext;
+  const unlock=()=>{
+    attempt();
+    if(audioContext.state==="running"){
+      window.removeEventListener("pointerdown",unlock,true);
+      window.removeEventListener("keydown",unlock,true);
+    }
+  };
+  window.addEventListener("pointerdown",unlock,true);
+  window.addEventListener("keydown",unlock,true);
+  setTimeout(()=>{
+    if(audioContext.state==="suspended"&&sessionActive&&sessionStorage.getItem("ucrLocalRoom")==="1"){
+      ui.status.textContent="Камера подключена. Нажмите в любое место страницы, чтобы включить звук.";
+    }
+  },800);
+}
+function holdRoomPresence(){
+  try{
+    const id=sessionStorage.getItem("ucrRoomUser");
+    if(!id)return;
+    const all=JSON.parse(localStorage.getItem("ucrRoomPresence")||"{}");
+    if(!all||typeof all!=="object")return;
+    all[id]=Date.now();
+    localStorage.setItem("ucrRoomPresence",JSON.stringify(all));
+  }catch(_){}
+}
+// A local-room grant cannot be extended in place. Ask for the next
+// one-minute issuance before this one expires, then move the open call
+// onto that session without dropping the camera the page already holds.
+async function renewLocalRoomGrant(){
+  if(typeof sessionStorage==="undefined"||typeof fetch!=="function")return;
+  if(sessionStorage.getItem("ucrLocalRoom")!=="1"||!sessionActive||!claims)return;
+  if(typeof claims.expires!=="number"||renewLocalRoomGrant.busy)return;
+  // Also run after expiry. A sleeping laptop misses the last two minutes,
+  // and the next heartbeat is rejected before the old end-of-success hook.
+  const remaining=claims.expires-Date.now();
+  if(remaining>120000)return;
+  const roomApi=sessionStorage.getItem("ucrRoomApi");
+  const user=sessionStorage.getItem("ucrRoomUser");
+  if(!roomApi||!user)return;
+  renewLocalRoomGrant.busy=true;
+  const generation=sessionLifecycleGeneration;
+  try{
+    const response=await fetch(localRoomRequestUrl("/v1/room/join"),{
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({externalUserId:user})
+    });
+    const data=await response.json().catch(()=>null);
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!response.ok||!data||data.ok!==true)return;
+    const fragment=typeof data.joinFragment==="string"?data.joinFragment:"";
+    const next=new URLSearchParams(fragment.startsWith("#")?fragment.slice(1):fragment).get("ucr_join");
+    if(!next||next===token)return;
+    let nextClaims;
+    try{nextClaims=readGrant(next);}catch(_){return;}
+    if(!nextClaims||nextClaims.session_id===claims.session_id||nextClaims.expires<=claims.expires)return;
+    if(generation!==sessionLifecycleGeneration||!sessionActive)return;
+    // Drop in-flight heartbeats before the session id changes. join() advances
+    // the generation again for the replacement session.
+    ++sessionLifecycleGeneration;
+    const handoff=sessionLifecycleGeneration;
+    const oldToken=token;
+    const oldBody=body();
+    await closeServerPeer();
+    teardownPeer();
+    retireEndpointMlsState();
+    mediaActive=false;
+    if(streamAbort){streamAbort.abort();streamAbort=null;}
+    if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
+    if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+    try{
+      await fetch("/v1/realtime/leave",{
+        method:"POST",
+        headers:{"Authorization":"Bearer "+oldToken,"Content-Type":"application/json"},
+        body:JSON.stringify(oldBody),
+        keepalive:true
+      });
+    }catch(_){}
+    if(handoff!==sessionLifecycleGeneration)return;
+    token=next;
+    claims=nextClaims;
+    sessionActive=false;
+    if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
+    ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
+    ui.status.textContent="Renewing room access before the signed grant expires.";
+    await join();
+  }catch(e){
+    if(generation===sessionLifecycleGeneration&&sessionActive)ui.status.textContent="Room access renewal failed: "+e.message;
+  }finally{
+    renewLocalRoomGrant.busy=false;
+  }
+}
+function releaseRoomPresence(){
+  try{
+    const id=sessionStorage.getItem("ucrRoomUser");
+    if(!id)return;
+    const all=JSON.parse(localStorage.getItem("ucrRoomPresence")||"{}");
+    if(!all||typeof all!=="object")return;
+    delete all[id];
+    localStorage.setItem("ucrRoomPresence",JSON.stringify(all));
+  }catch(_){}
+}
+function installLocalRoomMediaHost(){
+  if(sessionStorage.getItem("ucrLocalRoom")!=="1")return;
+  localRoomMediaHost=true;
+  // Presence means this tab is inside the call. Starting it before the room
+  // has reserved a user makes a retry in the same tab look like a second person.
+  if(typeof token==="string"&&token){
+    holdRoomPresence();
+    if(!installLocalRoomMediaHost.presence)installLocalRoomMediaHost.presence=setInterval(holdRoomPresence,2000);
+  }
+  if(!installLocalRoomMediaHost.watching){
+    installLocalRoomMediaHost.watching=true;
+    setInterval(()=>{
+      if(sessionActive&&mediaActive&&e2eeAdapterReady){
+        refreshLocalRoomEndpointAuthority().catch(e=>{if(sessionActive)ui.status.textContent="Encrypted media membership refresh failed: "+e.message;});
+      }
+    },300);
+  }
+  const roomApi=sessionStorage.getItem("ucrRoomApi")||"";
+  if(!roomApi)throw new Error("Local room API address is missing");
+  const roomPost=async(path,payload)=>{
+    const response=await fetch(localRoomRequestUrl(path),{
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify(payload)
+    });
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.message||"Local room request failed");
+    return data;
+  };
+  window.ucrCanonicalDeviceAuthority={
+    async inspect(binding){
+      const data=await roomPost("/v1/room/inspect",{deviceId:binding.deviceId});
+      return {
+        deviceActive:data.deviceActive===true,
+        deviceRevoked:data.deviceRevoked===true,
+        activeKey:data.keyId&&data.publicKeyBase64?{
+          keyId:data.keyId,
+          publicKey:endpointBase64ToBytes(data.publicKeyBase64)
+        }:null
+      };
+    },
+    async approveNewDevice(binding,signer){
+      await roomPost("/v1/room/trust",{
+        externalUserId:sessionStorage.getItem("ucrRoomUser")||"",
+        keyId:signer.keyId,
+        publicKeyBase64:bytesToBase64(signer.publicKey)
+      });
+    }
+  };
+  window.ucrCanonicalMediaAdmissionResolver=async bootstrap=>{
+    const context=await fetchEndpointMlsContext();
+    if(!context.media_negotiation_ref||!context.media_negotiation_generation){
+      throw new Error("Canonical media negotiation is not active yet");
+    }
+    const epoch=bootstrap.state.crypto_epoch();
+    if(BigInt(context.group_crypto_epoch)!==BigInt(epoch)){
+      throw new Error("Endpoint MLS epoch differs from the canonical conference epoch");
+    }
+    const keys=Array.isArray(context.trusted_device_keys)?context.trusted_device_keys:[];
+    const local=keys.find(key=>key.device_id===bootstrap.claims.deviceId);
+    if(!local)throw new Error("This device has no active trusted signing key");
+    if(!window.ucrProtectedDeviceKeyVault){
+      const module=await import("./endpoint-media/reference_browser_media_installer.js");
+      window.ucrProtectedDeviceKeyVault=module.createUcrBrowserProtectedDeviceVault();
+    }
+    const vault=window.ucrProtectedDeviceKeyVault;
+    const scope={
+      tenantId:bootstrap.claims.tenantId,
+      namespaceId:bootstrap.claims.namespaceId,
+      deviceId:bootstrap.claims.deviceId
+    };
+    let bridgeInstalled=false;
+    const seed=await vault.withAuthorizedSeed(
+      scope,
+      async()=>sessionActive,
+      async value=>value.slice(),
+      ()=>{bridgeInstalled=true;}
+    );
+    if(bridgeInstalled)throw new Error("Canonical device trust changed before media start");
+    const audioContext=window.ucrLocalRoomAudioContext||new AudioContext();
+    window.ucrLocalRoomAudioContext=audioContext;
+    resumeRoomAudio(audioContext);
+    const keyById=new Map(keys.map(key=>[key.key_id,endpointBase64ToBytes(key.public_key_base64)]));
+    localRoomAuthorityFingerprint=endpointAuthorityFingerprint(context);
+    return {
+      sessionId:bootstrap.claims.sessionId,
+      deviceId:bootstrap.claims.deviceId,
+      participantId:bootstrap.claims.participantId,
+      principalKindCode:bootstrap.claims.participantKind,
+      binding:{
+        tenantId:bootstrap.claims.tenantId,
+        namespaceId:bootstrap.claims.namespaceId,
+        callId:bootstrap.claims.callId,
+        groupId:bootstrap.groupId,
+        negotiationRef:context.media_negotiation_ref,
+        negotiationGeneration:BigInt(context.media_negotiation_generation),
+        cryptoEpoch:BigInt(epoch)
+      },
+      signingKeyId:local.key_id,
+      signingSeed:seed,
+      trustedLocalVerifyingKey:endpointBase64ToBytes(local.public_key_base64),
+      trustedKeys:{
+        resolve(_header,keyId){
+          const key=keyById.get(keyId);
+          if(!key)throw new Error("Unknown device signing key");
+          return key;
+        }
+      },
+      audioContext,
+      remoteVideoCanvas:document.getElementById("remote-e2ee-canvas"),
+      isCurrent:()=>sessionActive&&!!claims&&claims.session_id===bootstrap.claims.sessionId,
+      authorizeFrame:()=>sessionActive,
+      authorizePublish:()=>sessionActive
+    };
+  };
+}
+// The room API is injected only into the /room document. A pasted conference
+// grant never sees a loopback address here, and this string is not a secret.
+function localRoomRequestUrl(path){
+  const api=typeof sessionStorage!=="undefined"?sessionStorage.getItem("ucrRoomApi")||"":"";
+  if(api==="same-origin")return path;
+  if(api.startsWith("http://"))return api+path;
+  return path;
+}
+function roomTrustImage(data){
+  const key=data&&data.keyId&&typeof data.publicKeyBase64==="string"?{
+    keyId:data.keyId,
+    publicKey:endpointBase64ToBytes(data.publicKeyBase64)
+  }:null;
+  return {
+    deviceActive:!!(data&&data.deviceActive===true),
+    deviceRevoked:!!(data&&data.deviceRevoked===true),
+    activeKey:key
+  };
+}
+function sameRoomTrustKey(proved,data){
+  if(!proved||!data||data.deviceActive!==true||data.deviceRevoked===true)return false;
+  if(data.keyId!==proved.keyId||typeof data.publicKeyBase64!=="string")return false;
+  const bytes=endpointBase64ToBytes(data.publicKeyBase64);
+  if(bytes.length!==proved.publicKey.length)return false;
+  let difference=0;
+  for(let i=0;i<bytes.length;i++)difference|=bytes[i]^proved.publicKey[i];
+  return difference===0;
+}
+// The room document posts to its own origin. The gateway forwards those
+// calls to the loopback room API, so the browser does not preflight each one.
+// An absolute loopback URL remains valid for a grant renewal that still has
+// the previous address stored.
+function configuredLocalRoomApi(){
+  const configured = "%%UCR_ROOM_API%%";
+  if(configured==="same-origin")return configured;
+  return configured.startsWith("http://")?configured:"";
+}
+function readRememberedRoomDevice(){
+  try{
+    const value=JSON.parse(localStorage.getItem("ucrRoomDevice")||"null");
+    if(!value||typeof value.externalUserId!=="string"||typeof value.role!=="string")return null;
+    return value;
+  }catch(_){return null;}
+}
+function roomPresenceFresh(externalUserId){
+  try{
+    const all=JSON.parse(localStorage.getItem("ucrRoomPresence")||"{}");
+    const at=all&&typeof all==="object"?all[externalUserId]:null;
+    return typeof at==="number"&&Date.now()-at<8000;
+  }catch(_){return false;}
+}
+function rememberRoomDevice(device){
+  localStorage.setItem("ucrRoomDevice",JSON.stringify(device));
+}
+function startRoomPresence(){
+  holdRoomPresence();
+  if(!installLocalRoomMediaHost.presence)installLocalRoomMediaHost.presence=setInterval(holdRoomPresence,2000);
+}
+// The click that enters the room is the click that opens the camera. The
+// MediaStream is attached to this document's video element and later published.
+// A second getUserMedia after a navigation used to add the whole camera startup
+// again, after trust and MLS had already been waited out.
+function startRoomGestureCapture(){
+  if(localStream||localMediaPromise)return;
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)return;
+  const epoch=roomGestureEpoch;
+  const preferred=preferredCameraCapture("");
+  const capture=(async()=>{
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true,video:preferred});
+      if(epoch!==roomGestureEpoch){
+        stream.getTracks().forEach(track=>track.stop());
+        return null;
+      }
+      localStream=stream;
+      ui.localVideo.srcObject=stream;
+      const playing=ui.localVideo.play();
+      if(playing&&typeof playing.catch==="function")playing.catch(()=>{});
+      return stream;
+    }catch(error){
+      if(epoch===roomGestureEpoch)ui.status.textContent="Камера не открылась: "+error.message;
+      return null;
+    }
+  })();
+  localMediaPromise=capture;
+  capture.finally(()=>{if(localMediaPromise===capture)localMediaPromise=null;});
+}
+function resumeLocalRoomPlayback(){
+  const existing=window.ucrLocalRoomAudioContext;
+  const audioContext=existing&&existing.state!=="closed"?existing:new AudioContext();
+  window.ucrLocalRoomAudioContext=audioContext;
+  const resumed=audioContext.resume();
+  if(resumed&&typeof resumed.catch==="function")resumed.catch(()=>{});
+}
+let roomRosterTimer=null;
+let viewingRecorder=null;
+let viewingStream=null;
+let viewingOwned=[];
+let viewingChunks=[];
+let viewingBytes=0;
+let viewingTimer=null;
+let viewingCopyStarting=false;
+function startRoomRoster(){
+  if(typeof sessionStorage==="undefined"||sessionStorage.getItem("ucrLocalRoom")!=="1")return;
+  if(roomRosterTimer)return;
+  refreshRoomRoster().catch(()=>{});
+  roomRosterTimer=setInterval(()=>{refreshRoomRoster().catch(()=>{});},3000);
+}
+async function refreshRoomRoster(){
+  if(!token)return;
+  const list=document.getElementById("room-people-list");
+  if(!list)return;
+  const response=await fetch(localRoomRequestUrl("/v1/room/roster"),{
+    method:"POST",
+    headers:{"content-type":"application/json","authorization":"Bearer "+token},
+    body:"{}"
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok||!data.ok){
+    list.textContent=data.message||"Список участников недоступен";
+    return;
+  }
+  list.replaceChildren();
+  const people=Array.isArray(data.people)?data.people:[];
+  const selfId=sessionStorage.getItem("ucrRoomUser");
+  if(data.selfRole&&selfId&&sessionActive){
+    const self=people.find(person=>person.externalUserId===selfId);
+    if(!self||self.active===false){
+      const blocked=!!(self&&self.blocked);
+      if(typeof leave==="function")leave().catch(()=>{});
+      ui.state.textContent="Access ended";
+      ui.status.textContent=blocked?"Вас заблокировали в этой комнате.":"Вас выгнали из комнаты.";
+      return;
+    }
+  }
+  if(!people.length){
+    list.textContent="В комнате пока только вы.";
+    return;
+  }
+  for(const person of people){
+    const row=document.createElement("div");
+    row.className="person";
+    const name=document.createElement("b");
+    name.textContent=person.displayName||person.externalUserId||"Участник";
+    row.appendChild(name);
+    const meta=document.createElement("span");
+    const role=person.role==="speaker"?"спикер":"зритель";
+    const flags=[];
+    if(person.blocked)flags.push("заблокирован");
+    else if(person.active)flags.push("в эфире");
+    else flags.push("не в эфире");
+    if(typeof person.silencedUntil==="number"&&person.silencedUntil>Date.now()){
+      flags.push("чат до "+new Date(person.silencedUntil).toLocaleTimeString());
+    }
+    meta.textContent=" · "+role+" · "+flags.join(", ");
+    row.appendChild(meta);
+    if(data.selfRole==="speaker"&&person.role==="attendee"){
+      const actions=person.blocked?[["unblock","Разблокировать"]]:[
+        ["kick","Выгнать"],
+        ["block","Заблокировать"],
+        ["silence","Чат на 5 мин",5],
+        ["silence","Чат на 15 мин",15],
+        ["silence","Чат на 60 мин",60],
+        ["unsilence","Разрешить чат"]
+      ];
+      for(const [action,label,minutes] of actions){
+        const button=document.createElement("button");
+        button.type="button";
+        button.className="secondary";
+        button.textContent=label;
+        button.addEventListener("click",()=>{
+          roomModerate(action,person.externalUserId,minutes).catch(error=>{
+            ui.status.textContent=error&&error.message?error.message:"Комната не ответила";
+          });
+        });
+        row.appendChild(button);
+      }
+    }
+    list.appendChild(row);
+  }
+}
+async function roomModerate(action,externalUserId,silenceMinutes){
+  const response=await fetch(localRoomRequestUrl("/v1/room/moderate"),{
+    method:"POST",
+    headers:{"content-type":"application/json","authorization":"Bearer "+token},
+    body:JSON.stringify({action,externalUserId,silenceMinutes})
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok||!data.ok)throw new Error(data.message||"Комната не ответила");
+  await refreshRoomRoster();
+}
+function viewingCopyId(){
+  const raw=claims&&typeof claims.session_id==="string"?claims.session_id:"";
+  const id=raw.replace(/[^A-Za-z0-9_-]/g,"").slice(0,80);
+  return id;
+}
+function startRoomViewingCopy(){
+  if(typeof sessionStorage==="undefined"||sessionStorage.getItem("ucrLocalRoom")!=="1")return;
+  if(viewingRecorder||viewingCopyStarting)return;
+  if(typeof MediaRecorder==="undefined")return;
+  viewingCopyStarting=true;
+  const generation=sessionLifecycleGeneration;
+  const waitAndRecord=async()=>{
+    for(let attempt=0;attempt<10;attempt++){
+      if(!mediaActive||generation!==sessionLifecycleGeneration)return;
+      const canvas=ui.remoteCanvas;
+      if(canvas&&!canvas.classList.contains("hidden"))break;
+      if(attempt>=6&&localStream&&localStream.getVideoTracks().length)break;
+      await new Promise(resolve=>setTimeout(resolve,500));
+    }
+    if(!mediaActive||generation!==sessionLifecycleGeneration||viewingRecorder)return;
+    const tracks=[];
+    viewingOwned=[];
+    const canvas=ui.remoteCanvas;
+    let video=null;
+    if(canvas&&!canvas.classList.contains("hidden")&&typeof canvas.captureStream==="function"){
+      const captured=canvas.captureStream(15);
+      viewingOwned.push(captured);
+      video=captured.getVideoTracks()[0]||null;
+    }
+    if(!video&&localStream)video=localStream.getVideoTracks()[0]||null;
+    if(video&&typeof video.clone==="function")tracks.push(video.clone());
+    const remoteAudio=typeof remoteStream!=="undefined"&&remoteStream?remoteStream.getAudioTracks()[0]:null;
+    const localAudio=localStream?localStream.getAudioTracks()[0]:null;
+    const audio=remoteAudio||localAudio;
+    if(audio&&typeof audio.clone==="function")tracks.push(audio.clone());
+    if(!tracks.length)return;
+    const stream=new MediaStream(tracks);
+    let recorder;
+    try{
+      const mime=MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")?"video/webm;codecs=vp8,opus":"video/webm";
+      recorder=new MediaRecorder(stream,{mimeType:mime});
+    }catch(_){
+      try{recorder=new MediaRecorder(stream);}catch(__){stream.getTracks().forEach(track=>track.stop());return;}
+    }
+    viewingChunks=[];
+    viewingBytes=0;
+    recorder.ondataavailable=event=>{
+      if(!event.data||!event.data.size)return;
+      if(viewingBytes+event.data.size>32*1024*1024)return;
+      viewingChunks.push(event.data);
+      viewingBytes+=event.data.size;
+    };
+    if(!mediaActive||generation!==sessionLifecycleGeneration){
+      stream.getTracks().forEach(track=>{if(track.readyState==="live")track.stop();});
+      return;
+    }
+    recorder.start(4000);
+    viewingRecorder=recorder;
+    viewingStream=stream;
+    viewingTimer=setInterval(()=>{uploadViewingCopy().catch(()=>{});},8000);
+    if(!mediaActive||generation!==sessionLifecycleGeneration)stopRoomViewingCopy();
+  };
+  waitAndRecord().catch(()=>{}).finally(()=>{viewingCopyStarting=false;});
+}
+async function uploadViewingCopy(){
+  if(!viewingChunks.length)return;
+  const id=viewingCopyId();
+  if(!id)return;
+  const blob=new Blob(viewingChunks,{type:"video/webm"});
+  await fetch("/v1/room/viewing",{
+    method:"POST",
+    headers:{"content-type":"video/webm","x-ucr-viewing-id":id},
+    body:blob
+  });
+  refreshRoomViewings().catch(()=>{});
+}
+function stopRoomViewingCopy(){
+  if(viewingTimer){clearInterval(viewingTimer);viewingTimer=null;}
+  const recorder=viewingRecorder;
+  const stream=viewingStream;
+  const owned=viewingOwned;
+  viewingRecorder=null;
+  viewingStream=null;
+  viewingOwned=[];
+  const release=()=>{
+    if(stream)stream.getTracks().forEach(track=>{if(track.readyState==="live")track.stop();});
+    for(const item of owned){
+      if(item&&typeof item.getTracks==="function")item.getTracks().forEach(track=>{if(track.readyState==="live")track.stop();});
+    }
+    uploadViewingCopy().catch(()=>{});
+  };
+  if(recorder&&recorder.state!=="inactive"){
+    recorder.onstop=release;
+    recorder.stop();
+    return;
+  }
+  release();
+}
+async function refreshRoomViewings(){
+  const list=document.getElementById("room-viewings-list");
+  if(!list)return;
+  const response=await fetch("/room/viewings");
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok||!data.ok||!Array.isArray(data.viewings)){
+    list.textContent="Записи просмотра недоступны.";
+    return;
+  }
+  list.replaceChildren();
+  if(!data.viewings.length){
+    list.textContent="Пока нет записи просмотра.";
+    return;
+  }
+  for(const item of data.viewings){
+    if(!item||typeof item.id!=="string"||!/^[A-Za-z0-9_-]{1,80}$/.test(item.id))continue;
+    const row=document.createElement("div");
+    row.className="viewing";
+    const title=document.createElement("span");
+    const when=typeof item.updatedAt==="number"?new Date(item.updatedAt).toLocaleString():item.id;
+    title.textContent="Просмотр "+when;
+    row.appendChild(title);
+    const video=document.createElement("video");
+    video.controls=true;
+    video.playsInline=true;
+    video.src="/room/viewings/"+item.id;
+    row.appendChild(video);
+    list.appendChild(row);
+  }
+}
+function beginLocalRoomLobby(){
+  const api=configuredLocalRoomApi();
+  const lobby=document.getElementById("room-lobby");
+  if(!api||!lobby)return false;
+  applyLocale("ru");
+  document.title="Комната UCR";
+  ui.brandName.textContent="Комната UCR";
+  lobby.classList.remove("hidden");
+  ui.join.classList.add("hidden");
+  ui.footerNote.textContent="Камера и микрофон спикера открываются этим нажатием и остаются на этой странице. Экран спикер показывает кнопкой «Показать экран».";
+  ui.status.textContent="Откройте эту страницу во втором окне, чтобы второй человек вошёл в ту же комнату.";
+  // Compile the endpoint runtime while the name is typed, beside the click,
+  // not after a second document has thrown the first camera away.
+  loadEndpointWasmModule().catch(()=>{});
+  const people=document.getElementById("room-people");
+  const viewings=document.getElementById("room-viewings");
+  if(people)people.classList.remove("hidden");
+  if(viewings)viewings.classList.remove("hidden");
+  refreshRoomViewings().catch(()=>{});
+  const installerReady=import("./endpoint-media/reference_browser_media_installer.js");
+  lobby.addEventListener("submit",event=>{
+    submitLocalRoom(event,api,installerReady).catch(error=>{
+      // The room is the same document as the preview: failed enrollment
+      // must not leave an open microphone/camera behind a retry button.
+      stopLocalCapture();
+      releaseRoomPresence();
+      localRoomTrustReceipt=null;
+      ui.status.textContent=error&&error.message?error.message:"Комната не ответила";
+      const submit=document.getElementById("room-submit");
+      if(submit)submit.disabled=false;
+    });
+  });
+  return true;
+}
+async function submitLocalRoom(event,api,installerReady){
+  event.preventDefault();
+  const name=document.getElementById("room-name").value.trim();
+  const role=document.getElementById("room-role").value;
+  const submit=document.getElementById("room-submit");
+  if(!name||!submit||submit.disabled)return;
+  submit.disabled=true;
+  const lobby=document.getElementById("room-lobby");
+  let entered=false;
+  try{
+  // The form leaves immediately. Status stays on enrollment until encrypted
+  // media is up; this is not a Connected claim. Playback resumes inside the
+  // gesture, and the speaker camera opens once at the call resolution.
+  if(lobby)lobby.classList.add("hidden");
+  resumeLocalRoomPlayback();
+  sessionStorage.setItem("ucrLocalRoom","1");
+  sessionStorage.setItem("ucrRoomApi",api);
+  installLocalRoomMediaHost();
+  if(role==="speaker")startRoomGestureCapture();
+  else stopLocalCapture();
+  ui.state.textContent="Joining";
+  ui.status.textContent="Подтверждаем ключ устройства. Камера, если вы спикер, уже открывается.";
+  const module=await installerReady;
+  if(!module||typeof module.createUcrCanonicalDevicePreparation!=="function"||
+     typeof module.createUcrBrowserProtectedDeviceVault!=="function"){
+    throw new Error("Сборка медиаустройства недоступна");
+  }
+  if(!window.ucrProtectedDeviceKeyVault){
+    window.ucrProtectedDeviceKeyVault=module.createUcrBrowserProtectedDeviceVault();
+  }
+  const roomPost=async(path,payload)=>{
+    const response=await fetch(localRoomRequestUrl(path),{
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify(payload)
+    });
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok||!data.ok)throw new Error(data.message||"Комната не ответила");
+    return data;
+  };
+  const remembered=readRememberedRoomDevice();
+  const own=sessionStorage.getItem("ucrRoomUser");
+  const samePerson=remembered&&remembered.role===role&&
+    (!remembered.displayName||remembered.displayName===name)&&
+    (own===remembered.externalUserId||!roomPresenceFresh(remembered.externalUserId));
+  // Opening image and the later grant are two calls. The possession proof
+  // runs between them against the opening image. Commit is the authoritative
+  // re-read: its trust image has to match the key that was just proved.
+  const opened=await roomPost("/v1/room/enter",{
+    phase:"open",
+    displayName:name,
+    role,
+    externalUserId:samePerson?remembered.externalUserId:undefined,
+    deviceId:remembered&&typeof remembered.deviceId==="string"?remembered.deviceId:undefined
+  });
+  if(!opened.deviceId||!opened.participantId||!opened.tenantId||!opened.externalUserId){
+    throw new Error("Комната не выдала устройство");
+  }
+  sessionStorage.setItem("ucrRoomUser",opened.externalUserId);
+  rememberRoomDevice({
+    externalUserId:opened.externalUserId,
+    deviceId:opened.deviceId,
+    role,
+    displayName:name
+  });
+  startRoomPresence();
+  const binding=Object.freeze({
+    tenantId:opened.tenantId,
+    namespaceId:opened.namespaceId??null,
+    participantId:opened.participantId,
+    deviceId:opened.deviceId
+  });
+  let trustImage=roomTrustImage(opened);
+  const preparationAuthority={
+    async inspect(){
+      const key=trustImage.activeKey;
+      return {
+        deviceActive:trustImage.deviceActive===true,
+        deviceRevoked:trustImage.deviceRevoked===true,
+        activeKey:key?{keyId:key.keyId,publicKey:key.publicKey.slice()}:null
+      };
+    },
+    async approveNewDevice(_binding,signer){
+      if(!signer||typeof signer.keyId!=="string"||!(signer.publicKey instanceof Uint8Array)||signer.publicKey.length!==32){
+        throw new Error("Ключ устройства не подтверждён");
+      }
+      trustImage={
+        deviceActive:true,
+        deviceRevoked:false,
+        activeKey:{keyId:signer.keyId,publicKey:signer.publicKey.slice()}
+      };
+    }
+  };
+  const prepare=module.createUcrCanonicalDevicePreparation(
+    preparationAuthority,window.ucrProtectedDeviceKeyVault);
+  await prepare(binding);
+  const proved=trustImage.activeKey;
+  if(!proved)throw new Error("Ключ устройства не подтверждён");
+  const committed=await roomPost("/v1/room/enter",{
+    phase:"commit",
+    externalUserId:opened.externalUserId,
+    deviceId:opened.deviceId,
+    keyId:proved.keyId,
+    publicKeyBase64:bytesToBase64(proved.publicKey)
+  });
+  if(!sameRoomTrustKey(proved,committed)){
+    throw new Error("Ключ устройства не совпал с ответом комнаты");
+  }
+  const fragment=typeof committed.joinFragment==="string"?committed.joinFragment:"";
+  const next=new URLSearchParams(fragment.startsWith("#")?fragment.slice(1):fragment).get("ucr_join");
+  if(!next)throw new Error("Сервер не выдал подписанный вход");
+  const issued=readGrant(next);
+  if(issued.device_id!==binding.deviceId||issued.participant_id!==binding.participantId){
+    throw new Error("Подписанный вход выдан другому устройству");
+  }
+  if(Date.now()>=issued.expires)throw new Error("Join grant has expired");
+  token=next;
+  claims=issued;
+  entered=true;
+  if(typeof startRoomRoster==="function")startRoomRoster();
+  localRoomTrustReceipt={
+    deviceId:claims.device_id,
+    sessionId:claims.session_id,
+    keyId:committed.keyId,
+    publicKey:endpointBase64ToBytes(committed.publicKeyBase64),
+    checkedAt:Date.now()
+  };
+  ui.join.classList.remove("hidden");
+  ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
+  ui.status.textContent="Вход подтверждён. Подключаем защищённое медиа.";
+  if(!scheduleWaitingRoom()){
+    await join();
+    // join() handles its own rejected admission. It can return without
+    // throwing (for example, when the media authority is unavailable).
+    // A rejected Join is not permission to keep the preview capturing.
+    if(!sessionActive&&
+       (ui.state.textContent==="Rejected"||ui.state.textContent==="Secure media unavailable")){
+      throw new Error(ui.status.textContent||"Защищённое подключение отклонено");
+    }
+  }
+  }catch(error){
+    // Cancel an in-flight permission prompt as well as already-open tracks.
+    // The capture epoch prevents a late getUserMedia success from reviving it.
+    stopLocalCapture();
+    releaseRoomPresence();
+    localRoomTrustReceipt=null;
+    if(!entered){
+      // The camera opened on the click. A failed enrollment has to release
+      // those tracks; this page no longer navigates away from them.
+      stopLocalCapture();
+      if(lobby)lobby.classList.remove("hidden");
+      ui.join.classList.add("hidden");
+      submit.disabled=false;
+    }
+    throw error;
+  }
+}
 try{
   const params=new URLSearchParams(location.hash.slice(1));applyBrandingFromFragment(params);token=params.get("ucr_join")||"";
   // Signed fragment grants are not shared media secrets.
+  // /room has no grant yet. The form and the call share this document, so the
+  // click's MediaStream is the call stream. A pasted grant still joins below.
+  if(!(!token&&typeof beginLocalRoomLobby==="function"&&beginLocalRoomLobby())){
   if(!token)throw new Error("Missing #ucr_join grant");
   claims=readGrant(token);if(Date.now()>=claims.expires)throw new Error("Join grant has expired");
   if(window.history&&typeof window.history.replaceState==="function"){
     window.history.replaceState(window.history.state,"",location.pathname+location.search);
   }
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
-  if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
+  installLocalRoomMediaHost();
+  if(sessionStorage.getItem("ucrLocalRoom")==="1"){
+    if(!scheduleWaitingRoom())join().catch(e=>{fail(e.message);});
+  }else if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
+  }
 }catch(e){fail(e.message);}
 // Hosts installing trust before client startup benefit from an idle preload.
 // Hosts installing trust later may call this hook once authorized.
@@ -2088,7 +3063,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){const generation=sessionLifecycleGeneration;ui.webrtcState.textContent="Offline";void endUnverifiedMedia(generation,"Network unavailable; capture stopped until fresh authorization.");}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
-window.addEventListener("pagehide",()=>{const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("pagehide",()=>{releaseRoomPresence();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;++roomGestureEpoch;clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;stopLocalCapture();});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>

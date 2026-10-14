@@ -1072,6 +1072,9 @@ async fn create_live_peer_connection(
             .set_local_description(offer)
             .await
             .map_err(|_| WebRtcProviderError::Internal)?;
+        // The answer is delivered as a complete SDP; no server-to-browser trickle
+        // ICE channel exists. Do not return at the first host candidate:
+        // STUN/TURN candidates must be present for cross-NAT callers.
         tokio::time::timeout(
             Duration::from_secs(LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS),
             gathering_complete.recv(),
@@ -1138,6 +1141,7 @@ async fn restart_live_peer_connection(
         .set_local_description(offer)
         .await
         .map_err(|_| WebRtcProviderError::Conflict)?;
+    // ICE restart also needs the complete server-side candidate set.
     tokio::time::timeout(
         Duration::from_secs(LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS),
         gathering_complete.recv(),

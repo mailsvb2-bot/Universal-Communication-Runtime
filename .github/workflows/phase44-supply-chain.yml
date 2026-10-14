@@ -2,7 +2,7 @@ name: Phase 44 Supply Chain
 
 on:
   push:
-    branches: [main, phase44-supply-chain-hardening]
+    branches: [main, phase44-supply-chain-hardening, cursor/local-room-1b1d]
   pull_request:
   workflow_dispatch:
 

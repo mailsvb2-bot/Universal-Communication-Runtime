@@ -2,7 +2,7 @@ name: Phase 45 Production Hardening
 
 on:
   push:
-    branches: [main, phase45-production-hardening]
+    branches: [main, phase45-production-hardening, cursor/local-room-1b1d]
   pull_request:
   workflow_dispatch:
 

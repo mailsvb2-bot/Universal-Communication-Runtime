@@ -2,7 +2,7 @@ name: Phase 42 AI Actor
 
 on:
   push:
-    branches: [main, phase42-ai-actor-layer]
+    branches: [main, phase42-ai-actor-layer, cursor/local-room-1b1d]
   pull_request:
   workflow_dispatch:
 

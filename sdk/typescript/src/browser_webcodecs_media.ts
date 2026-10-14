@@ -80,6 +80,10 @@ const LOW_CAMERA_HEIGHT = 360;
 const LOW_CAMERA_FPS = 12;
 const LOW_CAMERA_BITRATE_BPS = 384_000;
 const LOW_CAMERA_INTERVAL_US = 1_000_000 / LOW_CAMERA_FPS;
+// A subscriber can decode only from a keyframe. Tie that to wall time, not to
+// a fixed frame count: a busy or slow camera would otherwise hide the picture
+// for many seconds after someone joins.
+const VIDEO_KEYFRAME_INTERVAL_US = 1_000_000;
 
 /** Stable, bounded stream identity for one actual encrypted camera quality layer.
  * Each derived stream gets a distinct MLS traffic key context through its stream ID.
@@ -264,16 +268,30 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     const reader = processor.readable.getReader();
     this.#readers.push(reader);
     const pump = async () => {
-      let count = 0;
-      let lowCount = 0;
+      let lastKeyframeTimestamp = Number.NEGATIVE_INFINITY;
+      let framesSinceKeyframe = Number.POSITIVE_INFINITY;
+      let lastLowKeyframeTimestamp = Number.NEGATIVE_INFINITY;
+      let lowFramesSinceKeyframe = Number.POSITIVE_INFINITY;
       let lastLowTimestamp = -LOW_CAMERA_INTERVAL_US;
+      const due = (timestamp: number, last: number, since: number) => {
+        const clock = Number.isFinite(timestamp) ? timestamp : 0;
+        return since >= 30 || clock - last >= VIDEO_KEYFRAME_INTERVAL_US;
+      };
       while (generation === this.#generation) {
         const result = await reader.read();
         if (result.done) break;
         const frame = result.value;
         try {
           if (ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
-            encoder.encode(frame, kind === "video" ? {keyFrame: count++ % 60 === 0} : undefined);
+            const keyframe = kind === "video" &&
+              due(frame.timestamp, lastKeyframeTimestamp, framesSinceKeyframe);
+            encoder.encode(frame, kind === "video" ? {keyFrame: keyframe} : undefined);
+            if (kind === "video") {
+              if (keyframe) {
+                framesSinceKeyframe = 0;
+                if (Number.isFinite(frame.timestamp)) lastKeyframeTimestamp = frame.timestamp;
+              } else framesSinceKeyframe++;
+            }
           }
           if (lowEncoder && lowCanvas && generation === this.#generation &&
               ucrCodecCanEnqueue("video", lowEncoder.encodeQueueSize) &&
@@ -283,7 +301,12 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             context.drawImage(frame as VideoFrame, 0, 0, LOW_CAMERA_WIDTH, LOW_CAMERA_HEIGHT);
             const downscaled = new VideoFrame(lowCanvas, {timestamp: frame.timestamp});
             try {
-              lowEncoder.encode(downscaled, {keyFrame: lowCount++ % 24 === 0});
+              const keyframe = due(frame.timestamp, lastLowKeyframeTimestamp, lowFramesSinceKeyframe);
+              lowEncoder.encode(downscaled, {keyFrame: keyframe});
+              if (keyframe) {
+                lowFramesSinceKeyframe = 0;
+                if (Number.isFinite(frame.timestamp)) lastLowKeyframeTimestamp = frame.timestamp;
+              } else lowFramesSinceKeyframe++;
               lastLowTimestamp = frame.timestamp;
             } finally {
               downscaled.close();

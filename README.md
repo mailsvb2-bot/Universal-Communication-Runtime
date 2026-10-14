@@ -91,6 +91,72 @@ It provides the authenticated `ucr dev` gRPC API on host loopback, ephemeral tes
 the reference browser client, a local test TURN service and a bounded webhook receiver example.
 See `spec/dev-mode.md` for the trust boundary and nonclaims.
 
+## Local call and webinar room
+
+`ucr dev --room` opens one loopback webinar on the development API. A hidden technical owner
+stays on the server so each browser can hold its own device key. Two speakers are a two-way
+call. A speaker plus an attendee is a webinar: the attendee watches and listens, and does not
+publish a camera. The room starts coturn on `127.0.0.1:53478`. `turnserver` must be on `PATH`. About eight
+seconds after two people have open realtime sessions, ciphertext is written into an
+encrypted archive under the room state directory. Accepted membership alone does not
+start that archive, so a slow conference page can still open the camera. A person who
+arrives after the archive has started ends it and can enter; a new archive begins once
+two people are live again. This is not Production 1.0 and it is not a horizontal SFU:
+those stay fail-closed until the repository's own release evidence exists.
+
+```bash
+cargo run -p ucr-dev -- dev --room
+UCR_REALTIME_WEB_BIND=127.0.0.1:43124 \
+  UCR_REALTIME_GRPC_UPSTREAM=http://127.0.0.1:50051 \
+  UCR_ROOM_API=http://127.0.0.1:43123 \
+  cargo run -p ucr-realtime-web
+```
+
+Open <http://127.0.0.1:43124/room> in two browser windows, enter a name, and choose a role.
+Signing seeds stay in the browser. The room API on `127.0.0.1:43123` stores only public keys.
+`ucr dev --room` prints the exact `UCR_ROOM_API` value for the address given to `--room-bind`.
+The room page is the call. The click resumes playback and opens the speaker camera
+once, at the call resolution (1920×1080 ideal), into the video element that stays.
+The form hides on that click. The browser talks only to this page: enrollment is
+two room calls, with the Ed25519 possession proof between them. The first returns
+the opening trust image. The second stores the public key when needed and returns
+the signed grant together with the confirming trust image. Status stays on that
+enrollment until encrypted media is actually up. The page does not navigate to a
+second document and it does not open the camera again after MLS.
+The endpoint runtime is preloaded while the name is typed. This browser's device key
+is reused for the same name and role. A second
+window that is already in the room, or a different name, gets its own device so it does
+not take over the first participant's media session. `ucr dev --room` keeps the
+conference, trusted devices, service credential and encrypted archive in
+`UCR_ROOM_STATE` (otherwise `~/.local/share/ucr-room`). The next start continues
+that room. Realtime sessions and the TURN secret stay in memory. The web process
+uses the same directory for the playable viewing copy: the browser records the
+picture it has already decrypted and uploads that WebM. The canonical archive is
+still ciphertext. A speaker shows the screen with «Показать экран». A speaker can
+remove an attendee, block that person from entering again, or stop their chat for
+5, 15 or 60 minutes. The block is checked before a new participant id is minted.
+A grant lasts 15 minutes; the open page requests the next one before expiry and keeps
+the camera it already has. A second participant refreshes the encrypted epoch on the
+already open media channel.
+
+The browser page also needs the endpoint package built from this revision. Those files are
+generated, not committed:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.128 --locked
+cargo build --release --manifest-path crates/ucr-endpoint-wasm/Cargo.toml --target wasm32-unknown-unknown
+mkdir -p crates/ucr-realtime-web/static/endpoint-wasm crates/ucr-realtime-web/static/endpoint-media
+wasm-bindgen crates/ucr-endpoint-wasm/target/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm \
+  --target web \
+  --out-dir crates/ucr-realtime-web/static/endpoint-wasm \
+  --out-name ucr_endpoint_wasm
+npm exec --yes --package=esbuild@0.25.5 -- \
+  esbuild sdk/typescript/src/reference_browser_media_installer.ts \
+  --bundle --platform=browser --format=esm --target=es2022 \
+  --outfile=crates/ucr-realtime-web/static/endpoint-media/reference_browser_media_installer.js
+```
+
 ## Quality gate
 
 ```bash

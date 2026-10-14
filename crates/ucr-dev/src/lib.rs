@@ -11,24 +11,26 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, transport::Server};
 use ucr_api_grpc::{
     GrpcAttachmentService, GrpcCallService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
-    GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
-    GrpcUniversalConferenceService, attach_service_credential, attachment_service_server,
+    GrpcIntegrationService, GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService,
+    GrpcSyncService, GrpcUniversalConferenceService, RealtimeValidatedMediaObserver,
+    RealtimeWebRtcDependencies, attach_service_credential, attachment_service_server,
     call_service_server, device_service_server, event_service_server, group_service_server,
-    integration_service_server, pb, realtime_service_server, store_forward_service_server,
-    sync_service_server, universal_conference_service_server,
+    integration_service_server, pb, realtime_service_server, recording_service_server,
+    store_forward_service_server, sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
-    CanonicalTransportError, ClassifiedTransportFailure, DeviceLifecycleStore, IdentityStore,
-    PermissionGrantStore, RouteCandidate, ServiceCredentialSecret, ServiceCredentialStore,
-    ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore, StorageProvider,
-    SystemEventDeliveryClock, SystemServiceQuotaClock, TransportHealth, TransportProvider,
-    issue_service_credential,
+    CallStore, CanonicalTransportError, ClassifiedTransportFailure, DeviceLifecycleStore,
+    IdentityStore, PermissionGrantStore, RouteCandidate, ServiceCredentialSecret,
+    ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore,
+    StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock, TransportHealth,
+    TransportProvider, issue_service_credential,
 };
 use ucr_model::{
     CapabilityDescriptor, CapabilityMaturity, DeviceDescriptor, DeviceId, DeviceLifecycleState,
@@ -39,20 +41,33 @@ use ucr_model::{
 use ucr_protocol::{RUNTIME_PERMISSION_IDS, attachment_content_id};
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_storage_sqlite::SqliteLocalStore;
+use ucr_webrtc::WebRtcSessionConfigFactory;
+
+mod live_media;
+mod room;
+mod room_edge;
+mod room_policy;
 
 pub const DEFAULT_DEV_BIND: &str = "127.0.0.1:50051";
+pub const DEFAULT_ROOM_BIND: &str = "127.0.0.1:43123";
 pub const DEV_TRANSPORT_CAPABILITY: &str = "ucr.transport.test.dev";
 
 static DEV_STORE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
-struct DevStoreCleanup(PathBuf);
+struct DevStoreCleanup {
+    path: PathBuf,
+    persistent: bool,
+}
 
 impl Drop for DevStoreCleanup {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-        let _ = fs::remove_file(format!("{}-wal", self.0.display()));
-        let _ = fs::remove_file(format!("{}-shm", self.0.display()));
+        if self.persistent {
+            return;
+        }
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(format!("{}-wal", self.path.display()));
+        let _ = fs::remove_file(format!("{}-shm", self.path.display()));
     }
 }
 
@@ -321,6 +336,7 @@ pub struct DevEnvironment {
     conference_state: Arc<ConferenceRuntimeState>,
     realtime_registry: Arc<RealtimeSessionRegistry>,
     debug_events: Mutex<Vec<String>>,
+    state_dir: Option<PathBuf>,
 }
 
 impl DevEnvironment {
@@ -338,7 +354,10 @@ impl DevEnvironment {
             SqliteLocalStore::open(&store_path)
                 .map_err(|error| format!("open ephemeral dev store: {error:?}"))?,
         );
-        let store_cleanup = DevStoreCleanup(store_path);
+        let store_cleanup = DevStoreCleanup {
+            path: store_path,
+            persistent: false,
+        };
         let scope = dev_scope();
         let local_identity_id = identity_id("dev-local-identity");
         let local_device_id = device_id("dev-local-device");
@@ -382,12 +401,105 @@ impl DevEnvironment {
                 "dev.mock_peer.ready".to_owned(),
                 "dev.local_api.prepared".to_owned(),
             ]),
+            state_dir: None,
+        })
+    }
+
+    /// Opens the local room store in a directory that outlives this process.
+    ///
+    /// Devices, the conference and the service credential stay on disk. A second
+    /// start of `ucr dev --room` continues the same room instead of minting a
+    /// new empty database.
+    ///
+    /// # Errors
+    /// Returns an error when the directory, store or saved credential cannot be opened.
+    pub fn open_room() -> Result<Self, String> {
+        Self::open_room_at(default_room_state_dir())
+    }
+
+    /// Opens a room store at an explicit directory. Tests use a temporary path.
+    ///
+    /// # Errors
+    /// Returns an error when the directory, store or saved credential cannot be opened.
+    pub fn open_room_at(dir: PathBuf) -> Result<Self, String> {
+        fs::create_dir_all(&dir).map_err(|error| format!("create room state: {error}"))?;
+        let store_path = dir.join("store.sqlite3");
+        let store = Arc::new(
+            SqliteLocalStore::open(&store_path)
+                .map_err(|error| format!("open room store: {error:?}"))?,
+        );
+        let scope = dev_scope();
+        let local_identity_id = identity_id("dev-local-identity");
+        let local_device_id = device_id("dev-local-device");
+        let mock_peer_identity_id = identity_id("dev-mock-peer-identity");
+        let mock_peer_device_id = device_id("dev-mock-peer-device");
+        if store
+            .identity(&scope, &local_identity_id)
+            .map_err(|error| format!("local identity lookup: {error:?}"))?
+            .is_none()
+        {
+            seed_identity_and_device(&store, &scope, &local_identity_id, &local_device_id)?;
+        }
+        if store
+            .identity(&scope, &mock_peer_identity_id)
+            .map_err(|error| format!("peer identity lookup: {error:?}"))?
+            .is_none()
+        {
+            seed_identity_and_device(&store, &scope, &mock_peer_identity_id, &mock_peer_device_id)?;
+        }
+        let (credential_id, credential_secret) =
+            load_or_issue_room_credential(&store, &scope, &dir.join("service-credential.json"))?;
+        let join_issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([0x44_u8; 32]),
+                "https://join.ucr-dev.local/join",
+            )
+            .map_err(|error| format!("join issuer: {error:?}"))?,
+        );
+        Ok(Self {
+            store,
+            _store_cleanup: DevStoreCleanup {
+                path: store_path,
+                persistent: true,
+            },
+            transport: Arc::new(TestTransport::default()),
+            scope,
+            local_identity_id,
+            local_device_id,
+            mock_peer_identity_id,
+            mock_peer_device_id,
+            credential_id,
+            credential_secret,
+            join_issuer,
+            conference_state: Arc::new(ConferenceRuntimeState::new()),
+            realtime_registry: Arc::new(RealtimeSessionRegistry::default()),
+            debug_events: Mutex::new(vec![
+                "dev.identity.ready".to_owned(),
+                "dev.node.ready".to_owned(),
+                "dev.storage.ready".to_owned(),
+                "dev.room.persistent".to_owned(),
+            ]),
+            state_dir: Some(dir),
         })
     }
 
     #[must_use]
     pub const fn scope(&self) -> &TenantScope {
         &self.scope
+    }
+
+    /// Participants whose realtime downlink is still open for this call.
+    ///
+    /// # Errors
+    /// Returns an error when the clock or the session registry is unavailable.
+    pub(crate) fn connected_realtime_participants(
+        &self,
+        call_id: &ucr_model::CallId,
+    ) -> Result<usize, String> {
+        let now = system_time_unix_ms("room realtime roster")?;
+        self.realtime_registry
+            .connected_call_participant_count_at(&self.scope, call_id, now)
+            .map_err(|error| format!("realtime roster: {error:?}"))
     }
 
     #[must_use]
@@ -491,20 +603,90 @@ impl DevEnvironment {
             .map_err(|_| "debug event lock poisoned".to_owned())
     }
 
-    /// Starts the public loopback gRPC dev API on the requested loopback address.
+    /// Starts the loopback gRPC API and the local call/webinar room on a second loopback port.
     ///
     /// # Errors
     /// Non-loopback binds and listener/server failures fail closed.
-    pub async fn serve(self: Arc<Self>, bind: SocketAddr) -> Result<(), String> {
-        if !bind.ip().is_loopback() {
-            return Err("ucr dev may bind only to loopback addresses".to_owned());
+    pub async fn serve_local_room(
+        self: Arc<Self>,
+        grpc_bind: SocketAddr,
+        room_bind: SocketAddr,
+    ) -> Result<(), String> {
+        let state_dir = self
+            .state_dir
+            .clone()
+            .ok_or_else(|| "local room requires a durable state directory".to_owned())?;
+        println!("UCR_ROOM_STATE={}", state_dir.display());
+        let edge = Arc::new(room_edge::RoomEdge::start(&state_dir).await?);
+        room::spawn(
+            Arc::clone(&self),
+            grpc_bind,
+            room_bind,
+            Some(Arc::clone(&edge)),
+            state_dir,
+        )
+        .await?;
+        self.serve_with(grpc_bind, Some(edge)).await
+    }
+
+    fn dev_realtime_service<C>(
+        clock: Arc<C>,
+        authorization: Arc<SqliteLocalStore>,
+        store: Arc<SqliteLocalStore>,
+        join_issuer: Arc<JoinTokenIssuer>,
+        registry: Arc<RealtimeSessionRegistry>,
+        conference_state: Arc<ConferenceRuntimeState>,
+        webrtc: RealtimeWebRtcDependencies,
+    ) -> GrpcRealtimeService<C, SqliteLocalStore, SqliteLocalStore> {
+        GrpcRealtimeService::with_webrtc(
+            clock,
+            authorization,
+            Arc::clone(&store),
+            join_issuer,
+            registry,
+            conference_state,
+            webrtc,
+        )
+        .with_mls_bootstrap_store(Arc::clone(&store))
+        .with_mls_admission_store(store)
+    }
+
+    fn dev_live_realtime<C>(
+        clock: Arc<C>,
+        authorization: Arc<SqliteLocalStore>,
+        store: Arc<SqliteLocalStore>,
+        join_issuer: Arc<JoinTokenIssuer>,
+        registry: Arc<RealtimeSessionRegistry>,
+        conference_state: Arc<ConferenceRuntimeState>,
+        edge: Option<&room_edge::RoomEdge>,
+    ) -> Result<GrpcRealtimeService<C, SqliteLocalStore, SqliteLocalStore>, String>
+    where
+        C: ucr_core::ServiceQuotaClock + 'static,
+    {
+        let config = edge.map_or_else(
+            || Arc::new(WebRtcSessionConfigFactory::default()),
+            room_edge::RoomEdge::config,
+        );
+        let (webrtc, provider, ingress) = live_media::start(config)?;
+        let mut service = Self::dev_realtime_service(
+            clock,
+            authorization,
+            store,
+            join_issuer,
+            Arc::clone(&registry),
+            conference_state,
+            webrtc,
+        );
+        if let Some(edge) = edge {
+            let recorder = Arc::clone(&edge.recorder);
+            let observer: Arc<dyn RealtimeValidatedMediaObserver> = recorder;
+            service = service.with_validated_media_observer(observer);
         }
-        let listener = TcpListener::bind(bind)
-            .await
-            .map_err(|error| format!("bind dev API: {error}"))?;
-        let address = listener
-            .local_addr()
-            .map_err(|error| format!("resolve dev API address: {error}"))?;
+        live_media::spawn_bridge(ingress, provider, registry, service.clone());
+        Ok(service)
+    }
+
+    fn announce_ready(&self, address: SocketAddr) {
         println!("UCR_DEV_READY endpoint=http://{address}");
         println!(
             "UCR_DEV_TENANT={}",
@@ -521,7 +703,31 @@ impl DevEnvironment {
         println!(
             "UCR_DEV_MODE=development-only auth=enabled storage=sqlite-ephemeral loopback=true"
         );
+    }
 
+    /// Starts the public loopback gRPC dev API on the requested loopback address.
+    ///
+    /// # Errors
+    /// Non-loopback binds and listener/server failures fail closed.
+    pub async fn serve(self: Arc<Self>, bind: SocketAddr) -> Result<(), String> {
+        self.serve_with(bind, None).await
+    }
+
+    async fn serve_with(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        edge: Option<Arc<room_edge::RoomEdge>>,
+    ) -> Result<(), String> {
+        if !bind.ip().is_loopback() {
+            return Err("ucr dev may bind only to loopback addresses".to_owned());
+        }
+        let listener = TcpListener::bind(bind)
+            .await
+            .map_err(|error| format!("bind dev API: {error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("resolve dev API address: {error}"))?;
+        self.announce_ready(address);
         let incoming = TcpListenerStream::new(listener);
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
@@ -568,23 +774,30 @@ impl DevEnvironment {
                 Arc::clone(&authorization),
                 Arc::clone(&store),
             )))
-            .add_service(universal_conference_service_server(
-                GrpcUniversalConferenceService::with_state_and_join_issuer(
-                    Arc::clone(&clock),
-                    Arc::clone(&authorization),
-                    Arc::clone(&store),
-                    Arc::clone(&conference_state),
-                    Arc::clone(&join_issuer),
-                ),
-            ))
-            .add_service(realtime_service_server(GrpcRealtimeService::new(
+            .add_service(universal_conference_service_server(dev_conference_service(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                Arc::clone(&conference_state),
+                Arc::clone(&join_issuer),
+                edge.as_deref(),
+            )))
+            .add_service(recording_service_server(GrpcRecordingService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                Arc::clone(&join_issuer),
+                edge.is_some(),
+            )))
+            .add_service(realtime_service_server(Self::dev_live_realtime(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
                 Arc::clone(&store),
                 join_issuer,
                 realtime_registry,
                 conference_state,
-            )))
+                edge.as_deref(),
+            )?))
             .add_service(store_forward_service_server(GrpcStoreForwardService::new(
                 clock,
                 authorization,
@@ -616,6 +829,35 @@ pub struct DevDiagnostics {
     pub storage_health: String,
     pub transport_health: String,
     pub debug_event_count: usize,
+}
+
+fn dev_conference_service(
+    clock: Arc<SystemServiceQuotaClock>,
+    authorization: Arc<SqliteLocalStore>,
+    store: Arc<SqliteLocalStore>,
+    conference_state: Arc<ConferenceRuntimeState>,
+    join_issuer: Arc<JoinTokenIssuer>,
+    edge: Option<&room_edge::RoomEdge>,
+) -> GrpcUniversalConferenceService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore> {
+    match edge {
+        Some(edge) => {
+            GrpcUniversalConferenceService::with_state_join_issuer_and_runtime_capabilities(
+                clock,
+                authorization,
+                store,
+                conference_state,
+                join_issuer,
+                edge.capabilities(),
+            )
+        }
+        None => GrpcUniversalConferenceService::with_state_and_join_issuer(
+            clock,
+            authorization,
+            store,
+            conference_state,
+            join_issuer,
+        ),
+    }
 }
 
 fn provision_dev_service_account(
@@ -658,6 +900,104 @@ fn provision_dev_service_account(
         credential_id: record.credential_id,
         credential_secret,
     })
+}
+
+fn default_room_state_dir() -> PathBuf {
+    if let Ok(value) = std::env::var("UCR_ROOM_STATE")
+        && !value.is_empty()
+        && !value.contains('\0')
+    {
+        return PathBuf::from(value);
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home).join(".local/share/ucr-room");
+    }
+    std::env::temp_dir().join("ucr-room-state")
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredRoomCredential {
+    credential_id: String,
+    secret_hex: String,
+}
+
+fn load_or_issue_room_credential(
+    store: &SqliteLocalStore,
+    scope: &TenantScope,
+    path: &PathBuf,
+) -> Result<(ServiceCredentialId, ServiceCredentialSecret), String> {
+    if path.is_file() {
+        let bytes = fs::read(path).map_err(|error| format!("read room credential: {error}"))?;
+        let stored: StoredRoomCredential = serde_json::from_slice(&bytes)
+            .map_err(|_| "room credential file is invalid".to_owned())?;
+        let secret_bytes = unhex(&stored.secret_hex)?;
+        let secret_bytes: [u8; 32] = secret_bytes
+            .try_into()
+            .map_err(|_| "room credential secret is invalid".to_owned())?;
+        let credential_id = ServiceCredentialId::from_opaque(opaque(&stored.credential_id));
+        return Ok((
+            credential_id,
+            ServiceCredentialSecret::from_bytes(secret_bytes),
+        ));
+    }
+    let account = provision_dev_service_account(store, scope, "dev-service-principal")?;
+    let stored = StoredRoomCredential {
+        credential_id: wire_text(account.credential_id.as_opaque()),
+        secret_hex: hex(account.credential_secret.as_bytes()),
+    };
+    let bytes =
+        serde_json::to_vec(&stored).map_err(|error| format!("encode room credential: {error}"))?;
+    write_private_file(path, &bytes)?;
+    Ok((account.credential_id, account.credential_secret))
+}
+
+fn write_private_file(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("create room state: {error}"))?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("write room credential: {error}"))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("write room credential: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("write room credential: {error}"))?;
+    Ok(())
+}
+
+fn unhex(value: &str) -> Result<Vec<u8>, String> {
+    if !value.len().is_multiple_of(2) {
+        return Err("room credential secret is invalid".to_owned());
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let digits = value.as_bytes();
+    let mut index = 0;
+    while index < digits.len() {
+        let high = hex_digit(digits[index])?;
+        let low = hex_digit(digits[index + 1])?;
+        bytes.push((high << 4) | low);
+        index += 2;
+    }
+    Ok(bytes)
+}
+
+fn hex_digit(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err("room credential secret is invalid".to_owned()),
+    }
 }
 
 fn seed_identity_and_device(
@@ -798,14 +1138,17 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
                     Arc::clone(&join_issuer),
                 ),
             ))
-            .add_service(realtime_service_server(GrpcRealtimeService::new(
-                clock,
-                authorization,
-                store,
-                join_issuer,
-                realtime_registry,
-                conference_state,
-            )))
+            .add_service(realtime_service_server(
+                DevEnvironment::dev_realtime_service(
+                    clock,
+                    authorization,
+                    store,
+                    join_issuer,
+                    realtime_registry,
+                    conference_state,
+                    RealtimeWebRtcDependencies::prepared(),
+                ),
+            ))
             .serve_with_incoming(incoming)
             .await
     });
@@ -1077,6 +1420,7 @@ async fn verify_universal_conference_round_trip(
     let (token, claims, session_id) =
         issue_dev_join_grant(&mut conference, env, &conference_id, &integration_id, clock).await?;
     join_and_leave_dev_realtime(endpoint, env, &token, &claims, &session_id).await?;
+    verify_dev_call_has_media_negotiation(env, &claims.call_id)?;
     verify_dev_attendance_projection(&mut events, env, &subscription_id).await?;
     verify_foreign_attendance_isolation(
         &mut foreign_events,
@@ -1788,6 +2132,27 @@ async fn attempt_realtime_join(
         .await
         .map(tonic::Response::into_inner)
         .map_err(|error| format!("self-check boundary JoinRealtime: {error}"))
+}
+
+fn verify_dev_call_has_media_negotiation(
+    env: &DevEnvironment,
+    call_id: &ucr_model::CallId,
+) -> Result<(), String> {
+    // The dev service account is not a Call participant, so public GetCall
+    // correctly refuses this conference call. The assertion reads the canonical
+    // Call the realtime join just updated.
+    let call = env
+        .store
+        .call(&env.scope, call_id)
+        .map_err(|error| format!("self-check call load: {error:?}"))?
+        .ok_or_else(|| "self-check call missing after realtime join".to_owned())?;
+    if call.media_negotiation_ref.is_none() || call.media_negotiation_generation != 1 {
+        return Err(format!(
+            "live call is missing canonical media negotiation (generation={})",
+            call.media_negotiation_generation
+        ));
+    }
+    Ok(())
 }
 
 async fn issue_dev_join_grant(
