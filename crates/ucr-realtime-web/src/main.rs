@@ -532,28 +532,52 @@ fn first_party_socket() -> Result<Option<SocketAddr>, String> {
 }
 
 fn parse_first_party_upstream(value: &str) -> Result<SocketAddr, String> {
-    let addr: SocketAddr = value.parse().map_err(|_| "invalid UCR_FIRST_PARTY_UPSTREAM")?;
+    let addr: SocketAddr = value
+        .parse()
+        .map_err(|_| "invalid UCR_FIRST_PARTY_UPSTREAM")?;
     if !addr.ip().is_loopback() {
         return Err("first-party upstream must be loopback".into());
     }
     Ok(addr)
 }
 
-async fn proxy_first_party(request: Request<Incoming>, upstream: Option<SocketAddr>) -> HttpResponse {
+async fn proxy_first_party(
+    request: Request<Incoming>,
+    upstream: Option<SocketAddr>,
+) -> HttpResponse {
     let Some(upstream) = upstream else {
-        return api_error(StatusCode::SERVICE_UNAVAILABLE, "first_party_unconfigured",
-            "First-party Identity/Device/Call server is not connected");
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "first_party_unconfigured",
+            "First-party Identity/Device/Call server is not connected",
+        );
     };
     if request.method() != Method::GET && request.method() != Method::POST {
-        return api_error(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed", "first-party method denied");
+        return api_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            "first-party method denied",
+        );
     }
     if request.uri().query().is_some() {
-        return api_error(StatusCode::BAD_REQUEST, "query_denied", "first-party query strings are not supported");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "query_denied",
+            "first-party query strings are not supported",
+        );
     }
     match tokio::time::timeout(ROOM_PROXY_TIMEOUT, forward_first_party(request, upstream)).await {
         Ok(Ok(response)) => response,
-        Ok(Err(_)) => api_error(StatusCode::BAD_GATEWAY, "first_party_unreachable", "first-party BFF did not answer"),
-        Err(_) => api_error(StatusCode::GATEWAY_TIMEOUT, "first_party_timeout", "first-party BFF timed out"),
+        Ok(Err(_)) => api_error(
+            StatusCode::BAD_GATEWAY,
+            "first_party_unreachable",
+            "first-party BFF did not answer",
+        ),
+        Err(_) => api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "first_party_timeout",
+            "first-party BFF timed out",
+        ),
     }
 }
 
@@ -574,36 +598,64 @@ where
     Ok(Bytes::from(collected))
 }
 
-async fn forward_first_party(request: Request<Incoming>, upstream: SocketAddr) -> Result<HttpResponse, ()> {
+async fn forward_first_party(
+    request: Request<Incoming>,
+    upstream: SocketAddr,
+) -> Result<HttpResponse, ()> {
     use hyper::client::conn::http1;
     let (parts, body) = request.into_parts();
     let data = match collect_first_party_bounded(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(data) => data,
-        Err(status) => return Ok(api_error(status, "first_party_body_rejected",
-            "first-party request body exceeds limit or is invalid")),
+        Err(status) => {
+            return Ok(api_error(
+                status,
+                "first_party_body_rejected",
+                "first-party request body exceeds limit or is invalid",
+            ));
+        }
     };
     let stream = TcpStream::connect(upstream).await.map_err(|_| ())?;
-    let (mut sender, connection) = http1::handshake(TokioIo::new(stream)).await.map_err(|_| ())?;
-    tokio::spawn(async move { let _ = connection.await; });
-    let mut builder = Request::builder().method(parts.method).uri(parts.uri.path());
+    let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|_| ())?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let mut builder = Request::builder()
+        .method(parts.method)
+        .uri(parts.uri.path());
     // Forward only the headers required by first-party CSRF, request encoding
     // and HttpOnly session authentication. Never forward untrusted routing headers.
-    for header in [ORIGIN, CONTENT_TYPE, hyper::header::COOKIE, hyper::header::ACCEPT] {
-        if let Some(value) = parts.headers.get(&header) { builder = builder.header(header, value); }
+    for header in [
+        ORIGIN,
+        CONTENT_TYPE,
+        hyper::header::COOKIE,
+        hyper::header::ACCEPT,
+    ] {
+        if let Some(value) = parts.headers.get(&header) {
+            builder = builder.header(header, value);
+        }
     }
     if let Some(value) = parts.headers.get("X-UCR-First-Party-Request") {
         builder = builder.header("X-UCR-First-Party-Request", value);
     }
-    let outgoing = builder.header(HOST, upstream.to_string())
-        .body(Full::new(data)).map_err(|_| ())?;
+    let outgoing = builder
+        .header(HOST, upstream.to_string())
+        .body(Full::new(data))
+        .map_err(|_| ())?;
     let response = sender.send_request(outgoing).await.map_err(|_| ())?;
     let status = response.status();
     let headers = response.headers().clone();
     let data = collect_first_party_bounded(response.into_body(), MAX_REQUEST_BODY_BYTES)
-        .await.map_err(|_| ())?;
-    let mut builder = Response::builder().status(status).header(CACHE_CONTROL, "no-store");
+        .await
+        .map_err(|_| ())?;
+    let mut builder = Response::builder()
+        .status(status)
+        .header(CACHE_CONTROL, "no-store");
     for header in [CONTENT_TYPE, hyper::header::SET_COOKIE] {
-        for value in headers.get_all(&header) { builder = builder.header(&header, value); }
+        for value in headers.get_all(&header) {
+            builder = builder.header(&header, value);
+        }
     }
     builder.body(full_body(data)).map_err(|_| ())
 }
@@ -3303,15 +3355,23 @@ mod tests {
     fn first_party_upstream_rejects_public_and_invalid_addresses() {
         assert!(super::parse_first_party_upstream("127.0.0.1:18081").is_ok());
         assert!(super::parse_first_party_upstream("[::1]:18081").is_ok());
-        for address in ["0.0.0.0:18081", "192.168.1.2:18081", "https://example.org", ""] {
-            assert!(super::parse_first_party_upstream(address).is_err(), "{address}");
+        for address in [
+            "0.0.0.0:18081",
+            "192.168.1.2:18081",
+            "https://example.org",
+            "",
+        ] {
+            assert!(
+                super::parse_first_party_upstream(address).is_err(),
+                "{address}"
+            );
         }
     }
 
     #[tokio::test]
     async fn first_party_body_is_bounded_before_forwarding() {
-        use http_body_util::Full;
         use bytes::Bytes;
+        use http_body_util::Full;
         let body = Full::new(Bytes::from_static(b"12345"));
         assert_eq!(
             super::collect_first_party_bounded(body, 4).await,
