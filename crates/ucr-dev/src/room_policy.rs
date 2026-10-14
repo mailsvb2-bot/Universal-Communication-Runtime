@@ -29,11 +29,14 @@ pub(crate) struct RoomPolicy {
 }
 
 impl RoomPolicy {
-    pub(crate) fn load(path: &Path) -> Self {
-        let Ok(bytes) = fs::read(path) else {
-            return Self::default();
+    pub(crate) fn load(path: &Path) -> Result<Self, String> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(format!("read room moderation policy: {error}")),
         };
-        serde_json::from_slice(&bytes).unwrap_or_default()
+        serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode room moderation policy: {error}"))
     }
 
     pub(crate) fn save(&self, path: &Path) -> Result<(), String> {
@@ -194,7 +197,7 @@ mod tests {
             silence_deadline(1_000, 15).expect("deadline"),
         );
         policy.save(&path).expect("save");
-        let loaded = RoomPolicy::load(&path);
+        let loaded = RoomPolicy::load(&path).expect("load");
         assert!(loaded.is_blocked(Some("user-aaaaaaaa"), None));
         assert!(loaded.is_blocked(None, Some("device-1")));
         assert!(loaded.silence_message("user-bbbbbbbb", 1_000).is_some());
