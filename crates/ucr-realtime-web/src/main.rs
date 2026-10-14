@@ -3432,13 +3432,20 @@ mod tests {
         let task = tokio::spawn(async move {
             for expected in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK] {
                 let (tcp, _) = listener.accept().await.unwrap();
-                let service = service_fn(move |request: Request<hyper::body::Incoming>| async move {
-                    assert_eq!(request.uri().path(), "/v1/first-party/bootstrap");
-                    Ok::<_, Infallible>(Response::builder().status(expected)
-                        .body(Full::new(Bytes::from_static(b"ok"))).unwrap())
-                });
+                let service =
+                    service_fn(move |request: Request<hyper::body::Incoming>| async move {
+                        assert_eq!(request.uri().path(), "/v1/first-party/bootstrap");
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(expected)
+                                .body(Full::new(Bytes::from_static(b"ok")))
+                                .unwrap(),
+                        )
+                    });
                 hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                    .serve_connection(TokioIo::new(tcp), service).await.unwrap();
+                    .serve_connection(TokioIo::new(tcp), service)
+                    .await
+                    .unwrap();
             }
         });
         assert_eq!(super::first_party_bootstrap_ready(addr).await, Ok(false));
