@@ -602,7 +602,7 @@ async fn forward_first_party(
     request: Request<Incoming>,
     upstream: SocketAddr,
 ) -> Result<HttpResponse, ()> {
-    use hyper::client::conn::http1;
+    use hyper_client::client::conn::http1;
     let (parts, body) = request.into_parts();
     let data = match collect_first_party_bounded(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(data) => data,
@@ -3407,7 +3407,7 @@ mod tests {
             Request, Response, StatusCode,
             header::{COOKIE, ORIGIN, SET_COOKIE},
         };
-        use hyper_util::rt::TokioIo;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
         use std::convert::Infallible;
         use tokio::net::{TcpListener, TcpStream};
 
@@ -3436,7 +3436,8 @@ mod tests {
                         .unwrap(),
                 )
             });
-            hyper::server::conn::http1::Builder::new()
+            let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+            builder
                 .serve_connection(TokioIo::new(tcp), service)
                 .await
                 .unwrap();
@@ -3449,14 +3450,15 @@ mod tests {
             let service = service_fn(move |request| async move {
                 Ok::<_, Infallible>(super::proxy_first_party(request, Some(bff_address)).await)
             });
-            hyper::server::conn::http1::Builder::new()
+            let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+            builder
                 .serve_connection(TokioIo::new(tcp), service)
                 .await
                 .unwrap();
         });
 
         let tcp = TcpStream::connect(gateway_address).await.unwrap();
-        let (mut client, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+        let (mut client, connection) = hyper_client::client::conn::http1::handshake(TokioIo::new(tcp))
             .await
             .unwrap();
         let drive_client = tokio::spawn(async move {
