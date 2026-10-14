@@ -83,3 +83,19 @@ On the Windows 10 1607 smoke machine, initially the browser displayed
 browser media assets, but a browser developer-console or network trace
 must confirm the missing module response; do not mistake that UI symptom
 alone for an authenticated or unauthenticated server result.
+
+## GitHub Actions media bundle (no local WASM compilation)
+
+The existing `Browser Compatibility` desktop Chrome job now uploads
+`ucr-browser-media-<commit-sha>` with three public browser files and
+`SHA256SUMS`. Use **only an artifact whose SHA equals the checked-out UCR
+revision**, otherwise the generated E2EE WASM and JavaScript may disagree
+with the runtime and SDK. Verify the checksums before copying the two
+`endpoint-*` directories into
+`crates/ucr-realtime-web/static/` on the same revision.
+
+The bundle does not contain any private keys, sessions, signers or grants.
+It does not eliminate the need for a trusted HTTPS origin and actual
+ICE/TURN/SFU configuration. The browser compatibility run provides
+an endpoint build and browser smoke probe, **not** live 2-person calling
+proof.
