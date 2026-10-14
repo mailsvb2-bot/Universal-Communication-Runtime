@@ -3351,6 +3351,83 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn first_party_proxy_roundtrip_preserves_csrf_and_secure_session_cookie() {
+        use bytes::Bytes;
+        use http_body_util::{BodyExt, Full};
+        use hyper::{Request, Response, StatusCode, header::{COOKIE, ORIGIN, SET_COOKIE}};
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use std::convert::Infallible;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let bff = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bff_address = bff.local_addr().unwrap();
+        let bff_task = tokio::spawn(async move {
+            let (tcp, _) = bff.accept().await.unwrap();
+            let service = service_fn(|req: Request<hyper::body::Incoming>| async move {
+                assert_eq!(req.uri().path(), "/v1/first-party/signup/begin");
+                assert_eq!(req.method(), hyper::Method::POST);
+                assert_eq!(req.headers()[ORIGIN], "https://calls.example.org");
+                assert_eq!(req.headers()[COOKIE], "ucr_fp_session=testvalue");
+                assert_eq!(req.headers()["X-UCR-First-Party-Request"], "v1");
+                assert!(req.headers().get("X-Forwarded-For").is_none());
+                let body = req.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(body.as_ref(), b"{}");
+                Ok::<_, Infallible>(Response::builder()
+                    .status(StatusCode::OK)
+                    .header(SET_COOKIE, "ucr_fp_session=rotated; Secure; HttpOnly; SameSite=Strict; Path=/")
+                    .header(hyper::header::CONTENT_TYPE, "application/json")
+                    .body(Full::new(Bytes::from_static(b"{\"ok\":true}")))
+                    .unwrap())
+            });
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(tcp), service).await.unwrap();
+        });
+
+        let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_address = gateway.local_addr().unwrap();
+        let gateway_task = tokio::spawn(async move {
+            let (tcp, _) = gateway.accept().await.unwrap();
+            let service = service_fn(move |request| async move {
+                Ok::<_, Infallible>(super::proxy_first_party(request, Some(bff_address)).await)
+            });
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(tcp), service).await.unwrap();
+        });
+
+        let tcp = TcpStream::connect(gateway_address).await.unwrap();
+        let (mut client, connection) =
+            hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await.unwrap();
+        let drive_client = tokio::spawn(async move { let _ = connection.await; });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/first-party/signup/begin")
+            .header(ORIGIN, "https://calls.example.org")
+            .header(COOKIE, "ucr_fp_session=testvalue")
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .header("X-UCR-First-Party-Request", "v1")
+            .header("X-Forwarded-For", "untrusted.example")
+            .body(Full::new(Bytes::from_static(b"{}")))
+            .unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5), client.send_request(request)
+        ).await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[SET_COOKIE],
+            "ucr_fp_session=rotated; Secure; HttpOnly; SameSite=Strict; Path=/"
+        );
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes().as_ref(),
+            b"{\"ok\":true}"
+        );
+        drop(client);
+        drive_client.abort();
+        gateway_task.abort();
+        bff_task.abort();
+    }
+
     #[test]
     fn first_party_upstream_rejects_public_and_invalid_addresses() {
         assert!(super::parse_first_party_upstream("127.0.0.1:18081").is_ok());
