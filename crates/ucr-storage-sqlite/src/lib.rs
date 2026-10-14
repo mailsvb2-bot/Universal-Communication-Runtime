@@ -2404,8 +2404,9 @@ mod tests {
     };
 
     use super::{
-        SQLITE_SCHEMA_V45, SQLITE_SCHEMA_V46, SQLITE_SCHEMA_VERSION, SqliteLocalStore,
-        UCR_SQLITE_APPLICATION_ID,
+        SQLITE_SCHEMA_V45, SQLITE_SCHEMA_V46, SQLITE_SCHEMA_V51, SQLITE_SCHEMA_VERSION,
+        SqliteLocalStore, UCR_SQLITE_APPLICATION_ID, first_party_account_store,
+        test_remove_v52_objects,
     };
 
     static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -2954,7 +2955,8 @@ mod tests {
         assert_eq!(original.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         drop(original);
         {
-            let connection = rusqlite::Connection::open(db.path()).expect("open historical fixture");
+            let connection =
+                rusqlite::Connection::open(db.path()).expect("open historical fixture");
             test_remove_v52_objects(&connection).expect("restore genuine v51 schema objects");
             connection
                 .pragma_update(None, "user_version", SQLITE_SCHEMA_V51)
@@ -2963,7 +2965,10 @@ mod tests {
         let migrated = SqliteLocalStore::open(db.path()).expect("migrate true v51 to v52");
         assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         let connection = migrated.lock_connection().expect("lock migrated store");
-        assert_eq!(first_party_account_store::verify_v52_objects(&connection), Ok(()));
+        assert_eq!(
+            first_party_account_store::verify_v52_objects(&connection),
+            Ok(())
+        );
         let count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM first_party_recovery_credentials",
