@@ -20,7 +20,7 @@ ucr-webrtc = { path = "../ucr-webrtc" }
 webrtc = "=0.17.2"
 tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 bytes = "=1.12.1"
-rustls = { version = "=0.23.45", features = ["ring"] }
+rustls = { version = "=0.23.46", features = ["ring"] }
 
 [lints]
 workspace = true

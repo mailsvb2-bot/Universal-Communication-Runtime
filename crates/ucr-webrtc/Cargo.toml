@@ -19,7 +19,7 @@ ucr-protocol = { path = "../ucr-protocol" }
 ucr-secrets = { path = "../ucr-secrets" }
 
 [dev-dependencies]
-rustls = { version = "=0.23.45", features = ["ring"] }
+rustls = { version = "=0.23.46", features = ["ring"] }
 
 [lints]
 workspace = true
