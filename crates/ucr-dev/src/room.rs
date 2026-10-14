@@ -57,8 +57,6 @@ struct RoomHost {
 struct RoomState {
     conference_id: Option<pb::OpaqueId>,
     opened: bool,
-    /// Next archive id. The first one keeps the historical `room-recording` label.
-    recording_seq: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,14 +140,13 @@ pub async fn spawn(
         state: Mutex::new(RoomState {
             conference_id: None,
             opened: false,
-            recording_seq: 0,
         }),
         open_gate: AsyncMutex::new(()),
         recording_gate: AsyncMutex::new(()),
         edge,
         policy: Mutex::new(super::room_policy::RoomPolicy::load(
             &state_dir.join("moderation.json"),
-        )),
+        )?),
         policy_path: state_dir.join("moderation.json"),
     });
     let prewarm_host = Arc::clone(&host);
@@ -1009,18 +1006,15 @@ async fn release_recording_for_newcomer(
     Ok(())
 }
 
-fn allocate_recording_label(host: &RoomHost) -> Result<String, String> {
-    let mut state = host
-        .state
-        .lock()
-        .map_err(|_| "room state lock poisoned".to_owned())?;
-    let seq = state.recording_seq.saturating_add(1);
-    state.recording_seq = seq;
-    if seq == 1 {
-        Ok("room-recording".to_owned())
-    } else {
-        Ok(format!("room-recording-{seq}"))
-    }
+// Generate an unpredictable durable identity rather than restarting an in-memory
+// counter at one. Old stopped recordings remain in the persistent archive.
+fn allocate_recording_label(_host: &RoomHost) -> Result<String, String> {
+    let mut random = [0_u8; 16];
+    let mut source = std::fs::File::open("/dev/urandom")
+        .map_err(|error| format!("recording id random source: {error}"))?;
+    source.read_exact(&mut random)
+        .map_err(|error| format!("recording id entropy: {error}"))?;
+    Ok(format!("room-recording-{}", super::hex(&random)))
 }
 
 async fn start_room_recording(
