@@ -441,6 +441,10 @@ mod tests {
             )
             .unwrap();
         drop(store);
+        verify_rotated_recovery_after_restart(&db, &identity);
+    }
+
+    fn verify_rotated_recovery_after_restart(db: &Db, identity: &IdentityId) {
         let again = SqliteLocalStore::open(&db.0).unwrap();
         for identity in [&one, &two] {
             assert_eq!(
