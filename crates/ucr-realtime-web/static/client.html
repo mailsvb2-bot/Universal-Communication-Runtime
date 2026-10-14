@@ -1131,30 +1131,6 @@ function preferredCameraCapture(deviceId){
   if(deviceId)video.deviceId={exact:deviceId};
   return video;
 }
-// The first open is small so a real camera can paint a picture before Full HD.
-function fastCameraPreview(preferred){
-  const video={width:{ideal:320},height:{ideal:180},frameRate:{ideal:15,max:30}};
-  if(preferred&&preferred.deviceId)video.deviceId=preferred.deviceId;
-  return video;
-}
-function upgradeLiveCamera(stream,preferred){
-  const track=stream&&typeof stream.getVideoTracks==="function"?stream.getVideoTracks()[0]:null;
-  if(!track||typeof track.applyConstraints!=="function"||!preferred)return;
-  let started=false;
-  const apply=()=>{
-    if(started||track.readyState!=="live")return;
-    started=true;
-    const target={};
-    if(preferred.width)target.width=preferred.width;
-    if(preferred.height)target.height=preferred.height;
-    if(preferred.frameRate)target.frameRate=preferred.frameRate;
-    track.applyConstraints(target).catch(()=>{});
-  };
-  const video=typeof ui!=="undefined"&&ui?ui.localVideo:null;
-  if(video&&typeof video.requestVideoFrameCallback==="function")video.requestVideoFrameCallback(()=>apply());
-  if(typeof setTimeout==="function")setTimeout(apply,400);
-  else Promise.resolve().then(apply);
-}
 // One click should establish an audio conversation even when a user's camera
 // is absent, disconnected, or held by another application. Never reinterpret
 // a permission denial as a recoverable hardware failure.
@@ -1201,8 +1177,7 @@ async function captureLocalMedia(force){
     localStream=new MediaStream();ui.localVideo.srcObject=localStream;refreshLocalMediaControls();return localStream;
   }
   const audio=audioAllowed?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):false;
-  const preferred=cameraAllowed?preferredCameraCapture(ui.camera.value):false;
-  const video=preferred?fastCameraPreview(preferred):false;
+  const video=cameraAllowed?preferredCameraCapture(ui.camera.value):false;
   const generation=mediaCaptureGeneration;
   const captureCurrent=()=>generation===mediaCaptureGeneration&&sessionActive&&
     (mediaActive||(typeof earlyLocalCapture!=="undefined"&&earlyLocalCapture))&&
@@ -1216,10 +1191,9 @@ async function captureLocalMedia(force){
     throw new Error("Media capture authorization changed while device access was pending");
   }
   localStream=captured;ui.localVideo.srcObject=captured;
-  if(ui.localVideo&&typeof ui.localVideo.play==="function")ui.localVideo.play().catch(()=>{});
   if(capture.audioOnlyFallback){
     ui.status.textContent="Camera unavailable; continuing the protected audio call automatically.";
-  }else upgradeLiveCamera(captured,preferred);
+  }
   refreshLocalMediaControls();
   await refreshDevices();
   return localStream;
@@ -1713,9 +1687,6 @@ async function join(){
     if(generation!==sessionLifecycleGeneration)return;
     if(!data.ok)throw new Error(data.message||"Join rejected");
     sessionActive=true;ui.leave.disabled=false;ui.privacyMode.disabled=true;
-    // Reuse the click's in-flight camera, or start it now, beside the post-join
-    // device recheck and MLS. Do not wait for both before the first picture.
-    if(typeof beginLocalRoomCapture==="function")beginLocalRoomCapture();
     // Complete approved enrollment/recovery before media admission can prompt
     // for camera/microphone. This is not authorized by the URL alone.
     await prepareCanonicalDeviceAfterJoin(generation);
@@ -2336,15 +2307,6 @@ function releaseRoomPresence(){
     localStorage.setItem("ucrRoomPresence",JSON.stringify(all));
   }catch(_){}
 }
-function beginLocalRoomCapture(){
-  let speaker=false;
-  try{
-    speaker=sessionStorage.getItem("ucrLocalRoom")==="1"&&sessionStorage.getItem("ucrRoomRole")==="speaker";
-  }catch(_){return;}
-  if(!speaker||!sessionActive||mediaActive||localStream||localMediaPromise)return;
-  earlyLocalCapture=true;
-  ensureLocalMedia(false).catch(()=>{if(!mediaActive)earlyLocalCapture=false;});
-}
 function installLocalRoomMediaHost(){
   if(sessionStorage.getItem("ucrLocalRoom")!=="1")return;
   localRoomMediaHost=true;
@@ -2499,10 +2461,7 @@ function startRoomGestureCapture(){
   const preferred=preferredCameraCapture("");
   const capture=(async()=>{
     try{
-      const stream=await navigator.mediaDevices.getUserMedia({
-        audio:true,
-        video:fastCameraPreview(preferred)
-      });
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true,video:preferred});
       if(epoch!==roomGestureEpoch){
         stream.getTracks().forEach(track=>track.stop());
         return null;
@@ -2511,7 +2470,6 @@ function startRoomGestureCapture(){
       ui.localVideo.srcObject=stream;
       const playing=ui.localVideo.play();
       if(playing&&typeof playing.catch==="function")playing.catch(()=>{});
-      upgradeLiveCamera(stream,preferred);
       return stream;
     }catch(error){
       if(epoch===roomGestureEpoch)ui.status.textContent="Камера не открылась: "+error.message;
@@ -2564,7 +2522,6 @@ async function submitLocalRoom(event,api,installerReady){
   resumeLocalRoomPlayback();
   sessionStorage.setItem("ucrLocalRoom","1");
   sessionStorage.setItem("ucrRoomApi",api);
-  sessionStorage.setItem("ucrRoomRole",role);
   installLocalRoomMediaHost();
   if(role==="speaker")startRoomGestureCapture();
   else stopLocalCapture();
