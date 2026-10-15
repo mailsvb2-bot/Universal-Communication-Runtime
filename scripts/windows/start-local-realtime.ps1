@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$repo = (Get-Location).Path
 Set-Location $repo
 Write-Host '[UCR] Unified local launcher — realtime + web (not yet live call proof)'
 $vc = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
