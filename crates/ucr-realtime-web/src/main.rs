@@ -710,6 +710,17 @@ async fn browser_ready_response(state: &AppState) -> HttpResponse {
     text_response(StatusCode::OK, "ready")
 }
 
+fn first_party_readiness_js_response() -> HttpResponse {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .body(full_body(Bytes::from_static(
+            FIRST_PARTY_READINESS_JS.as_bytes(),
+        )))
+        .expect("static readiness response")
+}
+
 async fn handle_request(
     request: Request<Incoming>,
     state: AppState,
@@ -738,14 +749,7 @@ async fn handle_request(
         return Ok(first_party_start_js_response());
     }
     if method == Method::GET && path == "/readiness.js" {
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
-            .header(CACHE_CONTROL, "no-store")
-            .body(full_body(Bytes::from_static(
-                FIRST_PARTY_READINESS_JS.as_bytes(),
-            )))
-            .expect("static readiness response"));
+        return Ok(first_party_readiness_js_response());
     }
     if method == Method::GET && path == "/room" {
         return Ok(html_body_response(StatusCode::OK, room_page()));
