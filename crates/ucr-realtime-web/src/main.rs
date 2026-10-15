@@ -47,6 +47,7 @@ const MAX_SIGNALING_ICE_MID_BYTES: usize = 256;
 const CLIENT_HTML: &str = include_str!("../static/client.html");
 const FIRST_PARTY_START_HTML: &str = include_str!("../static/start.html");
 const FIRST_PARTY_START_JS: &str = include_str!("../static/start.js");
+const FIRST_PARTY_READINESS_JS: &str = include_str!("../static/readiness.js");
 
 // Generated endpoint-only public code: no secrets, grants or MLS state in these
 // artifacts. The gateway serves only an explicit allowlist, never a directory.
@@ -735,6 +736,14 @@ async fn handle_request(
     }
     if method == Method::GET && path == "/start.js" {
         return Ok(first_party_start_js_response());
+    }
+    if method == Method::GET && path == "/readiness.js" {
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
+            .header(CACHE_CONTROL, "no-store")
+            .body(full_body(Bytes::from_static(FIRST_PARTY_READINESS_JS.as_bytes())))
+            .expect("static readiness response"));
     }
     if method == Method::GET && path == "/room" {
         return Ok(html_body_response(StatusCode::OK, room_page()));
