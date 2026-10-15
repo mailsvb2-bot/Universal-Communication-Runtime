@@ -742,7 +742,9 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
             .header(CACHE_CONTROL, "no-store")
-            .body(full_body(Bytes::from_static(FIRST_PARTY_READINESS_JS.as_bytes())))
+            .body(full_body(Bytes::from_static(
+                FIRST_PARTY_READINESS_JS.as_bytes(),
+            )))
             .expect("static readiness response"));
     }
     if method == Method::GET && path == "/room" {
