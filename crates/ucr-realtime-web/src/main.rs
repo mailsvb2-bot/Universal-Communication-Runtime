@@ -97,6 +97,7 @@ struct AppState {
     upstream: Channel,
     allowed_origins: Vec<String>,
     room_api: SocketAddr,
+    first_party_api: Option<SocketAddr>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,6 +480,7 @@ async fn run() -> Result<(), String> {
         upstream: channel,
         allowed_origins,
         room_api: room_api_socket()?,
+        first_party_api: first_party_socket()?,
     };
 
     let listener = TcpListener::bind(bind)
@@ -518,6 +520,195 @@ fn validate_loopback_bind(bind: SocketAddr) -> Result<(), String> {
     }
 }
 
+// The canonical first-party Identity/Device/Call owner remains in ucr-runtime.
+// This gateway only forwards its exact namespace to a loopback BFF. Deploy
+// the browser gateway behind a trusted HTTPS edge: Secure session cookies
+// must never be exposed through a public plaintext listener.
+fn first_party_socket() -> Result<Option<SocketAddr>, String> {
+    let Ok(value) = std::env::var("UCR_FIRST_PARTY_UPSTREAM") else {
+        return Ok(None);
+    };
+    parse_first_party_upstream(&value).map(Some)
+}
+
+fn parse_first_party_upstream(value: &str) -> Result<SocketAddr, String> {
+    let addr: SocketAddr = value
+        .parse()
+        .map_err(|_| "invalid UCR_FIRST_PARTY_UPSTREAM")?;
+    if !addr.ip().is_loopback() {
+        return Err("first-party upstream must be loopback".into());
+    }
+    Ok(addr)
+}
+
+async fn proxy_first_party(
+    request: Request<Incoming>,
+    upstream: Option<SocketAddr>,
+) -> HttpResponse {
+    let Some(upstream) = upstream else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "first_party_unconfigured",
+            "First-party Identity/Device/Call server is not connected",
+        );
+    };
+    if request.method() != Method::GET && request.method() != Method::POST {
+        return api_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            "first-party method denied",
+        );
+    }
+    if request.uri().query().is_some() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "query_denied",
+            "first-party query strings are not supported",
+        );
+    }
+    match tokio::time::timeout(ROOM_PROXY_TIMEOUT, forward_first_party(request, upstream)).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(())) => api_error(
+            StatusCode::BAD_GATEWAY,
+            "first_party_unreachable",
+            "first-party BFF did not answer",
+        ),
+        Err(_) => api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "first_party_timeout",
+            "first-party BFF timed out",
+        ),
+    }
+}
+
+async fn collect_first_party_bounded<B>(mut body: B, limit: usize) -> Result<Bytes, StatusCode>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+{
+    let mut collected = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| StatusCode::BAD_REQUEST)?;
+        if let Ok(data) = frame.into_data() {
+            if data.len() > limit.saturating_sub(collected.len()) {
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+            collected.extend_from_slice(&data);
+        }
+    }
+    Ok(Bytes::from(collected))
+}
+
+async fn forward_first_party(
+    request: Request<Incoming>,
+    upstream: SocketAddr,
+) -> Result<HttpResponse, ()> {
+    use hyper::client::conn::http1;
+    let (parts, body) = request.into_parts();
+    let data = match collect_first_party_bounded(body, MAX_REQUEST_BODY_BYTES).await {
+        Ok(data) => data,
+        Err(status) => {
+            return Ok(api_error(
+                status,
+                "first_party_body_rejected",
+                "first-party request body exceeds limit or is invalid",
+            ));
+        }
+    };
+    let stream = TcpStream::connect(upstream).await.map_err(|_| ())?;
+    let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|_| ())?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let mut builder = Request::builder()
+        .method(parts.method)
+        .uri(parts.uri.path());
+    // Forward only the headers required by first-party CSRF, request encoding
+    // and HttpOnly session authentication. Never forward untrusted routing headers.
+    for header in [
+        ORIGIN,
+        CONTENT_TYPE,
+        hyper::header::COOKIE,
+        hyper::header::ACCEPT,
+    ] {
+        if let Some(value) = parts.headers.get(&header) {
+            builder = builder.header(header, value);
+        }
+    }
+    if let Some(value) = parts.headers.get("X-UCR-First-Party-Request") {
+        builder = builder.header("X-UCR-First-Party-Request", value);
+    }
+    let outgoing = builder
+        .header(HOST, upstream.to_string())
+        .body(Full::new(data))
+        .map_err(|_| ())?;
+    let response = sender.send_request(outgoing).await.map_err(|_| ())?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    let data = collect_first_party_bounded(response.into_body(), MAX_REQUEST_BODY_BYTES)
+        .await
+        .map_err(|_| ())?;
+    let mut builder = Response::builder()
+        .status(status)
+        .header(CACHE_CONTROL, "no-store");
+    for header in [CONTENT_TYPE, hyper::header::SET_COOKIE] {
+        for value in headers.get_all(&header) {
+            builder = builder.header(&header, value);
+        }
+    }
+    builder.body(full_body(data)).map_err(|_| ())
+}
+
+// Opening a TCP port is not proof that the BFF is alive: require an actual
+// HTTP 200 from the scoped bootstrap endpoint before reporting readiness.
+async fn first_party_bootstrap_ready(bff: SocketAddr) -> Result<bool, ()> {
+    use hyper::client::conn::http1;
+    let stream = TcpStream::connect(bff).await.map_err(|_| ())?;
+    let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|_| ())?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/first-party/bootstrap")
+        .header(HOST, bff.to_string())
+        .body(Full::new(Bytes::new()))
+        .map_err(|_| ())?;
+    let response = sender.send_request(request).await.map_err(|_| ())?;
+    Ok(response.status() == StatusCode::OK)
+}
+
+async fn browser_ready_response(state: &AppState) -> HttpResponse {
+    if !browser_media_assets_present() {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "endpoint_media_asset_missing",
+            "Build the pinned endpoint WASM and browser installer before making calls",
+        );
+    }
+    let Some(bff) = state.first_party_api else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "first_party_unconfigured",
+            "Set UCR_FIRST_PARTY_UPSTREAM to the canonical loopback BFF",
+        );
+    };
+    if !matches!(
+        tokio::time::timeout(Duration::from_secs(2), first_party_bootstrap_ready(bff)).await,
+        Ok(Ok(true))
+    ) {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "first_party_unreachable",
+            "The canonical first-party BFF is unreachable or self-service registration is unconfigured",
+        );
+    }
+    text_response(StatusCode::OK, "ready")
+}
+
 async fn handle_request(
     request: Request<Incoming>,
     state: AppState,
@@ -535,6 +726,9 @@ async fn handle_request(
 
     if method == Method::GET && path == "/healthz" {
         return Ok(text_response(StatusCode::OK, "ok"));
+    }
+    if method == Method::GET && path == "/readyz" {
+        return Ok(browser_ready_response(&state).await);
     }
     if method == Method::GET && matches!(path.as_str(), "/start" | "/start.html") {
         return Ok(first_party_start_response());
@@ -574,6 +768,10 @@ async fn handle_request(
             store_viewing(viewing_id.as_deref(), &body),
             origin.as_deref(),
         ));
+    }
+
+    if path.starts_with("/v1/first-party/") {
+        return Ok(proxy_first_party(request, state.first_party_api).await);
     }
 
     if method != Method::POST {
@@ -2574,6 +2772,22 @@ fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> HttpResponse 
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
+fn browser_media_assets_present() -> bool {
+    let root = std::env::var_os("UCR_REALTIME_WEB_ASSET_DIR").map_or_else(
+        || std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
+        std::path::PathBuf::from,
+    );
+    browser_media_assets_present_in(&root)
+}
+
+fn browser_media_assets_present_in(root: &std::path::Path) -> bool {
+    REFERENCE_MEDIA_ASSETS.iter().all(|(_, file, _)| {
+        std::fs::metadata(root.join(file)).is_ok_and(|metadata| {
+            metadata.is_file() && (1..=16 * 1024 * 1024).contains(&metadata.len())
+        })
+    })
+}
+
 fn reference_media_asset(path: &str) -> Option<(&'static str, &'static str)> {
     REFERENCE_MEDIA_ASSETS
         .iter()
@@ -3205,6 +3419,188 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn bff_readiness_requires_scoped_bootstrap_http_200() {
+        use bytes::Bytes;
+        use http_body_util::Full;
+        use hyper::{Request, Response, StatusCode, service::service_fn};
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use std::convert::Infallible;
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for expected in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK] {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let service =
+                    service_fn(move |request: Request<hyper::body::Incoming>| async move {
+                        assert_eq!(request.uri().path(), "/v1/first-party/bootstrap");
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(expected)
+                                .body(Full::new(Bytes::from_static(b"ok")))
+                                .unwrap(),
+                        )
+                    });
+                hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(tcp), service)
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(super::first_party_bootstrap_ready(addr).await, Ok(false));
+        assert_eq!(super::first_party_bootstrap_ready(addr).await, Ok(true));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn first_party_proxy_roundtrip_preserves_csrf_and_secure_session_cookie() {
+        use bytes::Bytes;
+        use http_body_util::{BodyExt, Full};
+        use hyper::service::service_fn;
+        use hyper::{
+            Request, Response, StatusCode,
+            header::{COOKIE, ORIGIN, SET_COOKIE},
+        };
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use std::convert::Infallible;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let bff = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bff_address = bff.local_addr().unwrap();
+        let bff_task = tokio::spawn(async move {
+            let (tcp, _) = bff.accept().await.unwrap();
+            let service = service_fn(|req: Request<hyper::body::Incoming>| async move {
+                assert_eq!(req.uri().path(), "/v1/first-party/signup/begin");
+                assert_eq!(req.method(), hyper::Method::POST);
+                assert_eq!(req.headers()[ORIGIN], "https://calls.example.org");
+                assert_eq!(req.headers()[COOKIE], "ucr_fp_session=testvalue");
+                assert_eq!(req.headers()["X-UCR-First-Party-Request"], "v1");
+                assert!(req.headers().get("X-Forwarded-For").is_none());
+                let body = req.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(body.as_ref(), b"{}");
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(
+                            SET_COOKIE,
+                            "ucr_fp_session=rotated; Secure; HttpOnly; SameSite=Strict; Path=/",
+                        )
+                        .header(hyper::header::CONTENT_TYPE, "application/json")
+                        .body(Full::new(Bytes::from_static(b"{\"ok\":true}")))
+                        .unwrap(),
+                )
+            });
+            let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+            builder
+                .serve_connection(TokioIo::new(tcp), service)
+                .await
+                .unwrap();
+        });
+
+        let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_address = gateway.local_addr().unwrap();
+        let gateway_task = tokio::spawn(async move {
+            let (tcp, _) = gateway.accept().await.unwrap();
+            let service = service_fn(move |request| async move {
+                Ok::<_, Infallible>(super::proxy_first_party(request, Some(bff_address)).await)
+            });
+            let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+            builder
+                .serve_connection(TokioIo::new(tcp), service)
+                .await
+                .unwrap();
+        });
+
+        let tcp = TcpStream::connect(gateway_address).await.unwrap();
+        let (mut client, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+            .await
+            .unwrap();
+        let drive_client = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/first-party/signup/begin")
+            .header(ORIGIN, "https://calls.example.org")
+            .header(COOKIE, "ucr_fp_session=testvalue")
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .header("X-UCR-First-Party-Request", "v1")
+            .header("X-Forwarded-For", "untrusted.example")
+            .body(Full::new(Bytes::from_static(b"{}")))
+            .unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.send_request(request),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[SET_COOKIE],
+            "ucr_fp_session=rotated; Secure; HttpOnly; SameSite=Strict; Path=/"
+        );
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            b"{\"ok\":true}"
+        );
+        drop(client);
+        drive_client.abort();
+        gateway_task.abort();
+        bff_task.abort();
+    }
+
+    #[test]
+    fn browser_media_readiness_requires_all_pinned_files() {
+        let root =
+            std::env::temp_dir().join(format!("ucr-browser-media-ready-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (_, file, _) in super::REFERENCE_MEDIA_ASSETS {
+            let destination = root.join(file);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::write(destination, b"media-bundle-test").unwrap();
+        }
+        assert!(super::browser_media_assets_present_in(&root));
+        std::fs::remove_file(root.join("endpoint-wasm/ucr_endpoint_wasm_bg.wasm")).unwrap();
+        assert!(!super::browser_media_assets_present_in(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_party_upstream_rejects_public_and_invalid_addresses() {
+        assert!(super::parse_first_party_upstream("127.0.0.1:18081").is_ok());
+        assert!(super::parse_first_party_upstream("[::1]:18081").is_ok());
+        for address in [
+            "0.0.0.0:18081",
+            "192.168.1.2:18081",
+            "https://example.org",
+            "",
+        ] {
+            assert!(
+                super::parse_first_party_upstream(address).is_err(),
+                "{address}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn first_party_body_is_bounded_before_forwarding() {
+        use bytes::Bytes;
+        use http_body_util::Full;
+        let body = Full::new(Bytes::from_static(b"12345"));
+        assert_eq!(
+            super::collect_first_party_bounded(body, 4).await,
+            Err(hyper::StatusCode::PAYLOAD_TOO_LARGE)
+        );
+    }
+
     #[test]
     fn first_party_contact_call_entry_has_complete_fail_closed_user_route() {
         let html = super::FIRST_PARTY_START_HTML;

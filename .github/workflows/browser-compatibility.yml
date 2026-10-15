@@ -99,6 +99,33 @@ jobs:
           retention-days: 14
 
 
+      - name: Prepare revision-matched public media bundle
+        if: matrix.browser == 'chrome'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd crates/ucr-realtime-web/static
+          sha256sum \
+            endpoint-wasm/ucr_endpoint_wasm.js \
+            endpoint-wasm/ucr_endpoint_wasm_bg.wasm \
+            endpoint-media/reference_browser_media_installer.js \
+            > SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Upload revision-matched public media bundle
+        if: matrix.browser == 'chrome'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ucr-browser-media-${{ github.sha }}
+          path: |
+            crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm.js
+            crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm_bg.wasm
+            crates/ucr-realtime-web/static/endpoint-media/reference_browser_media_installer.js
+            crates/ucr-realtime-web/static/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+
   android-chrome:
     name: mobile-android-chrome
     runs-on: ubuntu-24.04

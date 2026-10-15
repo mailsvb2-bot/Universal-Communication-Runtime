@@ -315,6 +315,9 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 1);
+        // Windows does not permit deleting an open SQLite database file.
+        // Drop the reader only after asserting the scoped reconciliation result.
+        drop(connection);
         fs::remove_file(path).expect("cleanup");
     }
 
