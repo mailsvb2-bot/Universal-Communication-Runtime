@@ -99,3 +99,24 @@ It does not eliminate the need for a trusted HTTPS origin and actual
 ICE/TURN/SFU configuration. The browser compatibility run provides
 an endpoint build and browser smoke probe, **not** live 2-person calling
 proof.
+
+## First real call: Windows fail-closed preflight
+
+After deploying the **real** HTTPS edge, starting `serve-realtime` and the
+first-party BFF with canonical tenant and Join credentials, and producing the
+exact-revision browser media assets, run on the Windows host:
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/check-first-real-call.ps1 -PublicOrigin https://calls.example.org
+~~~
+
+The script checks that pinned media assets exist, gateway `/healthz` and
+`/readyz` return HTTP 200, first-party `/bootstrap` returns a nonempty
+canonical `tenantId` through the trusted HTTPS origin, anonymous `/session`
+is denied (401), and public HTTPS serves the browser entry and endpoint WASM.
+It exits nonzero if **any** check fails; it never logs or invents signers,
+recovery material, bearer credentials or Join tokens.
+
+**This is only a deployment preflight**, not media proof. Complete two-device
+acceptance and real encrypted audio/video transmission before claiming the
+calling journey is complete.
