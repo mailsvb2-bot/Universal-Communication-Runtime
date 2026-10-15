@@ -1,4 +1,6 @@
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Security
+
 $repo = (Get-Location).Path
 Set-Location $repo
 Write-Host '[UCR] Unified local launcher — realtime + web (not yet live call proof)'
