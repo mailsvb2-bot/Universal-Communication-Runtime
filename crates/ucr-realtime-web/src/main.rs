@@ -652,9 +652,26 @@ async fn forward_first_party(
     let mut builder = Response::builder()
         .status(status)
         .header(CACHE_CONTROL, "no-store");
+    // Forward only the canonical BFF's browser security and session headers.
+    // Never forward arbitrary or hop-by-hop upstream response headers.
     for header in [CONTENT_TYPE, hyper::header::SET_COOKIE] {
         for value in headers.get_all(&header) {
             builder = builder.header(&header, value);
+        }
+    }
+    for header in [
+        "Content-Security-Policy",
+        "X-Content-Type-Options",
+        "Referrer-Policy",
+        "Pragma",
+        "X-Frame-Options",
+        "Permissions-Policy",
+        "Cross-Origin-Opener-Policy",
+        "Cross-Origin-Resource-Policy",
+        "Cross-Origin-Embedder-Policy",
+    ] {
+        for value in headers.get_all(header) {
+            builder = builder.header(header, value);
         }
     }
     builder.body(full_body(data)).map_err(|_| ())
@@ -3487,6 +3504,15 @@ mod tests {
                             "ucr_fp_session=rotated; Secure; HttpOnly; SameSite=Strict; Path=/",
                         )
                         .header(hyper::header::CONTENT_TYPE, "application/json")
+                        .header(
+                            "Content-Security-Policy",
+                            "default-src 'none'; frame-ancestors 'none'",
+                        )
+                        .header("X-Content-Type-Options", "nosniff")
+                        .header("Referrer-Policy", "no-referrer")
+                        .header("Pragma", "no-cache")
+                        .header("Permissions-Policy", "camera=(), microphone=()")
+                        .header("X-Internal-Secret", "never-expose")
                         .body(Full::new(Bytes::from_static(b"{\"ok\":true}")))
                         .unwrap(),
                 )
@@ -3541,6 +3567,18 @@ mod tests {
             response.headers()[SET_COOKIE],
             "ucr_fp_session=rotated; Secure; HttpOnly; SameSite=Strict; Path=/"
         );
+        assert_eq!(
+            response.headers()["Content-Security-Policy"],
+            "default-src 'none'; frame-ancestors 'none'"
+        );
+        assert_eq!(response.headers()["X-Content-Type-Options"], "nosniff");
+        assert_eq!(response.headers()["Referrer-Policy"], "no-referrer");
+        assert_eq!(response.headers()["Pragma"], "no-cache");
+        assert_eq!(
+            response.headers()["Permissions-Policy"],
+            "camera=(), microphone=()"
+        );
+        assert!(response.headers().get("X-Internal-Secret").is_none());
         assert_eq!(
             response
                 .into_body()
