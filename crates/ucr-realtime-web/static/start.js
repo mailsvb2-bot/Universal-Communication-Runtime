@@ -71,6 +71,27 @@ function principalScope(user) {
 }
 
 function message(value) { status.textContent = value; }
+function setCallStage(step, guide) {
+  for (const [index, name] of ["device","contact","accepted","media"].entries()) {
+    const element = el("stage-" + name);
+    if (index === step) element.setAttribute("aria-current","step");
+    else element.removeAttribute("aria-current");
+  }
+  el("video-guide").textContent = guide;
+}
+async function checkMediaReadiness() {
+  const output = el("video-readiness");
+  try {
+    const response = await fetch("/readyz", {cache:"no-store", credentials:"same-origin"});
+    if (response.ok) {
+      output.textContent="Медиашлюз готов. Для появления видео нужны два доверенных устройства и принятый вызов.";
+    } else {
+      output.textContent="Медиа пока недоступно (HTTP " + response.status + "). Проверьте BFF авторизации и сборку браузерных E2EE-модулей.";
+    }
+  } catch {
+    output.textContent="Проверка медиашлюза не удалась. Убедитесь, что сервер запущен.";
+  }
+}
 function showRecovery(code) {
   const element = el("recovery-output");
   element.hidden = false;
@@ -160,6 +181,7 @@ function showActive() {
   if (!active) {
     state.textContent = "Нет активного вызова.";
     el("cancel").hidden = true;
+    setCallStage(accountScope ? 1 : 0, accountScope ? "Выберите контакт и нажмите «Видеозвонок»." : "Зарегистрируйте первое доверенное устройство.");
     return;
   }
   const remote = active.call.callerIdentityId === active.identity
@@ -167,6 +189,9 @@ function showActive() {
   state.textContent = nameFor(remote) + " — " + active.call.state
     + " (" + (active.call.media === "video" ? "видео" : "аудио") + ")";
   el("cancel").hidden = active.call.state === "terminated";
+  if (active.call.state === "active") setCallStage(3, "Вызов принят. Проверяем криптографический допуск и открываем видеоэкран…");
+  else if (active.call.state === "terminated") setCallStage(1, "Вызов завершён. Выберите контакт для нового звонка.");
+  else setCallStage(2, "Вызов отправлен. Ожидается принятие вторым участником; камера пока выключена.");
 }
 async function beginMedia(callId) {
   if (navigating) return;
@@ -175,6 +200,7 @@ async function beginMedia(callId) {
   const grant = await calls.join(callId);
   if (!grant || grant.callId !== callId) throw Error("Call admission mismatch");
   navigating = true;
+  setCallStage(3, "Допуск подтверждён. Открывается защищённый видеоэкран…");
   clearInterval(timer);
   const next = new URL("/client.html",location.origin);
   next.hash = grant.joinFragment.slice(1);
@@ -382,4 +408,5 @@ el("logout").addEventListener("click",()=>void run(async()=>{
 }));
 
 window.addEventListener("pagehide", () => clearInterval(timer));
+void checkMediaReadiness();
 void run(initialize);
