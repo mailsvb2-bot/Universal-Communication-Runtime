@@ -15,7 +15,10 @@ assert 'ucrCanonicalMediaAdmissionResolver' in sdk
 assert 'canonical device signing, media binding or authorization incomplete' in factory
 assert 'typeof admission.isCurrent !== "function"' in factory
 assert 'admission.trustedKeys?.resolve' in factory
-assert 'admission.signingSeed' in factory
+assert 'const seed = admission?.signingSeed;' in factory
+assert 'seed.length !== 32' in factory
+assert 'seedCopy = seed.slice()' in factory
+assert 'seedCopy.fill(0)' in factory
 assert 'admission.authorizeFrame' in factory
 assert 'admission.authorizePublish' in factory
 print("PASS first-party media admission must be canonical, current, revocable, device-signed, and frame-authorized")
