@@ -158,6 +158,15 @@ foreach ($port in @(50051,50052,8080,8081,8443)) {
     if ($listeners.Count -gt 0) { throw "Port $port already occupied; refusing to take over an unrelated service" }
 }
 Start-Sleep -Milliseconds 600
+# The browser installer is generated and ignored by Git. Rebuild from the checked-out
+# TypeScript SDK on every launch, otherwise Rust serves stale Call validation code.
+# This uses a pinned esbuild version and does not rebuild the existing WASM asset.
+Require-Tool 'npm.cmd'
+Write-Host 'Bundling the canonical first-party browser SDK from this checkout...'
+Invoke-Checked 'npm.cmd' @('exec','--yes','--package=esbuild@0.25.5','--','esbuild',
+    'sdk/typescript/src/reference_browser_media_installer.ts',
+    '--bundle','--platform=browser','--format=esm','--target=es2022',
+    '--outfile=crates/ucr-realtime-web/static/endpoint-media/reference_browser_media_installer.js')
 Write-Host 'Building runtime + browser gateway + HTTPS edge from the currently checked-out revision...'
 Invoke-Checked 'cargo' @('build','-p','ucr-runtime','-p','ucr-realtime-web','-p','ucr-https-edge','--locked')
 $runtimeExe = Join-Path $root 'target\debug\ucr-runtime.exe'
