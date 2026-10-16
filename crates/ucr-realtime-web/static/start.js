@@ -201,8 +201,10 @@ async function dial(contact,media) {
   const requestId = idempotency.get(key) ?? crypto.randomUUID();
   idempotency.set(key,requestId);
   message("Проверка Device и создание канонического вызова…");
+  // Re-establish device authority before making an irreversible canonical Call.
+  // A stale cookie must not create a Call which the UI then fails to display.
+  const session = await restoreSession();
   const call = await calls.start(contact.id,media,requestId);
-  const session = await host.resumeAuthenticatedDevice();
   active = {call,identity:session.participantId};
   showActive();
   message("Вызов создан. Ожидается реальное принятие другим участником.");
@@ -247,7 +249,7 @@ async function refresh() {
   if (refreshing || navigating) return;
   refreshing = true;
   try {
-    const user = await host.resumeAuthenticatedDevice();
+    const user = await restoreSession();
     if (accountScope !== principalScope(user)) {
       // Fail closed immediately if the user logs out or changes Device in
       // another tab. Never keep the former user's contacts/Call on screen.
