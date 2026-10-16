@@ -6,6 +6,10 @@ on:
       - 'crates/ucr-realtime-web/static/start.js'
       - 'tools/check_first_party_start_controls.py'
       - 'tools/check_first_party_call_revision_contract.py'
+      - 'tools/check_first_party_media_admission_contract.py'
+      - 'crates/ucr-realtime-web/static/client.html'
+      - 'sdk/typescript/src/reference_browser_media_installer.ts'
+      - 'sdk/typescript/src/canonical_browser_media_factory.ts'
       - 'sdk/typescript/src/contact_call_journey.ts'
       - 'scripts/windows/start-local-first-party-https.ps1'
       - '.github/workflows/windows-first-party-ui.yml'
@@ -24,3 +28,6 @@ jobs:
       - name: Check call creation revision contract
         shell: pwsh
         run: python tools/check_first_party_call_revision_contract.py
+      - name: Check canonical media admission boundary
+        shell: pwsh
+        run: python tools/check_first_party_media_admission_contract.py
