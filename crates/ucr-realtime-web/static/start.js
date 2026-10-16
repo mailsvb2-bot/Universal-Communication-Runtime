@@ -297,15 +297,25 @@ async function initialize() {
   await updateContacts();
   await updateDevices();
   el("who").textContent = "Identity: " + user.participantId + " · Device: " + user.deviceId;
-  await refresh();
+  // Successful device reauthentication is independent from Call state.
+  // A malformed/stale canonical Call must not invalidate a trusted Device.
+  message("Доверенное устройство подтверждено. Проверяем состояние вызовов…");
+  try {
+    await refresh();
+    message("Устройство подтверждено. Входящие звонки проверяются.");
+  } catch (error) {
+    message("Устройство подтверждено; проверка вызовов завершилась ошибкой: " +
+      (error instanceof Error ? error.message : String(error)));
+  }
   timer = setInterval(() => {
     if (busy || navigating || document.hidden) return;
     void refresh().catch(err => {
-      clearInterval(timer);
-      message("Проверка входящих остановлена: " + (err instanceof Error ? err.message : String(err)));
+      // Retain the authenticated device and keep polling rather than requiring
+      // fresh registration. Do not bypass server-side Call authority.
+      message("Устройство авторизовано; ошибка проверки вызовов: " +
+        (err instanceof Error ? err.message : String(err)));
     });
   },2500);
-  message("Учётная запись подтверждена. Исходящие и входящие проверяются каноническим сервером.");
 }
 el("device-login").addEventListener("submit", event => {
   event.preventDefault();
