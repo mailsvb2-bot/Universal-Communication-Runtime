@@ -37,7 +37,9 @@ function Http-Status([string]$uri) {
 function Start-Ucr([string]$exe,[string[]]$arguments,[string]$name) {
     $stdout = Join-Path $logRoot "$name.stdout.log"
     $stderr = Join-Path $logRoot "$name.stderr.log"
-    $process = Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $root -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    $startParams = @{ FilePath=$exe; WorkingDirectory=$root; RedirectStandardOutput=$stdout; RedirectStandardError=$stderr; PassThru=$true }
+    if ($arguments.Count -gt 0) { $startParams.ArgumentList = $arguments }
+    $process = Start-Process @startParams
     Start-Sleep -Seconds 2
     $process.Refresh()
     if ($process.HasExited) { throw "$name exited early. Read $stderr and $stdout" }
