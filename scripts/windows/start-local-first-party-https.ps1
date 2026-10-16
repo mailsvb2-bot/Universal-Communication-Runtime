@@ -1,8 +1,17 @@
 # Local Windows first-party HTTPS smoke launcher; does not prove a two-person E2EE call.
+param([string]$RepositoryRoot = '')
 # Keeps the existing canonical SQLite and in-process first-party BFF owner.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+if ($RepositoryRoot) {
+    $root = (Resolve-Path -LiteralPath $RepositoryRoot).Path
+} else {
+    $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+}
+if (!(Test-Path -LiteralPath (Join-Path $root 'Cargo.toml') -PathType Leaf) -or
+    !(Test-Path -LiteralPath (Join-Path $root 'crates\ucr-realtime-web\static\start.html') -PathType Leaf)) {
+    throw "Not a UCR repository root: $root. Pass -RepositoryRoot with the checked-out project path."
+}
 Set-Location $root
 $state = Join-Path $env:LOCALAPPDATA 'UCR-Local-Test'
 $db = Join-Path $state 'runtime.sqlite'
