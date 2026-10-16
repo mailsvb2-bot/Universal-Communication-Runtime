@@ -19,6 +19,11 @@ MAX_RESULT_BYTES = 1024 * 1024
 
 
 class ProbeServer(http.server.ThreadingHTTPServer):
+    # Mobile Safari may retain an HTTP keep-alive connection while the
+    # simulator is being torn down. Never let idle handler threads prevent
+    # an already validated probe process from exiting.
+    daemon_threads = True
+    block_on_close = False
     def __init__(
         self,
         server_address: tuple[str, int],

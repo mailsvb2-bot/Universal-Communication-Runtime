@@ -24,15 +24,28 @@ li:last-child{border-bottom:0}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
 .identity{color:#aebed6;overflow-wrap:anywhere;font-size:.85rem}
 #status{white-space:pre-wrap;min-height:2em}
+.call-stage{border-color:#6689bf;background:#152440}.call-steps{display:flex;gap:12px;flex-wrap:wrap;color:#d3e2f8}.call-steps span{border:1px solid #536884;padding:8px 12px;border-radius:8px}.call-steps [aria-current=step]{background:#235388;color:#fff}.media-entry{margin-top:12px;font-weight:650}
 small{color:#9aaaca;line-height:1.5;display:block}
 [hidden]{display:none!important}
 </style>
+<script defer src="/readiness.js"></script>
 <script type="module" src="/start.js"></script>
 </head>
 <body>
 <main>
 <h1>UCR — Защищённые звонки</h1>
 <p>Контакт → один вызов → согласие собеседника → отдельное разрешение на защищённую медиасессию.</p>
+<section class="call-stage" aria-label="Видеозвонок">
+  <h2>Экран видеозвонка</h2>
+  <div class="call-steps" aria-label="Этапы соединения">
+    <span id="stage-device" aria-current="step">1. Моё устройство</span>
+    <span id="stage-contact">2. Контакт и вызов</span>
+    <span id="stage-accepted">3. Принятие вызова</span>
+    <span id="stage-media">4. Камера и видео</span>
+  </div>
+  <p id="video-guide" class="media-entry">Сначала зарегистрируйте устройство. Экран с камерой откроется автоматически после принятия вызова собеседником.</p>
+  <small id="video-readiness">Проверка готовности браузерного медиашлюза…</small>
+</section>
 <section aria-label="Учётная запись">
   <h2>Моё устройство</h2>
   <p id="who" class="identity">Проверка независимой авторизации…</p>
