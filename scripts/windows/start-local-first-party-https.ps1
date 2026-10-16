@@ -43,6 +43,26 @@ function Http-Status([string]$uri) {
         return 0
     }
 }
+# Windows Server 2016 PowerShell's .NET TLS client can omit the signature_algorithms
+# extension required by rustls. Use Git-for-Windows curl with certificate verification
+# instead of weakening the HTTPS edge or accepting any invalid certificate.
+$curl = $null
+foreach ($candidate in @('C:\Program Files\Git\mingw64\bin\curl.exe','C:\Program Files\Git\usr\bin\curl.exe')) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $curl = $candidate; break }
+}
+if (!$curl) {
+    $installedCurl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($installedCurl) { $curl = $installedCurl.Source }
+}
+if (!$curl) { throw 'curl.exe with modern TLS support is required to verify the local HTTPS edge (Git for Windows includes one).' }
+function Https-Status([string]$uri) {
+    # --cacert pins the freshly generated localhost certificate; no -k/--insecure.
+    $status = & $curl '--cacert' $cert '--silent' '--show-error' '--max-time' '6' '--output' 'NUL' '--write-out' '%{http_code}' $uri
+    if ($LASTEXITCODE -ne 0) { return 0 }
+    $code = 0
+    if ([int]::TryParse(($status | Out-String).Trim(), [ref]$code)) { return $code }
+    return 0
+}
 function Start-Ucr([string]$exe,[string[]]$arguments,[string]$name) {
     $stdout = Join-Path $logRoot "$name.stdout.log"
     $stderr = Join-Path $logRoot "$name.stderr.log"
@@ -180,8 +200,8 @@ try {
     $ready = $false
     for ($i=0; $i -lt 20; $i++) {
         if ((Http-Status 'http://127.0.0.1:8080/readyz') -eq 200 -and
-            (Http-Status "$origin/v1/first-party/bootstrap") -eq 200 -and
-            (Http-Status "$origin/start") -eq 200) { $ready = $true; break }
+            (Https-Status "$origin/v1/first-party/bootstrap") -eq 200 -and
+            (Https-Status "$origin/start") -eq 200) { $ready = $true; break }
         Start-Sleep -Seconds 2
     }
     if (!$ready) { throw "Readiness failed. Check $logRoot and /readyz; not claiming a working video call." }
