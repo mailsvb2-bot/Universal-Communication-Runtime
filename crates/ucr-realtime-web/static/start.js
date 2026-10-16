@@ -327,7 +327,23 @@ el("device-login").addEventListener("submit", event => {
     await initialize();
   });
 });
-el("retry").addEventListener("click",() => void run(initialize));
+// A manual retry must be visible immediately, even when another action is busy.
+// The existing init lock prevents duplicate requests; explain this next to the button.
+el("retry").addEventListener("click",() => {
+  const control = el("retry");
+  control.textContent = busy ? "Проверка уже выполняется…" : "Проверяем вход…";
+  control.disabled = true;
+  message(busy ? "Проверка входа уже выполняется. Дождитесь результата." : "Повторная проверка защищённого устройства…");
+  if (busy || navigating) {
+    control.disabled = false;
+    control.textContent = "Повторить проверку входа";
+    return;
+  }
+  void run(initialize).finally(() => {
+    control.disabled = false;
+    control.textContent = "Повторить проверку входа";
+  });
+});
 el("new-contact").addEventListener("submit", event => {
   event.preventDefault();
   void run(async () => {
