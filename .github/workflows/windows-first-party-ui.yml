@@ -1,0 +1,26 @@
+name: Windows First-Party UI Contract
+on:
+  pull_request:
+    paths:
+      - 'crates/ucr-realtime-web/static/start.html'
+      - 'crates/ucr-realtime-web/static/start.js'
+      - 'tools/check_first_party_start_controls.py'
+      - '.github/workflows/windows-first-party-ui.yml'
+  workflow_dispatch:
+jobs:
+  first-party-ui-controls:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check JavaScript parses
+        shell: pwsh
+        run: node --check crates/ucr-realtime-web/static/start.js
+      - name: Check page control bindings
+        shell: pwsh
+        run: python tools/check_first_party_start_controls.py
