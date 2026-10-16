@@ -76,7 +76,25 @@ if (!$openssl) { throw 'OpenSSL executable not found; install OpenSSL CLI. No TL
 # Read the existing revision-matched local media files but never claim that presence proves live media.
 if (!(Test-Path $cert) -or !(Test-Path $privateKey)) {
     Write-Host 'Generating a localhost-only development TLS certificate. NOT for production use.'
-    Invoke-Checked $openssl @('req','-x509','-nodes','-newkey','rsa:3072','-sha256','-days','30','-keyout',$privateKey,'-out',$cert,'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1','-addext','basicConstraints=critical,CA:FALSE','-addext','extendedKeyUsage=serverAuth')
+    # Some Windows OpenSSL distributions (notably Strawberry Perl) point at a
+    # non-existent built-in openssl.cnf. Use an explicit, minimal certificate
+    # profile so no machine-global OPENSSL_CONF or installation is required.
+    $config = Join-Path $state 'localhost-openssl.cnf'
+    $profile = @(
+        '[req]',
+        'prompt = no',
+        'distinguished_name = subject',
+        'x509_extensions = localhost_extensions',
+        '[subject]',
+        'CN = localhost',
+        '[localhost_extensions]',
+        'basicConstraints = critical,CA:FALSE',
+        'keyUsage = critical,digitalSignature,keyEncipherment',
+        'extendedKeyUsage = serverAuth',
+        'subjectAltName = DNS:localhost,IP:127.0.0.1'
+    )
+    [IO.File]::WriteAllLines($config, [string[]]$profile, [Text.Encoding]::ASCII)
+    Invoke-Checked $openssl @('req','-x509','-nodes','-newkey','rsa:3072','-sha256','-days','30','-config',$config,'-extensions','localhost_extensions','-keyout',$privateKey,'-out',$cert)
 }
 # Trust changes require an explicit user decision. A trust failure halts, not falls back to HTTP.
 $thumbprint = (& $openssl x509 -in $cert -noout -fingerprint -sha256 | Out-String).Trim()
