@@ -125,13 +125,8 @@ $env:OPENSSL_NO_VENDOR = '1'
 $env:CARGO_INCREMENTAL = '0'
 $env:CARGO_BUILD_JOBS = '1'
 $env:CARGO_PROFILE_DEV_DEBUG = '0'
-Write-Host 'Building runtime + browser gateway + HTTPS edge from the currently checked-out revision...'
-Invoke-Checked 'cargo' @('build','-p','ucr-runtime','-p','ucr-realtime-web','-p','ucr-https-edge','--locked')
-$runtimeExe = Join-Path $root 'target\debug\ucr-runtime.exe'
-$webExe = Join-Path $root 'target\debug\ucr-realtime-web.exe'
-$edgeExe = Join-Path $root 'target\debug\ucr-https-edge.exe'
-foreach ($exe in @($runtimeExe,$webExe,$edgeExe)) { Require-File $exe }
-
+# Stop only the previous UCR binaries in this checkout BEFORE cargo links new EXEs.
+# On Windows an executing .exe is locked and link.exe fails with LNK1104.
 # Only stop UCR-owned binaries in this checkout; never kill unrelated listener processes.
 foreach ($process in (Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('ucr-runtime.exe','ucr-realtime-web.exe','ucr-https-edge.exe') })) {
     if ($process.ExecutablePath -and $process.ExecutablePath.StartsWith((Join-Path $root 'target\debug\'),[StringComparison]::OrdinalIgnoreCase)) {
@@ -142,6 +137,14 @@ foreach ($port in @(50051,50052,8080,8081,8443)) {
     $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
     if ($listeners.Count -gt 0) { throw "Port $port already occupied; refusing to take over an unrelated service" }
 }
+Start-Sleep -Milliseconds 600
+Write-Host 'Building runtime + browser gateway + HTTPS edge from the currently checked-out revision...'
+Invoke-Checked 'cargo' @('build','-p','ucr-runtime','-p','ucr-realtime-web','-p','ucr-https-edge','--locked')
+$runtimeExe = Join-Path $root 'target\debug\ucr-runtime.exe'
+$webExe = Join-Path $root 'target\debug\ucr-realtime-web.exe'
+$edgeExe = Join-Path $root 'target\debug\ucr-https-edge.exe'
+foreach ($exe in @($runtimeExe,$webExe,$edgeExe)) { Require-File $exe }
+
 Add-Type -AssemblyName System.Security
 if (!(Test-Path $keyFile)) {
     $bytes = New-Object byte[] 32
