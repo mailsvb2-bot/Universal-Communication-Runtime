@@ -2235,6 +2235,49 @@ async fn join_and_leave_dev_realtime(
         _ => return Err("self-check JoinRealtime rejected".to_owned()),
     };
     require_result(session_sequence > 0, "JoinRealtime session generation")?;
+    require_result(
+        session_sequence < (1_u64 << 53),
+        "JoinRealtime generation fits a JavaScript number",
+    )?;
+    // Heartbeat must accept the exact Join generation and reject a stale one.
+    let mut heartbeat = Request::new(pb::RealtimeHeartbeatRequest {
+        scope: Some(pb_scope(&env.scope)),
+        call_id: Some(call_id.clone()),
+        session_id: Some(session_id.clone()),
+        expected_session_sequence: session_sequence,
+    });
+    attach_realtime_bearer(&mut heartbeat, token)?;
+    let beat = realtime
+        .heartbeat_realtime(heartbeat)
+        .await
+        .map_err(|error| format!("self-check HeartbeatRealtime: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            beat.result,
+            Some(pb::realtime_heartbeat_response::Result::Acknowledgement(_))
+        ),
+        "HeartbeatRealtime accepts Join generation",
+    )?;
+    let mut stale = Request::new(pb::RealtimeHeartbeatRequest {
+        scope: Some(pb_scope(&env.scope)),
+        call_id: Some(call_id.clone()),
+        session_id: Some(session_id.clone()),
+        expected_session_sequence: session_sequence + 1,
+    });
+    attach_realtime_bearer(&mut stale, token)?;
+    let stale = realtime
+        .heartbeat_realtime(stale)
+        .await
+        .map_err(|error| format!("self-check stale HeartbeatRealtime: {error}"))?
+        .into_inner();
+    require_result(
+        !matches!(
+            stale.result,
+            Some(pb::realtime_heartbeat_response::Result::Acknowledgement(_))
+        ),
+        "HeartbeatRealtime rejects foreign generation",
+    )?;
 
     let mut leave = Request::new(pb::RealtimeLeaveRequest {
         scope: Some(pb_scope(&env.scope)),
