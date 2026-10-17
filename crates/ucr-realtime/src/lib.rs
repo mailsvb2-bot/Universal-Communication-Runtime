@@ -700,6 +700,10 @@ pub struct RealtimeDownlinkAttachment {
     pub transition: Option<AttendanceTransition>,
 }
 
+/// Maximum Join generation exactly representable by JavaScript clients.
+pub const MAX_JOIN_GENERATION: u64 = (1 << 53) - 1;
+const INITIAL_JOIN_GENERATION_MASK: u64 = (1 << 52) - 1;
+
 impl Default for RealtimeSessionRegistry {
     fn default() -> Self {
         Self::new(MAX_REALTIME_SESSIONS, DEFAULT_REALTIME_QUEUE_CAPACITY)
@@ -1024,15 +1028,15 @@ impl RealtimeSessionRegistry {
     fn next_join_generation(&self) -> Result<u64, RealtimeRegistryError> {
         if self.last_join_generation.load(Ordering::Relaxed) == 0 {
             // Native opaque ID has 128 bits from the OS CSPRNG; hash the entire
-            // random ID and use an unpredictable 63-bit initial generation.
-            // The top bit stays clear so one registry has ample counter space.
+            // random ID and use an unpredictable 52-bit initial generation.
+            // Keep the generation in the exact JavaScript integer range.
             let nonce =
                 generate_opaque_id().map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
             let digest = Sha256::digest(nonce.as_wire_bytes());
             let initial = u64::from_be_bytes([
                 digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
                 digest[7],
-            ]) & 0x7fff_ffff_ffff_ffff;
+            ]) & INITIAL_JOIN_GENERATION_MASK;
             let _ = self.last_join_generation.compare_exchange(
                 0,
                 initial.max(1),
@@ -1043,6 +1047,7 @@ impl RealtimeSessionRegistry {
         self.last_join_generation
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
                 last.checked_add(1)
+                    .filter(|next| *next <= MAX_JOIN_GENERATION)
             })
             .map(|previous| previous + 1)
             .map_err(|_| RealtimeRegistryError::SequenceOverflow)
