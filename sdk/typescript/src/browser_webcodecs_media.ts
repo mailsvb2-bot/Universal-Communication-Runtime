@@ -32,7 +32,12 @@ interface DecoderLike {
   decode(chunk: unknown): void;
   close(): void;
 }
-type WebCodecsGlobals = typeof globalThis & {
+// Omit the lib.dom WebCodecs declarations: intersecting them with these
+// structural shapes made every configure()/encode() argument an impossible
+// `VideoEncoderConfig & AudioEncoderConfig` under strict tsc.
+type WebCodecsGlobals = Omit<typeof globalThis,
+  "MediaStreamTrackProcessor" | "AudioEncoder" | "VideoEncoder" | "AudioDecoder" |
+  "VideoDecoder" | "EncodedAudioChunk" | "EncodedVideoChunk"> & {
   MediaStreamTrackProcessor?: new (options: {track: MediaStreamTrack}) => {
     readable: ReadableStream<VideoFrame | AudioData>;
   };
