@@ -48,6 +48,7 @@ const CLIENT_HTML: &str = include_str!("../static/client.html");
 const FIRST_PARTY_START_HTML: &str = include_str!("../static/start.html");
 const FIRST_PARTY_START_JS: &str = include_str!("../static/start.js");
 const FIRST_PARTY_READINESS_JS: &str = include_str!("../static/readiness.js");
+const MOBILE_BROWSER_PROBE_JS: &str = include_str!("../static/mobile-browser-probe.js");
 
 // Generated endpoint-only public code: no secrets, grants or MLS state in these
 // artifacts. The gateway serves only an explicit allowlist, never a directory.
@@ -710,15 +711,22 @@ async fn browser_ready_response(state: &AppState) -> HttpResponse {
     text_response(StatusCode::OK, "ready")
 }
 
-fn first_party_readiness_js_response() -> HttpResponse {
+fn static_script_response(source: &'static str) -> HttpResponse {
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
         .header(CACHE_CONTROL, "no-store")
-        .body(full_body(Bytes::from_static(
-            FIRST_PARTY_READINESS_JS.as_bytes(),
-        )))
-        .expect("static readiness response")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(full_body(Bytes::from_static(source.as_bytes())))
+        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+fn first_party_readiness_js_response() -> HttpResponse {
+    static_script_response(FIRST_PARTY_READINESS_JS)
+}
+
+fn mobile_browser_probe_js_response() -> HttpResponse {
+    static_script_response(MOBILE_BROWSER_PROBE_JS)
 }
 
 async fn handle_request(
@@ -750,6 +758,9 @@ async fn handle_request(
     }
     if method == Method::GET && path == "/readiness.js" {
         return Ok(first_party_readiness_js_response());
+    }
+    if method == Method::GET && path == "/mobile-browser-probe.js" {
+        return Ok(mobile_browser_probe_js_response());
     }
     if method == Method::GET && path == "/room" {
         return Ok(html_body_response(StatusCode::OK, room_page()));
