@@ -3645,7 +3645,9 @@ mod tests {
         let html = super::FIRST_PARTY_START_HTML;
         let js = super::FIRST_PARTY_START_JS;
         assert!(!js.contains("} from \"/endpoint-media/"));
-        assert!(js.contains("await import(\"/endpoint-media/reference_browser_media_installer.js\")"));
+        assert!(
+            js.contains("await import(\"/endpoint-media/reference_browser_media_installer.js\")")
+        );
         assert!(js.contains("Вход недоступен: браузерный пакет не установлен."));
         assert!(js.contains("function explainEntryFailure(error)"));
         assert!(js.contains("explainEntryFailure(error);"));
@@ -3668,7 +3670,6 @@ mod tests {
         );
         assert!(client.contains("function createEndpointAdmissionResolver(){"));
     }
-
 
     #[test]
     fn client_page_declares_raised_hand_state_in_strict_mode() {
@@ -3703,7 +3704,10 @@ mod tests {
         ] {
             assert_eq!(response.status(), super::StatusCode::OK);
             assert_eq!(
-                response.headers().get("X-Content-Type-Options").expect("nosniff header"),
+                response
+                    .headers()
+                    .get("X-Content-Type-Options")
+                    .expect("nosniff header"),
                 "nosniff"
             );
         }
