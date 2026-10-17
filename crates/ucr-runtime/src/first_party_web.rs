@@ -45,8 +45,15 @@ use ucr_storage_sqlite::SqliteLocalStore;
 use crate::first_party_media;
 
 const MAX_BODY: usize = 16 * 1024;
-const MAX_PENDING: usize = 512;
-const MAX_SESSIONS: usize = 2048;
+/// Successfully proven challenges remembered (only until expiry) to reject replay.
+/// Unproven challenges consume NO server memory, so anonymous challenge
+/// requests can never exhaust a shared pool and lock other users out.
+const MAX_CONSUMED: usize = 1 << 16;
+/// Global memory bound on live sessions; each Identity keeps at most
+/// `MAX_SESSIONS_PER_IDENTITY`, evicting only its OWN oldest session.
+const MAX_SESSIONS: usize = 1 << 16;
+const MAX_SESSIONS_PER_IDENTITY: usize = 16;
+const CHALLENGE_VERSION: u8 = 1;
 const CHALLENGE_TTL: Duration = Duration::from_secs(90);
 const SESSION_TTL: Duration = Duration::from_mins(30);
 const COOKIE_NAME: &str = "__Host-ucr_fp";
@@ -153,10 +160,10 @@ struct JoinRequest {
 
 #[derive(Debug, Clone)]
 struct Pending {
+    /// Authenticated replay tag of the proven challenge.
+    tag: [u8; 32],
     id: String,
-    binding: Binding,
     nonce: String,
-    purpose: &'static str,
     key_id: Option<String>,
     public_key: Option<[u8; 32]>,
     until: Instant,
@@ -178,7 +185,9 @@ struct State {
     issuer: Arc<JoinTokenIssuer>,
     origin: String,
     registration_scope: Option<TenantScope>,
-    pending: Mutex<Vec<Pending>>,
+    /// Per-process MAC key sealing stateless challenges. A restart voids them.
+    challenge_key: [u8; 32],
+    consumed: Mutex<Vec<([u8; 32], Instant)>>,
     sessions: Mutex<Vec<Session>>,
 }
 
@@ -241,7 +250,8 @@ pub(super) async fn serve(
         issuer,
         origin: config.origin,
         registration_scope: config.registration_scope,
-        pending: Mutex::new(Vec::new()),
+        challenge_key: random_key().map_err(|_| "first-party challenge key unavailable")?,
+        consumed: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     });
     println!(
@@ -405,59 +415,171 @@ fn nonce() -> Result<String, StatusCode> {
     Ok(URL_SAFE_NO_PAD.encode(raw))
 }
 
-fn challenge(
-    state: &State,
-    binding: Binding,
-    purpose: &'static str,
-    key_id: Option<String>,
-    public_key: Option<[u8; 32]>,
-) -> Result<Value, StatusCode> {
-    // Always bounded and one-time. The server does not trust the supplied Identity
-    // until signature verification; challenge requests never reveal its existence.
-    let record = Pending {
-        id: nonce()?,
-        binding,
-        nonce: nonce()?,
-        purpose,
-        key_id,
-        public_key,
-        until: Instant::now() + CHALLENGE_TTL,
-    };
-    let mut pending = state
-        .pending
-        .lock()
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    pending.retain(|c| c.until > Instant::now());
-    if pending.len() >= MAX_PENDING {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-    let response = json!({
-        "challengeId": record.id,
-        "challengeBytesBase64Url": record.nonce,
-    });
-    pending.push(record);
-    Ok(response)
+fn random_key() -> Result<[u8; 32], StatusCode> {
+    let mut key = [0u8; 32];
+    getrandom::fill(&mut key).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(key)
 }
 
+type ChallengeMac = hmac::Hmac<Sha256>;
+
+/// MAC over the challenge core and EVERYTHING the challenge is bound to.
+fn challenge_mac(
+    state: &State,
+    label: &[u8],
+    core: &[u8],
+    binding: &Binding,
+    purpose: &str,
+    key_id: Option<&str>,
+    public_key: Option<&[u8; 32]>,
+) -> Result<[u8; 32], StatusCode> {
+    use hmac::Mac as _;
+    let mut mac = <ChallengeMac as hmac::KeyInit>::new_from_slice(&state.challenge_key)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let bound = serde_json::to_vec(&json!([
+        purpose,
+        binding.tenant_id,
+        binding.namespace_id,
+        binding.participant_id,
+        binding.device,
+        key_id,
+        public_key.map(|key| URL_SAFE_NO_PAD.encode(key)),
+    ]))
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    for part in [label, core, &bound] {
+        mac.update(&(part.len() as u64).to_be_bytes());
+        mac.update(part);
+    }
+    Ok(mac.finalize().into_bytes().into())
+}
+
+fn now_ms() -> Result<u64, StatusCode> {
+    u64::try_from(now_unix_ms()?).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+}
+
+fn challenge(
+    state: &State,
+    binding: &Binding,
+    purpose: &'static str,
+    key_id: Option<&str>,
+    public_key: Option<[u8; 32]>,
+) -> Result<Value, StatusCode> {
+    // Always one-time and short-lived, but STATELESS: the challenge is sealed
+    // with a per-process MAC key, so issuing one allocates no server memory and
+    // no anonymous actor can exhaust a shared pool to lock everyone else out.
+    // The server does not trust the supplied Identity until signature
+    // verification; challenge requests never reveal its existence.
+    let expiry = now_ms()?.saturating_add(
+        u64::try_from(CHALLENGE_TTL.as_millis()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    let mut core = Vec::with_capacity(25);
+    core.push(CHALLENGE_VERSION);
+    core.extend_from_slice(&expiry.to_be_bytes());
+    core.extend_from_slice(&random_key()?[..16]);
+    let tag = challenge_mac(
+        state,
+        b"ucr-first-party-challenge-id.v1",
+        &core,
+        binding,
+        purpose,
+        key_id,
+        public_key.as_ref(),
+    )?;
+    let nonce = challenge_mac(
+        state,
+        b"ucr-first-party-challenge-nonce.v1",
+        &core,
+        binding,
+        purpose,
+        key_id,
+        public_key.as_ref(),
+    )?;
+    let mut id = core;
+    id.extend_from_slice(&tag);
+    Ok(json!({
+        "challengeId": URL_SAFE_NO_PAD.encode(id),
+        "challengeBytesBase64Url": URL_SAFE_NO_PAD.encode(nonce),
+    }))
+}
+
+/// Opens a sealed challenge for exactly this binding, purpose and key. This
+/// does NOT spend it: call [`spend`] only after the proof signature verified,
+/// so failed attempts never consume replay memory.
 fn consume(
     state: &State,
     binding: &Binding,
     id: &str,
-    purpose: &str,
+    purpose: &'static str,
+    key: Option<(&str, [u8; 32])>,
 ) -> Result<Pending, StatusCode> {
-    let mut pending = state
-        .pending
-        .lock()
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let index = pending
-        .iter()
-        .position(|c| c.id == id && c.purpose == purpose)
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let challenge = pending.swap_remove(index);
-    if challenge.until <= Instant::now() || challenge.binding != *binding {
+    use subtle::ConstantTimeEq as _;
+    let raw = URL_SAFE_NO_PAD
+        .decode(id)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    if raw.len() != 25 + 32 || raw[0] != CHALLENGE_VERSION || URL_SAFE_NO_PAD.encode(&raw) != id {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    Ok(challenge)
+    let (core, tag) = raw.split_at(25);
+    let key_id = key.map(|(key_id, _)| key_id);
+    let public_key = key.map(|(_, public_key)| public_key);
+    let expected = challenge_mac(
+        state,
+        b"ucr-first-party-challenge-id.v1",
+        core,
+        binding,
+        purpose,
+        key_id,
+        public_key.as_ref(),
+    )?;
+    if !bool::from(expected.ct_eq(tag)) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let expiry = u64::from_be_bytes(
+        core[1..9]
+            .try_into()
+            .map_err(|_| StatusCode::UNAUTHORIZED)?,
+    );
+    let now = now_ms()?;
+    if expiry <= now {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let nonce = challenge_mac(
+        state,
+        b"ucr-first-party-challenge-nonce.v1",
+        core,
+        binding,
+        purpose,
+        key_id,
+        public_key.as_ref(),
+    )?;
+    Ok(Pending {
+        tag: expected,
+        id: id.to_owned(),
+        nonce: URL_SAFE_NO_PAD.encode(nonce),
+        key_id: key_id.map(str::to_owned),
+        public_key,
+        until: Instant::now() + Duration::from_millis(expiry - now),
+    })
+}
+
+/// Atomically spends a VERIFIED challenge before any side effect: a replayed
+/// or concurrently duplicated proof loses here.
+fn spend(state: &State, pending: &Pending) -> Result<(), StatusCode> {
+    let mut consumed = state
+        .consumed
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let now = Instant::now();
+    consumed.retain(|(_, until)| *until > now);
+    if consumed.iter().any(|(tag, _)| *tag == pending.tag) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if consumed.len() >= MAX_CONSUMED {
+        // Reachable only by that many SUCCESSFUL proofs within one TTL.
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    consumed.push((pending.tag, pending.until));
+    Ok(())
 }
 
 fn encoded_proof(prefix: &str, context: &Value) -> Result<String, StatusCode> {
@@ -480,6 +602,18 @@ fn issue_session(
         .lock()
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     sessions.retain(|session| session.until > Instant::now());
+    // A new login evicts only the SAME Identity's oldest session, so one
+    // actor cannot push other people's sessions out or block their login.
+    let same = |session: &Session| {
+        session.binding.tenant_id == binding.tenant_id
+            && session.binding.namespace_id == binding.namespace_id
+            && session.binding.participant_id == binding.participant_id
+    };
+    if sessions.iter().filter(|session| same(session)).count() >= MAX_SESSIONS_PER_IDENTITY
+        && let Some(oldest) = sessions.iter().position(same)
+    {
+        sessions.remove(oldest);
+    }
     if sessions.len() >= MAX_SESSIONS {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
@@ -974,7 +1108,7 @@ fn account_route(
                 participant_id: format!("fp-id-{}", nonce()?),
                 device: format!("fp-device-{}", nonce()?),
             };
-            let mut result = challenge(state, binding.clone(), "signup", None, None)?;
+            let mut result = challenge(state, &binding, "signup", None, None)?;
             result["binding"] =
                 serde_json::to_value(binding).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             Ok((result, None))
@@ -988,7 +1122,7 @@ fn account_route(
             }
             identity(&binding)?;
             device(&binding)?;
-            Ok((challenge(state, binding, "recover", None, None)?, None))
+            Ok((challenge(state, &binding, "recover", None, None)?, None))
         }
         "/v1/first-party/signup/finish" | "/v1/first-party/recover/finish" => {
             account_finish(state, public, path, body)
@@ -1009,7 +1143,7 @@ fn account_finish(
     if &scope(&input.binding)? != public {
         return Err(StatusCode::FORBIDDEN);
     }
-    let pending = consume(state, &input.binding, &input.challenge_id, purpose)?;
+    let pending = consume(state, &input.binding, &input.challenge_id, purpose, None)?;
     let key_id = KeyId::from_opaque(opaque(&input.key_id)?);
     let public_key = URL_SAFE_NO_PAD
         .decode(&input.public_key_base64_url)
@@ -1040,6 +1174,7 @@ fn account_finish(
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     verify_ed25519(verifier_key, &signed, &input.signature_base64_url)?;
+    spend(state, &pending)?;
     let account = identity(&input.binding)?;
     let device_id = device(&input.binding)?;
     let descriptor = DeviceDescriptor {
@@ -1115,11 +1250,11 @@ fn login_route(
             scope(&binding)?;
             identity(&binding)?;
             device(&binding)?;
-            challenge(state, binding, "login", None, None)?
+            challenge(state, &binding, "login", None, None)?
         }
         "/v1/first-party/login/verify" => {
             let proof: LoginProof = parse(body)?;
-            let pending = consume(state, &proof.binding, &proof.challenge_id, "login")?;
+            let pending = consume(state, &proof.binding, &proof.challenge_id, "login", None)?;
             let subject = subject_for(state, &proof.binding)?;
             let (key_id, public_key) = trusted_key(state, &proof.binding)?;
             let signed = encoded_proof(
@@ -1134,6 +1269,7 @@ fn login_route(
                 ]),
             )?;
             verify_ed25519(public_key, &signed, &proof.signature_base64_url)?;
+            spend(state, &pending)?;
             let (value, cookie) = issue_session(state, proof.binding, subject, key_id, public_key)?;
             return Ok((value, Some(cookie)));
         }
@@ -1218,9 +1354,9 @@ fn device_route(
             let pubkey: [u8; 32] = public_key.try_into().map_err(|_| StatusCode::BAD_REQUEST)?;
             challenge(
                 state,
-                input.binding,
+                &input.binding,
                 "device",
-                Some(input.key_id),
+                Some(&input.key_id),
                 Some(pubkey),
             )?
         }
@@ -1233,7 +1369,18 @@ fn device_route(
 fn device_approve(state: &State, auth: &Session, body: &[u8]) -> Result<Value, StatusCode> {
     let input: DeviceApproval = parse(body)?;
     ensure_binding(&input.binding, auth)?;
-    let pending = consume(state, &input.binding, &input.challenge_id, "device")?;
+    let offered: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(&input.public_key_base64_url)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let pending = consume(
+        state,
+        &input.binding,
+        &input.challenge_id,
+        "device",
+        Some((&input.key_id, offered)),
+    )?;
     if pending.key_id.as_deref() != Some(&input.key_id)
         || pending.public_key.map(|x| URL_SAFE_NO_PAD.encode(x))
             != Some(input.public_key_base64_url.clone())
@@ -1260,6 +1407,7 @@ fn device_approve(state: &State, auth: &Session, body: &[u8]) -> Result<Value, S
         ]),
     )?;
     verify_ed25519(key, &signed, &input.signature_base64_url)?;
+    spend(state, &pending)?;
     Ok(json!({"approved": true}))
 }
 
