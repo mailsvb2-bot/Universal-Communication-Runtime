@@ -721,12 +721,32 @@ fn static_script_response(source: &'static str) -> HttpResponse {
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
+/// Browsers request it on every page; a 405 was logged as a load error.
+fn favicon_response() -> HttpResponse {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(CACHE_CONTROL, "public, max-age=86400")
+        .body(full_body(Bytes::new()))
+        .unwrap_or_else(|_| Response::new(full_body(Bytes::new())))
+}
+
 fn first_party_readiness_js_response() -> HttpResponse {
     static_script_response(FIRST_PARTY_READINESS_JS)
 }
 
 fn mobile_browser_probe_js_response() -> HttpResponse {
     static_script_response(MOBILE_BROWSER_PROBE_JS)
+}
+
+fn first_party_static_response(path: &str) -> Option<HttpResponse> {
+    Some(match path {
+        "/start" | "/start.html" => first_party_start_response(),
+        "/start.js" => first_party_start_js_response(),
+        "/readiness.js" => first_party_readiness_js_response(),
+        "/mobile-browser-probe.js" => mobile_browser_probe_js_response(),
+        "/favicon.ico" => favicon_response(),
+        _ => return None,
+    })
 }
 
 async fn handle_request(
@@ -750,17 +770,10 @@ async fn handle_request(
     if method == Method::GET && path == "/readyz" {
         return Ok(browser_ready_response(&state).await);
     }
-    if method == Method::GET && matches!(path.as_str(), "/start" | "/start.html") {
-        return Ok(first_party_start_response());
-    }
-    if method == Method::GET && path == "/start.js" {
-        return Ok(first_party_start_js_response());
-    }
-    if method == Method::GET && path == "/readiness.js" {
-        return Ok(first_party_readiness_js_response());
-    }
-    if method == Method::GET && path == "/mobile-browser-probe.js" {
-        return Ok(mobile_browser_probe_js_response());
+    if method == Method::GET
+        && let Some(response) = first_party_static_response(&path)
+    {
+        return Ok(response);
     }
     if method == Method::GET && path == "/room" {
         return Ok(html_body_response(StatusCode::OK, room_page()));
@@ -3644,6 +3657,25 @@ mod tests {
     fn client_page_declares_raised_hand_state_in_strict_mode() {
         assert!(super::CLIENT_HTML.contains("let handRaised=false,"));
     }
+
+    #[test]
+    fn favicon_is_answered_without_a_load_error() {
+        // Regression: every page logged "Failed to load resource: 405".
+        assert_eq!(
+            super::favicon_response().status(),
+            super::StatusCode::NO_CONTENT
+        );
+    }
+
+    #[test]
+    fn readiness_badge_claims_only_what_readyz_checks() {
+        // Regression: "Медиашлюз готов" was shown although /readyz checks only
+        // the BFF and the browser E2EE assets, never realtime gRPC, SFU or TURN.
+        let js = super::FIRST_PARTY_READINESS_JS;
+        assert!(!js.contains("Медиашлюз готов"));
+        assert!(js.contains("Сервер входа и браузерные E2EE-модули доступны"));
+    }
+
 
     #[test]
     fn client_page_scripts_are_served_with_nosniff() {
