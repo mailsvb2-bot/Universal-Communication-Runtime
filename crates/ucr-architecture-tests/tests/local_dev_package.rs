@@ -31,6 +31,17 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
             .contains("cargo build --locked --release -p ucr-realtime-web --bin ucr-realtime-web")
     );
     assert!(dockerfile.contains("--manifest-path crates/ucr-endpoint-wasm/Cargo.toml"));
+    // Regression: the endpoint WASM crate is its own workspace, so `--locked`
+    // needs its committed lock file and its output lives under its own target.
+    assert!(
+        workspace
+            .join("crates/ucr-endpoint-wasm/Cargo.lock")
+            .is_file(),
+        "`cargo build --locked` of the endpoint WASM requires a committed Cargo.lock"
+    );
+    assert!(dockerfile.contains(
+        "wasm-bindgen crates/ucr-endpoint-wasm/target/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm"
+    ));
     assert!(dockerfile.contains("sdk/typescript/src/reference_browser_media_installer.ts"));
     assert!(dockerfile.contains("COPY --from=browser-sdk /out/endpoint-media/"));
     assert!(
