@@ -1201,13 +1201,15 @@ where
                         .heartbeat(&claims, now)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
-                    if body.level > 0 {
-                        let policy = self
-                            .effective_universal_media_policy(&claims)?
-                            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
-                        if !policy.publish_audio_allowed {
-                            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-                        }
+                    // A Universal Conference may mute a participant. A plain
+                    // MLS Group Call has no such profile: publication is then
+                    // governed by canonical permissions in the SFU, exactly as
+                    // `require_universal_publish_allowed` treats it.
+                    if body.level > 0
+                        && let Some(policy) = self.effective_universal_media_policy(&claims)?
+                        && !policy.publish_audio_allowed
+                    {
+                        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
                     }
                     let actor = actor_for(&claims);
                     conference_runtime(self)
@@ -2266,6 +2268,11 @@ where
             let snapshot = conference_runtime(self)
                 .snapshot(&actor, &claims.scope, &claims.call_id)
                 .map_err(|error| map_conference_error(&error))?;
+            // An ended Call is never (re-)admitted, even on a reconnect path
+            // that skips the entry gate; the cleanup sweep is only eventual.
+            if snapshot.call.signalling_state == CallSignallingState::Terminated {
+                return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+            }
             let participant = snapshot
                 .call
                 .participants
@@ -2316,11 +2323,12 @@ where
         let snapshot = conference_runtime(self)
             .snapshot(&actor, &claims.scope, &claims.call_id)
             .map_err(|error| map_conference_error(&error))?;
-        let accepted = snapshot.call.participants.iter().any(|participant| {
-            participant.principal == claims.participant
-                && participant.state == CallParticipantState::Accepted
-                && participant.left_revision.is_none()
-        });
+        let accepted = snapshot.call.signalling_state != CallSignallingState::Terminated
+            && snapshot.call.participants.iter().any(|participant| {
+                participant.principal == claims.participant
+                    && participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            });
         if !accepted {
             return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
         }
@@ -2535,14 +2543,11 @@ where
             .mls_admission_store
             .as_ref()
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
-        let participant = self
-            .store
-            .universal_conference_participant(&claims.scope, &group_id, &claims.participant)
-            .map_err(map_store_error)?
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
-        if !participant.active {
-            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-        }
+        // A Universal Conference additionally requires its active participant
+        // profile. A plain MLS Group Call (e.g. the per-Call media Group of a
+        // first-party direct Call) has no such profile; its authority is the
+        // active Group membership checked immediately below.
+        self.require_active_universal_participant(claims, &group_id)?;
 
         let membership = store
             .group_membership(&claims.scope, &group_id, &claims.participant)
