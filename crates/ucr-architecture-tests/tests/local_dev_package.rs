@@ -57,8 +57,17 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
     );
     assert!(!entrypoint.contains("python3 -m http.server"));
     assert!(entrypoint.contains("webhook_receiver.py"));
-    assert!(entrypoint.contains("turnserver -n"));
+    // The explicit 0600 config replaces the image default (formerly `-n`).
+    assert!(entrypoint.contains("turnserver -c \"$TURN_CONFIG\""));
     assert!(entrypoint.contains("--use-auth-secret"));
+    // Regression: a fixed, publicly known TURN secret shipped in compose.yaml
+    // and as the entrypoint default; it was also visible in argv.
+    for source in [&compose, &entrypoint] {
+        assert!(!source.contains("0123456789abcdef0123456789abcdef"));
+    }
+    assert!(!entrypoint.contains("--static-auth-secret"));
+    assert!(entrypoint.contains("secrets.token_hex(32)"));
+    assert!(entrypoint.contains("umask 077"));
 
     let dev_main =
         fs::read_to_string(workspace.join("crates/ucr-dev/src/main.rs")).expect("read ucr dev CLI");
