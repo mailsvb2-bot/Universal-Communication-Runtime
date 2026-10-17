@@ -201,8 +201,10 @@ async function dial(contact,media) {
   const requestId = idempotency.get(key) ?? crypto.randomUUID();
   idempotency.set(key,requestId);
   message("Проверка Device и создание канонического вызова…");
+  // Re-establish device authority before making an irreversible canonical Call.
+  // A stale cookie must not create a Call which the UI then fails to display.
+  const session = await restoreSession();
   const call = await calls.start(contact.id,media,requestId);
-  const session = await host.resumeAuthenticatedDevice();
   active = {call,identity:session.participantId};
   showActive();
   message("Вызов создан. Ожидается реальное принятие другим участником.");
@@ -247,7 +249,7 @@ async function refresh() {
   if (refreshing || navigating) return;
   refreshing = true;
   try {
-    const user = await host.resumeAuthenticatedDevice();
+    const user = await restoreSession();
     if (accountScope !== principalScope(user)) {
       // Fail closed immediately if the user logs out or changes Device in
       // another tab. Never keep the former user's contacts/Call on screen.
@@ -295,15 +297,25 @@ async function initialize() {
   await updateContacts();
   await updateDevices();
   el("who").textContent = "Identity: " + user.participantId + " · Device: " + user.deviceId;
-  await refresh();
+  // Successful device reauthentication is independent from Call state.
+  // A malformed/stale canonical Call must not invalidate a trusted Device.
+  message("Доверенное устройство подтверждено. Проверяем состояние вызовов…");
+  try {
+    await refresh();
+    message("Устройство подтверждено. Входящие звонки проверяются.");
+  } catch (error) {
+    message("Устройство подтверждено; проверка вызовов завершилась ошибкой: " +
+      (error instanceof Error ? error.message : String(error)));
+  }
   timer = setInterval(() => {
     if (busy || navigating || document.hidden) return;
     void refresh().catch(err => {
-      clearInterval(timer);
-      message("Проверка входящих остановлена: " + (err instanceof Error ? err.message : String(err)));
+      // Retain the authenticated device and keep polling rather than requiring
+      // fresh registration. Do not bypass server-side Call authority.
+      message("Устройство авторизовано; ошибка проверки вызовов: " +
+        (err instanceof Error ? err.message : String(err)));
     });
   },2500);
-  message("Учётная запись подтверждена. Исходящие и входящие проверяются каноническим сервером.");
 }
 el("device-login").addEventListener("submit", event => {
   event.preventDefault();
@@ -325,7 +337,23 @@ el("device-login").addEventListener("submit", event => {
     await initialize();
   });
 });
-el("retry").addEventListener("click",() => void run(initialize));
+// A manual retry must be visible immediately, even when another action is busy.
+// The existing init lock prevents duplicate requests; explain this next to the button.
+el("retry").addEventListener("click",() => {
+  const control = el("retry");
+  control.textContent = busy ? "Проверка уже выполняется…" : "Проверяем вход…";
+  control.disabled = true;
+  message(busy ? "Проверка входа уже выполняется. Дождитесь результата." : "Повторная проверка защищённого устройства…");
+  if (busy || navigating) {
+    control.disabled = false;
+    control.textContent = "Повторить проверку входа";
+    return;
+  }
+  void run(initialize).finally(() => {
+    control.disabled = false;
+    control.textContent = "Повторить проверку входа";
+  });
+});
 el("new-contact").addEventListener("submit", event => {
   event.preventDefault();
   void run(async () => {

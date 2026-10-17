@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Check that all UCR first-party page controls have a wired event path.
+
+This is a source contract, not a substitute for live Windows/browser E2E.
+"""
+from html.parser import HTMLParser
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parents[1]
+HTML = (ROOT / "crates/ucr-realtime-web/static/start.html").read_text(encoding="utf-8")
+JS = (ROOT / "crates/ucr-realtime-web/static/start.js").read_text(encoding="utf-8")
+
+class Controls(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.controls = []
+        self.ids = set()
+    def handle_starttag(self, tag, attrs):
+        data = dict(attrs)
+        if data.get("id"):
+            if data["id"] in self.ids:
+                raise AssertionError("duplicate element ID: " + data["id"])
+            self.ids.add(data["id"])
+        if tag == "button" or tag == "form":
+            self.controls.append((tag, data))
+
+parser = Controls()
+parser.feed(HTML)
+assert parser.controls, "no visible forms/buttons found"
+for tag, element in parser.controls:
+    ident = element.get("id")
+    if tag == "form":
+        assert ident and re.search(r'el\(["\']' + re.escape(ident) + r'["\']\)\.addEventListener\(["\']submit', JS), (
+            "form lacks submit handler: " + str(ident)
+        )
+    else:
+        if element.get("type") == "submit":
+            # Belongs to a form with a validated submit listener.
+            continue
+        assert ident and re.search(r'el\(["\']' + re.escape(ident) + r'["\']\)\.addEventListener\(["\']click', JS), (
+            "button lacks click handler: " + str(ident)
+        )
+
+# Dynamic controls must be created with the common click-binding helper.
+for label in ("Аудиозвонок", "Видеозвонок", "Удалить", "Отозвать устройство", "Принять", "Отклонить"):
+    assert 'btn("' + label + '"' in JS, "missing dynamic control: " + label
+assert 'button.addEventListener("click", () => void run(callback))' in JS
+assert "const session = await restoreSession();\n  const call = await calls.start" in JS
+assert "const user = await restoreSession();\n    if (accountScope" in JS
+assert 'void run(initialize)' in JS
+print(f"UCR first-party UI control wiring: PASS ({len(parser.controls)} static form/button controls; 6 dynamic actions)")
