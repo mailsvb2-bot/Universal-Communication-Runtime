@@ -50,8 +50,22 @@ struct RoomHost {
     /// seal and unseal the same recording at once.
     recording_gate: AsyncMutex<()>,
     edge: Option<Arc<super::room_edge::RoomEdge>>,
+    /// Automatic archive recording is OFF unless the operator explicitly opts
+    /// in with `UCR_ROOM_RECORDING=opt-in`; participants are then notified.
+    recording_opt_in: bool,
     policy: Mutex<super::room_policy::RoomPolicy>,
     policy_path: PathBuf,
+}
+
+/// Parses the explicit operator opt-in for automatic local-room recording.
+fn recording_opt_in(value: Option<&str>) -> bool {
+    matches!(value, Some("opt-in"))
+}
+
+impl RoomHost {
+    fn records(&self) -> bool {
+        self.recording_opt_in && self.edge.is_some()
+    }
 }
 
 struct RoomState {
@@ -130,6 +144,11 @@ pub async fn spawn(
         .local_addr()
         .map_err(|error| format!("resolve local room address: {error}"))?;
     println!("UCR_ROOM_READY api=http://{address}");
+    if recording_opt_in(std::env::var("UCR_ROOM_RECORDING").ok().as_deref()) {
+        println!("UCR_ROOM_AUTO_RECORDING=opt-in participants-notified");
+    } else {
+        println!("UCR_ROOM_AUTO_RECORDING=off (explicit opt-in: UCR_ROOM_RECORDING=opt-in)");
+    }
     println!("UCR_ROOM_PAGE=http://127.0.0.1:43124/room");
     println!(
         "UCR_ROOM_REALTIME=UCR_REALTIME_WEB_BIND=127.0.0.1:43124 UCR_REALTIME_GRPC_UPSTREAM=http://{grpc_bind} UCR_ROOM_API=http://{address} ucr-realtime-web"
@@ -143,6 +162,7 @@ pub async fn spawn(
         }),
         open_gate: AsyncMutex::new(()),
         recording_gate: AsyncMutex::new(()),
+        recording_opt_in: recording_opt_in(std::env::var("UCR_ROOM_RECORDING").ok().as_deref()),
         edge,
         policy: Mutex::new(super::room_policy::RoomPolicy::load(
             &state_dir.join("moderation.json"),
@@ -231,7 +251,8 @@ async fn dispatch(
 ) -> Result<Vec<u8>, (u16, String)> {
     if method == "GET" && path == "/healthz" {
         let turn = host.edge.is_some();
-        return Ok(format!(r#"{{"ok":true,"turn":{turn},"recording":{turn}}}"#).into_bytes());
+        let recording = host.records();
+        return Ok(format!(r#"{{"ok":true,"turn":{turn},"recording":{recording}}}"#).into_bytes());
     }
     if method != "POST" {
         return Err((405, "only POST is supported".to_owned()));
@@ -403,7 +424,7 @@ async fn join(host: &Arc<RoomHost>, body: &[u8]) -> Result<Vec<u8>, String> {
     // before the camera opened. End that archive first so the room stays usable.
     release_recording_for_newcomer(host, &conference_id, &identity.participant).await?;
     prepare_runtime(host, &conference_id).await?;
-    if open_live(host, &conference_id).await? && host.edge.is_some() {
+    if open_live(host, &conference_id).await? && host.records() {
         let host = Arc::clone(host);
         tokio::spawn(async move {
             if let Err(error) = watch_room_recording(host).await {
@@ -792,7 +813,7 @@ async fn prewarm_when_ready(host: Arc<RoomHost>, grpc_bind: SocketAddr) -> Resul
         if TcpStream::connect(grpc_bind).await.is_ok() {
             let conference_id = ensure_conference(&host).await?;
             prepare_group(&host, &conference_id).await?;
-            if open_live(&host, &conference_id).await? && host.edge.is_some() {
+            if open_live(&host, &conference_id).await? && host.records() {
                 let watcher = Arc::clone(&host);
                 tokio::spawn(async move {
                     if let Err(error) = watch_room_recording(watcher).await {
@@ -1858,6 +1879,24 @@ fn chat_admit(host: &RoomHost, authorization: Option<&str>) -> Result<Vec<u8>, (
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn automatic_room_recording_requires_explicit_operator_opt_in() {
+        // Regression: the local room used to start an archive automatically,
+        // without any consent, whenever TURN/recording edge was present.
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("true"),
+            Some("on"),
+            Some("OPT-IN"),
+        ] {
+            assert!(!super::recording_opt_in(value), "{value:?}");
+        }
+        assert!(super::recording_opt_in(Some("opt-in")));
+    }
+
     use base64::Engine as _;
 
     use super::{authorization_token, origin_allowed, trust_image_matches};
