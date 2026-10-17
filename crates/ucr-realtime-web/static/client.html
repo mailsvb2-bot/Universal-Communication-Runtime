@@ -800,8 +800,15 @@ async function installFirstPartyDeviceAuthority(){
     }
     window.ucrProtectedDeviceKeyVault=vault;
     window.ucrCanonicalDeviceAuthority=host;
-    // This only establishes Device authority. A real canonical Call/Group
-    // media binding and peer trust resolver is still REQUIRED for E2EE.
+    // The server binds an ACTIVE, fully accepted direct Call to a derived
+    // two-member MLS media Group Call; its canonical mls-context names the
+    // trusted Device keys. Use the same resolver as the local room unless a
+    // host injected its own media integration.
+    if(typeof window.ucrCanonicalMediaAdmissionResolver!=="function"&&
+       typeof window.ucrCanonicalAuthorizedMediaFactory!=="function"&&
+       typeof window.ucrInstallAuthorizedMediaEndpoint!=="function"){
+      window.ucrCanonicalMediaAdmissionResolver=createEndpointAdmissionResolver();
+    }
   })().catch(error=>{firstPartyDeviceAuthorityPromise=null;throw error;});
   return firstPartyDeviceAuthorityPromise;
 }
@@ -2505,7 +2512,12 @@ function installLocalRoomMediaHost(){
       });
     }
   };
-  window.ucrCanonicalMediaAdmissionResolver=async bootstrap=>{
+  window.ucrCanonicalMediaAdmissionResolver=createEndpointAdmissionResolver();
+}
+// ONE admission resolver for the local room and first-party Calls: trust comes
+// from the canonical mls-context trusted_device_keys of the media Group Call.
+function createEndpointAdmissionResolver(){
+  return async bootstrap=>{
     const context=await fetchEndpointMlsContext();
     if(!context.media_negotiation_ref||!context.media_negotiation_generation){
       throw new Error("Canonical media negotiation is not active yet");
