@@ -3654,6 +3654,23 @@ mod tests {
     }
 
     #[test]
+    fn first_party_device_authority_installs_the_shared_admission_resolver() {
+        // Regression: with Device authority alone, every /start call stopped at
+        // "Canonical Device signing/trust integration is unavailable".
+        let client = super::CLIENT_HTML;
+        assert_eq!(
+            client
+                .matches(
+                    "window.ucrCanonicalMediaAdmissionResolver=createEndpointAdmissionResolver();"
+                )
+                .count(),
+            2
+        );
+        assert!(client.contains("function createEndpointAdmissionResolver(){"));
+    }
+
+
+    #[test]
     fn client_page_declares_raised_hand_state_in_strict_mode() {
         assert!(super::CLIENT_HTML.contains("let handRaised=false,"));
     }
