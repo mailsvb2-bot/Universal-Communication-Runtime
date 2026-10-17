@@ -770,7 +770,19 @@ async function installFirstPartyDeviceAuthority(){
     const module=await import("./endpoint-media/reference_browser_media_installer.js");
     const vault=module.createUcrBrowserProtectedDeviceVault();
     const host=module.createUcrFirstPartyHttpHost(vault,{origin:location.origin});
-    const user=await host.resumeAuthenticatedDevice();
+    const claimedBinding={
+      tenantId:claims.tenant_id,namespaceId:claims.namespace_id??null,
+      participantId:claims.participant_id,deviceId:claims.device_id
+    };
+    // The conference is a separate page. Its HTTP-only session cookie may
+    // expire between Call acceptance and Join; recover only by proving
+    // possession of the already-enrolled, protected Device signing key.
+    let user;
+    try{user=await host.resumeAuthenticatedDevice();}
+    catch(_){
+      user=await module.authenticateUcrFirstPartyDevice(
+        vault,{origin:location.origin},claimedBinding);
+    }
     if(user.tenantId!==claims.tenant_id||
        user.namespaceId!==(claims.namespace_id??null)||
        user.participantId!==claims.participant_id||
