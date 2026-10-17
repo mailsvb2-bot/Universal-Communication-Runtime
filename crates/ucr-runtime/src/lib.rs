@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod first_party_media;
 mod first_party_web;
 
 use std::{
