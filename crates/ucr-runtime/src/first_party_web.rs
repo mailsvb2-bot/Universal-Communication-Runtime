@@ -42,6 +42,8 @@ use ucr_model::{
 use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
 use ucr_storage_sqlite::SqliteLocalStore;
 
+use crate::first_party_media;
+
 const MAX_BODY: usize = 16 * 1024;
 const MAX_PENDING: usize = 512;
 const MAX_SESSIONS: usize = 2048;
@@ -617,6 +619,10 @@ fn start_call(state: &State, session: &Session, intent: &StartIntent) -> Result<
         return Err(StatusCode::BAD_REQUEST);
     }
     let peer_id = IdentityId::from_opaque(opaque(&intent.peer_identity_id)?);
+    if first_party_media::is_media_host_identity(&peer_id) {
+        // The media host is infrastructure, never a callable contact.
+        return Err(StatusCode::NOT_FOUND);
+    }
     let peer = state
         .store
         .principal_identity_bindings_for_identity_kind(
@@ -707,19 +713,32 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
         },
         _ => return Err(StatusCode::BAD_REQUEST),
     };
+    let ends_media = matches!(action, CallSignalKind::Terminate { .. });
     let signal = CallSignal {
         event_id: EventId::from_opaque(
             generate_opaque_id().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
         ),
         scope: session.subject.scope.clone(),
-        call_id: before.call_id,
+        call_id: before.call_id.clone(),
         expected_revision: req.expected_revision,
         kind: action,
     };
-    AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+    let runtime = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref());
+    if ends_media {
+        // `before` is a participant-scoped read at the expected revision. End
+        // media FIRST: a failure leaves the direct Call active and the user can
+        // retry, but media never keeps running after the direct Call ended.
+        first_party_media::end_direct_call_media(state.store.as_ref(), &before)
+            .map_err(|_| StatusCode::CONFLICT)?;
+    }
+    runtime
         .first_party_call_signal(&session.subject, &device(&session.binding)?, &signal)
         .map_err(|_| StatusCode::CONFLICT)?;
     let current = get_call(state, session, &req.call_id)?;
+    if current.signalling_state == CallSignallingState::Terminated {
+        first_party_media::end_direct_call_media(state.store.as_ref(), &current)
+            .map_err(|_| StatusCode::CONFLICT)?;
+    }
     to_call(state, &current)
 }
 
@@ -732,12 +751,24 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
             req.expected_revision,
         )
         .map_err(|_| StatusCode::FORBIDDEN)?;
+    // Realtime media is owned by the Conference/SFU + Group-MLS stack, which
+    // admits only Group Calls. Bind this ACTIVE direct Call to its derived
+    // two-member media Group Call and name THAT Call in the Join grant.
+    let media =
+        first_party_media::prepare_direct_call_media(state.store.as_ref(), &call, &session.subject)
+            .map_err(|error| match error {
+                first_party_media::MediaRuntimeError::NotAdmissible => StatusCode::FORBIDDEN,
+                first_party_media::MediaRuntimeError::Conflict => StatusCode::CONFLICT,
+                first_party_media::MediaRuntimeError::Unavailable => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            })?;
     // This is the SAME issuer instance used for gRPC Realtime admission.
     let grant = state
         .issuer
         .issue(
-            call.scope,
-            call.call_id,
+            media.scope,
+            media.call_id,
             session.subject.principal.clone(),
             Some(device(&session.binding)?),
             DEFAULT_JOIN_TTL_SECONDS,
