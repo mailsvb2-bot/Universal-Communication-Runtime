@@ -780,6 +780,7 @@ const earlyBlockedCtx: Record<string, any> = {
   claims: {expires: Date.now() + 5000},
   ui: {privacyMode: {value: "secure"}},
   mediaCaptureGeneration: 1,
+  installFirstPartyDeviceAuthority: async () => {},
   requireCanonicalMediaHostReady: preflightCtx.preflight,
   ensureLocalMedia: async () => {unexpectedCapture++;},
   api: async () => {unexpectedSignalling++;},
@@ -871,6 +872,7 @@ const acceptedJoinCtx: Record<string, any> = {
   ui: {state: {textContent: ""}, status: {textContent: ""},
     join: {disabled: false}, leave: {disabled: true},
     privacyMode: {disabled: false}, expires: {textContent: ""}},
+  installFirstPartyDeviceAuthority: async () => {},
   requireCanonicalMediaHostReady() {}, prewarmAuthorizedMediaRuntime() {},
   prepareCanonicalDeviceAfterJoin: async (_generation: number, beforeJoin = false) => {
     // This fixture models an already trusted Device: prepare prior to Join,
