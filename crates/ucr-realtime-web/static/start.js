@@ -1,11 +1,23 @@
-import {
+// Report a missing generated browser bundle instead of hanging at login.
+let media;
+try {
+  media = await import("/endpoint-media/reference_browser_media_installer.js");
+} catch (error) {
+  const who = document.getElementById("who");
+  if (who) who.textContent = "Вход недоступен: браузерный пакет не установлен.";
+  const status = document.getElementById("status");
+  if (status) status.textContent = "Не загружен браузерный пакет: " +
+    (error instanceof Error ? error.message : String(error));
+  throw error;
+}
+const {
   createUcrBrowserProtectedDeviceVault,
   createUcrFirstPartyHttpHost,
   authenticateUcrFirstPartyDevice,
   registerUcrFirstPartyUser,
   recoverUcrFirstPartyDevice,
   createUcrContactCallJourney,
-} from "/endpoint-media/reference_browser_media_installer.js";
+} = media;
 
 const el = (id) => document.getElementById(id);
 const status = el("status");
@@ -423,4 +435,21 @@ el("logout").addEventListener("click",()=>void run(async()=>{
 }));
 
 window.addEventListener("pagehide", () => clearInterval(timer));
-void run(initialize);
+function explainEntryFailure(error) {
+  const detail = error instanceof Error ? error.message : String(error);
+  let hint = "Войдите с доверенного устройства, создайте учётную запись или восстановите доступ.";
+  if (/HTTP 503/.test(detail)) hint = "Сервер входа не подключён: запустите first-party BFF.";
+  else if (/HTTP 403/.test(detail)) hint = "Origin не совпадает с публичным HTTPS-адресом сервера.";
+  else if (location.protocol !== "https:") hint += " Для защищённой сессии нужен HTTPS.";
+  el("who").textContent = "Нет подтверждённой сессии. " + hint;
+}
+void (async () => {
+  if (busy || navigating) return;
+  busy = true;
+  try { await initialize(); }
+  catch (error) {
+    explainEntryFailure(error);
+    message("Действие не подтверждено: " + (error instanceof Error ? error.message : String(error)));
+  }
+  finally { busy = false; }
+})();
