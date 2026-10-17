@@ -758,6 +758,41 @@ function requireCompatibleE2eeAdapter(adapter){
 // package, or begin signalling when the product has supplied no trusted
 // Device media signer/authorization integration. Presence is not proof of
 // trust: actual per-frame authority is still checked at adapter activation.
+// First-party calls use the SAME authenticated Device/Trust owner as /start.
+// Never use the local-room authority for a first-party Call, and never infer
+// trust from a Join URL or a browser-side key alone.
+let firstPartyDeviceAuthorityPromise=null;
+async function installFirstPartyDeviceAuthority(){
+  if(!claims||typeof claims.call_id!=="string"||!claims.call_id.startsWith("fp-")||
+     sessionStorage.getItem("ucrLocalRoom")==="1")return;
+  if(firstPartyDeviceAuthorityPromise)return firstPartyDeviceAuthorityPromise;
+  firstPartyDeviceAuthorityPromise=(async()=>{
+    const module=await import("./endpoint-media/reference_browser_media_installer.js");
+    const vault=module.createUcrBrowserProtectedDeviceVault();
+    const host=module.createUcrFirstPartyHttpHost(vault,{origin:location.origin});
+    const user=await host.resumeAuthenticatedDevice();
+    if(user.tenantId!==claims.tenant_id||
+       user.namespaceId!==(claims.namespace_id??null)||
+       user.participantId!==claims.participant_id||
+       user.deviceId!==claims.device_id){
+      throw new Error("Signed Join does not match authenticated first-party Device");
+    }
+    const scope={tenantId:user.tenantId,namespaceId:user.namespaceId,deviceId:user.deviceId};
+    const signer=await vault.load(scope);
+    const trust=await host.inspect(user);
+    if(!trust.deviceActive||trust.deviceRevoked||!signer||!trust.activeKey||
+       signer.keyId!==trust.activeKey.keyId||
+       signer.publicKey.length!==trust.activeKey.publicKey.length||
+       signer.publicKey.some((byte,index)=>byte!==trust.activeKey.publicKey[index])){
+      throw new Error("Authenticated Device signer is not currently trusted");
+    }
+    window.ucrProtectedDeviceKeyVault=vault;
+    window.ucrCanonicalDeviceAuthority=host;
+    // This only establishes Device authority. A real canonical Call/Group
+    // media binding and peer trust resolver is still REQUIRED for E2EE.
+  })().catch(error=>{firstPartyDeviceAuthorityPromise=null;throw error;});
+  return firstPartyDeviceAuthorityPromise;
+}
 function requireCanonicalMediaHostReady(){
   const adapter=e2eeAdapter();
   if(adapter){requireCompatibleE2eeAdapter(adapter);return;}
@@ -1729,7 +1764,7 @@ async function join(){
   // A signed join URL alone does not provision an authorized media signer.
   // Reject before opening a realtime session/heartbeat when the host omitted
   // the canonical Device media authority; the user may retry after setup.
-  try{requireCanonicalMediaHostReady();prewarmAuthorizedMediaRuntime();}
+  try{await installFirstPartyDeviceAuthority();requireCanonicalMediaHostReady();prewarmAuthorizedMediaRuntime();}
   catch(error){
     ui.state.textContent="Secure media unavailable";
     ui.status.textContent=error.message;
