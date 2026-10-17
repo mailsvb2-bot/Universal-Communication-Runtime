@@ -120,3 +120,65 @@ recovery material, bearer credentials or Join tokens.
 **This is only a deployment preflight**, not media proof. Complete two-device
 acceptance and real encrypted audio/video transmission before claiming the
 calling journey is complete.
+
+## Docker dev package (`docker compose up`) and `/start`
+
+The container started by `compose.yaml` runs the `ucr dev` Universal Conference
+package. It does **not** run the first-party BFF (`ucr-runtime serve-realtime`
+with `UCR_FIRST_PARTY_BIND`) nor an HTTPS edge, so `/start` answers 503
+`first_party_unconfigured`, and the entrypoint prints
+`UCR_DEV_FIRST_PARTY=disabled`. This is intentional: there is no safe
+default for `UCR_FIRST_PARTY_UPSTREAM` — pointing it at a port with no BFF only
+turns 503 into 502, and the BFF refuses any non-HTTPS Origin and issues
+`__Host-`/`Secure` cookies. Run the topology above instead (on Windows inside
+WSL2, because coturn has no native Windows build):
+
+```sh
+turnserver -n --use-auth-secret --static-auth-secret="$(openssl rand -hex 32)" ... &
+UCR_REALTIME_JOIN_KEY_HEX=$(openssl rand -hex 32) \
+UCR_FIRST_PARTY_BIND=127.0.0.1:18081 \
+UCR_FIRST_PARTY_PUBLIC_ORIGIN=https://localhost:8443 \
+UCR_FIRST_PARTY_SELF_SERVICE_TENANT=tenant-local \
+UCR_BROWSER_REALTIME_GATEWAY_ENABLED=true \
+UCR_WEBRTC_STUN_URLS=stun:127.0.0.1:3478 \
+UCR_WEBRTC_TURN_URLS="turn:127.0.0.1:3478?transport=udp" \
+UCR_WEBRTC_TURN_SECRET_HEX=<same secret as coturn> \
+ucr-runtime serve-realtime --database ucr.sqlite3 --bind 127.0.0.1:50051 \
+  --operator-bind 127.0.0.1:50062 --join-base-url https://localhost:8443/client.html &
+UCR_REALTIME_WEB_BIND=127.0.0.1:8080 UCR_REALTIME_GRPC_UPSTREAM=http://127.0.0.1:50051 \
+UCR_FIRST_PARTY_UPSTREAM=127.0.0.1:18081 UCR_REALTIME_ALLOWED_ORIGINS=https://localhost:8443 \
+ucr-realtime-web &
+UCR_HTTPS_EDGE_BIND=127.0.0.1:8443 UCR_HTTPS_EDGE_UPSTREAM=127.0.0.1:8080 \
+UCR_HTTPS_EDGE_CERT_FILE=cert.pem UCR_HTTPS_EDGE_KEY_FILE=key.pem ucr-https-edge &
+```
+
+Initialise the database once with `ucr-runtime init --database ucr.sqlite3`.
+
+## Direct-call media
+
+A first-party direct Call owns invitation, consent and lifecycle. Realtime
+media is admitted only for Group Calls bound to one MLS epoch, so when both
+participants have accepted, `join-accepted` derives (idempotently, with
+domain-separated hashed IDs) a private MLS Group containing exactly the two
+participants plus the tenant media-host committer leaf, and a media Group Call
+with the same two principals. The Join grant names that media Call; Join
+grant, Device trust, accepted-participant, generation/heartbeat fences, MLS
+endpoint admission and SFU authorization apply unchanged. Hang-up ends the
+media Call and Realtime refuses re-admission to a Terminated Call.
+
+Like every current Conference, the MLS Group is administered by a server-held
+committer leaf: endpoint media keys stay in the browsers, but the host leaf is
+a cryptographic Group member. Trusted endpoint keys require each user to have
+exactly one active Device (existing realtime limitation).
+
+## Anonymous challenge flood
+
+Sign-up, login, recovery and device-enrollment challenges are stateless
+(MAC-sealed with a per-process key, bound to binding, purpose and key). Issuing
+one allocates no server memory; only verified proofs are remembered until
+expiry to reject replay. A flood of anonymous challenge requests therefore
+cannot lock other users out. Per-client-IP quotas are not implemented: the
+HTTPS edge is a raw TLS passthrough and the BFF only sees a loopback peer. To
+limit account creation per client, terminate TLS at a reverse proxy that
+rate-limits by client address (for example nginx `limit_req`, see
+`rt0-first-party-https-edge.nginx.conf`).
