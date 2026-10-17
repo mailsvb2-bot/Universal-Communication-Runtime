@@ -3628,6 +3628,39 @@ mod tests {
     }
 
     #[test]
+    fn first_party_entry_reports_missing_bundle_and_failed_session_instead_of_hanging() {
+        let html = super::FIRST_PARTY_START_HTML;
+        let js = super::FIRST_PARTY_START_JS;
+        assert!(!js.contains("} from \"/endpoint-media/"));
+        assert!(js.contains("await import(\"/endpoint-media/reference_browser_media_installer.js\")"));
+        assert!(js.contains("Вход недоступен: браузерный пакет не установлен."));
+        assert!(js.contains("function explainEntryFailure(error)"));
+        assert!(js.contains("explainEntryFailure(error);"));
+        assert!(!js.contains("void run(initialize);"));
+        assert!(html.contains("section h2:not(:first-child){margin-top:28px"));
+    }
+
+    #[test]
+    fn client_page_declares_raised_hand_state_in_strict_mode() {
+        assert!(super::CLIENT_HTML.contains("let handRaised=false,"));
+    }
+
+    #[test]
+    fn client_page_scripts_are_served_with_nosniff() {
+        assert!(super::CLIENT_HTML.contains("<script src=\"./mobile-browser-probe.js\"></script>"));
+        for response in [
+            super::mobile_browser_probe_js_response(),
+            super::first_party_readiness_js_response(),
+        ] {
+            assert_eq!(response.status(), super::StatusCode::OK);
+            assert_eq!(
+                response.headers().get("X-Content-Type-Options").expect("nosniff header"),
+                "nosniff"
+            );
+        }
+    }
+
+    #[test]
     fn first_party_contact_call_entry_has_complete_fail_closed_user_route() {
         let html = super::FIRST_PARTY_START_HTML;
         let js = super::FIRST_PARTY_START_JS;
