@@ -49,7 +49,8 @@ fn state(path: &PathBuf) -> State {
             tenant_id: TenantId::from_opaque(OpaqueId::new("public-self-service").unwrap()),
             namespace_id: None,
         }),
-        pending: Mutex::new(Vec::new()),
+        challenge_key: [7; 32],
+        consumed: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     }
 }
@@ -662,5 +663,119 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             Some(pb::realtime_heartbeat_response::Result::Error(_))
         ),
         "{after:?}"
+    );
+}
+
+/// Regression: 512 anonymous challenge requests used to fill ONE global pending
+/// pool and answer 429 to every user for 90 s. Challenges are now stateless
+/// (MAC-sealed, bound to binding/purpose/key) and only verified proofs are
+/// remembered, so a flood cannot lock anybody out, while replay, tampering
+/// and cross-purpose use stay rejected.
+#[test]
+fn anonymous_challenge_flood_cannot_lock_out_signup_or_login() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, alice_signer, _) = signup(&server, 51);
+    for _ in 0..4096 {
+        account_route(&server, "/v1/first-party/signup/begin", b"{}").expect("never 429");
+        login_route(
+            &server,
+            "/v1/first-party/login/challenge",
+            &serde_json::to_vec(&alice).unwrap(),
+        )
+        .expect("never 429");
+    }
+    assert!(server.consumed.lock().unwrap().len() <= 1);
+    // Everybody can still sign up and log in.
+    let (bob, _, _) = signup(&server, 52);
+    signed_login(&server, &alice, &alice_signer);
+    assert_ne!(alice.participant_id, bob.participant_id);
+
+    let (issued, _) = login_route(
+        &server,
+        "/v1/first-party/login/challenge",
+        &serde_json::to_vec(&alice).unwrap(),
+    )
+    .unwrap();
+    let sign = |challenge_id: &str, nonce: &str| {
+        let payload = encoded_proof(
+            "ucr-first-party-device-login.v1",
+            &json!([
+                alice.tenant_id,
+                alice.namespace_id,
+                alice.participant_id,
+                alice.device,
+                challenge_id,
+                nonce
+            ]),
+        )
+        .unwrap();
+        URL_SAFE_NO_PAD.encode(alice_signer.sign(payload.as_bytes()).to_bytes())
+    };
+    let id = issued["challengeId"].as_str().unwrap();
+    let nonce = issued["challengeBytesBase64Url"].as_str().unwrap();
+    let verify = |binding: &Binding, challenge_id: &str, signature: String| {
+        login_route(
+            &server,
+            "/v1/first-party/login/verify",
+            &serde_json::to_vec(&json!({"binding": binding, "challengeId": challenge_id, "signatureBase64Url": signature})).unwrap(),
+        )
+        .map(|_| ())
+    };
+    // A wrong signature does not spend the challenge...
+    let mut bad = sign(id, nonce);
+    bad.replace_range(0..2, if bad.starts_with("AA") { "BB" } else { "AA" });
+    assert!(verify(&alice, id, bad).is_err());
+    // ...a tampered id or another binding is refused...
+    let mut tampered = URL_SAFE_NO_PAD.decode(id).unwrap();
+    tampered[3] ^= 1;
+    let tampered = URL_SAFE_NO_PAD.encode(tampered);
+    assert_eq!(
+        verify(&alice, &tampered, sign(&tampered, nonce)),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+    assert_eq!(
+        verify(&bob, id, sign(id, nonce)),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+    // ...a signup challenge never serves as a login challenge...
+    let (signup_issued, _) = account_route(&server, "/v1/first-party/signup/begin", b"{}").unwrap();
+    let signup_id = signup_issued["challengeId"].as_str().unwrap();
+    assert_eq!(
+        verify(
+            &alice,
+            signup_id,
+            sign(
+                signup_id,
+                signup_issued["challengeBytesBase64Url"].as_str().unwrap()
+            )
+        ),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+    // ...the genuine proof succeeds exactly once.
+    verify(&alice, id, sign(id, nonce)).expect("genuine login");
+    assert_eq!(
+        verify(&alice, id, sign(id, nonce)),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+
+    // Repeated logins of one Identity evict only its own oldest sessions.
+    for _ in 0..(MAX_SESSIONS_PER_IDENTITY + 4) {
+        signed_login(&server, &alice, &alice_signer);
+    }
+    let sessions = server.sessions.lock().unwrap();
+    assert_eq!(
+        sessions
+            .iter()
+            .filter(|s| s.binding.participant_id == alice.participant_id)
+            .count(),
+        MAX_SESSIONS_PER_IDENTITY
+    );
+    assert_eq!(
+        sessions
+            .iter()
+            .filter(|s| s.binding.participant_id == bob.participant_id)
+            .count(),
+        1
     );
 }
