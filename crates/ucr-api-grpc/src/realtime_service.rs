@@ -707,7 +707,8 @@ where
                         .map_err(map_registry_error)?;
                     // The client echoes the Join generation, not the attendance counter.
                     if request.expected_session_sequence != 0 {
-                        let generation = self.registry
+                        let generation = self
+                            .registry
                             .current_join_generation(&claims, now)
                             .map_err(map_registry_error)?;
                         if request.expected_session_sequence != generation {
