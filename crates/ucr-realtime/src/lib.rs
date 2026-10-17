@@ -1824,6 +1824,21 @@ const fn principal_kind_from_code(value: u8) -> Result<PrincipalKind, JoinTokenE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_generation_stays_exact_in_browser_json_numbers() {
+        for _ in 0..256 {
+            let registry = RealtimeSessionRegistry::default();
+            let first = registry.next_join_generation().expect("generation");
+            let second = registry.next_join_generation().expect("generation");
+            assert!((1..=MAX_JOIN_GENERATION).contains(&first));
+            assert_eq!(second, first + 1);
+        }
+        let registry = RealtimeSessionRegistry::default();
+        registry.last_join_generation.store(MAX_JOIN_GENERATION - 1, Ordering::Relaxed);
+        assert_eq!(registry.next_join_generation(), Ok(MAX_JOIN_GENERATION));
+        assert_eq!(registry.next_join_generation(), Err(RealtimeRegistryError::SequenceOverflow));
+    }
     use ucr_model::{
         CryptoSuite, GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, KeyId, MediaKind,
         SfuForwardTarget,
