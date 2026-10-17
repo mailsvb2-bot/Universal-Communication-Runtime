@@ -651,7 +651,8 @@ dependencies = [
 
 [[package]]
 name = "glob"
-version = "0.3.4"+source = "registry+https://github.com/rust-lang/crates.io-index"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
@@ -1350,7 +1351,8 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe42f1670a52a47d448f14b6a5c61dd78fce51856e68edaa38f7ae3a46b8d6b6"
 dependencies = [
- "ecdsa",+ "elliptic-curve",
+ "ecdsa",
+ "elliptic-curve",
  "primeorder",
  "sha2 0.10.9",
 ]
@@ -2049,7 +2051,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-bindgen-macro-support"+version = "0.2.128"
+name = "wasm-bindgen-macro-support"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "411e4887f0071ef2d2164a9d5fdf2d20efbef78fccd3a78b0c10a1dc5295e48a"
 dependencies = [
