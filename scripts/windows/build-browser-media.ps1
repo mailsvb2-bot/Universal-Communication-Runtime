@@ -27,7 +27,7 @@ if ($version -ne "wasm-bindgen 0.2.128") {
 }
 Invoke-UcrNative "rustup" @("target", "add", "wasm32-unknown-unknown")
 Invoke-UcrNative "cargo" @(
-    "build", "--release", "--manifest-path", "crates/ucr-endpoint-wasm/Cargo.toml",
+    "build", "--locked", "--release", "--manifest-path", "crates/ucr-endpoint-wasm/Cargo.toml",
     "--target", "wasm32-unknown-unknown"
 )
 $wasmDir = Join-Path $root "crates\ucr-realtime-web\static\endpoint-wasm"
