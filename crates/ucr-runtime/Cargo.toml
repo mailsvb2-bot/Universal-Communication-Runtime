@@ -30,6 +30,7 @@ rustls = { version = "=0.23.46", default-features = false, features = ["ring", "
 ucr-api-grpc = { path = "../ucr-api-grpc" }
 ucr-core = { path = "../ucr-core" }
 ucr-crypto = { path = "../ucr-crypto" }
+ucr-group-mls = { path = "../ucr-group-mls" }
 ucr-conference = { path = "../ucr-conference" }
 ucr-media-e2ee = { path = "../ucr-media-e2ee" }
 ucr-model = { path = "../ucr-model" }
