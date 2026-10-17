@@ -1835,9 +1835,14 @@ mod tests {
             assert_eq!(second, first + 1);
         }
         let registry = RealtimeSessionRegistry::default();
-        registry.last_join_generation.store(MAX_JOIN_GENERATION - 1, Ordering::Relaxed);
+        registry
+            .last_join_generation
+            .store(MAX_JOIN_GENERATION - 1, Ordering::Relaxed);
         assert_eq!(registry.next_join_generation(), Ok(MAX_JOIN_GENERATION));
-        assert_eq!(registry.next_join_generation(), Err(RealtimeRegistryError::SequenceOverflow));
+        assert_eq!(
+            registry.next_join_generation(),
+            Err(RealtimeRegistryError::SequenceOverflow)
+        );
     }
     use ucr_model::{
         CryptoSuite, GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, KeyId, MediaKind,
