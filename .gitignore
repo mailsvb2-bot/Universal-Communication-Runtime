@@ -11,3 +11,6 @@ __pycache__/
 # Generated endpoint-only media code; build from the pinned source revision.
 /crates/ucr-realtime-web/static/endpoint-wasm/
 /crates/ucr-realtime-web/static/endpoint-media/
+
+# Standalone endpoint WASM build output.
+/crates/ucr-endpoint-wasm/target/
