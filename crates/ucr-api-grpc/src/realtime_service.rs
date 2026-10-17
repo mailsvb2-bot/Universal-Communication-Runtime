@@ -702,14 +702,17 @@ where
                 .and_then(|claims| {
                     self.require_accepted_conference_participant(&claims)?;
                     let now = self.now()?;
-                    let sequence = self
-                        .registry
+                    self.registry
                         .heartbeat(&claims, now)
                         .map_err(map_registry_error)?;
-                    if request.expected_session_sequence != 0
-                        && request.expected_session_sequence != sequence
-                    {
-                        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+                    // The client echoes the Join generation, not the attendance counter.
+                    if request.expected_session_sequence != 0 {
+                        let generation = self.registry
+                            .current_join_generation(&claims, now)
+                            .map_err(map_registry_error)?;
+                        if request.expected_session_sequence != generation {
+                            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+                        }
                     }
                     let admission = self.realtime_admission_state(&claims)?;
                     let media_policy = self.effective_universal_media_policy(&claims)?;
