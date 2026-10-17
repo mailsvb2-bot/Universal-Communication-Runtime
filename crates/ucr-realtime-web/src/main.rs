@@ -3694,7 +3694,6 @@ mod tests {
         assert!(js.contains("Сервер входа и браузерные E2EE-модули доступны"));
     }
 
-
     #[test]
     fn client_page_scripts_are_served_with_nosniff() {
         assert!(super::CLIENT_HTML.contains("<script src=\"./mobile-browser-probe.js\"></script>"));
