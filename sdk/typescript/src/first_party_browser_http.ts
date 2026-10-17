@@ -132,7 +132,7 @@ export function encodeUcrFirstPartyEnrollmentProof(
   signer: UcrLocalDeviceSigner,
   challengeId: string,
   challenge: Uint8Array,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
   const user = parseBinding(binding);
   const keyId = requiredId(signer.keyId, "key ID");
   const serverChallengeId = requiredId(challengeId, "challenge");
