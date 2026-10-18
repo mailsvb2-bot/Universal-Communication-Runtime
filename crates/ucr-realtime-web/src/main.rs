@@ -3656,6 +3656,20 @@ mod tests {
     }
 
     #[test]
+    fn expired_realtime_grant_and_session_conflict_fail_closed() {
+        let client = super::CLIENT_HTML;
+        assert!(client.contains("r.status===409&&sessionActive"));
+        assert!(client.contains("\"/v1/realtime/audio-level\""));
+        assert!(client.contains("\"/v1/realtime/active-speaker\""));
+        assert!(client.contains("\"/v1/realtime/chat/list\""));
+        assert!(client.contains("\"/v1/realtime/reactions/list\""));
+        assert!(client.contains("api.retiringConflictGeneration=generation"));
+        assert!(client.contains("Realtime session conflict: audio/video stopped."));
+        assert!(client.contains("Date.now()>=claims.expires"));
+        assert!(client.contains("Signed session expired without renewal; media capture stopped."));
+    }
+
+    #[test]
     fn accepted_direct_call_renews_via_canonical_owner_and_audio_can_be_unlocked() {
         let client = super::CLIENT_HTML;
         let start = super::FIRST_PARTY_START_JS;
