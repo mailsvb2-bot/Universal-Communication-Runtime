@@ -1287,6 +1287,11 @@ function attachE2eeDataChannel(channel){
     ui.state.textContent="Protected media unavailable";
     ui.status.textContent="Endpoint E2EE adapter failed; encrypted transport closed: "+e.message;
     ucrRecordDiagnostic("E2EE adapter activation failed: "+ucrDiagnosticReason(e?.message),"crypto");
+    // An opened peer transport is not proof of an authorized E2EE media
+    // pipeline. Retire the complete capture/call session on activation failure.
+    const generation=sessionLifecycleGeneration;
+    void endUnverifiedMedia(generation,
+      "Protected media activation failed ("+ucrDiagnosticReason(e?.message)+"); media capture stopped.");
   });};
   channel.onmessage=event=>{
     try{
@@ -1946,8 +1951,18 @@ async function join(){
     heartbeatTimer=setInterval(()=>{
       const generation=sessionLifecycleGeneration;
       if(sessionActive&&claims&&Date.now()>=claims.expires){
-        void endUnverifiedMedia(generation,
-          "Signed session expired without renewal; media capture stopped.");
+        // A renewal may be in flight when the timer ticks; let it complete
+        // within the existing heartbeat authorization watchdog, never publish
+        // or capture beyond the watchdog if the signed handoff stalls.
+        if(renewLocalRoomGrant.busy)return;
+        void renewLocalRoomGrant().then(()=>{
+          if(generation!==sessionLifecycleGeneration||!sessionActive)return;
+          if(Date.now()>=claims.expires){
+            void endUnverifiedMedia(generation,
+              "Signed session expired without renewal; media capture stopped.");
+          }
+        }).catch(()=>endUnverifiedMedia(generation,
+          "Signed session renewal rejected; media capture stopped."));
         return;
       }
       heartbeat().catch(e=>{
