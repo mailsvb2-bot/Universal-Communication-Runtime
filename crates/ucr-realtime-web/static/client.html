@@ -191,8 +191,8 @@ document.getElementById("ucr-diagnostics-save")?.addEventListener("click",()=>{
   const link=document.createElement("a");link.href=url;link.download="ucr-call-diagnostics.json";
   link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 });
+// Snapshot after top-level media state has finished initializing.
 setInterval(ucrRenderDiagnostics,1500);
-ucrRenderDiagnostics();
 const ui={
   join:$("join"),leave:$("leave"),state:$("state"),webrtcState:$("webrtc-state"),
   packets:$("packets"),expires:$("expires"),status:$("status"),
