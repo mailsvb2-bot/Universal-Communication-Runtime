@@ -57,11 +57,11 @@ function authRenderDiagnostics(){
   panel.textContent=JSON.stringify({schema:"ucr-auth-diagnostics-v1",
     generatedAt:new Date().toISOString(),events:authDiagnostics},null,2);
 }
-el("auth-diagnostics-copy")?.addEventListener("click",async()=>{
+el("auth-diagnostics-copy").addEventListener("click",async()=>{
   try{await navigator.clipboard.writeText(el("auth-diagnostics-report").textContent);}
   catch{message("Буфер обмена недоступен. Используйте «Сохранить JSON».");}
 });
-el("auth-diagnostics-save")?.addEventListener("click",()=>{
+el("auth-diagnostics-save").addEventListener("click",()=>{
   const blob=new Blob([el("auth-diagnostics-report").textContent],{type:"application/json"});
   const url=URL.createObjectURL(blob);const link=document.createElement("a");
   link.href=url;link.download="ucr-auth-diagnostics.json";link.click();
