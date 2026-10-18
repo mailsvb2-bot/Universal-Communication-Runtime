@@ -3656,6 +3656,23 @@ mod tests {
     }
 
     #[test]
+    fn first_party_auth_diagnostics_expose_only_stages_and_http_categories() {
+        let page = super::FIRST_PARTY_START_HTML;
+        let script = super::FIRST_PARTY_START_JS;
+        assert!(page.contains("id=\"auth-diagnostics-report\""));
+        assert!(page.contains("id=\"auth-diagnostics-save\""));
+        assert!(script.contains("schema:\"ucr-auth-diagnostics-v1\""));
+        assert!(script.contains("authDiagnostics.length>60"));
+        assert!(script.contains("HTTP_401_AUTHORITY_REJECTED"));
+        assert!(script.contains("authTrace(\"resume_session\""));
+        assert!(script.contains("authTrace(\"device_reauthentication\""));
+        assert!(script.contains("authTrace(\"list_contacts\""));
+        assert!(script.contains("authTrace(\"list_devices\""));
+        assert!(script.contains("authTrace(\"incoming_calls\""));
+        assert!(!script.contains("authDiagnostics.push({error:"));
+    }
+
+    #[test]
     fn call_diagnostics_are_bounded_exportable_and_do_not_include_credentials() {
         let client = super::CLIENT_HTML;
         assert!(client.contains("id=\"ucr-diagnostics\""));
