@@ -287,6 +287,23 @@ async function api(path,payload,signal,keepalive=false){
   const r=await fetch(path,{method:"POST",headers:{"Authorization":"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify(payload),signal,keepalive});
   if(!r.ok){
     let detail=null;try{detail=await r.clone().json();}catch(_){}
+    // Telemetry/chat conflicts after grant retirement must not create an
+    // unbounded request storm or display a stale "Connected" status.
+    // Fail closed, but only for control-plane session-bound polling endpoints.
+    if(r.status===409&&sessionActive&&
+       ["/v1/realtime/audio-level","/v1/realtime/active-speaker",
+        "/v1/realtime/chat/list","/v1/realtime/reactions/list"].includes(path)){
+      const generation=sessionLifecycleGeneration;
+      if(!api.retiringConflictGeneration||api.retiringConflictGeneration!==generation){
+        api.retiringConflictGeneration=generation;
+        queueMicrotask(()=>{
+          if(generation===sessionLifecycleGeneration&&sessionActive){
+            void endUnverifiedMedia(generation,
+              "Realtime session conflict: audio/video stopped. Start a new authorized call.");
+          }
+        });
+      }
+    }
     const error=new Error(detail&&detail.message?detail.message:"Request failed: "+r.status);
     error.code=detail&&detail.code?detail.code:"request_failed";
     error.status=r.status;
@@ -1838,6 +1855,11 @@ async function join(){
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
     heartbeatTimer=setInterval(()=>{
       const generation=sessionLifecycleGeneration;
+      if(sessionActive&&claims&&Date.now()>=claims.expires){
+        void endUnverifiedMedia(generation,
+          "Signed session expired without renewal; media capture stopped.");
+        return;
+      }
       heartbeat().catch(e=>{
         // Re-authorize before a rejected heartbeat when the room's grant expired.
         // Never allow an old response to retain capture after a newer Leave.
