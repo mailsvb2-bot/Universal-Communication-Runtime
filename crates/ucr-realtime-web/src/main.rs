@@ -3818,11 +3818,11 @@ mod tests {
         assert!(js.contains("await calls.contacts()"));
         assert!(js.contains("await calls.addContact(name,peer)"));
         assert!(js.contains("await calls.start(contact.id,media,requestId)"));
-        assert!(js.contains("await calls.incoming()"));
+        assert!(js.contains("await authTrace(\"incoming_calls\",()=>calls.incoming())"));
         assert!(js.contains("await calls.signal(call.callId,\"accept\")"));
         assert!(js.contains("await calls.signal(call.callId,\"reject\")"));
         assert!(js.contains("await calls.signal(active.call.callId,action)"));
-        assert!(js.contains("await calls.inspect(active.call.callId)"));
+        assert!(js.contains("await authTrace(\"inspect_call\",()=>calls.inspect(active.call.callId))"));
         assert!(js.contains("if (accountScope !== principalScope(user))"));
         assert!(js.contains("idempotency.clear()"));
         assert!(js.contains("clearRetryKey(active.call)"));
