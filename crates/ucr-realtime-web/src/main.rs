@@ -3656,6 +3656,16 @@ mod tests {
     }
 
     #[test]
+    fn e2ee_failure_and_expired_renewal_revoke_capture() {
+        let client = super::CLIENT_HTML;
+        assert!(client.contains("Protected media activation failed ("));
+        assert!(client.contains("void endUnverifiedMedia(generation,"));
+        assert!(client.contains("if(renewLocalRoomGrant.busy)return;"));
+        assert!(client.contains("Signed session renewal rejected; media capture stopped."));
+        assert!(client.contains("Signed session expired without renewal; media capture stopped."));
+    }
+
+    #[test]
     fn first_party_auth_diagnostics_expose_only_stages_and_http_categories() {
         let page = super::FIRST_PARTY_START_HTML;
         let script = super::FIRST_PARTY_START_JS;
