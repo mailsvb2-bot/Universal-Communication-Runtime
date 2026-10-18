@@ -800,6 +800,7 @@ async function installFirstPartyDeviceAuthority(){
     }
     window.ucrProtectedDeviceKeyVault=vault;
     window.ucrCanonicalDeviceAuthority=host;
+    window.ucrFirstPartyAuthenticatedBinding=user;
     // The server binds an ACTIVE, fully accepted direct Call to a derived
     // two-member MLS media Group Call; its canonical mls-context names the
     // trusted Device keys. Use the same resolver as the local room unless a
@@ -1819,8 +1820,7 @@ async function join(){
         // Re-authorize before a rejected heartbeat when the room's grant expired.
         // Never allow an old response to retain capture after a newer Leave.
         const expired=claims&&typeof claims.expires==="number"&&Date.now()>=claims.expires;
-        const localRoom=typeof sessionStorage!=="undefined"&&sessionStorage.getItem("ucrLocalRoom")==="1";
-        if(e.code==="heartbeat_rejected"&&expired&&localRoom&&typeof renewLocalRoomGrant==="function"){
+        if(e.code==="heartbeat_rejected"&&expired&&typeof renewLocalRoomGrant==="function"){
           void renewLocalRoomGrant().then(()=>{
             if(generation!==sessionLifecycleGeneration||!sessionActive)return;
             heartbeat().catch(()=>endUnverifiedMedia(generation,"Conference authorization could not be verified; media capture stopped."));
@@ -2398,25 +2398,46 @@ function holdRoomPresence(){
 // onto that session without dropping the camera the page already holds.
 async function renewLocalRoomGrant(){
   if(typeof sessionStorage==="undefined"||typeof fetch!=="function")return;
-  if(sessionStorage.getItem("ucrLocalRoom")!=="1"||!sessionActive||!claims)return;
+  const isLocalRoom=sessionStorage.getItem("ucrLocalRoom")==="1";
+  const directCallId=!isLocalRoom&&claims?.call_id?.startsWith("fp-")
+    ? sessionStorage.getItem("ucrFirstPartyDirectCall"):null;
+  if((!isLocalRoom&&!directCallId)||!sessionActive||!claims)return;
   if(typeof claims.expires!=="number"||renewLocalRoomGrant.busy)return;
   // Also run after expiry. A sleeping laptop misses the last two minutes,
   // and the next heartbeat is rejected before the old end-of-success hook.
   const remaining=claims.expires-Date.now();
   if(remaining>120000)return;
-  const roomApi=sessionStorage.getItem("ucrRoomApi");
-  const user=sessionStorage.getItem("ucrRoomUser");
-  if(!roomApi||!user)return;
+  const roomApi=isLocalRoom?sessionStorage.getItem("ucrRoomApi"):null;
+  const user=isLocalRoom?sessionStorage.getItem("ucrRoomUser"):null;
+  if(isLocalRoom&&(!roomApi||!user))return;
   renewLocalRoomGrant.busy=true;
   const generation=sessionLifecycleGeneration;
   try{
-    const response=await fetch(localRoomRequestUrl("/v1/room/join"),{
-      method:"POST",
-      headers:{"content-type":"application/json"},
-      body:JSON.stringify({externalUserId:user})
-    });
-    const data=await response.json().catch(()=>null);
-    if(generation!==sessionLifecycleGeneration||!sessionActive||!response.ok||!data||data.ok!==true)return;
+    let data;
+    if(isLocalRoom){
+      const response=await fetch(localRoomRequestUrl("/v1/room/join"),{
+        method:"POST",
+        headers:{"content-type":"application/json"},
+        body:JSON.stringify({externalUserId:user})
+      });
+      data=await response.json().catch(()=>null);
+      if(!response.ok||!data||data.ok!==true)throw new Error("Room Join renewal rejected");
+    }else{
+      // Re-enter the canonical Call owner. Neither the fragment nor the
+      // derived MLS Group Call can mint new identity or device authority.
+      const host=window.ucrCanonicalDeviceAuthority;
+      const binding=window.ucrFirstPartyAuthenticatedBinding;
+      if(!host||!binding)throw new Error("Authenticated Device authority unavailable");
+      const call=await host.getDirectCall(binding,directCallId);
+      if(call.state!=="active"||!Number.isSafeInteger(call.revision))
+        throw new Error("Direct Call is no longer active");
+      data=await host.issueSignedJoinForAcceptedCall(binding,{
+        callId:directCallId,expectedRevision:call.revision
+      });
+      if(data.callId!==directCallId)
+        throw new Error("Direct Call renewal returned a foreign Call");
+    }
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!data)return;
     const fragment=typeof data.joinFragment==="string"?data.joinFragment:"";
     const next=new URLSearchParams(fragment.startsWith("#")?fragment.slice(1):fragment).get("ucr_join");
     if(!next||next===token)return;
@@ -2451,10 +2472,10 @@ async function renewLocalRoomGrant(){
     sessionActive=false;
     if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
     ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
-    ui.status.textContent="Renewing room access before the signed grant expires.";
+    ui.status.textContent="Renewing authorized call access before the signed grant expires.";
     await join();
   }catch(e){
-    if(generation===sessionLifecycleGeneration&&sessionActive)ui.status.textContent="Room access renewal failed: "+e.message;
+    if(generation===sessionLifecycleGeneration&&sessionActive)ui.status.textContent="Call access renewal failed: "+e.message;
   }finally{
     renewLocalRoomGrant.busy=false;
   }
