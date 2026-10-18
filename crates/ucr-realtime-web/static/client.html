@@ -1902,7 +1902,7 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
   requireCanonicalMediaHostReady();
 }
 async function join(){
-  ucrRecordDiagnostic("Join requested","lifecycle");
+  if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Join requested","lifecycle");
   if(signedGrantRetired){
     ui.state.textContent="Access ended";
     ui.status.textContent="This session grant has ended. Open a fresh authorized call link.";
@@ -2006,7 +2006,7 @@ async function endUnverifiedMedia(generation,message){
   }
 }
 async function leave(){
-  ucrRecordDiagnostic("Leave requested","lifecycle");
+  if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Leave requested","lifecycle");
   const wasActive=sessionActive;
   const leavingClaims=wasActive?body():null;
   const leavingSequence=activeSessionSequence;
