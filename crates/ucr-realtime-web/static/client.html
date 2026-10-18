@@ -1863,7 +1863,13 @@ async function endUnverifiedMedia(generation,message){
   const cleanup=leave();
   ui.state.textContent="Access ended";ui.status.textContent=message;
   await cleanup;
-  if(generation+1===sessionLifecycleGeneration){ui.state.textContent="Access ended";ui.status.textContent=message;}
+  // The retired-grant Join guard may have already told the user to obtain a
+  // fresh link. Do not overwrite that security decision with a late watchdog
+  // completion (or with a stale session's status after a new admission).
+  if(generation+1===sessionLifecycleGeneration&&
+     ui.status.textContent===message){
+    ui.state.textContent="Access ended";
+  }
 }
 async function leave(){
   const wasActive=sessionActive;
