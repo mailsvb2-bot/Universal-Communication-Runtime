@@ -2463,6 +2463,17 @@ async function renewLocalRoomGrant(){
     let nextClaims;
     try{nextClaims=readGrant(next);}catch(_){return;}
     if(!nextClaims||nextClaims.session_id===claims.session_id||nextClaims.expires<=claims.expires)return;
+    // The newly signed grant must preserve the exact canonical tenant,
+    // participant, Device and media Group Call. Cross-principal handoff is
+    // forbidden even if an authenticated response is malformed or stale.
+    if(nextClaims.tenant_id!==claims.tenant_id||
+       nextClaims.namespace_id!==claims.namespace_id||
+       nextClaims.call_id!==claims.call_id||
+       nextClaims.participant_kind!==claims.participant_kind||
+       nextClaims.participant_id!==claims.participant_id||
+       nextClaims.device_id!==claims.device_id){
+      throw new Error("Renewed Join changed canonical Call or Device identity");
+    }
     if(generation!==sessionLifecycleGeneration||!sessionActive)return;
     // Drop in-flight heartbeats before the session id changes. join() advances
     // the generation again for the replacement session.
