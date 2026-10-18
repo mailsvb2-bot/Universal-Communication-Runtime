@@ -3822,7 +3822,9 @@ mod tests {
         assert!(js.contains("await calls.signal(call.callId,\"accept\")"));
         assert!(js.contains("await calls.signal(call.callId,\"reject\")"));
         assert!(js.contains("await calls.signal(active.call.callId,action)"));
-        assert!(js.contains("await authTrace(\"inspect_call\",()=>calls.inspect(active.call.callId))"));
+        assert!(
+            js.contains("await authTrace(\"inspect_call\",()=>calls.inspect(active.call.callId))")
+        );
         assert!(js.contains("if (accountScope !== principalScope(user))"));
         assert!(js.contains("idempotency.clear()"));
         assert!(js.contains("clearRetryKey(active.call)"));
