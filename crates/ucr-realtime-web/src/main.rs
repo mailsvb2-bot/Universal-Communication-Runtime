@@ -3656,6 +3656,23 @@ mod tests {
     }
 
     #[test]
+    fn accepted_direct_call_renews_via_canonical_owner_and_audio_can_be_unlocked() {
+        let client = super::CLIENT_HTML;
+        let start = super::FIRST_PARTY_START_JS;
+        assert!(start.contains("sessionStorage.setItem(\"ucrFirstPartyDirectCall\", callId)"));
+        assert!(client.contains("host.getDirectCall(binding,directCallId)"));
+        assert!(client.contains("host.issueSignedJoinForAcceptedCall(binding,"));
+        assert!(client.contains("if(call.state!==\"active\""));
+        assert!(client.contains("expectedRevision:call.revision"));
+        assert!(client.contains("data.callId!==directCallId"));
+        assert!(client.contains("if(!next||next===token)return"));
+        assert!(client.contains("await join();"));
+        assert!(client.contains("id=\"sound-unlock\""));
+        assert!(client.contains("ui.soundUnlock.addEventListener(\"click\""));
+        assert!(client.contains("Audio playback is suspended"));
+    }
+
+    #[test]
     fn first_party_device_authority_installs_the_shared_admission_resolver() {
         // Regression: with Device authority alone, every /start call stopped at
         // "Canonical Device signing/trust integration is unavailable".
