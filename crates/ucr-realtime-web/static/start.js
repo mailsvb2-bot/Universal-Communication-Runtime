@@ -202,6 +202,9 @@ async function beginMedia(callId) {
   setCallStage(3, active?.call.media === "video" ? "Допуск подтверждён. Открывается защищённый видеоэкран…" : "Допуск подтверждён. Открывается защищённый экран аудиосвязи…");
   clearInterval(timer);
   const next = new URL("/client.html",location.origin);
+  // The signed media Join names the derived Group Call. Preserve only the
+  // accepted canonical Direct Call id for independently authenticated renewal.
+  sessionStorage.setItem("ucrFirstPartyDirectCall", callId);
   next.hash = grant.joinFragment.slice(1);
   location.replace(next.href);
 }
