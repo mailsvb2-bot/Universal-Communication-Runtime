@@ -18,6 +18,7 @@ import {
   UcrBrowserWebCodecsProducer,
   ucrCameraLayerStreamId,
   ucrVideoEncodingTarget,
+  ucrNormalizeOpusAudio,
 } from "./src/browser_webcodecs_media.ts";
 import { createUcrCanonicalBrowserMediaFactory } from "./src/canonical_browser_media_factory.ts";
 import { createUcrCanonicalDevicePreparation } from "./src/canonical_device_enrollment.ts";
@@ -26,6 +27,45 @@ import {
   UcrChameleonReceiveHandover,
   type UcrEncryptedReceivePath,
 } from "./src/chameleon_receive_handover.ts";
+
+// Real microphone PCM is not guaranteed to match the configured Opus profile.
+// Exercise endpoint-only conversion without requiring browser permissions.
+{
+  const original = globalThis.AudioData;
+  const created: Array<Record<string, unknown>> = [];
+  class FakeAudioData {
+    sampleRate: number; numberOfChannels: number; numberOfFrames: number; timestamp: number;
+    planes: Float32Array[];
+    constructor(config: {sampleRate: number; numberOfChannels: number;
+      numberOfFrames: number; timestamp: number; data: Float32Array}) {
+      this.sampleRate=config.sampleRate;this.numberOfChannels=config.numberOfChannels;
+      this.numberOfFrames=config.numberOfFrames;this.timestamp=config.timestamp;
+      this.planes=[config.data];
+      created.push(config);
+    }
+    copyTo(dest: Float32Array,{planeIndex}: {planeIndex: number}) {
+      dest.set(this.planes[planeIndex]);
+    }
+    close() {}
+  }
+  try {
+    Object.assign(globalThis,{AudioData:FakeAudioData});
+    const stereo=Object.create(FakeAudioData.prototype) as FakeAudioData;
+    stereo.sampleRate=44100;stereo.numberOfChannels=2;stereo.numberOfFrames=441;
+    stereo.timestamp=1234;
+    stereo.planes=[new Float32Array(441).fill(.5),new Float32Array(441).fill(-.25)];
+    const output=ucrNormalizeOpusAudio(stereo as unknown as AudioData);
+    assert.equal(output.sampleRate,48000);
+    assert.equal(output.numberOfChannels,1);
+    assert.equal(output.numberOfFrames,480);
+    assert.equal(output.timestamp,1234);
+    assert.ok(Math.abs((created[0].data as Float32Array)[0]-.125)<.0001);
+    assert.equal(ucrNormalizeOpusAudio(output),output);
+  } finally {
+    if(original===undefined) Reflect.deleteProperty(globalThis,"AudioData");
+    else Object.assign(globalThis,{AudioData:original});
+  }
+}
 
 // Real first/repeat-login orchestration over externally authenticated canonical
 // Device/Trust and endpoint-owned key vault; never create a second key owner.
