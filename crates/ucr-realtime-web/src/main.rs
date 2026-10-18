@@ -3669,7 +3669,7 @@ mod tests {
         assert!(client.contains("await join();"));
         assert!(client.contains("id=\"sound-unlock\""));
         assert!(client.contains("ui.soundUnlock.addEventListener(\"click\""));
-        assert!(client.contains("Audio playback is suspended"));
+        assert!(client.contains("Encrypted video is connected, but audio playback is suspended. Click Enable sound."));
     }
 
     #[test]
