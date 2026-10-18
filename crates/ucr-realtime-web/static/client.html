@@ -2474,7 +2474,7 @@ async function renewLocalRoomGrant(){
       }catch(error){
         // Only an expired BFF login may trigger a new signed Device proof.
         // Policy, revocation, conflicts and server failures stay fatal.
-        if(!/HTTP 401\\b/.test(String(error?.message||error)))throw error;
+        if(!/HTTP 401\b/.test(String(error?.message||error)))throw error;
         const reauthenticate=window.ucrRefreshFirstPartyDeviceSession;
         if(typeof reauthenticate!=="function")throw error;
         await reauthenticate();
