@@ -802,6 +802,27 @@ async function installFirstPartyDeviceAuthority(){
     window.ucrProtectedDeviceKeyVault=vault;
     window.ucrCanonicalDeviceAuthority=host;
     window.ucrFirstPartyAuthenticatedBinding=user;
+    // The BFF's HTTP-only login cookie expires independently of a live
+    // signed media grant. Renewal must prove possession of the same enrolled
+    // Device key; a media fragment alone cannot authenticate this session.
+    window.ucrRefreshFirstPartyDeviceSession=async()=>{
+      const authenticated=await module.authenticateUcrFirstPartyDevice(
+        vault,{origin:location.origin},claimedBinding);
+      if(authenticated.tenantId!==user.tenantId||
+         authenticated.namespaceId!==user.namespaceId||
+         authenticated.participantId!==user.participantId||
+         authenticated.deviceId!==user.deviceId){
+        throw new Error("Device reauthentication changed first-party principal");
+      }
+      const trustNow=await host.inspect(authenticated);
+      if(!trustNow.deviceActive||trustNow.deviceRevoked||
+         !trustNow.activeKey||trustNow.activeKey.keyId!==signer.keyId||
+         trustNow.activeKey.publicKey.length!==signer.publicKey.length||
+         trustNow.activeKey.publicKey.some((byte,index)=>byte!==signer.publicKey[index])){
+        throw new Error("Device signer is no longer trusted");
+      }
+      return authenticated;
+    };
     // The server binds an ACTIVE, fully accepted direct Call to a derived
     // two-member MLS media Group Call; its canonical mls-context names the
     // trusted Device keys. Use the same resolver as the local room unless a
@@ -2447,7 +2468,19 @@ async function renewLocalRoomGrant(){
       const host=window.ucrCanonicalDeviceAuthority;
       const binding=window.ucrFirstPartyAuthenticatedBinding;
       if(!host||!binding)throw new Error("Authenticated Device authority unavailable");
-      const call=await host.getDirectCall(binding,directCallId);
+      let call;
+      try{
+        call=await host.getDirectCall(binding,directCallId);
+      }catch(error){
+        // Only an expired BFF login may trigger a new signed Device proof.
+        // Policy, revocation, conflicts and server failures stay fatal.
+        if(!/HTTP 401\\b/.test(String(error?.message||error)))throw error;
+        const reauthenticate=window.ucrRefreshFirstPartyDeviceSession;
+        if(typeof reauthenticate!=="function")throw error;
+        await reauthenticate();
+        if(generation!==sessionLifecycleGeneration||!sessionActive)return;
+        call=await host.getDirectCall(binding,directCallId);
+      }
       if(call.state!=="active"||!Number.isSafeInteger(call.revision))
         throw new Error("Direct Call is no longer active");
       data=await host.issueSignedJoinForAcceptedCall(binding,{
