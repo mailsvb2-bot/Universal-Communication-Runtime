@@ -37,6 +37,10 @@ button{border:0;font-weight:700;cursor:pointer}
 button.primary{background:var(--ucr-accent);color:var(--ucr-accent-text)}
 button.secondary{background:var(--ucr-border);color:var(--ucr-text)}
 button:disabled,select:disabled,input:disabled{opacity:.45;cursor:not-allowed}
+#ucr-diagnostics{margin-top:16px;padding:14px;border:1px solid var(--ucr-border);border-radius:12px;background:var(--ucr-panel)}
+#ucr-diagnostics summary{cursor:pointer;font-weight:700}
+#ucr-diagnostics pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,monospace;max-height:300px;overflow:auto}
+#ucr-diagnostics button{margin:6px 8px 4px 0}
 #status{white-space:pre-wrap;background:var(--ucr-panel-deep);border-radius:12px;padding:12px;min-height:48px}
 .small{font-size:.85rem;color:#94a3b8}
 .hidden{display:none}
@@ -112,12 +116,83 @@ canvas.remote-media.hidden{display:none}
 <button id="leave" class="secondary" disabled>Leave</button>
 </div>
 <div id="status" role="status" aria-live="polite">Reading signed join grant…</div>
+<details id="ucr-diagnostics" open>
+  <summary>Диагностика звонка — состояние и ошибки</summary>
+  <p class="small">Без паролей, токенов, ключей, содержимого сообщений и идентификаторов участников. Работает без F12.</p>
+  <button id="ucr-diagnostics-copy" class="secondary" type="button">Скопировать отчёт</button>
+  <button id="ucr-diagnostics-save" class="secondary" type="button">Сохранить JSON</button>
+  <pre id="ucr-diagnostics-live" aria-live="off">Подготовка диагностики…</pre>
+</details>
 <p id="footer-note" class="small">Media permission is requested only after joining. Recording is a separate explicit UCR capability with consent and retention policy.</p>
 </section>
 </main>
 <script>
 "use strict";
 const $=id=>document.getElementById(id);
+// Bounded, privacy-preserving local diagnostics. No bearer tokens, join grants,
+// participant IDs, device IDs, SDP, room messages, local paths or media payloads.
+const ucrDiagnosticsEvents=[];
+const ucrDiagnosticAllowedPaths=new Set([
+ "/v1/realtime/join","/v1/realtime/heartbeat","/v1/realtime/audio-level",
+ "/v1/realtime/active-speaker","/v1/realtime/chat/list",
+ "/v1/realtime/reactions/list","/v1/realtime/media/stream",
+ "/v1/realtime/webrtc/offer","/v1/realtime/webrtc/answer",
+ "/v1/realtime/webrtc/close","/v1/realtime/leave"
+]);
+function ucrRecordDiagnostic(event,category="runtime"){
+  const safe=String(event).replace(/[^a-zA-Z0-9_ .:()/-]/g,"?").slice(0,180);
+  ucrDiagnosticsEvents.push({time:new Date().toISOString(),category,safe});
+  if(ucrDiagnosticsEvents.length>80)ucrDiagnosticsEvents.shift();
+}
+function ucrDiagnosticTrack(track){
+  return track?{state:track.readyState,enabled:track.enabled,muted:track.muted}:null;
+}
+function ucrDiagnosticReport(){
+  const local=typeof localStream!=="undefined"?localStream:null;
+  const audio=local?.getAudioTracks()?.[0]||null;
+  const video=local?.getVideoTracks()?.[0]||null;
+  const context=window.ucrLocalRoomAudioContext;
+  const grant=typeof claims!=="undefined"?claims:null;
+  return {
+    schema:"ucr-local-diagnostics-v1",
+    capturedAt:new Date().toISOString(),
+    page:"conference",
+    state:document.getElementById("state")?.textContent||"unknown",
+    webrtc:document.getElementById("webrtc-state")?.textContent||"unknown",
+    encryptedPackets:Number(document.getElementById("packets")?.textContent)||0,
+    authorization:{sessionActive:typeof sessionActive!=="undefined"&&sessionActive,
+      mediaActive:typeof mediaActive!=="undefined"&&mediaActive,
+      expiresInSeconds:grant?.expires?Math.round((grant.expires-Date.now())/1000):null,
+      sessionSequenceValid:typeof activeSessionSequence!=="undefined"&&activeSessionSequence>0},
+    crypto:{adapterReady:typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady,
+      transportOpen:typeof e2eeChannel!=="undefined"&&e2eeChannel?.readyState==="open"},
+    microphone:ucrDiagnosticTrack(audio),
+    camera:ucrDiagnosticTrack(video),
+    audioPlayback:context?context.state:"unavailable",
+    remoteVideo:{hasStream:!!document.getElementById("remote-video")?.srcObject,
+      canvasVisible:!document.getElementById("remote-e2ee-canvas")?.classList.contains("hidden")},
+    recentEvents:ucrDiagnosticsEvents.slice()
+  };
+}
+function ucrRenderDiagnostics(){
+  const area=document.getElementById("ucr-diagnostics-live");
+  if(!area)return;
+  area.textContent=JSON.stringify(ucrDiagnosticReport(),null,2);
+}
+function ucrDiagnosticJson(){return JSON.stringify(ucrDiagnosticReport(),null,2);}
+document.getElementById("ucr-diagnostics-copy")?.addEventListener("click",async()=>{
+  try{await navigator.clipboard.writeText(ucrDiagnosticJson());ucrRecordDiagnostic("Report copied","diagnostics");}
+  catch(_){ucrRecordDiagnostic("Clipboard unavailable; use Save JSON","diagnostics");}
+  ucrRenderDiagnostics();
+});
+document.getElementById("ucr-diagnostics-save")?.addEventListener("click",()=>{
+  const blob=new Blob([ucrDiagnosticJson()],{type:"application/json"});
+  const url=URL.createObjectURL(blob);
+  const link=document.createElement("a");link.href=url;link.download="ucr-call-diagnostics.json";
+  link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+setInterval(ucrRenderDiagnostics,1500);
+ucrRenderDiagnostics();
 const ui={
   join:$("join"),leave:$("leave"),state:$("state"),webrtcState:$("webrtc-state"),
   packets:$("packets"),expires:$("expires"),status:$("status"),
@@ -286,6 +361,7 @@ function body(){return {tenant_id:claims.tenant_id,namespace_id:claims.namespace
 async function api(path,payload,signal,keepalive=false){
   const r=await fetch(path,{method:"POST",headers:{"Authorization":"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify(payload),signal,keepalive});
   if(!r.ok){
+    if(ucrDiagnosticAllowedPaths.has(path))ucrRecordDiagnostic(path+" HTTP "+r.status,"http");
     let detail=null;try{detail=await r.clone().json();}catch(_){}
     // Telemetry/chat conflicts after grant retirement must not create an
     // unbounded request storm or display a stale "Connected" status.
@@ -1198,6 +1274,7 @@ function attachE2eeDataChannel(channel){
     closeE2eeTransport();ui.webrtcState.textContent="E2EE unavailable";
     ui.state.textContent="Protected media unavailable";
     ui.status.textContent="Endpoint E2EE adapter failed; encrypted transport closed: "+e.message;
+    ucrRecordDiagnostic("E2EE adapter activation failed: "+(e?.name||"Error"),"crypto");
   });};
   channel.onmessage=event=>{
     try{
@@ -1813,6 +1890,7 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
   requireCanonicalMediaHostReady();
 }
 async function join(){
+  ucrRecordDiagnostic("Join requested","lifecycle");
   if(signedGrantRetired){
     ui.state.textContent="Access ended";
     ui.status.textContent="This session grant has ended. Open a fresh authorized call link.";
@@ -1916,6 +1994,7 @@ async function endUnverifiedMedia(generation,message){
   }
 }
 async function leave(){
+  ucrRecordDiagnostic("Leave requested","lifecycle");
   const wasActive=sessionActive;
   const leavingClaims=wasActive?body():null;
   const leavingSequence=activeSessionSequence;
