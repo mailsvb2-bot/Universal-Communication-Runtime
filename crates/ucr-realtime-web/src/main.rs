@@ -3661,6 +3661,11 @@ mod tests {
         let start = super::FIRST_PARTY_START_JS;
         assert!(start.contains("sessionStorage.setItem(\"ucrFirstPartyDirectCall\", callId)"));
         assert!(client.contains("host.getDirectCall(binding,directCallId)"));
+        assert!(client.contains("window.ucrRefreshFirstPartyDeviceSession=async()=>"));
+        assert!(client.contains("Device reauthentication changed first-party principal"));
+        assert!(client.contains("Device signer is no longer trusted"));
+        assert!(client.contains("nextClaims.device_id!==claims.device_id"));
+        assert!(client.contains("nextClaims.call_id!==claims.call_id"));
         assert!(client.contains("host.issueSignedJoinForAcceptedCall(binding,"));
         assert!(client.contains("if(call.state!==\"active\""));
         assert!(client.contains("expectedRevision:call.revision"));
