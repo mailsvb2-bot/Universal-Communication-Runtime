@@ -85,6 +85,7 @@ canvas.remote-media.hidden{display:none}
 <select id="microphone" aria-label="Microphone"><option value="">Default microphone</option></select>
 <select id="camera" aria-label="Camera"><option value="">Default camera</option></select>
 <button id="mic-toggle" class="secondary" disabled>Mute microphone</button>
+<button id="sound-unlock" class="secondary" disabled>Enable sound</button>
 <button id="camera-toggle" class="secondary" disabled>Turn camera off</button>
 <button id="screen-toggle" class="secondary" disabled>Share screen</button>
 <button id="hand-toggle" class="secondary" disabled>Raise hand</button>
@@ -124,7 +125,7 @@ const ui={
   stateLabel:$("state-label"),webrtcLabel:$("webrtc-label"),packetsLabel:$("packets-label"),expiresLabel:$("expires-label"),
   localLabel:$("local-label"),screenLabel:$("screen-label"),remoteLabel:$("remote-label"),footerNote:$("footer-note"),chatCard:$("chat-card"),
   localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),remoteCanvas:$("remote-e2ee-canvas"),
-  privacyMode:$("privacy-mode"),mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
+  privacyMode:$("privacy-mode"),mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),soundUnlock:$("sound-unlock"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false,adaptiveMediaGeneration=0;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
@@ -2297,6 +2298,22 @@ async function toggleRaisedHand(){
   ui.status.textContent=handRaised?tr("handRaised"):tr("handLowered");
 }
 ui.handToggle.addEventListener("click",()=>{toggleRaisedHand().catch(e=>{ui.status.textContent="Raised hand failed: "+e.message;});});
+ui.soundUnlock.addEventListener("click",()=>{
+  const context=window.ucrLocalRoomAudioContext;
+  if(!sessionActive||!context||context.state==="closed"){
+    ui.status.textContent="Audio playback is unavailable until secure media joins.";
+    return;
+  }
+  const pending=context.resume();
+  if(pending&&typeof pending.then==="function"){
+    pending.then(()=>{
+      if(!sessionActive)return;
+      ui.soundUnlock.textContent="Sound enabled";
+      ui.soundUnlock.disabled=true;
+      ui.status.textContent="Audio playback context is running.";
+    }).catch(e=>{if(sessionActive)ui.status.textContent="Audio playback failed: "+e.message;});
+  }
+});
 ui.micToggle.addEventListener("click",async()=>{try{let track=localStream&&localStream.getAudioTracks()[0];if(!track){await ensureLocalTrack("audio");return;}track.enabled=!track.enabled;applyToggleLabels();}catch(e){ui.status.textContent="Microphone failed: "+e.message;}});
 ui.cameraToggle.addEventListener("click",async()=>{try{let track=localStream&&localStream.getVideoTracks()[0];if(!track){await ensureLocalTrack("camera");return;}track.enabled=!track.enabled;applyToggleLabels();}catch(e){ui.status.textContent="Camera failed: "+e.message;}});
 ui.screenToggle.addEventListener("click",async()=>{try{if(screenStream){await stopScreenShare(true);ui.status.textContent="Screen sharing stopped.";}else{await startScreenShare();ui.status.textContent="Screen sharing active through the endpoint E2EE adapter.";}}catch(e){ui.status.textContent="Screen sharing failed: "+e.message;}});
@@ -2361,6 +2378,7 @@ function resumeRoomAudio(audioContext){
   if(!audioContext||audioContext.state==="closed")return;
   // resume() stays pending forever when this document has no user gesture.
   // Waiting here blocks the encrypted camera and microphone.
+  ui.soundUnlock.disabled=false;
   const attempt=()=>{
     const pending=audioContext.resume();
     if(pending&&typeof pending.catch==="function")pending.catch(()=>{});
@@ -2371,6 +2389,7 @@ function resumeRoomAudio(audioContext){
   const unlock=()=>{
     attempt();
     if(audioContext.state==="running"){
+      ui.soundUnlock.textContent="Sound enabled";ui.soundUnlock.disabled=true;
       window.removeEventListener("pointerdown",unlock,true);
       window.removeEventListener("keydown",unlock,true);
     }
@@ -2378,8 +2397,8 @@ function resumeRoomAudio(audioContext){
   window.addEventListener("pointerdown",unlock,true);
   window.addEventListener("keydown",unlock,true);
   setTimeout(()=>{
-    if(audioContext.state==="suspended"&&sessionActive&&sessionStorage.getItem("ucrLocalRoom")==="1"){
-      ui.status.textContent="Камера подключена. Нажмите в любое место страницы, чтобы включить звук.";
+    if(audioContext.state==="suspended"&&sessionActive){
+      ui.status.textContent="Encrypted video is connected, but audio playback is suspended. Click Enable sound.";
     }
   },800);
 }
