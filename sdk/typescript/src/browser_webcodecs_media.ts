@@ -652,7 +652,16 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       const node = context.createBufferSource();
       node.buffer = buffer;
       node.connect(context.destination);
-      const start = Math.max(context.currentTime, this.#nextAudioTime.get(streamKey) ?? context.currentTime);
+      // A burst of delayed network frames must not grow the playback queue
+      // indefinitely. Drop obsolete audio instead of playing seconds of stale
+      // speech while new encrypted video continues in real time.
+      const now = context.currentTime;
+      const pending = this.#nextAudioTime.get(streamKey) ?? now;
+      if (pending - now > 0.35) {
+        this.#nextAudioTime.set(streamKey, now);
+        return;
+      }
+      const start = Math.max(now, pending);
       node.start(start);
       this.#nextAudioTime.set(streamKey, start + buffer.duration);
     } catch (error) { this.#onError(error); }
