@@ -3656,6 +3656,21 @@ mod tests {
     }
 
     #[test]
+    fn call_diagnostics_are_bounded_exportable_and_do_not_include_credentials() {
+        let client = super::CLIENT_HTML;
+        assert!(client.contains("id=\"ucr-diagnostics\""));
+        assert!(client.contains("id=\"ucr-diagnostics-save\""));
+        assert!(client.contains("id=\"ucr-diagnostics-copy\""));
+        assert!(client.contains("ucrDiagnosticsEvents.length>80"));
+        assert!(client.contains("schema:\"ucr-local-diagnostics-v1\""));
+        assert!(client.contains("ucrDiagnosticReason(e?.message)"));
+        assert!(client.contains("MLS_EPOCH_MISMATCH"));
+        assert!(client.contains("MEDIA_CODEC_FAILURE"));
+        assert!(client.contains("SESSION_CONFLICT"));
+        assert!(client.contains("URL.revokeObjectURL(url)"));
+    }
+
+    #[test]
     fn expired_realtime_grant_and_session_conflict_fail_closed() {
         let client = super::CLIENT_HTML;
         assert!(client.contains("r.status===409&&sessionActive"));
