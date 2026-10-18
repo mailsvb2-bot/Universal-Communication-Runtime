@@ -144,6 +144,18 @@ function ucrRecordDiagnostic(event,category="runtime"){
   ucrDiagnosticsEvents.push({time:new Date().toISOString(),category,safe});
   if(ucrDiagnosticsEvents.length>80)ucrDiagnosticsEvents.shift();
 }
+function ucrDiagnosticReason(value){
+  const message=String(value||"").toLowerCase();
+  if(/epoch/.test(message))return "MLS_EPOCH_MISMATCH";
+  if(/trusted|revoked|device signer|device trust/.test(message))return "DEVICE_TRUST_REJECTED";
+  if(/codec|audioencoder|audiodecoder|webcodecs/.test(message))return "MEDIA_CODEC_FAILURE";
+  if(/wasm|module|import/.test(message))return "MEDIA_MODULE_LOAD_FAILURE";
+  if(/expired|grant/.test(message))return "GRANT_INVALID_OR_EXPIRED";
+  if(/409|conflict/.test(message))return "SESSION_CONFLICT";
+  if(/permission|notallowed/.test(message))return "DEVICE_PERMISSION_DENIED";
+  if(/ice|webrtc|peer/.test(message))return "WEBRTC_CONNECTION_FAILURE";
+  return "MEDIA_ACTIVATION_FAILURE";
+}
 function ucrDiagnosticTrack(track){
   return track?{state:track.readyState,enabled:track.enabled,muted:track.muted}:null;
 }
@@ -1274,7 +1286,7 @@ function attachE2eeDataChannel(channel){
     closeE2eeTransport();ui.webrtcState.textContent="E2EE unavailable";
     ui.state.textContent="Protected media unavailable";
     ui.status.textContent="Endpoint E2EE adapter failed; encrypted transport closed: "+e.message;
-    ucrRecordDiagnostic("E2EE adapter activation failed: "+(e?.name||"Error"),"crypto");
+    ucrRecordDiagnostic("E2EE adapter activation failed: "+ucrDiagnosticReason(e?.message),"crypto");
   });};
   channel.onmessage=event=>{
     try{
