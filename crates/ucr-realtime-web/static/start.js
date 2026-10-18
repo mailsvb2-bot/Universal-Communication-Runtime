@@ -29,6 +29,50 @@ let knownContacts = [];
 let accountScope = null;
 const idempotency = new Map();
 const HINT_KEY = "ucr.first-party.last-device.v1";
+const authDiagnostics=[];
+function authHttpCode(error){
+  const match=String(error instanceof Error?error.message:"").match(/HTTP (401|403|404|409|429|500|502|503)/);
+  return match?Number(match[1]):null;
+}
+function authFailureCategory(error){
+  const code=authHttpCode(error);
+  if(code===401)return "HTTP_401_AUTHORITY_REJECTED";
+  if(code===403)return "HTTP_403_ACCESS_DENIED";
+  if(code===409)return "HTTP_409_STATE_CONFLICT";
+  if(code===503)return "HTTP_503_AUTHORITY_UNAVAILABLE";
+  return code?"HTTP_"+code:"CLIENT_OR_NETWORK_ERROR";
+}
+function authDiagnostic(stage,outcome,error){
+  // Explicit allowlist: do not include arbitrary error messages or IDs.
+  const allowed=new Set(["resume_session","device_reauthentication","device_scope_verification","list_devices","list_contacts","incoming_calls","inspect_call","initialization","periodic_refresh"]);
+  if(!allowed.has(stage))return;
+  authDiagnostics.push({timestamp:new Date().toISOString(),stage,outcome,
+    reason:error?authFailureCategory(error):null,httpStatus:error?authHttpCode(error):null});
+  if(authDiagnostics.length>60)authDiagnostics.shift();
+  authRenderDiagnostics();
+}
+function authRenderDiagnostics(){
+  const panel=el("auth-diagnostics-report");
+  if(!panel)return;
+  panel.textContent=JSON.stringify({schema:"ucr-auth-diagnostics-v1",
+    generatedAt:new Date().toISOString(),events:authDiagnostics},null,2);
+}
+el("auth-diagnostics-copy")?.addEventListener("click",async()=>{
+  try{await navigator.clipboard.writeText(el("auth-diagnostics-report").textContent);}
+  catch{message("Буфер обмена недоступен. Используйте «Сохранить JSON».");}
+});
+el("auth-diagnostics-save")?.addEventListener("click",()=>{
+  const blob=new Blob([el("auth-diagnostics-report").textContent],{type:"application/json"});
+  const url=URL.createObjectURL(blob);const link=document.createElement("a");
+  link.href=url;link.download="ucr-auth-diagnostics.json";link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+authRenderDiagnostics();
+async function authTrace(stage,operation){
+  try{const result=await operation();authDiagnostic(stage,"ok");return result;}
+  catch(error){authDiagnostic(stage,"failed",error);throw error;}
+}
+
 // A convenience hint only: never a login credential, authorization grant,
 // private Device signer, recovery code or second Identity database.
 function rememberBinding(binding) {
@@ -55,15 +99,16 @@ function lastBinding() {
   } catch {return null;}
 }
 async function restoreSession() {
-  try {return await host.resumeAuthenticatedDevice();}
+  try {return await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());}
   catch(error) {
     const hint=lastBinding();
     if(!hint)throw error;
     // Only a real protected, previously registered signer may re-login.
     // If the server revoked this Device, do not turn the hint into trust.
-    const verified=await authenticateUcrFirstPartyDevice(
-      vault,{origin:location.origin},hint);
+    const verified=await authTrace("device_reauthentication",()=>authenticateUcrFirstPartyDevice(
+      vault,{origin:location.origin},hint));
     if(principalScope(verified)!==principalScope(hint)){
+      authDiagnostic("device_scope_verification","failed");
       forgetBinding();
       throw Error("восстановленная учётная запись или Device не совпадает");
     }
@@ -278,10 +323,10 @@ async function refresh() {
       showActive();
       throw Error("учётная запись сменилась — требуется повторная проверка");
     }
-    const incoming = await calls.incoming();
+    const incoming = await authTrace("incoming_calls",()=>calls.incoming());
     renderIncoming(incoming);
     if (active) {
-      const fresh = await calls.inspect(active.call.callId);
+      const fresh = await authTrace("inspect_call",()=>calls.inspect(active.call.callId));
       active = {...active,call:fresh};
       showActive();
       if (fresh.state === "active") await beginMedia(fresh.callId);
@@ -293,6 +338,7 @@ async function refresh() {
   } finally {refreshing = false;}
 }
 async function initialize() {
+  authDiagnostic("initialization","started");
   clearInterval(timer);
   message("Проверка независимо авторизованной Identity и Device…");
   const user = await restoreSession();
@@ -309,8 +355,8 @@ async function initialize() {
     renderIncoming([]);
     renderContacts([]);
   }
-  await updateContacts();
-  await updateDevices();
+  await authTrace("list_contacts",()=>updateContacts());
+  await authTrace("list_devices",()=>updateDevices());
   el("who").textContent = "Identity: " + user.participantId + " · Device: " + user.deviceId;
   // Successful device reauthentication is independent from Call state.
   // A malformed/stale canonical Call must not invalidate a trusted Device.
@@ -325,6 +371,7 @@ async function initialize() {
   timer = setInterval(() => {
     if (busy || navigating || document.hidden) return;
     void refresh().catch(err => {
+      authDiagnostic("periodic_refresh","failed",err);
       // Retain the authenticated device and keep polling rather than requiring
       // fresh registration. Do not bypass server-side Call authority.
       message("Устройство авторизовано; ошибка проверки вызовов: " +
