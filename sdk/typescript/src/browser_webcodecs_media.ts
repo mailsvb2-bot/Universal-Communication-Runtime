@@ -60,6 +60,43 @@ const AUDIO_CODEC = "opus";
 const VIDEO_CODEC = "vp8";
 const AUDIO_RATE = 48_000;
 const AUDIO_CHANNELS = 1;
+
+/** Opus publish contract is 48 kHz mono. Microphones commonly produce
+ * 44.1 kHz stereo; passing that AudioData directly to the configured
+ * AudioEncoder rejects frames while video continues to work.
+ * Convert at the endpoint, before any encryption or transport.
+ */
+export function ucrNormalizeOpusAudio(input: AudioData): AudioData {
+  if (input.sampleRate === AUDIO_RATE && input.numberOfChannels === AUDIO_CHANNELS) return input;
+  const sourceRate = input.sampleRate;
+  const channels = input.numberOfChannels;
+  const length = input.numberOfFrames;
+  if (!Number.isFinite(sourceRate) || sourceRate < 8000 || sourceRate > 192000 ||
+      !Number.isInteger(channels) || channels < 1 || channels > 8 ||
+      !Number.isInteger(length) || length < 1 || length > 192000) {
+    throw new Error("Unsupported microphone PCM format");
+  }
+  const planes: Float32Array[] = [];
+  for (let channel = 0; channel < channels; channel++) {
+    const plane = new Float32Array(length);
+    input.copyTo(plane, {planeIndex: channel, format: "f32-planar"});
+    planes.push(plane);
+  }
+  const outputFrames = Math.max(1, Math.round(length * AUDIO_RATE / sourceRate));
+  const mono = new Float32Array(outputFrames);
+  for (let i = 0; i < outputFrames; i++) {
+    const position = Math.min(length - 1, i * sourceRate / AUDIO_RATE);
+    const left = Math.floor(position), right = Math.min(length - 1, left + 1);
+    const fraction = position - left;
+    let sample = 0;
+    for (const plane of planes) sample += plane[left] * (1 - fraction) + plane[right] * fraction;
+    mono[i] = Math.max(-1, Math.min(1, sample / channels));
+  }
+  return new AudioData({
+    format: "f32-planar", sampleRate: AUDIO_RATE, numberOfFrames: outputFrames,
+    numberOfChannels: AUDIO_CHANNELS, timestamp: input.timestamp, data: mono,
+  });
+}
 const VIDEO_WIDTH = 640;
 const VIDEO_HEIGHT = 480;
 const VIDEO_FRAMERATE = 30;
@@ -290,7 +327,13 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
           if (ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
             const keyframe = kind === "video" &&
               due(frame.timestamp, lastKeyframeTimestamp, framesSinceKeyframe);
-            encoder.encode(frame, kind === "video" ? {keyFrame: keyframe} : undefined);
+            if (kind === "audio") {
+              const pcm = ucrNormalizeOpusAudio(frame as AudioData);
+              try { encoder.encode(pcm); }
+              finally { if (pcm !== frame) pcm.close(); }
+            } else {
+              encoder.encode(frame, {keyFrame: keyframe});
+            }
             if (kind === "video") {
               if (keyframe) {
                 framesSinceKeyframe = 0;
