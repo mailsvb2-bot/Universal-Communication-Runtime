@@ -250,14 +250,17 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       }
       this.#reserved.add(reservation);
       const previous = this.#receiveTails.get(replayKey) ?? Promise.resolve();
+      let inboundStage = "RECEIVE_AUTHORIZATION";
       const current: Promise<void> = previous.catch(() => {}).then(async () => {
       if (!this.#active || this.#generation !== generation) return;
       if (this.#authorizeFrame && !(await this.#authorizeFrame(header))) {
         throw new Error("media recipient or source authorization revoked");
       }
+      inboundStage = "SIGNING_KEY_RESOLUTION";
       const key = await this.#trustedKeys.resolve(header, envelope.frame.sourceSignature.keyId);
       if (!(key instanceof Uint8Array) || key.byteLength !== 32) throw new Error("untrusted endpoint signing key");
       if (!this.#active || this.#generation !== generation) return;
+      inboundStage = "VERIFY_AND_DECRYPT";
       const plaintext = this.#bridge.open_wire(wire, key);
       if (!(plaintext instanceof Uint8Array) || plaintext.byteLength > this.#maxFrameBytes) {
         throw new Error("invalid decrypted media payload");
@@ -271,6 +274,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         throw new Error("replayed endpoint media frame");
       }
       this.#received.set(replayKey, header.sequence);
+      inboundStage = "DECODE_AND_PLAY";
       await this.#consumer.play({
         mediaKind: header.mediaKind,
         videoSourceKind: header.videoSourceKind ?? undefined,
@@ -295,6 +299,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       this.#receiveTails.set(replayKey, current);
       try {
         await current;
+      } catch (_error) {
+        const code = "UCR_MEDIA_INBOUND_" + inboundStage;
+        this.#onError(new Error(code));
+        throw new Error(code);
       } finally {
         this.#reserved.delete(reservation);
         if (this.#receiveTails.get(replayKey) === current) {
@@ -365,6 +373,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     const ownedFrame = {...frame, bytes: frame.bytes.slice()};
     const previous = this.#sendTails.get(streamKey) ?? Promise.resolve();
     this.#pendingOutbound++;
+    let outboundStage = "PUBLISH_AUTHORIZATION";
     const current: Promise<void> = previous.then(async () => {
       if (!this.#active || generation !== this.#generation) return;
       if (!(await this.#authorizePublish(ownedFrame))) {
@@ -381,6 +390,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       // Reserve BEFORE encryption: even a crypto or transport error must never
       // allow a previously used sequence/nonce to be retried with new plaintext.
       this.#sequences.set(streamKey, sequence);
+      outboundStage = "SEAL_WIRE";
       const wire = this.#bridge.seal_wire(
         ownedFrame.streamId, ownedFrame.mediaKind === "audio" ? 1 : 2,
         videoSourceCode, sequence, ownedFrame.timestamp, ownedFrame.keyframe, ownedFrame.bytes,
@@ -389,9 +399,12 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         throw new Error("encrypted media exceeds transport bounds");
       }
       if (!this.#active || generation !== this.#generation) return;
-      this.#sender?.(wire, ownedFrame.mediaKind);
-    }).catch((error: unknown) => {
-      this.#onError(error);
+      outboundStage = "DATACHANNEL_SEND";
+      if (!this.#sender) throw new Error("media sender unavailable");
+      this.#sender(wire, ownedFrame.mediaKind);
+    }).catch((_error: unknown) => {
+      // Stable, non-sensitive stage labels; never expose keys, ciphertext or source identity.
+      this.#onError(new Error("UCR_MEDIA_OUTBOUND_" + outboundStage));
     }).finally(() => {
       this.#pendingOutbound--;
       if (this.#sendTails.get(streamKey) === current) {
