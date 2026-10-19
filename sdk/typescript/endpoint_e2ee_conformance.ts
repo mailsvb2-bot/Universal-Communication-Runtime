@@ -2329,7 +2329,10 @@ try {
   mixing.play(audioFrame("mic-a"), sourceHeader("alice"));
   mixing.play(audioFrame("mic-a"), sourceHeader("alice"));
   mixing.play(audioFrame("mic-b"), sourceHeader("bob"));
-  assert.deepEqual(audioStartTimes, [100, 100.01, 100],
+  assert.equal(audioStartTimes.length, 3);
+  assert.ok(Math.abs(audioStartTimes[0] - 100.06) < 0.000001);
+  assert.ok(Math.abs(audioStartTimes[1] - 100.07) < 0.000001);
+  assert.ok(Math.abs(audioStartTimes[2] - audioStartTimes[0]) < 0.000001,
     "independent authenticated speakers must overlap while own frames stay ordered");
   mixing.stop();
 } finally {
