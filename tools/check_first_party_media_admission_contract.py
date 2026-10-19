@@ -38,5 +38,11 @@ assert 'const HINT_KEY' in login
 assert 'authenticateUcrFirstPartyDevice(' in login
 assert 'const avRestored=createUcrBrowserProtectedDeviceVault(av.storage)' in account
 assert 'await hA.logout()' in account
+webcodecs = (root/"sdk/typescript/src/browser_webcodecs_media.ts").read_text(encoding="utf-8")
+protocol = (root/"crates/ucr-protocol/src/group_media_e2ee.rs").read_text(encoding="utf-8")
+assert 'keyframe: kind === "video" && chunk.type === "key"' in webcodecs, (
+    "Opus audio cannot be a keyframe: Rust seal_wire rejects InvalidAudioHeader")
+assert 'header.media_kind == MediaKind::Audio && header.keyframe' in protocol
+print("PASS real WebCodecs Opus frames comply with canonical Rust no-audio-keyframe contract")
 print("PASS protected media failure stages, bounded fail-closed handling and persisted trusted Device restart")
 print("PASS first-party media admission must be canonical, current, revocable, device-signed, and frame-authorized")
