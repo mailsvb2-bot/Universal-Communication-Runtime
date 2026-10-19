@@ -21,4 +21,22 @@ assert 'seedCopy = seed.slice()' in factory
 assert 'seedCopy.fill(0)' in factory
 assert 'admission.authorizeFrame' in factory
 assert 'admission.authorizePublish' in factory
+pipeline = (root/"sdk/typescript/src/portable_endpoint_media.ts").read_text(encoding="utf-8")
+login = (root/"crates/ucr-realtime-web/static/start.js").read_text(encoding="utf-8")
+account = (root/"sdk/typescript/first_party_account_conformance.ts").read_text(encoding="utf-8")
+for stage in (
+    "PUBLISH_AUTHORIZATION", "SEAL_WIRE", "DATACHANNEL_SEND",
+    "RECEIVE_AUTHORIZATION", "SIGNING_KEY_RESOLUTION",
+    "VERIFY_AND_DECRYPT", "DECODE_AND_PLAY",
+):
+    assert stage in pipeline, f"missing protected media stage {stage}"
+assert 'this.#onError(new Error("UCR_MEDIA_OUTBOUND_" + outboundStage))' in pipeline
+assert 'this.#onError(new Error(code))' in pipeline
+assert 'ucrMediaFailureCount>=8' in client
+assert 'endUnverifiedMedia(sessionLifecycleGeneration' in client
+assert 'const HINT_KEY' in login
+assert 'authenticateUcrFirstPartyDevice(' in login
+assert 'const avRestored=createUcrBrowserProtectedDeviceVault(av.storage)' in account
+assert 'await hA.logout()' in account
+print("PASS protected media failure stages, bounded fail-closed handling and persisted trusted Device restart")
 print("PASS first-party media admission must be canonical, current, revocable, device-signed, and frame-authorized")
