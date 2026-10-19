@@ -118,7 +118,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   #active = false;
   #retired = false;
   #generation = 0;
-  #sender: ((wire: Uint8Array) => void) | null = null;
+  #sender: ((wire: Uint8Array, kind?: "audio" | "video") => void) | null = null;
 
   constructor(options: UcrEndpointPipelineOptions) {
     if (!options.bridge || typeof options.bridge.revoke !== "function") {
@@ -389,7 +389,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         throw new Error("encrypted media exceeds transport bounds");
       }
       if (!this.#active || generation !== this.#generation) return;
-      this.#sender?.(wire);
+      this.#sender?.(wire, ownedFrame.mediaKind);
     }).catch((error: unknown) => {
       this.#onError(error);
     }).finally(() => {
