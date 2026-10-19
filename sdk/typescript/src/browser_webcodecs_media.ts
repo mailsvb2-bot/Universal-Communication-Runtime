@@ -114,10 +114,13 @@ export function ucrVideoEncodingTarget(width: number, height: number): {
     throw new Error("invalid measured source video dimensions");
   }
   const pixels = width * height;
-  if (pixels >= 1920 * 1080) return {frameRate: 30, bitrate: 4_000_000};
-  if (pixels >= 1280 * 720) return {frameRate: 30, bitrate: 2_000_000};
-  if (pixels >= 854 * 480) return {frameRate: 30, bitrate: 1_000_000};
-  return {frameRate: 12, bitrate: 384_000};
+  // The browser's encrypted DataChannel is not a congestion-controlled
+  // RTP sender. Conservative realtime VP8 budgets prevent bursty camera
+  // packets from starving latency-sensitive encrypted Opus.
+  if (pixels >= 1920 * 1080) return {frameRate: 15, bitrate: 1_200_000};
+  if (pixels >= 1280 * 720) return {frameRate: 15, bitrate: 850_000};
+  if (pixels >= 854 * 480) return {frameRate: 15, bitrate: 600_000};
+  return {frameRate: 12, bitrate: 300_000};
 }
 const MAX_VIDEO_ENCODER_QUEUE = 2;
 const LOW_CAMERA_WIDTH = 640;
