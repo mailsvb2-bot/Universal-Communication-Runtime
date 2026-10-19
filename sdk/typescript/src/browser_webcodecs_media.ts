@@ -15,7 +15,7 @@ import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1, UcrVerified
  * Designed to be replaceable by native codecs on Android/iOS/desktop.
  */
 // Aggregate-only observability: no media samples, participant identities or keys.
-const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0};
+const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, inputPeak: 0, outputPeak: 0};
 (globalThis as unknown as {__ucrAudioCounters?: typeof ucrAudioCounters}).__ucrAudioCounters = ucrAudioCounters;
 interface EncodedChunkLike {
   readonly byteLength: number;
@@ -334,7 +334,14 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             if (kind === "audio") {
               ucrAudioCounters.captured++;
               const pcm = ucrNormalizeOpusAudio(frame as AudioData);
-              try { encoder.encode(pcm); }
+              try {
+                const samples = new Float32Array(pcm.numberOfFrames);
+                pcm.copyTo(samples, {planeIndex: 0, format: "f32-planar"});
+                let peak = 0;
+                for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
+                ucrAudioCounters.inputPeak = Math.round(peak * 1000) / 1000;
+                encoder.encode(pcm);
+              }
               finally { if (pcm !== frame) pcm.close(); }
             } else {
               encoder.encode(frame, {keyFrame: keyframe});
@@ -654,6 +661,9 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       for (let ch = 0; ch < data.numberOfChannels; ch++) {
         const pcm = new Float32Array(data.numberOfFrames);
         data.copyTo(pcm, {planeIndex: ch, format: "f32-planar"});
+        let peak = 0;
+        for (let i = 0; i < pcm.length; i++) peak = Math.max(peak, Math.abs(pcm[i]));
+        ucrAudioCounters.outputPeak = Math.round(peak * 1000) / 1000;
         buffer.copyToChannel(pcm, ch);
       }
       const node = context.createBufferSource();
