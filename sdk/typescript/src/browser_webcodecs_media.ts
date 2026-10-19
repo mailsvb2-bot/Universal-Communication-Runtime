@@ -15,7 +15,7 @@ import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1, UcrVerified
  * Designed to be replaceable by native codecs on Android/iOS/desktop.
  */
 // Aggregate-only observability: no media samples, participant identities or keys.
-const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, inputPeak: 0, outputPeak: 0};
+const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0};
 (globalThis as unknown as {__ucrAudioCounters?: typeof ucrAudioCounters}).__ucrAudioCounters = ucrAudioCounters;
 interface EncodedChunkLike {
   readonly byteLength: number;
