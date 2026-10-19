@@ -117,10 +117,31 @@ export function ucrVideoEncodingTarget(width: number, height: number): {
   // The browser's encrypted DataChannel is not a congestion-controlled
   // RTP sender. Conservative realtime VP8 budgets prevent bursty camera
   // packets from starving latency-sensitive encrypted Opus.
-  if (pixels >= 1920 * 1080) return {frameRate: 15, bitrate: 1_200_000};
-  if (pixels >= 1280 * 720) return {frameRate: 15, bitrate: 850_000};
-  if (pixels >= 854 * 480) return {frameRate: 15, bitrate: 600_000};
-  return {frameRate: 12, bitrate: 300_000};
+  if (pixels >= 1920 * 1080) return {frameRate: 30, bitrate: 4_000_000};
+  if (pixels >= 1280 * 720) return {frameRate: 30, bitrate: 2_000_000};
+  if (pixels >= 854 * 480) return {frameRate: 30, bitrate: 1_000_000};
+  return {frameRate: 12, bitrate: 384_000};
+}
+/** Source-owned congestion adaptation. Only verified encrypted transport queue
+ * depth and local encoder pressure influence publish quality. Never change MLS
+ * keys, Device authority, or a different participant's receive policy.
+ */
+export function ucrAdaptiveVideoStep(
+  stage: number, bufferedBytes: number, encoderQueued: number,
+  healthySamples: number,
+): {stage: number; healthySamples: number} {
+  if (![stage, bufferedBytes, encoderQueued, healthySamples].every(Number.isFinite) ||
+      stage < 0 || stage > 2 || bufferedBytes < 0 || encoderQueued < 0) {
+    throw new Error("invalid video congestion sample");
+  }
+  if (bufferedBytes > 1_048_576 || encoderQueued >= 2)
+    return {stage: Math.min(2, stage + 1), healthySamples: 0};
+  if (bufferedBytes > 256_000 || encoderQueued >= 1)
+    return {stage, healthySamples: 0};
+  const next = healthySamples + 1;
+  return next >= 5 && stage > 0 ?
+    {stage: stage - 1, healthySamples: 0} :
+    {stage, healthySamples: Math.min(5, next)};
 }
 const MAX_VIDEO_ENCODER_QUEUE = 2;
 const LOW_CAMERA_WIDTH = 640;
@@ -314,6 +335,18 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         this.#encoders.push(lowEncoder);
       }
     }
+    // A transport-pressure probe is installed by the first-party encrypted
+    // DataChannel owner; absence is treated as no observed network congestion.
+    let qualityStage = 0, healthySamples = 0, lastQualitySample = 0;
+    let lastVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
+    let forceKeyframe = false;
+    const readBuffered = () => {
+      const probe = (globalThis as unknown as {
+        ucrEncryptedTransportBufferedAmount?: () => number;
+      }).ucrEncryptedTransportBufferedAmount;
+      if (typeof probe !== "function") return 0;
+      try { return Math.max(0, Number(probe()) || 0); } catch { return 0; }
+    };
     const reader = processor.readable.getReader();
     this.#readers.push(reader);
     const pump = async () => {
@@ -331,9 +364,36 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         if (result.done) break;
         const frame = result.value;
         try {
-          if (ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
+          if (kind === "video" && frame.timestamp - lastQualitySample >= 1_000_000) {
+            lastQualitySample = frame.timestamp;
+            const next = ucrAdaptiveVideoStep(qualityStage, readBuffered(),
+              encoder.encodeQueueSize, healthySamples);
+            healthySamples = next.healthySamples;
+            if (next.stage !== qualityStage) {
+              qualityStage = next.stage;
+              const settings = track.getSettings();
+              const width = settings.width ?? VIDEO_WIDTH;
+              const height = settings.height ?? VIDEO_HEIGHT;
+              const full = ucrVideoEncodingTarget(width, height);
+              const factor = qualityStage === 0 ? 1 : qualityStage === 1 ? 0.45 : 0.2;
+              const fps = qualityStage === 0 ? full.frameRate : qualityStage === 1 ? 15 : 10;
+              encoder.configure({codec: VIDEO_CODEC, width, height,
+                framerate: Math.min(settings.frameRate ?? VIDEO_FRAMERATE, fps),
+                bitrate: Math.max(150_000, Math.round(full.bitrate * factor)),
+                latencyMode: "realtime"});
+              forceKeyframe = true;
+            }
+          }
+          const maxFps = kind === "video" ?
+            (qualityStage === 0 ? ucrVideoEncodingTarget(
+              track.getSettings().width ?? VIDEO_WIDTH,
+              track.getSettings().height ?? VIDEO_HEIGHT).frameRate :
+              qualityStage === 1 ? 15 : 10) : 0;
+          const videoPacingOk = kind !== "video" ||
+            frame.timestamp - lastVideoEncodeTimestamp >= 1_000_000 / maxFps;
+          if (videoPacingOk && ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
             const keyframe = kind === "video" &&
-              due(frame.timestamp, lastKeyframeTimestamp, framesSinceKeyframe);
+              (forceKeyframe || due(frame.timestamp, lastKeyframeTimestamp, framesSinceKeyframe));
             if (kind === "audio") {
               ucrAudioCounters.captured++;
               const pcm = ucrNormalizeOpusAudio(frame as AudioData);
@@ -348,6 +408,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               finally { if (pcm !== frame) pcm.close(); }
             } else {
               encoder.encode(frame, {keyFrame: keyframe});
+              lastVideoEncodeTimestamp = frame.timestamp;
+              forceKeyframe = false;
             }
             if (kind === "video") {
               if (keyframe) {
