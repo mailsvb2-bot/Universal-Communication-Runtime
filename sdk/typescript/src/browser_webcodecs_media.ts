@@ -128,13 +128,13 @@ export function ucrVideoEncodingTarget(width: number, height: number): {
  */
 export function ucrAdaptiveVideoStep(
   stage: number, bufferedBytes: number, encoderQueued: number,
-  healthySamples: number,
+  healthySamples: number, devicePressure = false,
 ): {stage: number; healthySamples: number} {
   if (![stage, bufferedBytes, encoderQueued, healthySamples].every(Number.isFinite) ||
       stage < 0 || stage > 2 || bufferedBytes < 0 || encoderQueued < 0) {
     throw new Error("invalid video congestion sample");
   }
-  if (bufferedBytes > 1_048_576 || encoderQueued >= 2)
+  if (devicePressure || bufferedBytes > 1_048_576 || encoderQueued >= 2)
     return {stage: Math.min(2, stage + 1), healthySamples: 0};
   if (bufferedBytes > 256_000 || encoderQueued >= 1)
     return {stage, healthySamples: 0};
@@ -343,6 +343,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     // DataChannel owner; absence is treated as no observed network congestion.
     let qualityStage = 0, healthySamples = 0, lastQualitySample = 0;
     let lastVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
+    let videoEncodeCostMs = 0;
+    let videoPressureSamples = 0;
     let forceKeyframe = false;
     const readBuffered = () => {
       const probe = (globalThis as unknown as {
@@ -370,8 +372,13 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         try {
           if (kind === "video" && frame.timestamp - lastQualitySample >= 1_000_000) {
             lastQualitySample = frame.timestamp;
+            // Delayed encoder work and elevated queue pressure indicate local
+            // CPU/GPU contention even when the network DataChannel is empty.
+            // Recover only after sustained healthy samples.
+            const devicePressure = videoPressureSamples >= 3;
             const next = ucrAdaptiveVideoStep(qualityStage, readBuffered(),
-              encoder.encodeQueueSize, healthySamples);
+              encoder.encodeQueueSize, healthySamples, devicePressure);
+            videoPressureSamples = 0;
             healthySamples = next.healthySamples;
             ucrVideoAdaptation.bufferedBytes = readBuffered();
             ucrVideoAdaptation.encoderQueued = encoder.encodeQueueSize;
@@ -415,7 +422,12 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               }
               finally { if (pcm !== frame) pcm.close(); }
             } else {
+              const encodeStarted = performance.now();
               encoder.encode(frame, {keyFrame: keyframe});
+              const encodeCost = performance.now() - encodeStarted;
+              videoEncodeCostMs = videoEncodeCostMs * 0.8 + encodeCost * 0.2;
+              if (videoEncodeCostMs > 12 || encoder.encodeQueueSize >= 2)
+                videoPressureSamples++;
               lastVideoEncodeTimestamp = frame.timestamp;
               forceKeyframe = false;
             }
