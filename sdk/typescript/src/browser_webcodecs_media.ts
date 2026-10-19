@@ -345,6 +345,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     let lastVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
     let videoEncodeCostMs = 0;
     let videoPressureSamples = 0;
+    let lastWallSample = performance.now();
+    let lastMediaSample = -1;
     let forceKeyframe = false;
     const readBuffered = () => {
       const probe = (globalThis as unknown as {
@@ -370,6 +372,20 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         if (result.done) break;
         const frame = result.value;
         try {
+          if (kind === "video" && Number.isFinite(frame.timestamp)) {
+            // Detect a stalled local capture/encode loop: compare media capture
+            // time progression against monotonic wall time, ignoring timestamp
+            // resets or large capture gaps caused by background tabs.
+            const wall = performance.now();
+            if (lastMediaSample >= 0 && frame.timestamp >= lastMediaSample) {
+              const wallElapsed = wall - lastWallSample;
+              const mediaElapsed = (frame.timestamp - lastMediaSample) / 1000;
+              if (wallElapsed > 150 && mediaElapsed < wallElapsed * 0.6)
+                videoPressureSamples++;
+            }
+            lastWallSample = wall;
+            lastMediaSample = frame.timestamp;
+          }
           if (kind === "video" && frame.timestamp - lastQualitySample >= 1_000_000) {
             lastQualitySample = frame.timestamp;
             // Delayed encoder work and elevated queue pressure indicate local
