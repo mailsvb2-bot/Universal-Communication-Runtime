@@ -664,12 +664,11 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       // speech while new encrypted video continues in real time.
       const now = context.currentTime;
       const pending = this.#nextAudioTime.get(streamKey) ?? now;
-      if (pending - now > 0.35) {
-        ucrAudioCounters.dropped++;
-        this.#nextAudioTime.set(streamKey, now);
-        return;
-      }
-      const start = Math.max(now, pending);
+      // Recover an overrun by collapsing the obsolete schedule, not by
+      // discarding the newest authenticated audio frame. Dropping here can
+      // silence speech indefinitely on a persistently bursty transport.
+      const start = pending - now > 0.35 ? now : Math.max(now, pending);
+      if (pending - now > 0.35) ucrAudioCounters.dropped++;
       node.start(start);
       ucrAudioCounters.scheduled++;
       this.#nextAudioTime.set(streamKey, start + buffer.duration);
