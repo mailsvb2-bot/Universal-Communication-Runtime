@@ -2456,6 +2456,32 @@ try {
   }
 }
 
+// Audio always retains protected DataChannel headroom under heavy encrypted
+// video. This tests the real browser transport function, not a mock priority
+// implementation; permission/MLS checks stay in the portable adapter.
+{
+  const start = browser.indexOf("function sendE2eeEnvelope(wire,mediaKind){");
+  const end = browser.indexOf("function endpointMediaSources(){", start);
+  assert.ok(start >= 0 && end > start, "encrypted sender must accept media class");
+  const sentChunks: Uint8Array[] = [];
+  const context: Record<string, any> = {
+    e2eeChannel: {readyState: "open", bufferedAmount: 1_700_000,
+      send(chunk: Uint8Array) {sentChunks.push(chunk);}},
+    e2eeMessageId: 1, E2EE_MAX_WIRE_BYTES: 2 * 1024 * 1024 + 8192,
+    E2EE_MAX_BUFFERED_SEND_BYTES: 2 * 1024 * 1024,
+    E2EE_CHUNK_HEADER_BYTES: 24, E2EE_CHUNK_PAYLOAD_BYTES: 16000 - 24,
+    E2EE_CHUNK_MAGIC: "UCRCHK01", window: {__ucrAudioCounters: {transportQueued: 0}},
+    BigInt, Uint8Array, TextEncoder, DataView, Math, Error,
+  };
+  runInNewContext(browser.slice(start,end) +
+    "\nthis.publish = sendE2eeEnvelope;",context);
+  assert.throws(()=>context.publish(Uint8Array.of(7,8), "video"),/congested/);
+  assert.equal(sentChunks.length,0,"congested camera must not starve protected audio");
+  context.publish(Uint8Array.of(1,2), "audio");
+  assert.equal(sentChunks.length,1,"encrypted Opus must use reserved channel capacity");
+  assert.equal(context.window.__ucrAudioCounters.transportQueued,1);
+}
+
 // The same canonical MLS transport must preserve the authenticated media class
 // on the outbound path. Audio metadata is necessary for protecting Opus queue
 // space; it must never select a different key or skip the secure bridge.
