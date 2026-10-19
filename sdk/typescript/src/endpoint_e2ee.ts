@@ -7,7 +7,7 @@ export interface UcrEndpointMediaSources {
 }
 
 export interface UcrEndpointE2eeStartInput extends UcrEndpointMediaSources {
-  readonly sendEnvelope: (wireEnvelope: Uint8Array) => void;
+  readonly sendEnvelope: (wireEnvelope: Uint8Array, mediaKind?: "audio" | "video") => void;
 }
 
 /** The canonical Phase-23 receive-quality target for one subscriber endpoint.
