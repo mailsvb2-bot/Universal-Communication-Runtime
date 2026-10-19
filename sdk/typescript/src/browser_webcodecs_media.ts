@@ -260,7 +260,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
           videoSourceKind: source,
           streamId: encodedStreamId,
           timestamp: wireTimestamp(chunk.timestamp),
-          keyframe: kind === "audio" || chunk.type === "key",
+          keyframe: kind === "video" && chunk.type === "key",
           bytes,
         })).catch(this.#onError);
       } catch (error) { this.#onError(error); }
