@@ -102,7 +102,12 @@ async function restoreSession() {
   try {return await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());}
   catch(error) {
     const hint=lastBinding();
-    if(!hint)throw error;
+    if(!hint){
+      authDiagnostic("device_reauthentication","unavailable");
+      // A missing public binding cannot authorize a replacement identity.
+      // Preserve the existing protected signer and require explicit re-login.
+      throw new Error("HTTP 401: session expired; no saved Device binding. Enter your existing Tenant, Identity and Device IDs to sign in with the original protected key. If that key is unavailable, use account recovery.");
+    }
     // Only a real protected, previously registered signer may re-login.
     // If the server revoked this Device, do not turn the hint into trust.
     const verified=await authTrace("device_reauthentication",()=>authenticateUcrFirstPartyDevice(
