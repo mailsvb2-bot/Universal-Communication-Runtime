@@ -14,6 +14,9 @@ import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1, UcrVerified
  * codec payloads; the portable E2EE adapter seals them using canonical Rust/WASM.
  * Designed to be replaceable by native codecs on Android/iOS/desktop.
  */
+// Aggregate-only observability: no media samples, participant identities or keys.
+const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0};
+(globalThis as unknown as {__ucrAudioCounters?: typeof ucrAudioCounters}).__ucrAudioCounters = ucrAudioCounters;
 interface EncodedChunkLike {
   readonly byteLength: number;
   readonly timestamp: number;
@@ -251,6 +254,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       const bytes = new Uint8Array(chunk.byteLength);
       chunk.copyTo(bytes);
       try {
+        if (kind === "audio") ucrAudioCounters.encoded++;
         void Promise.resolve(this.#emit({
           mediaKind: kind,
           videoSourceKind: source,
@@ -328,6 +332,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             const keyframe = kind === "video" &&
               due(frame.timestamp, lastKeyframeTimestamp, framesSinceKeyframe);
             if (kind === "audio") {
+              ucrAudioCounters.captured++;
               const pcm = ucrNormalizeOpusAudio(frame as AudioData);
               try { encoder.encode(pcm); }
               finally { if (pcm !== frame) pcm.close(); }
@@ -617,6 +622,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     const timestamp = Number(frame.timestamp);
     if (!Number.isSafeInteger(timestamp)) throw new Error("media timestamp exceeds browser bounds");
     if (frame.mediaKind === "audio") {
+      ucrAudioCounters.received++;
       decoder.decode(new b.EncodedAudioChunk!({type: "key", timestamp, data}));
     } else {
       try {
@@ -641,6 +647,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   }
 
   #playAudio(data: AudioData, streamKey: string): void {
+    ucrAudioCounters.decoded++;
     try {
       const context = this.#audioContext!;
       const buffer = context.createBuffer(data.numberOfChannels, data.numberOfFrames, data.sampleRate);
@@ -658,11 +665,13 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       const now = context.currentTime;
       const pending = this.#nextAudioTime.get(streamKey) ?? now;
       if (pending - now > 0.35) {
+        ucrAudioCounters.dropped++;
         this.#nextAudioTime.set(streamKey, now);
         return;
       }
       const start = Math.max(now, pending);
       node.start(start);
+      ucrAudioCounters.scheduled++;
       this.#nextAudioTime.set(streamKey, start + buffer.duration);
     } catch (error) { this.#onError(error); }
     finally { data.close(); }
