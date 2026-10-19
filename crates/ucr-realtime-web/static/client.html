@@ -220,6 +220,12 @@ function ucrDiagnosticReport(){
       inputPeak:window.__ucrAudioCounters.inputPeak,
       outputPeak:window.__ucrAudioCounters.outputPeak
     }:null),
+    videoAdaptation:(window.__ucrVideoAdaptation?{
+      stage:window.__ucrVideoAdaptation.stage,
+      changes:window.__ucrVideoAdaptation.changes,
+      bufferedBytes:window.__ucrVideoAdaptation.bufferedBytes,
+      encoderQueued:window.__ucrVideoAdaptation.encoderQueued
+    }:null),
     remoteVideo:{hasStream:!!document.getElementById("remote-video")?.srcObject,
       canvasVisible:!document.getElementById("remote-e2ee-canvas")?.classList.contains("hidden")},
     recentEvents:ucrDiagnosticsEvents.slice()
