@@ -2519,6 +2519,44 @@ try {
   await outbound.stop();
 }
 
+// Exercise fail-closed stage attribution for the real portable sender. The
+// failure must remain observable without leaking transport payloads or keys.
+for (const [name, publish, seal, transport] of [
+  ["PUBLISH_AUTHORIZATION", false, false, false],
+  ["SEAL_WIRE", true, true, false],
+  ["DATACHANNEL_SEND", true, false, true],
+] as const) {
+  const errors: string[] = [];
+  const stageAdapter = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire() { if (seal) throw Error("sensitive crypto detail"); return Uint8Array.of(3); },
+      open_wire() { return Uint8Array.of(2); },
+      revoke() {},
+    },
+    producer: {
+      async start(_sources, emit) {
+        await emit({mediaKind: "audio", streamId: "mic", timestamp: 1n,
+          keyframe: true, bytes: Uint8Array.of(4)});
+      },
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() { return new Uint8Array(32); }},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => true,
+    authorizePublish: () => publish,
+    onError(error) { errors.push((error as Error).message); },
+  });
+  await stageAdapter.start({...src, sendEnvelope() {
+    if (transport) throw Error("sensitive websocket detail");
+  }});
+  assert.deepEqual(errors, ["UCR_MEDIA_OUTBOUND_" + name],
+    "outbound failure must identify the exact failing stage without leaking details");
+  await stageAdapter.stop();
+}
+
 // Different frames on one DataChannel may finish async trust lookups out of
 // order. The E2EE receiver must commit them in arrival order PER source/stream,
 // without stalling another participant and without weakening replay rejection.
