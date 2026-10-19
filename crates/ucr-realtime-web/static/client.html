@@ -152,10 +152,25 @@ function ucrDiagnosticReason(value){
   if(/wasm|module|import/.test(message))return "MEDIA_MODULE_LOAD_FAILURE";
   if(/expired|grant/.test(message))return "GRANT_INVALID_OR_EXPIRED";
   if(/409|conflict/.test(message))return "SESSION_CONFLICT";
+  if(/congest|buffered|queue capacity/.test(message))return "MEDIA_TRANSPORT_CONGESTION";
+  if(/publish authorization/.test(message))return "MEDIA_PUBLISH_REJECTED";
+  if(/encoded media|opus|microphone|pcm/.test(message))return "AUDIO_ENCODE_OR_PUBLISH_FAILURE";
   if(/permission|notallowed/.test(message))return "DEVICE_PERMISSION_DENIED";
   if(/ice|webrtc|peer/.test(message))return "WEBRTC_CONNECTION_FAILURE";
   return "MEDIA_ACTIVATION_FAILURE";
 }
+// Receive failures from the actual codec/MLS media owner. Never log raw
+// exception strings: they may contain sensitive internal context.
+let ucrLastMediaError="",ucrLastMediaErrorAt=0;
+window.ucrEndpointMediaError=error=>{
+  const category=ucrDiagnosticReason(error?.message||"");
+  const now=Date.now();
+  if(category===ucrLastMediaError&&now-ucrLastMediaErrorAt<2000)return;
+  ucrLastMediaError=category;ucrLastMediaErrorAt=now;
+  ucrRecordDiagnostic("Protected media pipeline failure: "+category,"media");
+  const status=document.getElementById("status");
+  if(status)status.textContent="Protected media pipeline error: "+category;
+};
 function ucrDiagnosticTrack(track){
   return track?{state:track.readyState,enabled:track.enabled,muted:track.muted}:null;
 }
