@@ -394,9 +394,9 @@ el("device-login").addEventListener("submit", event => {
       deviceId:el("login-device").value.trim(),
     };
     message("Проверка владения существующим защищённым Device…");
-    const verified = await authenticateUcrFirstPartyDevice(vault,{
+    const verified = await authTrace("device_reauthentication",()=>authenticateUcrFirstPartyDevice(vault,{
       origin:location.origin,
-    },binding);
+    },binding));
     if (principalScope(verified)!==principalScope(binding)) {
       throw Error("сервер вернул другую Identity или Device");
     }
