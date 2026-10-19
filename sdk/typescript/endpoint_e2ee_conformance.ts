@@ -2456,6 +2456,43 @@ try {
   }
 }
 
+// The same canonical MLS transport must preserve the authenticated media class
+// on the outbound path. Audio metadata is necessary for protecting Opus queue
+// space; it must never select a different key or skip the secure bridge.
+{
+  const sent: Array<{kind: string | undefined; sealed: number}> = [];
+  const outbound = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire(_streamId, mediaKind) { return Uint8Array.of(mediaKind); },
+      open_wire() { return Uint8Array.of(1); },
+      revoke() {},
+    },
+    producer: {
+      async start(_sources, emit) {
+        await emit({mediaKind: "audio", streamId: "microphone", timestamp: 1n,
+          keyframe: true, bytes: Uint8Array.of(9)});
+        await emit({mediaKind: "video", videoSourceKind: "camera", streamId: "camera",
+          timestamp: 2n, keyframe: true, bytes: Uint8Array.of(8)});
+      },
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() { return new Uint8Array(32); }},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => true, authorizePublish: () => true,
+  });
+  await outbound.start({
+    stream: {} as MediaStream, cameraStream: {} as MediaStream,
+    sendEnvelope(wire, kind) {sent.push({kind, sealed: wire[0]});},
+  });
+  assert.deepEqual(sent, [
+    {kind: "audio", sealed: 1}, {kind: "video", sealed: 2},
+  ], "sealing and transport must both preserve real audio/video kind");
+  await outbound.stop();
+}
+
 // Different frames on one DataChannel may finish async trust lookups out of
 // order. The E2EE receiver must commit them in arrival order PER source/stream,
 // without stalling another participant and without weakening replay rejection.
