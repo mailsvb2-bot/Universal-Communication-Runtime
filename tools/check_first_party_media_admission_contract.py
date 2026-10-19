@@ -46,6 +46,11 @@ assert 'header.media_kind == MediaKind::Audio && header.keyframe' in protocol
 assert 'if (pending - now > 0.25)' in webcodecs
 assert 'const start = Math.max(now + 0.012, pending)' in webcodecs
 assert 'const start = pending - now > 0.35 ? now' not in webcodecs
+assert 'export function ucrAdaptiveVideoStep(' in webcodecs
+assert 'ucrVideoAdaptation.stage = next.stage' in webcodecs
+assert 'ucrEncryptedTransportBufferedAmount' in client
+assert 'videoAdaptation:(window.__ucrVideoAdaptation?' in client
+print("PASS VP8 quality adapts by encrypted transport/encoder congestion and exports aggregate telemetry")
 print("PASS decoded Opus playout is bounded and never overlaps stale audio bursts")
 print("PASS real WebCodecs Opus frames comply with canonical Rust no-audio-keyframe contract")
 print("PASS protected media failure stages, bounded fail-closed handling and persisted trusted Device restart")
