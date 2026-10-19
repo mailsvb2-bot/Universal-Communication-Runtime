@@ -673,12 +673,15 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       // indefinitely. Drop obsolete audio instead of playing seconds of stale
       // speech while new encrypted video continues in real time.
       const now = context.currentTime;
-      const pending = this.#nextAudioTime.get(streamKey) ?? now;
-      // Recover an overrun by collapsing the obsolete schedule, not by
-      // discarding the newest authenticated audio frame. Dropping here can
-      // silence speech indefinitely on a persistently bursty transport.
-      const start = pending - now > 0.35 ? now : Math.max(now, pending);
-      if (pending - now > 0.35) ucrAudioCounters.dropped++;
+      // Keep a small playout cushion to absorb normal packet jitter. If an
+      // old burst would push playout too far behind real time, discard the
+      // obsolete decoded packet: never overlap whole Opus buffers at "now".
+      const pending = this.#nextAudioTime.get(streamKey) ?? now + 0.06;
+      if (pending - now > 0.25) {
+        ucrAudioCounters.dropped++;
+        return;
+      }
+      const start = Math.max(now + 0.012, pending);
       node.start(start);
       ucrAudioCounters.scheduled++;
       this.#nextAudioTime.set(streamKey, start + buffer.duration);
