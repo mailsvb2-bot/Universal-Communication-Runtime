@@ -2496,7 +2496,7 @@ try {
     producer: {
       async start(_sources, emit) {
         await emit({mediaKind: "audio", streamId: "microphone", timestamp: 1n,
-          keyframe: true, bytes: Uint8Array.of(9)});
+          keyframe: false, bytes: Uint8Array.of(9)});
         await emit({mediaKind: "video", videoSourceKind: "camera", streamId: "camera",
           timestamp: 2n, keyframe: true, bytes: Uint8Array.of(8)});
       },
