@@ -312,7 +312,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         framerate: Math.min(
           Math.max(1, settings.frameRate ?? VIDEO_FRAMERATE), quality.frameRate,
         ),
-        bitrate: quality.bitrate, latencyMode: "realtime"});
+        bitrate: quality.bitrate, latencyMode: "realtime",
+        hardwareAcceleration: "prefer-hardware"});
     }
     this.#encoders.push(encoder);
     // A second *real* encrypted source layer is opt-in, not a viewer-count mode.
@@ -334,7 +335,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         lowEncoder.configure({
           codec: VIDEO_CODEC, width: LOW_CAMERA_WIDTH, height: LOW_CAMERA_HEIGHT,
           framerate: LOW_CAMERA_FPS, bitrate: LOW_CAMERA_BITRATE_BPS,
-          latencyMode: "realtime",
+          latencyMode: "realtime", hardwareAcceleration: "prefer-hardware",
         });
         this.#encoders.push(lowEncoder);
       }
@@ -411,7 +412,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               encoder.configure({codec: VIDEO_CODEC, width, height,
                 framerate: Math.min(settings.frameRate ?? VIDEO_FRAMERATE, fps),
                 bitrate: Math.max(150_000, Math.round(full.bitrate * factor)),
-                latencyMode: "realtime"});
+                latencyMode: "realtime", hardwareAcceleration: "prefer-hardware"});
               forceKeyframe = true;
             }
           }
