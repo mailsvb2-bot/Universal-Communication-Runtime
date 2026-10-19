@@ -184,6 +184,7 @@ function ucrDiagnosticReport(){
     audioFrames:(window.__ucrAudioCounters?{
       captured:window.__ucrAudioCounters.captured,
       encoded:window.__ucrAudioCounters.encoded,
+      transportQueued:window.__ucrAudioCounters.transportQueued,
       received:window.__ucrAudioCounters.received,
       decoded:window.__ucrAudioCounters.decoded,
       scheduled:window.__ucrAudioCounters.scheduled,
@@ -1031,11 +1032,15 @@ function receiveE2eeChunk(data){
   for(const part of pending.parts){wire.set(part,offset);offset+=part.length;}
   return wire;
 }
-function sendE2eeEnvelope(wire){
+function sendE2eeEnvelope(wire,mediaKind){
   if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media channel is not open");
   const bytes=wire instanceof Uint8Array?wire:new Uint8Array(wire);
   if(bytes.length===0||bytes.length>E2EE_MAX_WIRE_BYTES)throw new Error("Encrypted media envelope exceeds transport bounds");
-  if(e2eeChannel.bufferedAmount+bytes.length+Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES)*E2EE_CHUNK_HEADER_BYTES>E2EE_MAX_BUFFERED_SEND_BYTES){
+  // Video must not consume the final 512 KiB of the same ordered data channel:
+  // small encrypted Opus frames need space even during keyframe bursts.
+  // This is a congestion preference, NEVER an authorization bypass.
+  const ceiling=mediaKind==="video"?E2EE_MAX_BUFFERED_SEND_BYTES-512*1024:E2EE_MAX_BUFFERED_SEND_BYTES;
+  if(e2eeChannel.bufferedAmount+bytes.length+Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES)*E2EE_CHUNK_HEADER_BYTES>ceiling){
     throw new Error("Encrypted media transport congested; frame not queued");
   }
   const count=Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES);
@@ -1050,6 +1055,7 @@ function sendE2eeEnvelope(wire){
     chunk.set(bytes.subarray(start,end),E2EE_CHUNK_HEADER_BYTES);
     e2eeChannel.send(chunk);
   }
+  if(mediaKind==="audio"&&window.__ucrAudioCounters)window.__ucrAudioCounters.transportQueued++;
 }
 function endpointMediaSources(){
   return {stream:localStream,cameraStream:localStream,screenStream};
