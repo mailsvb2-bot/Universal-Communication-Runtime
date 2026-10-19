@@ -187,7 +187,9 @@ function ucrDiagnosticReport(){
       received:window.__ucrAudioCounters.received,
       decoded:window.__ucrAudioCounters.decoded,
       scheduled:window.__ucrAudioCounters.scheduled,
-      dropped:window.__ucrAudioCounters.dropped
+      dropped:window.__ucrAudioCounters.dropped,
+      inputPeak:window.__ucrAudioCounters.inputPeak,
+      outputPeak:window.__ucrAudioCounters.outputPeak
     }:null),
     remoteVideo:{hasStream:!!document.getElementById("remote-video")?.srcObject,
       canvasVisible:!document.getElementById("remote-e2ee-canvas")?.classList.contains("hidden")},
