@@ -98,6 +98,18 @@ function lastBinding() {
     return hint;
   } catch {return null;}
 }
+// Keep the public identity fields visible for an existing trusted Device.
+// The localStorage hint cannot authorize anything without the IndexedDB signer
+// and fresh server challenge. This never registers or trusts a new Device.
+{
+  const saved = lastBinding();
+  if (saved) {
+    el("login-tenant").value = saved.tenantId;
+    el("login-namespace").value = saved.namespaceId ?? "";
+    el("login-identity").value = saved.participantId;
+    el("login-device").value = saved.deviceId;
+  }
+}
 async function restoreSession() {
   try {return await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());}
   catch(error) {
