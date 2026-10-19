@@ -2028,6 +2028,10 @@ assert.deepEqual(ucrAdaptiveVideoStep(2, 0, 0, 4), {stage:1, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(1, 0, 0, 4), {stage:0, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(1, 300_000, 0, 4), {stage:1, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 2, 0), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 0, 0, true), {stage:1, healthySamples:0},
+  "local encode pressure must reduce quality without transport congestion");
+assert.deepEqual(ucrAdaptiveVideoStep(1, 0, 0, 4, false), {stage:0, healthySamples:0},
+  "quality must recover after five healthy device and transport samples");
 assert.throws(() => ucrAdaptiveVideoStep(0, -1, 0, 0), /invalid video congestion sample/);
 
 const endpointQualityCalls: string[] = [];
