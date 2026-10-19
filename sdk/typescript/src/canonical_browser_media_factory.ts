@@ -157,6 +157,14 @@ export function createUcrCanonicalBrowserMediaFactory(
           admission.isCurrent() && await admission.authorizePublish(frame) &&
           admission.isCurrent(),
         audioContext: admission.audioContext,
+        // Codec/MLS transport failures must not disappear behind a "Connected"
+        // label while all decoded audio frames remain at zero.
+        onError: (error: unknown) => {
+          const receiver = (globalThis as {
+            ucrEndpointMediaError?: (error: unknown) => void;
+          }).ucrEndpointMediaError;
+          if (typeof receiver === "function") receiver(error);
+        },
         remoteVideoCanvas: admission.remoteVideoCanvas,
         enableCameraLayerPair: admission.enableCameraLayerPair,
         measureReceiveTelemetry: admission.measureReceiveTelemetry,
