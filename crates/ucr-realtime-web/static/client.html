@@ -146,6 +146,8 @@ function ucrRecordDiagnostic(event,category="runtime"){
 }
 function ucrDiagnosticReason(value){
   const message=String(value||"").toLowerCase();
+  const stage=message.match(/ucr_media_(outbound|inbound)_(publish_authorization|seal_wire|datachannel_send|receive_authorization|signing_key_resolution|verify_and_decrypt|decode_and_play)/);
+  if(stage)return "MEDIA_"+stage[1].toUpperCase()+"_"+stage[2].toUpperCase();
   if(/epoch/.test(message))return "MLS_EPOCH_MISMATCH";
   if(/trusted|revoked|device signer|device trust/.test(message))return "DEVICE_TRUST_REJECTED";
   if(/codec|audioencoder|audiodecoder|webcodecs/.test(message))return "MEDIA_CODEC_FAILURE";
@@ -162,9 +164,20 @@ function ucrDiagnosticReason(value){
 // Receive failures from the actual codec/MLS media owner. Never log raw
 // exception strings: they may contain sensitive internal context.
 let ucrLastMediaError="",ucrLastMediaErrorAt=0;
+let ucrMediaFailureCount=0,ucrMediaFailureWindowStart=0,ucrMediaFailureStopped=false;
 window.ucrEndpointMediaError=error=>{
   const category=ucrDiagnosticReason(error?.message||"");
   const now=Date.now();
+  if(now-ucrMediaFailureWindowStart>20000){ucrMediaFailureWindowStart=now;ucrMediaFailureCount=0;}
+  ucrMediaFailureCount++;
+  if(ucrMediaFailureCount>=8&&!ucrMediaFailureStopped){
+    ucrMediaFailureStopped=true;
+    ucrRecordDiagnostic("Protected media fail-closed after repeated "+category,"media");
+    if(typeof sessionLifecycleGeneration!=="undefined"&&typeof endUnverifiedMedia==="function"){
+      void endUnverifiedMedia(sessionLifecycleGeneration,
+        "Protected media stopped after repeated "+category+". Retry the call after checking device authorization.");
+    }
+  }
   if(category===ucrLastMediaError&&now-ucrLastMediaErrorAt<2000)return;
   ucrLastMediaError=category;ucrLastMediaErrorAt=now;
   ucrRecordDiagnostic("Protected media pipeline failure: "+category,"media");
@@ -1293,6 +1306,7 @@ async function activateE2eeAdapter(){
   const persisted=await persistEndpointState(adapter);
   if(!isCurrent())return;
   e2eeAdapterReady=true;
+  ucrMediaFailureCount=0;ucrMediaFailureWindowStart=Date.now();ucrMediaFailureStopped=false;
   ui.state.textContent="Connected"; // only authenticated E2EE media is a connected call
   // A connected ICE transport alone is never evidence of recovered E2EE.
   webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
