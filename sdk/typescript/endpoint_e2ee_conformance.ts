@@ -2616,6 +2616,38 @@ await assert.rejects(inbound.onEnvelope(inboundWire(1n, "alice", "audio")),
   /replayed endpoint media frame/);
 await inbound.stop();
 
+// Verify the inbound pipeline identifies authorization, key resolution, authenticated
+// decryption and decoder/playout failures without exposing private exception strings.
+for (const stage of ["RECEIVE_AUTHORIZATION", "SIGNING_KEY_RESOLUTION",
+  "VERIFY_AND_DECRYPT", "DECODE_AND_PLAY"] as const) {
+  const errors: string[] = [];
+  const receiver = new UcrPortableEndpointMediaAdapter({
+    bridge: {seal_wire() {return Uint8Array.of(1);},
+      open_wire() {
+        if (stage === "VERIFY_AND_DECRYPT") throw Error("private key material");
+        return Uint8Array.of(8);
+      }, revoke() {}},
+    producer: {start() {}, stop() {}},
+    consumer: {play() {
+      if (stage === "DECODE_AND_PLAY") throw Error("private decoder detail");
+    }, stop() {}},
+    trustedKeys: {resolve() {
+      if (stage === "SIGNING_KEY_RESOLUTION") throw Error("private trust detail");
+      return new Uint8Array(32).fill(3);
+    }},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => stage !== "RECEIVE_AUTHORIZATION",
+    authorizePublish: () => true,
+    onError(error) {errors.push((error as Error).message);},
+  });
+  await receiver.start({...src, sendEnvelope() {}});
+  await assert.rejects(receiver.onEnvelope(inboundWire(1n, "alice", "audio")));
+  assert.deepEqual(errors, ["UCR_MEDIA_INBOUND_" + stage]);
+  await receiver.stop();
+}
+
 // The only permitted default browser factory needs active canonical identity,
 // locally held device signing seed, exact epoch and matching published signer.
 // This is actual WASM media_bridge composition, not a second crypto function.
