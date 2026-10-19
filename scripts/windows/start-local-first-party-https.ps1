@@ -1,5 +1,5 @@
 # Local Windows first-party HTTPS smoke launcher; does not prove a two-person E2EE call.
-param([string]$RepositoryRoot = '')
+param([string]$RepositoryRoot = '', [switch]$OpenSecondPersistentProfile)
 # Keeps the existing canonical SQLite and in-process first-party BFF owner.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -217,6 +217,9 @@ try {
     Write-Host 'UCR_LOCAL_HTTPS_FIRST_PARTY_READY'
     Write-Host "Open $origin/start"
     Start-Process "$origin/start"
+    if ($OpenSecondPersistentProfile) {
+        & (Join-Path $root 'scripts\windows\open-second-persistent-chrome.ps1')
+    }
     Write-Host 'Next test: create two independent trusted identities, accept Call, and verify actual E2EE bidirectional A/V.'
 } catch {
     Write-Host "UCR local HTTPS startup failed: $_"
