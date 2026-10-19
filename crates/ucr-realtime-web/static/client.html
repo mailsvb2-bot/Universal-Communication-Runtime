@@ -181,6 +181,14 @@ function ucrDiagnosticReport(){
     microphone:ucrDiagnosticTrack(audio),
     camera:ucrDiagnosticTrack(video),
     audioPlayback:context?context.state:"unavailable",
+    audioFrames:(window.__ucrAudioCounters?{
+      captured:window.__ucrAudioCounters.captured,
+      encoded:window.__ucrAudioCounters.encoded,
+      received:window.__ucrAudioCounters.received,
+      decoded:window.__ucrAudioCounters.decoded,
+      scheduled:window.__ucrAudioCounters.scheduled,
+      dropped:window.__ucrAudioCounters.dropped
+    }:null),
     remoteVideo:{hasStream:!!document.getElementById("remote-video")?.srcObject,
       canvasVisible:!document.getElementById("remote-e2ee-canvas")?.classList.contains("hidden")},
     recentEvents:ucrDiagnosticsEvents.slice()
