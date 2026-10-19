@@ -143,6 +143,10 @@ export function ucrAdaptiveVideoStep(
     {stage: stage - 1, healthySamples: 0} :
     {stage, healthySamples: Math.min(5, next)};
 }
+// Aggregate quality telemetry exposed to privacy-safe call diagnostics.
+const ucrVideoAdaptation = {stage: 0, changes: 0, bufferedBytes: 0, encoderQueued: 0};
+(globalThis as unknown as {__ucrVideoAdaptation?: typeof ucrVideoAdaptation})
+  .__ucrVideoAdaptation = ucrVideoAdaptation;
 const MAX_VIDEO_ENCODER_QUEUE = 2;
 const LOW_CAMERA_WIDTH = 640;
 const LOW_CAMERA_HEIGHT = 360;
@@ -369,7 +373,11 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             const next = ucrAdaptiveVideoStep(qualityStage, readBuffered(),
               encoder.encodeQueueSize, healthySamples);
             healthySamples = next.healthySamples;
+            ucrVideoAdaptation.bufferedBytes = readBuffered();
+            ucrVideoAdaptation.encoderQueued = encoder.encodeQueueSize;
             if (next.stage !== qualityStage) {
+              ucrVideoAdaptation.changes++;
+              ucrVideoAdaptation.stage = next.stage;
               qualityStage = next.stage;
               const settings = track.getSettings();
               const width = settings.width ?? VIDEO_WIDTH;
