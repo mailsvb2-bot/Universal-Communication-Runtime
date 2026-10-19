@@ -2016,9 +2016,9 @@ assert.ok(screenUpdates >= 2, "revocation must signal empty E2EE source list");
 
 // Real RT0 portable pipeline integration: an authenticated, active adapter receives
 // per-subscriber quality commands, leaves the sender alone, and stops after revocation.
-assert.deepEqual(ucrVideoEncodingTarget(1920, 1080), {frameRate: 30, bitrate: 4_000_000});
-assert.deepEqual(ucrVideoEncodingTarget(1280, 720), {frameRate: 30, bitrate: 2_000_000});
-assert.deepEqual(ucrVideoEncodingTarget(640, 360), {frameRate: 12, bitrate: 384_000});
+assert.deepEqual(ucrVideoEncodingTarget(1920, 1080), {frameRate: 15, bitrate: 1_200_000});
+assert.deepEqual(ucrVideoEncodingTarget(1280, 720), {frameRate: 15, bitrate: 850_000});
+assert.deepEqual(ucrVideoEncodingTarget(640, 360), {frameRate: 12, bitrate: 300_000});
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
 const endpointQualityCalls: string[] = [];
 const crypto = {
