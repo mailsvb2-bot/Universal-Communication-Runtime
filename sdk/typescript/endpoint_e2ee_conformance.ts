@@ -18,6 +18,7 @@ import {
   UcrBrowserWebCodecsProducer,
   ucrCameraLayerStreamId,
   ucrVideoEncodingTarget,
+  ucrAdaptiveVideoStep,
   ucrNormalizeOpusAudio,
 } from "./src/browser_webcodecs_media.ts";
 import { createUcrCanonicalBrowserMediaFactory } from "./src/canonical_browser_media_factory.ts";
@@ -2016,10 +2017,19 @@ assert.ok(screenUpdates >= 2, "revocation must signal empty E2EE source list");
 
 // Real RT0 portable pipeline integration: an authenticated, active adapter receives
 // per-subscriber quality commands, leaves the sender alone, and stops after revocation.
-assert.deepEqual(ucrVideoEncodingTarget(1920, 1080), {frameRate: 15, bitrate: 1_200_000});
-assert.deepEqual(ucrVideoEncodingTarget(1280, 720), {frameRate: 15, bitrate: 850_000});
-assert.deepEqual(ucrVideoEncodingTarget(640, 360), {frameRate: 12, bitrate: 300_000});
+assert.deepEqual(ucrVideoEncodingTarget(1920, 1080), {frameRate: 30, bitrate: 4_000_000});
+assert.deepEqual(ucrVideoEncodingTarget(1280, 720), {frameRate: 30, bitrate: 2_000_000});
+assert.deepEqual(ucrVideoEncodingTarget(640, 360), {frameRate: 12, bitrate: 384_000});
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
+assert.deepEqual(ucrAdaptiveVideoStep(0, 1_500_000, 0, 0), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(1, 1_500_000, 0, 0), {stage:2, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(2, 1_500_000, 0, 0), {stage:2, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(2, 0, 0, 4), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(1, 0, 0, 4), {stage:0, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(1, 300_000, 0, 4), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 2, 0), {stage:1, healthySamples:0});
+assert.throws(() => ucrAdaptiveVideoStep(0, -1, 0, 0), /invalid video congestion sample/);
+
 const endpointQualityCalls: string[] = [];
 const crypto = {
   seal_wire() { return new Uint8Array([1, 2]); },
