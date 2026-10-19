@@ -43,6 +43,10 @@ protocol = (root/"crates/ucr-protocol/src/group_media_e2ee.rs").read_text(encodi
 assert 'keyframe: kind === "video" && chunk.type === "key"' in webcodecs, (
     "Opus audio cannot be a keyframe: Rust seal_wire rejects InvalidAudioHeader")
 assert 'header.media_kind == MediaKind::Audio && header.keyframe' in protocol
+assert 'if (pending - now > 0.25)' in webcodecs
+assert 'const start = Math.max(now + 0.012, pending)' in webcodecs
+assert 'const start = pending - now > 0.35 ? now' not in webcodecs
+print("PASS decoded Opus playout is bounded and never overlaps stale audio bursts")
 print("PASS real WebCodecs Opus frames comply with canonical Rust no-audio-keyframe contract")
 print("PASS protected media failure stages, bounded fail-closed handling and persisted trusted Device restart")
 print("PASS first-party media admission must be canonical, current, revocable, device-signed, and frame-authorized")
