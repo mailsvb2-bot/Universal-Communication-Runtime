@@ -302,7 +302,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       } catch (_error) {
         const code = "UCR_MEDIA_INBOUND_" + inboundStage;
         this.#onError(new Error(code));
-        throw new Error(code);
+        throw _error;
       } finally {
         this.#reserved.delete(reservation);
         if (this.#receiveTails.get(replayKey) === current) {
