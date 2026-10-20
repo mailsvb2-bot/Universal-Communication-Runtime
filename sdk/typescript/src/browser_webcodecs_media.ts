@@ -277,6 +277,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     const processor = new b.MediaStreamTrackProcessor!({track});
     const streamId = track.id;
     if (!streamId) throw new Error("media track must have stream identity");
+    let forceKeyframe = false;
     const emitChunkFor = (encodedStreamId: string) => (chunk: EncodedChunkLike) => {
       if (generation !== this.#generation || !this.#emit) return;
       if (chunk.byteLength < 1 || chunk.byteLength > MAX_CAPTURE_FRAME_BYTES) {
@@ -295,7 +296,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
           timestamp: wireTimestamp(chunk.timestamp),
           keyframe: kind === "video" && chunk.type === "key",
           bytes,
-        })).catch(this.#onError);
+        })).catch((error) => { if (kind === "video") forceKeyframe = true; this.#onError(error); });
       } catch (error) { this.#onError(error); }
     };
     const encodedStreamId = kind === "video" && source === "camera" &&
@@ -361,7 +362,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     let videoPressureSamples = 0;
     let lastWallSample = performance.now();
     let lastMediaSample = -1;
-    let forceKeyframe = false;
+
     const readBuffered = () => {
       const probe = (globalThis as unknown as {
         ucrEncryptedTransportBufferedAmount?: () => number;
