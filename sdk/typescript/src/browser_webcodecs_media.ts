@@ -734,7 +734,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               const pending = this.#pendingVideoStreams.get(selectedSourceKey);
               if (pending?.streamId === selectedStreamId && pending.decoderKey === key) {
                 this.#pendingVideoStreams.delete(selectedSourceKey);
-                this.#decoders.delete(key);
+                // An asynchronous VideoDecoder error permanently invalidates
+                // this pending decoder. Close it before allowing the next
+                // authenticated keyframe to construct a clean decoder.
+                const failedDecoder = this.#decoders.get(key);
+                if (failedDecoder) {
+                  this.#decoders.delete(key);
+                  try { failedDecoder.close(); } catch { /* codec already closed */ }
+                }
                 if (this.#pendingVisibleVideoDecoderKey === key) {
                   this.#pendingVisibleVideoDecoderKey = null;
                 }
