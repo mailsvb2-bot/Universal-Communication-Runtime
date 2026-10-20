@@ -226,6 +226,15 @@ function ucrDiagnosticReport(){
       bufferedBytes:window.__ucrVideoAdaptation.bufferedBytes,
       encoderQueued:window.__ucrVideoAdaptation.encoderQueued
     }:null),
+    videoFrames:(window.__ucrVideoCounters?{
+      captured:window.__ucrVideoCounters.captured,
+      encoded:window.__ucrVideoCounters.encoded,
+      received:window.__ucrVideoCounters.received,
+      decoded:window.__ucrVideoCounters.decoded,
+      rendered:window.__ucrVideoCounters.rendered,
+      keyframes:window.__ucrVideoCounters.keyframes
+    }:null),
+    mediaFailure:{category:ucrLastMediaError||null,count:ucrMediaFailureCount,stopped:ucrMediaFailureStopped},
     remoteVideo:{hasStream:!!document.getElementById("remote-video")?.srcObject,
       canvasVisible:!document.getElementById("remote-e2ee-canvas")?.classList.contains("hidden")},
     recentEvents:ucrDiagnosticsEvents.slice()
