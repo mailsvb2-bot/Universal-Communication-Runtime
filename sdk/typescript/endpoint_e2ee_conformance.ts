@@ -2296,6 +2296,8 @@ try {
   // Two speakers' audio is mixed in parallel on WebAudio. A shared playback
   // watermark must not serialize independent speaker buffers back-to-back.
   const audioStartTimes: number[] = [];
+  let audioStops = 0;
+  let audioDisconnects = 0;
   const audioSink = {
     currentTime: 100,
     destination: {},
@@ -2304,6 +2306,7 @@ try {
     },
     createBufferSource() {
       return {buffer: null as unknown, connect() {},
+        stop() {audioStops++;}, disconnect() {audioDisconnects++;},
         start(time: number) {audioStartTimes.push(time);}};
     },
   };
@@ -2334,7 +2337,15 @@ try {
   assert.ok(Math.abs(audioStartTimes[1] - 100.07) < 0.000001);
   assert.ok(Math.abs(audioStartTimes[2] - audioStartTimes[0]) < 0.000001,
     "independent authenticated speakers must overlap while own frames stay ordered");
+  // Drive a stalled sender queue past the bounded playout horizon.
+  // Old WebAudio nodes must be stopped and disconnected before rebasing.
+  for (let i = 0; i < 30; i++) mixing.play(audioFrame("mic-a"), sourceHeader("alice"));
+  assert.ok(audioStops > 0, "congested audio must cancel old scheduled PCM");
+  const disconnectedBeforeStop = audioDisconnects;
+  assert.ok(disconnectedBeforeStop > 0, "congested audio must release old audio nodes");
   mixing.stop();
+  assert.ok(audioDisconnects >= disconnectedBeforeStop,
+    "consumer teardown must not leak its remaining scheduled audio nodes");
 } finally {
   for (const item of savedGlobals) {
     if (item.original) Object.defineProperty(globalThis, item.key, item.original);
