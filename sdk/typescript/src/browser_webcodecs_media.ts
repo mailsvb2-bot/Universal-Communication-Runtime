@@ -377,8 +377,13 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       const probe = (globalThis as unknown as {
         ucrEncryptedTransportBufferedAmount?: () => number;
       }).ucrEncryptedTransportBufferedAmount;
-      if (typeof probe !== "function") return 0;
-      try { return Math.max(0, Number(probe()) || 0); } catch { return 0; }
+      // Missing or invalid transport telemetry is NOT proof of a healthy link.
+      // Fail toward the most conservative publish stage until real measurements return.
+      if (typeof probe !== "function") return 1_048_577;
+      try {
+        const measured = Number(probe());
+        return Number.isFinite(measured) && measured >= 0 ? measured : 1_048_577;
+      } catch { return 1_048_577; }
     };
     const reader = processor.readable.getReader();
     this.#readers.push(reader);
@@ -529,6 +534,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   // from the SAME authenticated audio stream must be sequenced; a global clock
   // serializes different speakers and makes conferences fall behind real time.
   readonly #nextAudioTime = new Map<string, number>();
+  readonly #scheduledAudio = new Map<string, Set<AudioBufferSourceNode>>();
   #videoEnabled = true;
   #renderGeneration = 0;
   #lowVideoPreferred = false;
@@ -828,6 +834,16 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       // future deadline, even after the network has recovered.
       if (pending - now > 0.25) {
         ucrAudioCounters.dropped++;
+        // Cancel already queued stale PCM. Rebasing only the timestamp would
+        // overlap old audio with new speech and produce audible distortion.
+        const scheduled = this.#scheduledAudio.get(streamKey);
+        if (scheduled) {
+          for (const source of scheduled) {
+            try { source.stop(); } catch { /* already played */ }
+            source.disconnect();
+          }
+          scheduled.clear();
+        }
         this.#nextAudioTime.set(streamKey, now + 0.06);
         return;
       }
@@ -835,6 +851,17 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       // permanently chasing the audio callback at the immediate deadline.
       if (pending < now) pending = now + 0.06;
       const start = Math.max(now + 0.012, pending);
+      let scheduled = this.#scheduledAudio.get(streamKey);
+      if (!scheduled) {
+        scheduled = new Set<AudioBufferSourceNode>();
+        this.#scheduledAudio.set(streamKey, scheduled);
+      }
+      scheduled.add(node);
+      node.onended = () => {
+        scheduled!.delete(node);
+        node.disconnect();
+        if (scheduled!.size === 0) this.#scheduledAudio.delete(streamKey);
+      };
       node.start(start);
       ucrAudioCounters.scheduled++;
       this.#nextAudioTime.set(streamKey, start + buffer.duration);
@@ -855,5 +882,12 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     this.#videoEnabled = true;
     this.#lowVideoPreferred = false;
     this.#nextAudioTime.clear();
+    for (const sources of this.#scheduledAudio.values()) {
+      for (const source of sources) {
+        try { source.stop(); } catch { /* already ended */ }
+        source.disconnect();
+      }
+    }
+    this.#scheduledAudio.clear();
   }
 }
