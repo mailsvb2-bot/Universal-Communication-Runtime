@@ -810,11 +810,18 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       // Keep a small playout cushion to absorb normal packet jitter. If an
       // old burst would push playout too far behind real time, discard the
       // obsolete decoded packet: never overlap whole Opus buffers at "now".
-      const pending = this.#nextAudioTime.get(streamKey) ?? now + 0.06;
+      let pending = this.#nextAudioTime.get(streamKey) ?? now + 0.06;
+      // A stalled playback clock must be rebased after a burst. Otherwise
+      // every subsequent decoded packet is discarded against the same stale
+      // future deadline, even after the network has recovered.
       if (pending - now > 0.25) {
         ucrAudioCounters.dropped++;
+        this.#nextAudioTime.set(streamKey, now + 0.06);
         return;
       }
+      // After underflow, reestablish a small playout cushion instead of
+      // permanently chasing the audio callback at the immediate deadline.
+      if (pending < now) pending = now + 0.06;
       const start = Math.max(now + 0.012, pending);
       node.start(start);
       ucrAudioCounters.scheduled++;
