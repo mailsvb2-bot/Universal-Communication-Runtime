@@ -72,9 +72,15 @@ try {
        $offsets[$file]=$handle.Position
      } finally { $handle.Dispose() }
    }
-   if ($process.HasExited -and $process.ExitCode -ne 0) {
-      Write-Host "Launcher terminated with exit code $($process.ExitCode). See $out and $err" -ForegroundColor Red
-      break
+   # The launcher intentionally exits after starting detached server processes.
+   # A successful parent exit is NOT a diagnostic-session failure.
+   if ($process.HasExited) {
+      $process.Refresh()
+      $exitCode = $process.ExitCode
+      if ($exitCode -ne 0) {
+         Write-Host "Launcher failed with exit code $exitCode. See $out and $err" -ForegroundColor Red
+         break
+      }
    }
    Start-Sleep -Milliseconds 500
  }
