@@ -16,6 +16,10 @@ import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1, UcrVerified
  */
 // Aggregate-only observability: no media samples, participant identities or keys.
 const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0};
+// Count actual encoded and rendered video separately; a connected DataChannel
+// and encrypted packet count are not evidence of remote picture delivery.
+const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0};
+(globalThis as unknown as {__ucrVideoCounters?: typeof ucrVideoCounters}).__ucrVideoCounters = ucrVideoCounters;
 (globalThis as unknown as {__ucrAudioCounters?: typeof ucrAudioCounters}).__ucrAudioCounters = ucrAudioCounters;
 interface EncodedChunkLike {
   readonly byteLength: number;
@@ -283,6 +287,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       chunk.copyTo(bytes);
       try {
         if (kind === "audio") ucrAudioCounters.encoded++;
+        else { ucrVideoCounters.encoded++; if (chunk.type === "key") ucrVideoCounters.keyframes++; }
         void Promise.resolve(this.#emit({
           mediaKind: kind,
           videoSourceKind: source,
@@ -373,6 +378,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         if (result.done) break;
         const frame = result.value;
         try {
+          if (kind === "video") ucrVideoCounters.captured++;
           if (kind === "video" && Number.isFinite(frame.timestamp)) {
             // Detect a stalled local capture/encode loop: compare media capture
             // time progression against monotonic wall time, ignoring timestamp
@@ -675,6 +681,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               if (selectedSourceKey !== null && oldVisible !== selectedStreamId &&
                   (pending?.streamId !== selectedStreamId || pending.decoderKey !== key)) return;
               const canvas = this.#videoCanvas!;
+              ucrVideoCounters.decoded++;
               const width = video.displayWidth, height = video.displayHeight;
               if (width < 1 || height < 1 || width > 7680 || height > 4320) {
                 throw new Error("decoded frame exceeds secure display bounds");
@@ -686,6 +693,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               if (canvas.width !== width) canvas.width = width;
               if (canvas.height !== height) canvas.height = height;
               (context as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
+              ucrVideoCounters.rendered++;
               if (selectedSourceKey !== null && oldVisible !== selectedStreamId) {
                 this.#activeVideoStreams.set(selectedSourceKey, selectedStreamId);
                 this.#pendingVideoStreams.delete(selectedSourceKey);
@@ -736,6 +744,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       ucrAudioCounters.received++;
       decoder.decode(new b.EncodedAudioChunk!({type: "key", timestamp, data}));
     } else {
+      ucrVideoCounters.received++;
       try {
         decoder.decode(new b.EncodedVideoChunk!({
           type: frame.keyframe ? "key" : "delta", timestamp, data,
