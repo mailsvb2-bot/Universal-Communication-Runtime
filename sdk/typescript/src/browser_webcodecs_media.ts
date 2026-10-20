@@ -235,7 +235,20 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       if (generation !== this.#generation || !this.#emit) return;
       await this.#reset();
       if (generation !== this.#generation || !this.#emit) return;
-      await this.#attach(sources, generation);
+      try {
+        await this.#attach(sources, generation);
+      } catch (error) {
+        // Partial attachment may already have opened one or more codecs.
+        // A failed replacement must never leave orphaned capture loops running
+        // while the caller believes the source update succeeded.
+        if (generation === this.#generation) {
+          ++this.#generation;
+          this.#emit = null;
+          await this.#reset();
+          this.#onError(error);
+        }
+        throw error;
+      }
     });
     this.#sourceUpdateTail = next;
     await next;
