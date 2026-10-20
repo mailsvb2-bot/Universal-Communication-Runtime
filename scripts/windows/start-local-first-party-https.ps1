@@ -77,7 +77,6 @@ function Start-Ucr([string]$exe,[string[]]$arguments,[string]$name) {
 }
 
 Require-File $vc
-Require-File $db
 Require-File (Join-Path $opensslRoot 'include\openssl\ssl.h')
 foreach ($asset in @(
     'crates\ucr-realtime-web\static\endpoint-media\reference_browser_media_installer.js',
@@ -173,6 +172,13 @@ $runtimeExe = Join-Path $root 'target\debug\ucr-runtime.exe'
 $webExe = Join-Path $root 'target\debug\ucr-realtime-web.exe'
 $edgeExe = Join-Path $root 'target\debug\ucr-https-edge.exe'
 foreach ($exe in @($runtimeExe,$webExe,$edgeExe)) { Require-File $exe }
+# One-command first launch: initialize ONLY when no local database exists.
+# Never overwrite an existing Identity, Contact, Device or Call database.
+if (!(Test-Path -LiteralPath $db -PathType Leaf)) {
+    Write-Host 'Initializing canonical local UCR SQLite database...'
+    Invoke-Checked $runtimeExe @('init','--database',$db)
+}
+Require-File $db
 
 Add-Type -AssemblyName System.Security
 if (!(Test-Path $keyFile)) {
