@@ -43,8 +43,13 @@ protocol = (root/"crates/ucr-protocol/src/group_media_e2ee.rs").read_text(encodi
 assert 'keyframe: kind === "video" && chunk.type === "key"' in webcodecs, (
     "Opus audio cannot be a keyframe: Rust seal_wire rejects InvalidAudioHeader")
 assert 'header.media_kind == MediaKind::Audio && header.keyframe' in protocol
-assert 'if (pending - now > 0.25)' in webcodecs
-assert 'const start = Math.max(now + 0.012, pending)' in webcodecs
+assert 'if (state.next - now > 0.25)' in webcodecs
+assert 'this.#scheduledAudio.get(streamKey)' in webcodecs
+assert 'source.onended = null;' in webcodecs
+assert 'source.stop();' in webcodecs
+assert 'this.#scheduledAudio.delete(streamKey);' in webcodecs
+assert 'state.next = now + cushion;' in webcodecs
+assert 'const start = Math.max(now + 0.012, state.next)' in webcodecs
 assert 'const start = pending - now > 0.35 ? now' not in webcodecs
 assert 'export function ucrAdaptiveVideoStep(' in webcodecs
 assert 'ucrVideoAdaptation.stage = next.stage' in webcodecs
