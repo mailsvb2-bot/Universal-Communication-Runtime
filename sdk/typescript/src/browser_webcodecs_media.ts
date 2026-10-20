@@ -278,6 +278,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     const streamId = track.id;
     if (!streamId) throw new Error("media track must have stream identity");
     let forceKeyframe = false;
+    let forceLowKeyframe = false;
     const emitChunkFor = (encodedStreamId: string) => (chunk: EncodedChunkLike) => {
       if (generation !== this.#generation || !this.#emit) return;
       if (chunk.byteLength < 1 || chunk.byteLength > MAX_CAPTURE_FRAME_BYTES) {
@@ -296,7 +297,16 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
           timestamp: wireTimestamp(chunk.timestamp),
           keyframe: kind === "video" && chunk.type === "key",
           bytes,
-        })).catch((error) => { if (kind === "video") forceKeyframe = true; this.#onError(error); });
+        })).catch((error) => {
+          if (kind === "video") {
+            if (encodedStreamId.endsWith("-low") && this.#layeredCamera) {
+              forceLowKeyframe = true;
+            } else {
+              forceKeyframe = true;
+            }
+          }
+          this.#onError(error);
+        });
       } catch (error) { this.#onError(error); }
     };
     const encodedStreamId = kind === "video" && source === "camera" &&
@@ -485,13 +495,15 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             context.drawImage(frame as VideoFrame, 0, 0, LOW_CAMERA_WIDTH, LOW_CAMERA_HEIGHT);
             const downscaled = new VideoFrame(lowCanvas, {timestamp: frame.timestamp});
             try {
-              const keyframe = due(frame.timestamp, lastLowKeyframeTimestamp, lowFramesSinceKeyframe);
+              const keyframe = forceLowKeyframe ||
+                due(frame.timestamp, lastLowKeyframeTimestamp, lowFramesSinceKeyframe);
               lowEncoder.encode(downscaled, {keyFrame: keyframe});
               if (keyframe) {
                 lowFramesSinceKeyframe = 0;
                 if (Number.isFinite(frame.timestamp)) lastLowKeyframeTimestamp = frame.timestamp;
               } else lowFramesSinceKeyframe++;
               lastLowTimestamp = frame.timestamp;
+              forceLowKeyframe = false;
             } finally {
               downscaled.close();
             }
