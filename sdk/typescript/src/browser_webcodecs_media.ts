@@ -317,12 +317,15 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
           Math.max(1, settings.frameRate ?? VIDEO_FRAMERATE), quality.frameRate,
         ),
         bitrate: quality.bitrate, latencyMode: "realtime"};
-      // Hardware VP8 support is not universal on Windows. Failure to configure
-      // must not disable an otherwise working software WebCodecs encoder.
+      // On some Windows GPU stacks configure(prefer-hardware) succeeds but
+      // the asynchronous first encode fails, leaving a live camera and zero
+      // encoded video frames. Prefer a software VP8 encoder for the first call;
+      // preserve resolution and bitrate, and fall back to default negotiation
+      // only if this browser rejects that preference synchronously.
       try {
-        encoder.configure({...config, hardwareAcceleration: "prefer-hardware"});
-      } catch {
         encoder.configure({...config, hardwareAcceleration: "prefer-software"});
+      } catch {
+        encoder.configure(config);
       }
     }
     this.#encoders.push(encoder);
@@ -345,7 +348,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         lowEncoder.configure({
           codec: VIDEO_CODEC, width: LOW_CAMERA_WIDTH, height: LOW_CAMERA_HEIGHT,
           framerate: LOW_CAMERA_FPS, bitrate: LOW_CAMERA_BITRATE_BPS,
-          latencyMode: "realtime", hardwareAcceleration: "prefer-hardware",
+          latencyMode: "realtime", hardwareAcceleration: "prefer-software",
         });
         this.#encoders.push(lowEncoder);
       }
@@ -425,9 +428,9 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
                 bitrate: Math.max(150_000, Math.round(full.bitrate * factor)),
                 latencyMode: "realtime"};
               try {
-                encoder.configure({...config, hardwareAcceleration: "prefer-hardware"});
-              } catch {
                 encoder.configure({...config, hardwareAcceleration: "prefer-software"});
+              } catch {
+                encoder.configure(config);
               }
               forceKeyframe = true;
             }
