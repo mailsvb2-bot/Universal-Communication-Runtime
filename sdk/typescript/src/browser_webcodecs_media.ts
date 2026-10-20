@@ -422,7 +422,9 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               track.getSettings().height ?? VIDEO_HEIGHT).frameRate :
               qualityStage === 1 ? 15 : 10) : 0;
           const videoPacingOk = kind !== "video" ||
-            frame.timestamp - lastVideoEncodeTimestamp >= 1_000_000 / maxFps;
+            // Capture timestamps are integer microseconds; allow sub-microsecond
+            // rounding so a nominal 30 fps source (33_333 us) is not halved.
+            frame.timestamp - lastVideoEncodeTimestamp >= Math.floor(1_000_000 / maxFps);
           if (videoPacingOk && ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
             const keyframe = kind === "video" &&
               (forceKeyframe || due(frame.timestamp, lastKeyframeTimestamp, framesSinceKeyframe));
