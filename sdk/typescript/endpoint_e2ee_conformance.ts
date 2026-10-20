@@ -2346,6 +2346,23 @@ try {
   mixing.stop();
   assert.ok(audioDisconnects >= disconnectedBeforeStop,
     "consumer teardown must not leak its remaining scheduled audio nodes");
+
+  // A burst of jitter must not poison a fresh audio session or cause the
+  // sender's queue to grow unbounded when wall-clock arrival catches up.
+  const adaptive = new UcrBrowserWebCodecsConsumer({
+    audioContext: audioSink as unknown as AudioContext,
+  });
+  const startsBefore = audioStartTimes.length;
+  audioSink.currentTime = 200;
+  adaptive.play(audioFrame("jitter-test"), sourceHeader("alice"));
+  audioSink.currentTime = 200.03;
+  adaptive.play(audioFrame("jitter-test"), sourceHeader("alice"));
+  audioSink.currentTime = 200.12;
+  adaptive.play(audioFrame("jitter-test"), sourceHeader("alice"));
+  assert.equal(audioStartTimes.length, startsBefore + 3);
+  assert.ok(audioStartTimes[startsBefore + 2] >= 200.12,
+    "playout must recover after input starvation instead of scheduling in the past");
+  adaptive.stop();
 } finally {
   for (const item of savedGlobals) {
     if (item.original) Object.defineProperty(globalThis, item.key, item.original);
