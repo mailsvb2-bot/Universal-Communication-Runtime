@@ -212,6 +212,24 @@ def probe_device(
             stdout = process.communicate(timeout=5)[0]
             raise RuntimeError(f"mobile probe failed to start: {stdout[-4000:]}")
 
+        # Do not ask CoreSimulator to open Safari until the real host probe
+        # serves HTTP. This distinguishes probe startup failure from a
+        # simulator hang and prevents wasted openurl attempts.
+        import urllib.request
+        ready = False
+        for _ in range(40):
+            if process.poll() is not None:
+                raise RuntimeError("mobile probe terminated before HTTP readiness")
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/client.html", timeout=2) as response:
+                    ready = response.status == 200
+            except (OSError, TimeoutError):
+                pass
+            if ready:
+                break
+            time.sleep(0.25)
+        if not ready:
+            raise RuntimeError("mobile probe HTTP listener did not become ready")
         url = f"http://127.0.0.1:{port}/client.html?ucr_mobile_probe=ios-safari"
         for attempt in range(1, open_attempts + 1):
             try:
