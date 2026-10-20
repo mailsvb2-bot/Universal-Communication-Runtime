@@ -546,7 +546,12 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   // WebAudio mixes independent AudioBufferSources automatically. Only frames
   // from the SAME authenticated audio stream must be sequenced; a global clock
   // serializes different speakers and makes conferences fall behind real time.
-  readonly #nextAudioTime = new Map<string, number>();
+  // One receiver-local playout state per authenticated sender. Jitter is
+  // estimated from actual decoded packet arrival spacing, never fabricated
+  // from network statistics. Keep audio sources independent when mixing.
+  readonly #audioPlayout = new Map<string, {
+    next: number; lastArrival: number; lastDuration: number; jitter: number;
+  }>();
   readonly #scheduledAudio = new Map<string, Set<AudioBufferSourceNode>>();
   #videoEnabled = true;
   #renderGeneration = 0;
@@ -834,52 +839,60 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       const node = context.createBufferSource();
       node.buffer = buffer;
       node.connect(context.destination);
-      // A burst of delayed network frames must not grow the playback queue
-      // indefinitely. Drop obsolete audio instead of playing seconds of stale
-      // speech while new encrypted video continues in real time.
       const now = context.currentTime;
-      // Keep a small playout cushion to absorb normal packet jitter. If an
-      // old burst would push playout too far behind real time, discard the
-      // obsolete decoded packet: never overlap whole Opus buffers at "now".
-      let pending = this.#nextAudioTime.get(streamKey) ?? now + 0.06;
-      // A stalled playback clock must be rebased after a burst. Otherwise
-      // every subsequent decoded packet is discarded against the same stale
-      // future deadline, even after the network has recovered.
-      if (pending - now > 0.25) {
+      let state = this.#audioPlayout.get(streamKey);
+      if (!state) {
+        state = {next: now + 0.06, lastArrival: now,
+          lastDuration: buffer.duration, jitter: 0};
+        this.#audioPlayout.set(streamKey, state);
+      } else {
+        // RFC3550-style EWMA, measured from actual consecutive PCM arrivals.
+        // Clamp spikes to keep a tab suspension from inflating playout forever.
+        const arrivalGap = Math.max(0, now - state.lastArrival);
+        const variation = Math.min(0.25, Math.abs(arrivalGap - state.lastDuration));
+        state.jitter += (variation - state.jitter) / 16;
+        state.lastArrival = now;
+        state.lastDuration = buffer.duration;
+      }
+      const cushion = Math.min(0.12, Math.max(0.04, 0.04 + 2 * state.jitter));
+      // Bound queued audio by elapsed wall-clock time. On overflow cancel
+      // obsolete scheduled PCM, then rebuild from a fresh bounded cushion.
+      // Merely rebasing a timestamp would overlap old and new speech.
+      if (state.next - now > 0.25) {
         ucrAudioCounters.dropped++;
-        // Cancel already queued stale PCM. Rebasing only the timestamp would
-        // overlap old audio with new speech and produce audible distortion.
         const scheduled = this.#scheduledAudio.get(streamKey);
         if (scheduled) {
+          this.#scheduledAudio.delete(streamKey);
           for (const source of scheduled) {
-            try { source.stop(); } catch { /* already played */ }
+            source.onended = null;
+            try { source.stop(); } catch { /* source already finished */ }
             if (typeof source.disconnect === "function") source.disconnect();
           }
           scheduled.clear();
         }
-        this.#nextAudioTime.set(streamKey, now + 0.06);
+        state.next = now + cushion;
         if (typeof node.disconnect === "function") node.disconnect();
         return;
       }
-      // After underflow, reestablish a small playout cushion instead of
-      // permanently chasing the audio callback at the immediate deadline.
-      if (pending < now) pending = now + 0.06;
-      const start = Math.max(now + 0.012, pending);
+      // Following starvation, restart promptly with a small measured cushion.
+      if (state.next < now) state.next = now + cushion;
+      const start = Math.max(now + 0.012, state.next);
       let scheduled = this.#scheduledAudio.get(streamKey);
       if (!scheduled) {
         scheduled = new Set<AudioBufferSourceNode>();
         this.#scheduledAudio.set(streamKey, scheduled);
       }
-      scheduled.add(node);
+      const owner = scheduled;
+      owner.add(node);
       node.onended = () => {
-        scheduled!.delete(node);
+        owner.delete(node);
         if (typeof node.disconnect === "function") node.disconnect();
-        if (scheduled!.size === 0 && this.#scheduledAudio.get(streamKey) === scheduled)
+        if (owner.size === 0 && this.#scheduledAudio.get(streamKey) === owner)
           this.#scheduledAudio.delete(streamKey);
       };
       node.start(start);
       ucrAudioCounters.scheduled++;
-      this.#nextAudioTime.set(streamKey, start + buffer.duration);
+      state.next = start + buffer.duration;
     } catch (error) { this.#onError(error); }
     finally { data.close(); }
   }
@@ -896,9 +909,10 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     this.#lastScreenVideoAt = 0;
     this.#videoEnabled = true;
     this.#lowVideoPreferred = false;
-    this.#nextAudioTime.clear();
+    this.#audioPlayout.clear();
     for (const sources of this.#scheduledAudio.values()) {
       for (const source of sources) {
+        source.onended = null;
         try { source.stop(); } catch { /* already ended */ }
         if (typeof source.disconnect === "function") source.disconnect();
       }
