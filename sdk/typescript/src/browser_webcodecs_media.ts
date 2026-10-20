@@ -858,6 +858,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
           scheduled.clear();
         }
         this.#nextAudioTime.set(streamKey, now + 0.06);
+        if (typeof node.disconnect === "function") node.disconnect();
         return;
       }
       // After underflow, reestablish a small playout cushion instead of
@@ -872,8 +873,9 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       scheduled.add(node);
       node.onended = () => {
         scheduled!.delete(node);
-        node.disconnect();
-        if (scheduled!.size === 0) this.#scheduledAudio.delete(streamKey);
+        if (typeof node.disconnect === "function") node.disconnect();
+        if (scheduled!.size === 0 && this.#scheduledAudio.get(streamKey) === scheduled)
+          this.#scheduledAudio.delete(streamKey);
       };
       node.start(start);
       ucrAudioCounters.scheduled++;
