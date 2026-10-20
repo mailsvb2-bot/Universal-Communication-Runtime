@@ -77,7 +77,7 @@ try {
    if ($process.HasExited) {
       $process.Refresh()
       $exitCode = $process.ExitCode
-      if ($exitCode -ne 0) {
+      if ($null -ne $exitCode -and $exitCode -ne 0) {
          Write-Host "Launcher failed with exit code $exitCode. See $out and $err" -ForegroundColor Red
          break
       }
