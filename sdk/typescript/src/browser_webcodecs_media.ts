@@ -853,7 +853,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         if (scheduled) {
           for (const source of scheduled) {
             try { source.stop(); } catch { /* already played */ }
-            source.disconnect();
+            if (typeof source.disconnect === "function") source.disconnect();
           }
           scheduled.clear();
         }
@@ -898,7 +898,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     for (const sources of this.#scheduledAudio.values()) {
       for (const source of sources) {
         try { source.stop(); } catch { /* already ended */ }
-        source.disconnect();
+        if (typeof source.disconnect === "function") source.disconnect();
       }
     }
     this.#scheduledAudio.clear();
