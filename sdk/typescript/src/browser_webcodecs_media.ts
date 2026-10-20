@@ -312,13 +312,18 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       const width = settings.width ?? VIDEO_WIDTH;
       const height = settings.height ?? VIDEO_HEIGHT;
       const quality = ucrVideoEncodingTarget(width, height);
-      encoder.configure({codec: VIDEO_CODEC,
-        width, height,
+      const config = {codec: VIDEO_CODEC, width, height,
         framerate: Math.min(
           Math.max(1, settings.frameRate ?? VIDEO_FRAMERATE), quality.frameRate,
         ),
-        bitrate: quality.bitrate, latencyMode: "realtime",
-        hardwareAcceleration: "prefer-hardware"});
+        bitrate: quality.bitrate, latencyMode: "realtime"};
+      // Hardware VP8 support is not universal on Windows. Failure to configure
+      // must not disable an otherwise working software WebCodecs encoder.
+      try {
+        encoder.configure({...config, hardwareAcceleration: "prefer-hardware"});
+      } catch {
+        encoder.configure({...config, hardwareAcceleration: "prefer-software"});
+      }
     }
     this.#encoders.push(encoder);
     // A second *real* encrypted source layer is opt-in, not a viewer-count mode.
@@ -415,10 +420,15 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               const full = ucrVideoEncodingTarget(width, height);
               const factor = qualityStage === 0 ? 1 : qualityStage === 1 ? 0.45 : 0.2;
               const fps = qualityStage === 0 ? full.frameRate : qualityStage === 1 ? 15 : 10;
-              encoder.configure({codec: VIDEO_CODEC, width, height,
+              const config = {codec: VIDEO_CODEC, width, height,
                 framerate: Math.min(settings.frameRate ?? VIDEO_FRAMERATE, fps),
                 bitrate: Math.max(150_000, Math.round(full.bitrate * factor)),
-                latencyMode: "realtime", hardwareAcceleration: "prefer-hardware"});
+                latencyMode: "realtime"};
+              try {
+                encoder.configure({...config, hardwareAcceleration: "prefer-hardware"});
+              } catch {
+                encoder.configure({...config, hardwareAcceleration: "prefer-software"});
+              }
               forceKeyframe = true;
             }
           }
