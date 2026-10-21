@@ -134,8 +134,15 @@ const $=id=>document.getElementById(id);
 const ucrDiagnosticsEvents=[];
 let ucrPreLeaveSnapshot=null;
 function ucrFreezePreLeaveSnapshot(){
-  if(!ucrPreLeaveSnapshot)ucrPreLeaveSnapshot=ucrDiagnosticReport();
-  ucrRecordDiagnostic("Pre-disconnect media snapshot captured","lifecycle");
+  // Observability is best-effort; it must NEVER veto security revocation,
+  // synchronous track stop, or authenticated Leave on a partially torn-down UI.
+  if( ucrPreLeaveSnapshot )return;
+  try {
+    ucrPreLeaveSnapshot=ucrDiagnosticReport();
+    ucrRecordDiagnostic("Pre-disconnect media snapshot captured","lifecycle");
+  } catch (_) {
+    ucrRecordDiagnostic("Pre-disconnect snapshot unavailable","lifecycle");
+  }
 }
 const ucrDiagnosticAllowedPaths=new Set([
  "/v1/realtime/join","/v1/realtime/heartbeat","/v1/realtime/audio-level",
