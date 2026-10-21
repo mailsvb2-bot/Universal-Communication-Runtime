@@ -48,6 +48,13 @@ assert 'this.#scheduledAudio.get(streamKey)' in webcodecs
 assert 'source.onended = null;' in webcodecs
 assert 'source.stop();' in webcodecs
 assert 'this.#scheduledAudio.delete(streamKey);' in webcodecs
+assert 'this.#codecRecoveryAttempts++ === 0' in webcodecs
+assert 'void this.updateSources(sources).catch(' in webcodecs
+assert 'void this.stop().catch(this.#onError)' in webcodecs
+assert 'playoutQueuedMs' in webcodecs
+assert 'playoutJitterMs' in webcodecs
+assert 'mediaStageMetrics:window.__ucrMediaStageMetrics' in client
+
 assert 'state.next = now + cushion;' in webcodecs
 assert 'const start = Math.max(now + 0.012, state.next)' in webcodecs
 assert 'const start = pending - now > 0.35 ? now' not in webcodecs
