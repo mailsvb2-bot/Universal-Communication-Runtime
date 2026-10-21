@@ -148,7 +148,7 @@ export function ucrAdaptiveVideoStep(
     {stage, healthySamples: Math.min(5, next)};
 }
 // Aggregate quality telemetry exposed to privacy-safe call diagnostics.
-const ucrVideoAdaptation = {stage: 0, changes: 0, bufferedBytes: 0, encoderQueued: 0};
+const ucrVideoAdaptation = {stage: 0, changes: 0, bufferedBytes: 0, encoderQueued: 0, encodeLatencyMs: 0, encodeLatencyMaxMs: 0};
 (globalThis as unknown as {__ucrVideoAdaptation?: typeof ucrVideoAdaptation})
   .__ucrVideoAdaptation = ucrVideoAdaptation;
 const MAX_VIDEO_ENCODER_QUEUE = 2;
@@ -205,6 +205,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
   #codecRecoveryAttempts = 0;
   #lastCodecFailureAt = 0;
   #codecRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  readonly #keyframeRequests = new Map<string, () => void>();
 
   constructor(
     onError: (error: unknown) => void = () => {},
@@ -229,6 +230,10 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       await this.stop();
       throw error;
     }
+  }
+
+  requestVideoKeyframe(streamId: string): void {
+    this.#keyframeRequests.get(streamId)?.();
   }
 
   async updateSources(sources: UcrEndpointMediaSources): Promise<void> {
@@ -273,6 +278,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
   }
 
   async #reset(): Promise<void> {
+    this.#keyframeRequests.clear();
     for (const reader of this.#readers.splice(0)) {
       try { await reader.cancel(); } catch (_) { /* already closed */ }
     }
@@ -302,6 +308,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     if (!streamId) throw new Error("media track must have stream identity");
     let forceKeyframe = false;
     let forceLowKeyframe = false;
+    const encodeStartTimes = new Map<number, number>();
     const emitChunkFor = (encodedStreamId: string) => (chunk: EncodedChunkLike) => {
       if (generation !== this.#generation || !this.#emit) return;
       if (chunk.byteLength < 1 || chunk.byteLength > MAX_CAPTURE_FRAME_BYTES) {
@@ -312,7 +319,18 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       chunk.copyTo(bytes);
       try {
         if (kind === "audio") ucrAudioCounters.encoded++;
-        else { ucrVideoCounters.encoded++; if (chunk.type === "key") ucrVideoCounters.keyframes++; }
+        else {
+          ucrVideoCounters.encoded++;
+          if (chunk.type === "key") ucrVideoCounters.keyframes++;
+          const started = encodeStartTimes.get(chunk.timestamp);
+          if (started !== undefined) {
+            encodeStartTimes.delete(chunk.timestamp);
+            const elapsed = performance.now() - started;
+            ucrVideoAdaptation.encodeLatencyMs = Math.round(elapsed);
+            ucrVideoAdaptation.encodeLatencyMaxMs = Math.max(
+              ucrVideoAdaptation.encodeLatencyMaxMs, Math.round(elapsed));
+          }
+        }
         void Promise.resolve(this.#emit({
           mediaKind: kind,
           videoSourceKind: source,
@@ -334,6 +352,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     };
     const encodedStreamId = kind === "video" && source === "camera" &&
       this.#layeredCamera ? ucrCameraLayerStreamId(streamId, "full") : streamId;
+    if (kind === "video") this.#keyframeRequests.set(encodedStreamId, () => { forceKeyframe = true; });
     const onError = (error: Error) => {
       if (generation !== this.#generation || !this.#emit) return;
       this.#onError(error);
@@ -398,6 +417,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
           latencyMode: "realtime", hardwareAcceleration: "prefer-software",
         });
         this.#encoders.push(lowEncoder);
+        this.#keyframeRequests.set(lowStreamId, () => { forceLowKeyframe = true; });
       }
     }
     // A transport-pressure probe is installed by the first-party encrypted
@@ -513,10 +533,12 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               finally { if (pcm !== frame) pcm.close(); }
             } else {
               const encodeStarted = performance.now();
+              encodeStartTimes.set(frame.timestamp, encodeStarted);
+              if (encodeStartTimes.size > 32) encodeStartTimes.delete(encodeStartTimes.keys().next().value!);
               encoder.encode(frame, {keyFrame: keyframe});
               const encodeCost = performance.now() - encodeStarted;
               videoEncodeCostMs = videoEncodeCostMs * 0.8 + encodeCost * 0.2;
-              if (videoEncodeCostMs > 12 || encoder.encodeQueueSize >= 2)
+              if (ucrVideoAdaptation.encodeLatencyMs > 120 || videoEncodeCostMs > 12 || encoder.encodeQueueSize >= 2)
                 videoPressureSamples++;
               lastVideoEncodeTimestamp = frame.timestamp;
               forceKeyframe = false;
