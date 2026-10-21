@@ -132,6 +132,11 @@ const $=id=>document.getElementById(id);
 // Bounded, privacy-preserving local diagnostics. No bearer tokens, join grants,
 // participant IDs, device IDs, SDP, room messages, local paths or media payloads.
 const ucrDiagnosticsEvents=[];
+let ucrPreLeaveSnapshot=null;
+function ucrFreezePreLeaveSnapshot(){
+  if(!ucrPreLeaveSnapshot)ucrPreLeaveSnapshot=ucrDiagnosticReport();
+  ucrRecordDiagnostic("Pre-disconnect media snapshot captured","lifecycle");
+}
 const ucrDiagnosticAllowedPaths=new Set([
  "/v1/realtime/join","/v1/realtime/heartbeat","/v1/realtime/audio-level",
  "/v1/realtime/active-speaker","/v1/realtime/chat/list",
@@ -196,6 +201,7 @@ function ucrDiagnosticReport(){
   return {
     schema:"ucr-local-diagnostics-v1",
     capturedAt:new Date().toISOString(),
+    preDisconnect:ucrPreLeaveSnapshot,
     page:"conference",
     state:document.getElementById("state")?.textContent||"unknown",
     webrtc:document.getElementById("webrtc-state")?.textContent||"unknown",
@@ -242,6 +248,8 @@ function ucrDiagnosticReport(){
       received:window.__ucrVideoCounters.received,
       decoded:window.__ucrVideoCounters.decoded,
       rendered:window.__ucrVideoCounters.rendered,
+      lastRenderedAt:window.__ucrVideoCounters.lastRenderedAt,
+      renderStallMs:window.__ucrVideoCounters.lastRenderedAt?Date.now()-window.__ucrVideoCounters.lastRenderedAt:null,
       keyframes:window.__ucrVideoCounters.keyframes
     }:null),
     mediaFailure:{category:ucrLastMediaError||null,count:ucrMediaFailureCount,stopped:ucrMediaFailureStopped},
@@ -1577,7 +1585,15 @@ async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims
   try{
     await api("/v1/realtime/webrtc/close",{...(retiredClaims||body()),offer_id:offerId},undefined,keepalive);
     if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
-  }catch(_){}
+  }catch(error){
+    const message=String(error?.message||error);
+    if(/\\b404\\b|not_found|offer_not_found/i.test(message)){
+      ucrRecordDiagnostic("WebRTC offer already retired on close","webrtc");
+      if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
+    }else{
+      ucrRecordDiagnostic("WebRTC close failed: "+ucrDiagnosticReason(message),"webrtc");
+    }
+  }
 }
 function scheduleWebRtcRetry(immediate=false){
   if(!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine||restarting)return;
@@ -2098,6 +2114,7 @@ async function endUnverifiedMedia(generation,message){
 async function leave(){
   if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Leave requested","lifecycle");
   const wasActive=sessionActive;
+  if(wasActive)ucrFreezePreLeaveSnapshot();
   const leavingClaims=wasActive?body():null;
   const leavingSequence=activeSessionSequence;
   const leavingOfferId=startWebRtc.offerId;
@@ -3415,7 +3432,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){const generation=sessionLifecycleGeneration;ui.webrtcState.textContent="Offline";void endUnverifiedMedia(generation,"Network unavailable; capture stopped until fresh authorization.");}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
-window.addEventListener("pagehide",()=>{releaseRoomPresence();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;++roomGestureEpoch;clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;stopLocalCapture();});
+window.addEventListener("pagehide",()=>{releaseRoomPresence();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;++roomGestureEpoch;clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;retireEndpointMlsState();if(sessionActive){ucrFreezePreLeaveSnapshot();closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;stopLocalCapture();});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>
