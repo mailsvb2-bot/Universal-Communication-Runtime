@@ -384,6 +384,13 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     // Keep an owned, bounded snapshot until the authorization queue drains.
     const ownedFrame = {...frame, bytes: frame.bytes.slice()};
     const queuedAt = performance.now();
+    // Only bounded aggregate stage metrics are exposed: no payload, sender ID,
+    // keys, or timestamps of individual captured speech leave this process.
+    const metrics = (globalThis as unknown as {__ucrMediaStageMetrics?: {
+      authorizationMs: number; authorizationMaxMs: number; expiredBeforeSeal: number;
+      outboundFrames: number; sealAndSendMs: number;
+    }}).__ucrMediaStageMetrics;
+
     // Fresh voice matters more than an old frame: asynchronous authorization
     // or sealing can otherwise accumulate seconds of *valid but obsolete* media.
     const maxQueueAgeMs = frame.mediaKind === "audio" ? 150 : 250;
@@ -392,12 +399,25 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     let outboundStage = "PUBLISH_AUTHORIZATION";
     const current: Promise<void> = previous.then(async () => {
       if (!this.#active || generation !== this.#generation) return;
-      if (performance.now() - queuedAt > maxQueueAgeMs) return;
-      if (!(await this.#authorizePublish(ownedFrame))) {
+      if (performance.now() - queuedAt > maxQueueAgeMs) {
+        if (metrics) metrics.expiredBeforeSeal++;
+        return;
+      }
+      const authStarted = performance.now();
+      const authorized = await this.#authorizePublish(ownedFrame);
+      if (metrics) {
+        const elapsed = performance.now() - authStarted;
+        metrics.authorizationMs = Math.round(elapsed);
+        metrics.authorizationMaxMs = Math.max(metrics.authorizationMaxMs, Math.round(elapsed));
+      }
+      if (!authorized) {
         throw new Error("media publish authorization revoked");
       }
       if (!this.#active || generation !== this.#generation) return;
-      if (performance.now() - queuedAt > maxQueueAgeMs) return;
+      if (performance.now() - queuedAt > maxQueueAgeMs) {
+        if (metrics) metrics.expiredBeforeSeal++;
+        return;
+      }
       const sequence = (this.#sequences.get(streamKey) ?? 0n) + 1n;
       if (sequence > 18_446_744_073_709_551_615n) {
         throw new Error("media sequence exhausted; rotate session");
@@ -420,6 +440,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       outboundStage = "DATACHANNEL_SEND";
       if (!this.#sender) throw new Error("media sender unavailable");
       this.#sender(wire, ownedFrame.mediaKind);
+      if (metrics) {
+        metrics.outboundFrames++;
+        metrics.sealAndSendMs = Math.round(performance.now() - queuedAt);
+      }
     }).catch((_error: unknown) => {
       // Stable, non-sensitive stage labels; never expose keys, ciphertext or source identity.
       this.#onError(new Error("UCR_MEDIA_OUTBOUND_" + outboundStage));
