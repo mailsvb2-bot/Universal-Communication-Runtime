@@ -15,7 +15,7 @@ import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1, UcrVerified
  * Designed to be replaceable by native codecs on Android/iOS/desktop.
  */
 // Aggregate-only observability: no media samples, participant identities or keys.
-const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0};
+const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0, playoutQueuedMs: 0, playoutJitterMs: 0, playoutRebases: 0};
 // Count actual encoded and rendered video separately; a connected DataChannel
 // and encrypted packet count are not evidence of remote picture delivery.
 const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0};
@@ -855,11 +855,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         state.lastDuration = buffer.duration;
       }
       const cushion = Math.min(0.12, Math.max(0.04, 0.04 + 2 * state.jitter));
+      ucrAudioCounters.playoutJitterMs = Math.round(state.jitter * 1000);
+      ucrAudioCounters.playoutQueuedMs = Math.max(0, Math.round((state.next - now) * 1000));
       // Bound queued audio by elapsed wall-clock time. On overflow cancel
       // obsolete scheduled PCM, then rebuild from a fresh bounded cushion.
       // Merely rebasing a timestamp would overlap old and new speech.
       if (state.next - now > 0.25) {
         ucrAudioCounters.dropped++;
+        ucrAudioCounters.playoutRebases++;
         const scheduled = this.#scheduledAudio.get(streamKey);
         if (scheduled) {
           this.#scheduledAudio.delete(streamKey);
