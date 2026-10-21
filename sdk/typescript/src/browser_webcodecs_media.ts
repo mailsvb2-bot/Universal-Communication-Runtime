@@ -201,6 +201,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
   #emit: ((frame: UcrEncodedMediaFrame) => void | Promise<void>) | null = null;
   #sourceUpdateTail: Promise<void> = Promise.resolve();
   readonly #layeredCamera: boolean;
+  #currentSources: UcrEndpointMediaSources | null = null;
+  #codecRecoveryAttempts = 0;
 
   constructor(
     onError: (error: unknown) => void = () => {},
@@ -217,6 +219,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     if (!ucrWebCodecsSupported()) throw new Error("WebCodecs media capture/codec unavailable");
     if (this.#emit) throw new Error("WebCodecs producer already started");
     this.#emit = emit;
+    this.#currentSources = sources;
+    this.#codecRecoveryAttempts = 0;
     try {
       await this.#attach(sources, ++this.#generation);
     } catch (error) {
@@ -227,6 +231,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
 
   async updateSources(sources: UcrEndpointMediaSources): Promise<void> {
     if (!this.#emit) throw new Error("WebCodecs producer not running");
+    this.#currentSources = sources;
     const generation = ++this.#generation;
     // A screen-share revocation may arrive while an earlier reader.cancel()
     // awaits. Serialize resets and attach ONLY that update's generation:
@@ -257,6 +262,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
   async stop(): Promise<void> {
     ++this.#generation;
     this.#emit = null;
+    this.#currentSources = null;
     // No post-stop update may reattach an encoder after cleanup has finished.
     await this.#sourceUpdateTail.catch(() => {});
     await this.#reset();
@@ -324,7 +330,21 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     };
     const encodedStreamId = kind === "video" && source === "camera" &&
       this.#layeredCamera ? ucrCameraLayerStreamId(streamId, "full") : streamId;
-    const onError = (error: Error) => this.#onError(error);
+    const onError = (error: Error) => {
+      if (generation !== this.#generation || !this.#emit) return;
+      // WebCodecs reports device/driver failures asynchronously, after a
+      // successful configure(). Attempt one serialized producer recreation,
+      // then retire rather than maintaining a live but silent encoder.
+      if (this.#codecRecoveryAttempts++ === 0 && this.#currentSources) {
+        const sources = this.#currentSources;
+        void this.updateSources(sources).catch((recoveryError) => {
+          this.#onError(recoveryError);
+        });
+      } else {
+        this.#onError(error);
+        void this.stop().catch(this.#onError);
+      }
+    };
     const encoder = kind === "audio"
       ? new b.AudioEncoder!({output: emitChunkFor(encodedStreamId), error: onError})
       : new b.VideoEncoder!({output: emitChunkFor(encodedStreamId), error: onError});
