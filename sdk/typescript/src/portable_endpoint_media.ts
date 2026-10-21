@@ -383,15 +383,21 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     // A codec/producer may recycle its output buffer as soon as emit() returns.
     // Keep an owned, bounded snapshot until the authorization queue drains.
     const ownedFrame = {...frame, bytes: frame.bytes.slice()};
+    const queuedAt = performance.now();
+    // Fresh voice matters more than an old frame: asynchronous authorization
+    // or sealing can otherwise accumulate seconds of *valid but obsolete* media.
+    const maxQueueAgeMs = frame.mediaKind === "audio" ? 150 : 250;
     const previous = this.#sendTails.get(streamKey) ?? Promise.resolve();
     this.#pendingOutbound++;
     let outboundStage = "PUBLISH_AUTHORIZATION";
     const current: Promise<void> = previous.then(async () => {
       if (!this.#active || generation !== this.#generation) return;
+      if (performance.now() - queuedAt > maxQueueAgeMs) return;
       if (!(await this.#authorizePublish(ownedFrame))) {
         throw new Error("media publish authorization revoked");
       }
       if (!this.#active || generation !== this.#generation) return;
+      if (performance.now() - queuedAt > maxQueueAgeMs) return;
       const sequence = (this.#sequences.get(streamKey) ?? 0n) + 1n;
       if (sequence > 18_446_744_073_709_551_615n) {
         throw new Error("media sequence exhausted; rotate session");
