@@ -1085,7 +1085,9 @@ function sendE2eeEnvelope(wire,mediaKind){
   // Video must not consume the final 512 KiB of the same ordered data channel:
   // small encrypted Opus frames need space even during keyframe bursts.
   // This is a congestion preference, NEVER an authorization bypass.
-  const ceiling=mediaKind==="video"?E2EE_MAX_BUFFERED_SEND_BYTES-512*1024:E2EE_MAX_BUFFERED_SEND_BYTES;
+  // Bound queueing delay on the shared reliable ordered channel: large video
+  // backlogs block subsequent Opus even when the audio packets are small.
+  const ceiling=mediaKind==="video"?256*1024:384*1024;
   if(e2eeChannel.bufferedAmount+bytes.length+Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES)*E2EE_CHUNK_HEADER_BYTES>ceiling){
     throw new Error("Encrypted media transport congested; frame not queued");
   }
