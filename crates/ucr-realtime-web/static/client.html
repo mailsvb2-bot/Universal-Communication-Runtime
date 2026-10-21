@@ -209,6 +209,13 @@ function ucrDiagnosticReport(){
     microphone:ucrDiagnosticTrack(audio),
     camera:ucrDiagnosticTrack(video),
     audioPlayback:context?context.state:"unavailable",
+    mediaStageMetrics:window.__ucrMediaStageMetrics?{
+      authorizationMs:window.__ucrMediaStageMetrics.authorizationMs,
+      authorizationMaxMs:window.__ucrMediaStageMetrics.authorizationMaxMs,
+      expiredBeforeSeal:window.__ucrMediaStageMetrics.expiredBeforeSeal,
+      outboundFrames:window.__ucrMediaStageMetrics.outboundFrames,
+      sealAndSendMs:window.__ucrMediaStageMetrics.sealAndSendMs
+    }:null,
     audioFrames:(window.__ucrAudioCounters?{
       captured:window.__ucrAudioCounters.captured,
       encoded:window.__ucrAudioCounters.encoded,
