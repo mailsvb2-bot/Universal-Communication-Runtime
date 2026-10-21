@@ -48,9 +48,14 @@ assert 'this.#scheduledAudio.get(streamKey)' in webcodecs
 assert 'source.onended = null;' in webcodecs
 assert 'source.stop();' in webcodecs
 assert 'this.#scheduledAudio.delete(streamKey);' in webcodecs
-assert 'this.#codecRecoveryAttempts++ === 0' in webcodecs
-assert 'void this.updateSources(sources).catch(' in webcodecs
-assert 'void this.stop().catch(this.#onError)' in webcodecs
+assert 'this.#codecRecoveryTimer = setTimeout(' in webcodecs
+assert 'Math.min(10_000, 250 * 2 ** Math.min(this.#codecRecoveryAttempts++, 6))' in webcodecs
+assert 'void this.updateSources(this.#currentSources).catch(this.#onError)' in webcodecs
+assert 'if (this.#codecRecoveryTimer !== null) clearTimeout(this.#codecRecoveryTimer)' in webcodecs
+assert 'this.#awaitVideoKeyframe.add(key)' in webcodecs
+assert 'this.#awaitVideoKeyframe.has(key) && !frame.keyframe' in webcodecs
+assert 'framePeak = Math.max(framePeak, peak)' in webcodecs
+assert 'ucrFreezePreLeaveSnapshot()' in client
 assert 'playoutQueuedMs' in webcodecs
 assert 'playoutJitterMs' in webcodecs
 assert 'mediaStageMetrics:window.__ucrMediaStageMetrics' in client
