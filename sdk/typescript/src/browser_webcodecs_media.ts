@@ -18,7 +18,7 @@ import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1, UcrVerified
 const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0, playoutQueuedMs: 0, playoutJitterMs: 0, playoutRebases: 0};
 // Count actual encoded and rendered video separately; a connected DataChannel
 // and encrypted packet count are not evidence of remote picture delivery.
-const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0};
+const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, lastRenderedAt: 0};
 (globalThis as unknown as {__ucrVideoCounters?: typeof ucrVideoCounters}).__ucrVideoCounters = ucrVideoCounters;
 (globalThis as unknown as {__ucrAudioCounters?: typeof ucrAudioCounters}).__ucrAudioCounters = ucrAudioCounters;
 interface EncodedChunkLike {
@@ -203,6 +203,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
   readonly #layeredCamera: boolean;
   #currentSources: UcrEndpointMediaSources | null = null;
   #codecRecoveryAttempts = 0;
+  #lastCodecFailureAt = 0;
+  #codecRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     onError: (error: unknown) => void = () => {},
@@ -263,6 +265,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     ++this.#generation;
     this.#emit = null;
     this.#currentSources = null;
+    if (this.#codecRecoveryTimer !== null) clearTimeout(this.#codecRecoveryTimer);
+    this.#codecRecoveryTimer = null;
     // No post-stop update may reattach an encoder after cleanup has finished.
     await this.#sourceUpdateTail.catch(() => {});
     await this.#reset();
@@ -332,18 +336,17 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       this.#layeredCamera ? ucrCameraLayerStreamId(streamId, "full") : streamId;
     const onError = (error: Error) => {
       if (generation !== this.#generation || !this.#emit) return;
-      // WebCodecs reports device/driver failures asynchronously, after a
-      // successful configure(). Attempt one serialized producer recreation,
-      // then retire rather than maintaining a live but silent encoder.
-      if (this.#codecRecoveryAttempts++ === 0 && this.#currentSources) {
-        const sources = this.#currentSources;
-        void this.updateSources(sources).catch((recoveryError) => {
-          this.#onError(recoveryError);
-        });
-      } else {
-        this.#onError(error);
-        void this.stop().catch(this.#onError);
-      }
+      this.#onError(error);
+      const now = Date.now();
+      if (now - this.#lastCodecFailureAt > 60_000) this.#codecRecoveryAttempts = 0;
+      this.#lastCodecFailureAt = now;
+      if (!this.#currentSources || this.#codecRecoveryTimer !== null) return;
+      const delay = Math.min(10_000, 250 * 2 ** Math.min(this.#codecRecoveryAttempts++, 6));
+      this.#codecRecoveryTimer = setTimeout(() => {
+        this.#codecRecoveryTimer = null;
+        if (!this.#emit || !this.#currentSources) return;
+        void this.updateSources(this.#currentSources).catch(this.#onError);
+      }, delay);
     };
     const encoder = kind === "audio"
       ? new b.AudioEncoder!({output: emitChunkFor(encodedStreamId), error: onError})
@@ -578,6 +581,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   #lowVideoPreferred = false;
   readonly #activeVideoStreams = new Map<string, string>();
   readonly #pendingVideoStreams = new Map<string, {streamId: string; decoderKey: string}>();
+  readonly #awaitVideoKeyframe = new Set<string>();
   // A single reference canvas may show exactly ONE authenticated video source,
   // even while a keyframe for its replacement is decoding. Retire all old
   // decoders only after the replacement has actually rendered successfully.
@@ -712,7 +716,9 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     if (!ucrWebCodecsSupported()) throw new Error("WebCodecs playback unavailable");
     let decoder = this.#decoders.get(key);
     // A newly selected encrypted video layer must start from its keyframe.
+    if (frame.mediaKind === "video" && this.#awaitVideoKeyframe.has(key) && !frame.keyframe) return;
     if (frame.mediaKind === "video" && !decoder && !frame.keyframe) return;
+    if (frame.mediaKind === "video" && frame.keyframe) this.#awaitVideoKeyframe.delete(key);
     if (frame.mediaKind === "video" && key !== this.#visibleVideoDecoderKey &&
         this.#pendingVisibleVideoDecoderKey !== key) {
       // Only the currently displayed decoder and one candidate may be alive.
@@ -764,6 +770,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               if (canvas.height !== height) canvas.height = height;
               (context as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
               ucrVideoCounters.rendered++;
+              ucrVideoCounters.lastRenderedAt = Date.now();
               if (selectedSourceKey !== null && oldVisible !== selectedStreamId) {
                 this.#activeVideoStreams.set(selectedSourceKey, selectedStreamId);
                 this.#pendingVideoStreams.delete(selectedSourceKey);
@@ -790,6 +797,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
             } finally { video.close(); }
           },
           error: (error) => {
+            this.#awaitVideoKeyframe.add(key);
+            const failed = this.#decoders.get(key);
+            if (failed) {
+              this.#decoders.delete(key);
+              try { failed.close(); } catch { /* codec already closed */ }
+            }
+            if (this.#visibleVideoDecoderKey === key) this.#visibleVideoDecoderKey = null;
+            if (this.#pendingVisibleVideoDecoderKey === key) this.#pendingVisibleVideoDecoderKey = null;
             if (selectedSourceKey !== null) {
               const pending = this.#pendingVideoStreams.get(selectedSourceKey);
               if (pending?.streamId === selectedStreamId && pending.decoderKey === key) {
@@ -827,6 +842,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
           type: frame.keyframe ? "key" : "delta", timestamp, data,
         }));
       } catch (error) {
+        this.#awaitVideoKeyframe.add(key);
+        const failed = this.#decoders.get(key);
+        if (failed) {
+          this.#decoders.delete(key);
+          try { failed.close(); } catch { /* codec already closed */ }
+        }
+        if (this.#visibleVideoDecoderKey === key) this.#visibleVideoDecoderKey = null;
+        if (this.#pendingVisibleVideoDecoderKey === key) this.#pendingVisibleVideoDecoderKey = null;
         if (videoSourceKey !== null) {
           const pending = this.#pendingVideoStreams.get(videoSourceKey);
           if (pending?.streamId === frame.streamId && pending.decoderKey === key) {
@@ -848,14 +871,16 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     try {
       const context = this.#audioContext!;
       const buffer = context.createBuffer(data.numberOfChannels, data.numberOfFrames, data.sampleRate);
+      let framePeak = 0;
       for (let ch = 0; ch < data.numberOfChannels; ch++) {
         const pcm = new Float32Array(data.numberOfFrames);
         data.copyTo(pcm, {planeIndex: ch, format: "f32-planar"});
         let peak = 0;
         for (let i = 0; i < pcm.length; i++) peak = Math.max(peak, Math.abs(pcm[i]));
-        ucrAudioCounters.outputPeak = Math.round(peak * 1000) / 1000;
+        framePeak = Math.max(framePeak, peak);
         buffer.copyToChannel(pcm, ch);
       }
+      ucrAudioCounters.outputPeak = Math.round(framePeak * 1000) / 1000;
       const node = context.createBufferSource();
       node.buffer = buffer;
       node.connect(context.destination);
@@ -925,6 +950,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     for (const decoder of this.#decoders.values()) decoder.close();
     this.#decoders.clear();
     this.#pendingVideoStreams.clear();
+    this.#awaitVideoKeyframe.clear();
     this.#activeVideoStreams.clear();
     this.#visibleVideoDecoderKey = null;
     this.#pendingVisibleVideoDecoderKey = null;
