@@ -220,7 +220,16 @@ function ucrDiagnosticReport(){
       authorizationMaxMs:window.__ucrMediaStageMetrics.authorizationMaxMs,
       expiredBeforeSeal:window.__ucrMediaStageMetrics.expiredBeforeSeal,
       outboundFrames:window.__ucrMediaStageMetrics.outboundFrames,
-      sealAndSendMs:window.__ucrMediaStageMetrics.sealAndSendMs
+      sealAndSendMs:window.__ucrMediaStageMetrics.sealAndSendMs,
+      audioExpired:window.__ucrMediaStageMetrics.audioExpired,
+      audioQueueFull:window.__ucrMediaStageMetrics.audioQueueFull,
+      audioAuthorizationRejected:window.__ucrMediaStageMetrics.audioAuthorizationRejected,
+      audioSealFailure:window.__ucrMediaStageMetrics.audioSealFailure,
+      audioTransportFailure:window.__ucrMediaStageMetrics.audioTransportFailure,
+      audioDecodeFailure:window.__ucrMediaStageMetrics.audioDecodeFailure,
+      videoExpired:window.__ucrMediaStageMetrics.videoExpired,
+      videoQueueFull:window.__ucrMediaStageMetrics.videoQueueFull,
+      videoKeyframeRequests:window.__ucrMediaStageMetrics.videoKeyframeRequests
     }:null,
     audioFrames:(window.__ucrAudioCounters?{
       captured:window.__ucrAudioCounters.captured,
@@ -240,7 +249,9 @@ function ucrDiagnosticReport(){
       stage:window.__ucrVideoAdaptation.stage,
       changes:window.__ucrVideoAdaptation.changes,
       bufferedBytes:window.__ucrVideoAdaptation.bufferedBytes,
-      encoderQueued:window.__ucrVideoAdaptation.encoderQueued
+      encoderQueued:window.__ucrVideoAdaptation.encoderQueued,
+      encodeLatencyMs:window.__ucrVideoAdaptation.encodeLatencyMs,
+      encodeLatencyMaxMs:window.__ucrVideoAdaptation.encodeLatencyMaxMs
     }:null),
     videoFrames:(window.__ucrVideoCounters?{
       captured:window.__ucrVideoCounters.captured,
