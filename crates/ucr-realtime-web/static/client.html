@@ -194,8 +194,8 @@ function ucrDiagnosticTrack(track){
 }
 function ucrDiagnosticReport(){
   const local=typeof localStream!=="undefined"?localStream:null;
-  const audio=local?.getAudioTracks()?.[0]||null;
-  const video=local?.getVideoTracks()?.[0]||null;
+  const audio=typeof local?.getAudioTracks==="function"?local.getAudioTracks()[0]||null:null;
+  const video=typeof local?.getVideoTracks==="function"?local.getVideoTracks()[0]||null:null;
   const context=window.ucrLocalRoomAudioContext;
   const grant=typeof claims!=="undefined"?claims:null;
   return {
