@@ -229,7 +229,12 @@ function ucrDiagnosticReport(){
       audioDecodeFailure:window.__ucrMediaStageMetrics.audioDecodeFailure,
       videoExpired:window.__ucrMediaStageMetrics.videoExpired,
       videoQueueFull:window.__ucrMediaStageMetrics.videoQueueFull,
-      videoKeyframeRequests:window.__ucrMediaStageMetrics.videoKeyframeRequests
+      videoKeyframeRequests:window.__ucrMediaStageMetrics.videoKeyframeRequests,
+      sendChannelClosed:window.__ucrMediaStageMetrics.sendChannelClosed,
+      sendQueueCongested:window.__ucrMediaStageMetrics.sendQueueCongested,
+      sendInvalidEnvelope:window.__ucrMediaStageMetrics.sendInvalidEnvelope,
+      sendUnexpectedFailure:window.__ucrMediaStageMetrics.sendUnexpectedFailure,
+      sendUnavailable:window.__ucrMediaStageMetrics.sendUnavailable
     }:null,
     audioFrames:(window.__ucrAudioCounters?{
       captured:window.__ucrAudioCounters.captured,
@@ -1107,10 +1112,11 @@ function receiveE2eeChunk(data){
 // Aggregate encrypted transport pressure only: no ciphertext, keys or peers.
 window.ucrEncryptedTransportBufferedAmount=()=>e2eeChannel?.readyState==="open"?
   e2eeChannel.bufferedAmount:Number.POSITIVE_INFINITY;
+function ucrTransportError(code,message){const error=new Error(message);error.code=code;return error;}
 function sendE2eeEnvelope(wire,mediaKind){
-  if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media channel is not open");
+  if(!e2eeChannel||e2eeChannel.readyState!=="open")throw ucrTransportError("UCR_TRANSPORT_CHANNEL_CLOSED","Encrypted media channel is not open");
   const bytes=wire instanceof Uint8Array?wire:new Uint8Array(wire);
-  if(bytes.length===0||bytes.length>E2EE_MAX_WIRE_BYTES)throw new Error("Encrypted media envelope exceeds transport bounds");
+  if(bytes.length===0||bytes.length>E2EE_MAX_WIRE_BYTES)throw ucrTransportError("UCR_TRANSPORT_INVALID_ENVELOPE","Encrypted media envelope exceeds transport bounds");
   // Video must not consume the final 512 KiB of the same ordered data channel:
   // small encrypted Opus frames need space even during keyframe bursts.
   // This is a congestion preference, NEVER an authorization bypass.
@@ -1118,10 +1124,10 @@ function sendE2eeEnvelope(wire,mediaKind){
   // backlogs block subsequent Opus even when the audio packets are small.
   const ceiling=mediaKind==="video"?256*1024:384*1024;
   if(e2eeChannel.bufferedAmount+bytes.length+Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES)*E2EE_CHUNK_HEADER_BYTES>ceiling){
-    throw new Error("Encrypted media transport congested; frame not queued");
+    throw ucrTransportError("UCR_TRANSPORT_QUEUE_CONGESTED","Encrypted media transport congested; frame not queued");
   }
   const count=Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES);
-  if(count>65535)throw new Error("Encrypted media envelope requires too many chunks");
+  if(count>65535)throw ucrTransportError("UCR_TRANSPORT_INVALID_ENVELOPE","Encrypted media envelope requires too many chunks");
   const messageId=BigInt(e2eeMessageId++);
   for(let index=0;index<count;index++){
     const start=index*E2EE_CHUNK_PAYLOAD_BYTES,end=Math.min(bytes.length,start+E2EE_CHUNK_PAYLOAD_BYTES);
@@ -1730,7 +1736,9 @@ async function startWebRtcOnce(forceMedia=false){
   remoteDescriptionAccepted=true;
   for(const candidate of pendingCandidates.splice(0)){ensureOwnedPeer();await sendCandidate(candidate);}
   ensureOwnedPeer();
-  ui.webrtcState.textContent="Connecting";
+  // SDP signalling completion must not overwrite a later ICE/DTLS state.
+  // Render the peer's actual current state, not a stale assumption.
+  ui.webrtcState.textContent=pc.connectionState||"Connecting";
 }
 async function restartIce(){
   if(restarting||!sessionActive||!mediaActive||!navigator.onLine||!peer)return false;
