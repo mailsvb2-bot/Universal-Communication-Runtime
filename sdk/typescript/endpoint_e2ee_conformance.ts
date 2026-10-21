@@ -2601,6 +2601,40 @@ try {
   await outbound.stop();
 }
 
+// Authorization can be temporarily slow on a real Windows machine. Frames
+// must not be encrypted/sent after they become obsolete while awaiting it.
+{
+  let sealed = 0, delivered = 0;
+  const delayed = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire() { sealed++; return Uint8Array.of(1); },
+      open_wire() { return Uint8Array.of(1); }, revoke() {},
+    },
+    producer: {
+      async start(_sources, emit) {
+        await emit({mediaKind: "audio", streamId: "mic", timestamp: 1n,
+          keyframe: false, bytes: Uint8Array.of(9)});
+      },
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() { return new Uint8Array(32); }},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => true,
+    authorizePublish: async () => {
+      await new Promise(resolve => setTimeout(resolve, 180));
+      return true;
+    },
+  });
+  await delayed.start({stream: {} as MediaStream, cameraStream: {} as MediaStream,
+    sendEnvelope() {delivered++;}});
+  assert.equal(sealed, 0, "stale authorized speech must not be encrypted");
+  assert.equal(delivered, 0, "stale authorized speech must not reach DataChannel");
+  await delayed.stop();
+}
+
 // Exercise fail-closed stage attribution for the real portable sender. The
 // failure must remain observable without leaking transport payloads or keys.
 for (const [name, publish, seal, transport] of [
