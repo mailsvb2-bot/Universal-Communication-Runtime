@@ -54,6 +54,8 @@ assert 'const start = pending - now > 0.35 ? now' not in webcodecs
 assert 'export function ucrAdaptiveVideoStep(' in webcodecs
 assert 'ucrVideoAdaptation.stage = next.stage' in webcodecs
 assert 'ucrEncryptedTransportBufferedAmount' in client
+assert 'const ceiling=mediaKind==="video"?256*1024:384*1024;' in client
+assert 'e2eeChannel.bufferedAmount:Number.POSITIVE_INFINITY' in client
 assert 'videoAdaptation:(window.__ucrVideoAdaptation?' in client
 print("PASS VP8 quality adapts by encrypted transport/encoder congestion and exports aggregate telemetry")
 print("PASS decoded Opus playout is bounded and never overlaps stale audio bursts")
