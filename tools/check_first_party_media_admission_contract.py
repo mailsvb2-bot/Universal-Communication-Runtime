@@ -59,6 +59,20 @@ assert 'ucrFreezePreLeaveSnapshot()' in client
 assert 'playoutQueuedMs' in webcodecs
 assert 'playoutJitterMs' in webcodecs
 assert 'mediaStageMetrics:window.__ucrMediaStageMetrics' in client
+assert 'sendChannelClosed' in pipeline
+assert 'sendQueueCongested' in pipeline
+assert 'sendInvalidEnvelope' in pipeline
+assert 'sendUnexpectedFailure' in pipeline
+assert 'sendUnavailable' in pipeline
+assert 'code === "UCR_TRANSPORT_CHANNEL_CLOSED"' in pipeline
+assert 'code === "UCR_TRANSPORT_QUEUE_CONGESTED"' in pipeline
+assert 'code === "UCR_TRANSPORT_INVALID_ENVELOPE"' in pipeline
+assert 'ui.webrtcState.textContent=pc.connectionState||"Connecting";' in client
+assert 'UCR_TRANSPORT_CHANNEL_CLOSED' in client
+assert 'UCR_TRANSPORT_QUEUE_CONGESTED' in client
+assert 'UCR_TRANSPORT_INVALID_ENVELOPE' in client
+assert 'sendQueueCongested:window.__ucrMediaStageMetrics.sendQueueCongested' in client
+
 assert 'requestVideoKeyframe?(streamId: string)' in pipeline
 assert 'this.#producer.requestVideoKeyframe?.(frame.streamId)' in pipeline
 assert 'videoKeyframeRequests' in pipeline
