@@ -2542,7 +2542,7 @@ try {
   assert.ok(start >= 0 && end > start, "encrypted sender must accept media class");
   const sentChunks: Uint8Array[] = [];
   const context: Record<string, any> = {
-    e2eeChannel: {readyState: "open", bufferedAmount: 1_700_000,
+    e2eeChannel: {readyState: "open", bufferedAmount: 300_000,
       send(chunk: Uint8Array) {sentChunks.push(chunk);}},
     e2eeMessageId: 1, E2EE_MAX_WIRE_BYTES: 2 * 1024 * 1024 + 8192,
     E2EE_MAX_BUFFERED_SEND_BYTES: 2 * 1024 * 1024,
@@ -2557,6 +2557,11 @@ try {
   context.publish(Uint8Array.of(1,2), "audio");
   assert.equal(sentChunks.length,1,"encrypted Opus must use reserved channel capacity");
   assert.equal(context.window.__ucrAudioCounters.transportQueued,1);
+  // Bounded latency is more important than accepting ever-growing Opus
+  // backlog: above the audio limit even voice frames must be refused.
+  context.e2eeChannel.bufferedAmount = 400_000;
+  assert.throws(()=>context.publish(Uint8Array.of(3,4), "audio"),/congested/);
+  assert.equal(sentChunks.length,1,"overloaded transport must not accumulate stale voice");
 }
 
 // The same canonical MLS transport must preserve the authenticated media class
