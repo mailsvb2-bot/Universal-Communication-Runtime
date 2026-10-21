@@ -249,9 +249,11 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     }
     this.#pending++;
     const generation = this.#generation;
+    let inboundAudio = false;
     try {
       const envelope = decodeSfuForwardEnvelopeWire(wire);
       const header = envelope.frame.header;
+      inboundAudio = header.mediaKind === "audio";
       const binding = this.#binding;
       if (binding && (header.tenantId !== binding.tenantId ||
           header.namespaceId !== binding.namespaceId ||
@@ -325,6 +327,8 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       try {
         await current;
       } catch (_error) {
+        if (inboundAudio && inboundStage === "DECODE_AND_PLAY")
+          ucrMediaStageMetrics.audioDecodeFailure++;
         const code = "UCR_MEDIA_INBOUND_" + inboundStage;
         this.#onError(new Error(code));
         throw _error;
@@ -434,7 +438,6 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         metrics.authorizationMaxMs = Math.max(metrics.authorizationMaxMs, Math.round(elapsed));
       }
       if (!authorized) {
-        if (frame.mediaKind === "audio") ucrMediaStageMetrics.audioAuthorizationRejected++;
         throw new Error("media publish authorization revoked");
       }
       if (!this.#active || generation !== this.#generation) return;
