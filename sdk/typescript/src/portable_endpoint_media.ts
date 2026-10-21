@@ -178,7 +178,19 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   async updateSources(sources: UcrEndpointMediaSources): Promise<void> {
     if (!this.#active) throw new Error("endpoint media not started");
     if (!this.#producer.updateSources) throw new Error("media source updates unsupported by platform producer");
-    await this.#producer.updateSources(sources);
+    try {
+      await this.#producer.updateSources(sources);
+    } catch (error) {
+      // The producer may already have torn down the previous media sources.
+      // Never retain a live MLS signer and report an active call after failed
+      // source replacement. Retire the whole endpoint and require fresh Join.
+      try {
+        await this.stop();
+      } catch (cleanupError) {
+        this.#onError(cleanupError);
+      }
+      throw error;
+    }
   }
 
   /** No placeholder CPU/battery/thermal metrics: absent measurement means no report. */
