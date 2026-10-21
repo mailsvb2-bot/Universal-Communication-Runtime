@@ -1587,7 +1587,7 @@ async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims
     if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
   }catch(error){
     const message=String(error?.message||error);
-    if(/\\b404\\b|not_found|offer_not_found/i.test(message)){
+    if(/\b404\b|not_found|offer_not_found/i.test(message)){
       ucrRecordDiagnostic("WebRTC offer already retired on close","webrtc");
       if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
     }else{
