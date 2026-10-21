@@ -50,6 +50,8 @@ export interface UcrMediaProducer {
     emit: (frame: UcrEncodedMediaFrame) => void | Promise<void>,
   ): void | Promise<void>;
   updateSources?(sources: UcrEndpointMediaSources): void | Promise<void>;
+  /** Request a clean reference frame after a pre-encryption video drop. */
+  requestVideoKeyframe?(streamId: string): void;
   stop(): void | Promise<void>;
 }
 
@@ -91,6 +93,9 @@ type InboundHeader = SfuForwardEnvelopeWire["frame"]["header"];
 const ucrMediaStageMetrics = {
   authorizationMs: 0, authorizationMaxMs: 0, expiredBeforeSeal: 0,
   outboundFrames: 0, sealAndSendMs: 0,
+  audioExpired: 0, audioQueueFull: 0, audioAuthorizationRejected: 0,
+  audioSealFailure: 0, audioTransportFailure: 0, audioDecodeFailure: 0,
+  videoExpired: 0, videoQueueFull: 0, videoKeyframeRequests: 0,
 };
 (globalThis as unknown as {__ucrMediaStageMetrics?: typeof ucrMediaStageMetrics})
   .__ucrMediaStageMetrics = ucrMediaStageMetrics;
@@ -382,6 +387,11 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       return;
     }
     if (this.#pendingOutbound >= this.#maxPendingFrames) {
+      if (frame.mediaKind === "video") {
+        ucrMediaStageMetrics.videoQueueFull++;
+        this.#producer.requestVideoKeyframe?.(frame.streamId);
+        ucrMediaStageMetrics.videoKeyframeRequests++;
+      } else ucrMediaStageMetrics.audioQueueFull++;
       this.#onError(new Error("outbound endpoint media queue capacity exceeded"));
       return;
     }
@@ -409,6 +419,11 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       if (!this.#active || generation !== this.#generation) return;
       if (performance.now() - queuedAt > maxQueueAgeMs) {
         if (metrics) metrics.expiredBeforeSeal++;
+        if (frame.mediaKind === "video") {
+          ucrMediaStageMetrics.videoExpired++;
+          this.#producer.requestVideoKeyframe?.(frame.streamId);
+          ucrMediaStageMetrics.videoKeyframeRequests++;
+        } else ucrMediaStageMetrics.audioExpired++;
         return;
       }
       const authStarted = performance.now();
@@ -419,11 +434,17 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         metrics.authorizationMaxMs = Math.max(metrics.authorizationMaxMs, Math.round(elapsed));
       }
       if (!authorized) {
+        if (frame.mediaKind === "audio") ucrMediaStageMetrics.audioAuthorizationRejected++;
         throw new Error("media publish authorization revoked");
       }
       if (!this.#active || generation !== this.#generation) return;
       if (performance.now() - queuedAt > maxQueueAgeMs) {
         if (metrics) metrics.expiredBeforeSeal++;
+        if (frame.mediaKind === "video") {
+          ucrMediaStageMetrics.videoExpired++;
+          this.#producer.requestVideoKeyframe?.(frame.streamId);
+          ucrMediaStageMetrics.videoKeyframeRequests++;
+        } else ucrMediaStageMetrics.audioExpired++;
         return;
       }
       const sequence = (this.#sequences.get(streamKey) ?? 0n) + 1n;
@@ -453,7 +474,16 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         metrics.sealAndSendMs = Math.round(performance.now() - queuedAt);
       }
     }).catch((_error: unknown) => {
+      if (frame.mediaKind === "audio") {
+        if (outboundStage === "PUBLISH_AUTHORIZATION") ucrMediaStageMetrics.audioAuthorizationRejected++;
+        else if (outboundStage === "SEAL_WIRE") ucrMediaStageMetrics.audioSealFailure++;
+        else ucrMediaStageMetrics.audioTransportFailure++;
+      }
       // Stable, non-sensitive stage labels; never expose keys, ciphertext or source identity.
+      if (frame.mediaKind === "video") {
+        this.#producer.requestVideoKeyframe?.(frame.streamId);
+        ucrMediaStageMetrics.videoKeyframeRequests++;
+      }
       this.#onError(new Error("UCR_MEDIA_OUTBOUND_" + outboundStage));
     }).finally(() => {
       this.#pendingOutbound--;
