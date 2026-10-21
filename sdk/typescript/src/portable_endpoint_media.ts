@@ -96,6 +96,8 @@ const ucrMediaStageMetrics = {
   audioExpired: 0, audioQueueFull: 0, audioAuthorizationRejected: 0,
   audioSealFailure: 0, audioTransportFailure: 0, audioDecodeFailure: 0,
   videoExpired: 0, videoQueueFull: 0, videoKeyframeRequests: 0,
+  sendChannelClosed: 0, sendQueueCongested: 0, sendInvalidEnvelope: 0,
+  sendUnexpectedFailure: 0, sendUnavailable: 0,
 };
 (globalThis as unknown as {__ucrMediaStageMetrics?: typeof ucrMediaStageMetrics})
   .__ucrMediaStageMetrics = ucrMediaStageMetrics;
@@ -470,13 +472,26 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       }
       if (!this.#active || generation !== this.#generation) return;
       outboundStage = "DATACHANNEL_SEND";
-      if (!this.#sender) throw new Error("media sender unavailable");
+      if (!this.#sender) {
+        ucrMediaStageMetrics.sendUnavailable++;
+        throw new Error("media sender unavailable");
+      }
       this.#sender(wire, ownedFrame.mediaKind);
       if (metrics) {
         metrics.outboundFrames++;
         metrics.sealAndSendMs = Math.round(performance.now() - queuedAt);
       }
     }).catch((_error: unknown) => {
+      if (outboundStage === "DATACHANNEL_SEND" && this.#sender) {
+        // Only codes issued by the first-party transport are trusted.
+        // Do not expose arbitrary exception text, URLs, devices or identifiers.
+        const code = (_error && typeof _error === "object" &&
+          "code" in _error) ? (_error as {code?: unknown}).code : null;
+        if (code === "UCR_TRANSPORT_CHANNEL_CLOSED") ucrMediaStageMetrics.sendChannelClosed++;
+        else if (code === "UCR_TRANSPORT_QUEUE_CONGESTED") ucrMediaStageMetrics.sendQueueCongested++;
+        else if (code === "UCR_TRANSPORT_INVALID_ENVELOPE") ucrMediaStageMetrics.sendInvalidEnvelope++;
+        else ucrMediaStageMetrics.sendUnexpectedFailure++;
+      }
       if (frame.mediaKind === "audio") {
         if (outboundStage === "PUBLISH_AUTHORIZATION") ucrMediaStageMetrics.audioAuthorizationRejected++;
         else if (outboundStage === "SEAL_WIRE") ucrMediaStageMetrics.audioSealFailure++;
