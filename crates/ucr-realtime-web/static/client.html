@@ -1077,7 +1077,7 @@ function receiveE2eeChunk(data){
 }
 // Aggregate encrypted transport pressure only: no ciphertext, keys or peers.
 window.ucrEncryptedTransportBufferedAmount=()=>e2eeChannel?.readyState==="open"?
-  e2eeChannel.bufferedAmount:0;
+  e2eeChannel.bufferedAmount:Number.POSITIVE_INFINITY;
 function sendE2eeEnvelope(wire,mediaKind){
   if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media channel is not open");
   const bytes=wire instanceof Uint8Array?wire:new Uint8Array(wire);
