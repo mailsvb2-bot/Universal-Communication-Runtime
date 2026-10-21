@@ -2537,7 +2537,7 @@ try {
 // video. This tests the real browser transport function, not a mock priority
 // implementation; permission/MLS checks stay in the portable adapter.
 {
-  const start = browser.indexOf("function sendE2eeEnvelope(wire,mediaKind){");
+  const start = browser.indexOf("function ucrTransportError(code,message){");
   const end = browser.indexOf("function endpointMediaSources(){", start);
   assert.ok(start >= 0 && end > start, "encrypted sender must accept media class");
   const sentChunks: Uint8Array[] = [];
