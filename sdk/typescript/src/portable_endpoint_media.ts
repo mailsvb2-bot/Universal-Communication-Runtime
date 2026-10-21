@@ -87,6 +87,14 @@ export interface UcrEndpointPipelineOptions {
 
 type InboundHeader = SfuForwardEnvelopeWire["frame"]["header"];
 
+// Aggregate endpoint stage counters. Never expose plaintext, peer IDs or keys.
+const ucrMediaStageMetrics = {
+  authorizationMs: 0, authorizationMaxMs: 0, expiredBeforeSeal: 0,
+  outboundFrames: 0, sealAndSendMs: 0,
+};
+(globalThis as unknown as {__ucrMediaStageMetrics?: typeof ucrMediaStageMetrics})
+  .__ucrMediaStageMetrics = ucrMediaStageMetrics;
+
 export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1 {
   readonly contractVersion = UCR_ENDPOINT_E2EE_CONTRACT_VERSION;
   readonly #bridge: UcrGroupMediaCryptoBridge;
