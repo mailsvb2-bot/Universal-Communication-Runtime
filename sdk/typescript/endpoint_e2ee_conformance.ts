@@ -2080,6 +2080,38 @@ assert.equal(await endpoint.getReceiveMediaTelemetry(), null);
 await assert.rejects(endpoint.applyReceiveMediaDecision({
   stage: "audio", video: null, opus_target_bitrate_bps: 48_000,
 }), /not active/);
+// A failed capture replacement must atomically retire encryption and stop
+// BOTH platform endpoints: a media-less UI must never keep a live MLS signer.
+const failedSourceEvents: string[] = [];
+const failedSourceEndpoint = new UcrPortableEndpointMediaAdapter({
+  bridge: {
+    seal_wire() { return new Uint8Array(); },
+    open_wire() { return new Uint8Array(); },
+    revoke() { failedSourceEvents.push("revoke"); },
+  },
+  consumer: {
+    play() {},
+    stop() { failedSourceEvents.push("consumer:stop"); },
+  },
+  producer: {
+    start() { failedSourceEvents.push("producer:start"); },
+    updateSources() { throw new Error("capture replacement failed"); },
+    stop() { failedSourceEvents.push("producer:stop"); },
+  },
+  trustedKeys: {resolve() { return new Uint8Array(32); }},
+  binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+    groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+    negotiationGeneration: 1n},
+  authorizeFrame: () => true,
+  authorizePublish: () => true,
+});
+await failedSourceEndpoint.start({...src, sendEnvelope() {}});
+await assert.rejects(failedSourceEndpoint.updateSources(src), /capture replacement failed/);
+assert.deepEqual(failedSourceEvents, [
+  "producer:start", "revoke", "producer:stop", "consumer:stop",
+]);
+await assert.rejects(failedSourceEndpoint.start({...src, sendEnvelope() {}}),
+  /retired/);
 const decoder = new UcrBrowserWebCodecsConsumer();
 decoder.setReceiveQuality({stage: "audio", video: null, opus_target_bitrate_bps: 48_000});
 // Video is ignored before needing WebCodecs APIs: no forbidden plaintext fallbacks.
