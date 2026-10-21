@@ -225,7 +225,10 @@ function ucrDiagnosticReport(){
       scheduled:window.__ucrAudioCounters.scheduled,
       dropped:window.__ucrAudioCounters.dropped,
       inputPeak:window.__ucrAudioCounters.inputPeak,
-      outputPeak:window.__ucrAudioCounters.outputPeak
+      outputPeak:window.__ucrAudioCounters.outputPeak,
+      playoutQueuedMs:window.__ucrAudioCounters.playoutQueuedMs,
+      playoutJitterMs:window.__ucrAudioCounters.playoutJitterMs,
+      playoutRebases:window.__ucrAudioCounters.playoutRebases
     }:null),
     videoAdaptation:(window.__ucrVideoAdaptation?{
       stage:window.__ucrVideoAdaptation.stage,
