@@ -59,6 +59,23 @@ assert 'ucrFreezePreLeaveSnapshot()' in client
 assert 'playoutQueuedMs' in webcodecs
 assert 'playoutJitterMs' in webcodecs
 assert 'mediaStageMetrics:window.__ucrMediaStageMetrics' in client
+assert 'requestVideoKeyframe?(streamId: string)' in pipeline
+assert 'this.#producer.requestVideoKeyframe?.(frame.streamId)' in pipeline
+assert 'videoKeyframeRequests' in pipeline
+assert 'audioExpired' in pipeline
+assert 'audioQueueFull' in pipeline
+assert 'audioAuthorizationRejected' in pipeline
+assert 'audioSealFailure' in pipeline
+assert 'audioTransportFailure' in pipeline
+assert 'audioDecodeFailure' in pipeline
+assert 'encodeLatencyMs' in webcodecs
+assert 'encodeStartTimes.set(frame.timestamp, encodeStarted)' in webcodecs
+assert 'performance.now() - started' in webcodecs
+assert 'this.#keyframeRequests.set(encodedStreamId' in webcodecs
+assert 'this.#keyframeRequests.set(lowStreamId' in webcodecs
+assert 'audioTransportFailure:window.__ucrMediaStageMetrics.audioTransportFailure' in client
+assert 'encodeLatencyMaxMs:window.__ucrVideoAdaptation.encodeLatencyMaxMs' in client
+
 
 assert 'state.next = now + cushion;' in webcodecs
 assert 'const start = Math.max(now + 0.012, state.next)' in webcodecs
