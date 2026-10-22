@@ -117,15 +117,26 @@ export function ucrVideoEncodingTarget(width: number, height: number): {
       width < 1 || height < 1 || width > 7680 || height > 4320) {
     throw new Error("invalid measured source video dimensions");
   }
-  const pixels = width * height;
-  // The browser's encrypted DataChannel is not a congestion-controlled
-  // RTP sender. Conservative realtime VP8 budgets prevent bursty camera
-  // packets from starving latency-sensitive encrypted Opus.
-  if (pixels >= 1920 * 1080) return {frameRate: 30, bitrate: 4_000_000};
-  if (pixels >= 1280 * 720) return {frameRate: 30, bitrate: 2_000_000};
-  if (pixels >= 854 * 480) return {frameRate: 30, bitrate: 1_000_000};
-  return {frameRate: 12, bitrate: 384_000};
+  const {width: w, height: h} = ucrVideoEncodeSize(width, height, 1);
+  const bitrate = Math.round(Math.min(2_500_000, Math.max(600_000, w * h * 30 * 0.09)) / 1000) * 1000;
+  return {frameRate: 30, bitrate};
 }
+export function ucrVideoEncodeSize(width: number, height: number, scale: number): {
+  width: number; height: number;
+} {
+  const cap = Math.min(1, 1280 / Math.max(width, height), 720 / Math.min(width, height));
+  const f = Math.min(1, cap) * Math.min(1, Math.max(0.25, scale));
+  const even = (v: number) => Math.max(2, Math.round(v * f / 2) * 2);
+  return {width: even(width), height: even(height)};
+}
+export function ucrVideoStageProfile(stage: number): {scale: number; bitrateFactor: number; frameRate: number} {
+  if (stage <= 0) return {scale: 1, bitrateFactor: 1, frameRate: 30};
+  if (stage === 1) return {scale: 0.75, bitrateFactor: 0.6, frameRate: 30};
+  return {scale: 0.5, bitrateFactor: 0.35, frameRate: 24};
+}
+let ucrVideoForceSoftware = false;
+const ucrVideoHw = (): "no-preference" | "prefer-software" =>
+  ucrVideoForceSoftware ? "prefer-software" : "no-preference";
 /** Source-owned congestion adaptation. Only verified encrypted transport queue
  * depth and local encoder pressure influence publish quality. Never change MLS
  * keys, Device authority, or a different participant's receive policy.
@@ -160,7 +171,7 @@ const LOW_CAMERA_INTERVAL_US = 1_000_000 / LOW_CAMERA_FPS;
 // A subscriber can decode only from a keyframe. Tie that to wall time, not to
 // a fixed frame count: a busy or slow camera would otherwise hide the picture
 // for many seconds after someone joins.
-const VIDEO_KEYFRAME_INTERVAL_US = 1_000_000;
+const VIDEO_KEYFRAME_INTERVAL_US = 8_000_000;
 
 /** Stable, bounded stream identity for one actual encrypted camera quality layer.
  * Each derived stream gets a distinct MLS traffic key context through its stream ID.
@@ -355,6 +366,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     if (kind === "video") this.#keyframeRequests.set(encodedStreamId, () => { forceKeyframe = true; });
     const onError = (error: Error) => {
       if (generation !== this.#generation || !this.#emit) return;
+      if (kind === "video") ucrVideoForceSoftware = true;
       this.#onError(error);
       const now = Date.now();
       if (now - this.#lastCodecFailureAt > 60_000) this.#codecRecoveryAttempts = 0;
@@ -372,24 +384,26 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       : new b.VideoEncoder!({output: emitChunkFor(encodedStreamId), error: onError});
     if (kind === "audio") {
       encoder.configure({codec: AUDIO_CODEC, sampleRate: AUDIO_RATE,
-        numberOfChannels: AUDIO_CHANNELS, bitrate: 32_000});
+        numberOfChannels: AUDIO_CHANNELS, bitrate: 48_000,
+        opus: {complexity: 8, useinbandfec: true, frameDuration: 20_000}} as never);
     } else {
       const settings = track.getSettings();
       const width = settings.width ?? VIDEO_WIDTH;
       const height = settings.height ?? VIDEO_HEIGHT;
       const quality = ucrVideoEncodingTarget(width, height);
-      const config = {codec: VIDEO_CODEC, width, height,
+      const size = ucrVideoEncodeSize(width, height, 1);
+      const config = {codec: VIDEO_CODEC, width: size.width, height: size.height,
         framerate: Math.min(
           Math.max(1, settings.frameRate ?? VIDEO_FRAMERATE), quality.frameRate,
         ),
-        bitrate: quality.bitrate, latencyMode: "realtime"};
+        bitrate: quality.bitrate, bitrateMode: "variable", latencyMode: "realtime"};
       // On some Windows GPU stacks configure(prefer-hardware) succeeds but
       // the asynchronous first encode fails, leaving a live camera and zero
       // encoded video frames. Prefer a software VP8 encoder for the first call;
       // preserve resolution and bitrate, and fall back to default negotiation
       // only if this browser rejects that preference synchronously.
       try {
-        encoder.configure({...config, hardwareAcceleration: "prefer-software"});
+        encoder.configure({...config, hardwareAcceleration: ucrVideoHw()});
       } catch {
         encoder.configure(config);
       }
@@ -414,7 +428,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         lowEncoder.configure({
           codec: VIDEO_CODEC, width: LOW_CAMERA_WIDTH, height: LOW_CAMERA_HEIGHT,
           framerate: LOW_CAMERA_FPS, bitrate: LOW_CAMERA_BITRATE_BPS,
-          latencyMode: "realtime", hardwareAcceleration: "prefer-software",
+          latencyMode: "realtime", hardwareAcceleration: ucrVideoHw(),
         });
         this.#encoders.push(lowEncoder);
         this.#keyframeRequests.set(lowStreamId, () => { forceLowKeyframe = true; });
@@ -451,7 +465,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       let lastLowTimestamp = -LOW_CAMERA_INTERVAL_US;
       const due = (timestamp: number, last: number, since: number) => {
         const clock = Number.isFinite(timestamp) ? timestamp : 0;
-        return since >= 30 || clock - last >= VIDEO_KEYFRAME_INTERVAL_US;
+        return since >= 300 || clock - last >= VIDEO_KEYFRAME_INTERVAL_US;
       };
       while (generation === this.#generation) {
         const result = await reader.read();
@@ -493,14 +507,14 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               const width = settings.width ?? VIDEO_WIDTH;
               const height = settings.height ?? VIDEO_HEIGHT;
               const full = ucrVideoEncodingTarget(width, height);
-              const factor = qualityStage === 0 ? 1 : qualityStage === 1 ? 0.45 : 0.2;
-              const fps = qualityStage === 0 ? full.frameRate : qualityStage === 1 ? 15 : 10;
-              const config = {codec: VIDEO_CODEC, width, height,
-                framerate: Math.min(settings.frameRate ?? VIDEO_FRAMERATE, fps),
-                bitrate: Math.max(150_000, Math.round(full.bitrate * factor)),
-                latencyMode: "realtime"};
+              const profile = ucrVideoStageProfile(qualityStage);
+              const size = ucrVideoEncodeSize(width, height, profile.scale);
+              const config = {codec: VIDEO_CODEC, width: size.width, height: size.height,
+                framerate: Math.min(settings.frameRate ?? VIDEO_FRAMERATE, profile.frameRate),
+                bitrate: Math.max(250_000, Math.round(full.bitrate * profile.bitrateFactor)),
+                bitrateMode: "variable", latencyMode: "realtime"};
               try {
-                encoder.configure({...config, hardwareAcceleration: "prefer-software"});
+                encoder.configure({...config, hardwareAcceleration: ucrVideoHw()});
               } catch {
                 encoder.configure(config);
               }
@@ -508,14 +522,11 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             }
           }
           const maxFps = kind === "video" ?
-            (qualityStage === 0 ? ucrVideoEncodingTarget(
-              track.getSettings().width ?? VIDEO_WIDTH,
-              track.getSettings().height ?? VIDEO_HEIGHT).frameRate :
-              qualityStage === 1 ? 15 : 10) : 0;
+            ucrVideoStageProfile(qualityStage).frameRate : 0;
           const videoPacingOk = kind !== "video" ||
             // Capture timestamps are integer microseconds; allow sub-microsecond
             // rounding so a nominal 30 fps source (33_333 us) is not halved.
-            frame.timestamp - lastVideoEncodeTimestamp >= Math.floor(1_000_000 / maxFps);
+            frame.timestamp - lastVideoEncodeTimestamp >= Math.floor(800_000 / maxFps);
           if (videoPacingOk && ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
             const keyframe = kind === "video" &&
               (forceKeyframe || due(frame.timestamp, lastKeyframeTimestamp, framesSinceKeyframe));
@@ -523,11 +534,13 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               ucrAudioCounters.captured++;
               const pcm = ucrNormalizeOpusAudio(frame as AudioData);
               try {
-                const samples = new Float32Array(pcm.numberOfFrames);
-                pcm.copyTo(samples, {planeIndex: 0, format: "f32-planar"});
-                let peak = 0;
-                for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
-                ucrAudioCounters.inputPeak = Math.round(peak * 1000) / 1000;
+                if ((ucrAudioCounters.captured & 15) === 0) {
+                  const samples = new Float32Array(pcm.numberOfFrames);
+                  pcm.copyTo(samples, {planeIndex: 0, format: "f32-planar"});
+                  let peak = 0;
+                  for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
+                  ucrAudioCounters.inputPeak = Math.round(peak * 1000) / 1000;
+                }
                 encoder.encode(pcm);
               }
               finally { if (pcm !== frame) pcm.close(); }
