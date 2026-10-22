@@ -526,7 +526,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
           const videoPacingOk = kind !== "video" ||
             // Capture timestamps are integer microseconds; allow sub-microsecond
             // rounding so a nominal 30 fps source (33_333 us) is not halved.
-            frame.timestamp - lastVideoEncodeTimestamp >= Math.floor(800_000 / maxFps);
+            frame.timestamp - lastVideoEncodeTimestamp >= Math.floor(1_000_000 / maxFps) - 1;
           if (videoPacingOk && ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
             const keyframe = kind === "video" &&
               (forceKeyframe || due(frame.timestamp, lastKeyframeTimestamp, framesSinceKeyframe));
