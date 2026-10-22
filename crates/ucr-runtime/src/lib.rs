@@ -3333,7 +3333,8 @@ async fn run_webrtc_e2ee_session_lane(
     service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
 ) {
     loop {
-        let Ok(Some(frame)) = tokio::time::timeout(Duration::from_mins(2), lane.recv()).await else {
+        let Ok(Some(frame)) = tokio::time::timeout(Duration::from_mins(2), lane.recv()).await
+        else {
             break;
         };
         if service.has_sfu_media_router() {
