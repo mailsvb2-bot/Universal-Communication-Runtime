@@ -100,6 +100,17 @@ assert 'ucrEncryptedTransportBufferedAmount' in client
 assert 'const ceiling=mediaKind==="video"?256*1024:384*1024;' in client
 assert 'e2eeChannel.bufferedAmount:Number.POSITIVE_INFINITY' in client
 assert 'videoAdaptation:(window.__ucrVideoAdaptation?' in client
+# Windows launch must not silently trust expired certs or reuse gitignored WASM.
+windows_launcher = (root/"scripts/windows/start-local-first-party-https.ps1").read_text(encoding="utf-8")
+windows_builder = (root/"scripts/windows/build-browser-media.ps1").read_text(encoding="utf-8")
+assert "'-checkend' '86400'" in windows_launcher
+assert "$certPublic -ne $keyPublic" in windows_launcher
+assert "$renewCertificate" in windows_launcher
+assert "build-browser-media.ps1" in windows_launcher
+assert "crates\\ucr-realtime-web\\static\\endpoint-wasm\\ucr_endpoint_wasm_bg.wasm" in windows_launcher
+assert 'wasm-bindgen 0.2.128' in windows_builder
+assert '"wasm32-unknown-unknown"' in windows_builder
+print("PASS Windows launcher renews expired TLS certificates and rebuilds revision-matched WASM/SDK")
 print("PASS VP8 quality adapts by encrypted transport/encoder congestion and exports aggregate telemetry")
 print("PASS decoded Opus playout is bounded and never overlaps stale audio bursts")
 print("PASS real WebCodecs Opus frames comply with canonical Rust no-audio-keyframe contract")
