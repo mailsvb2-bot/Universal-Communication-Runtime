@@ -171,7 +171,11 @@ const LOW_CAMERA_INTERVAL_US = 1_000_000 / LOW_CAMERA_FPS;
 // A subscriber can decode only from a keyframe. Tie that to wall time, not to
 // a fixed frame count: a busy or slow camera would otherwise hide the picture
 // for many seconds after someone joins.
-const VIDEO_KEYFRAME_INTERVAL_US = 8_000_000;
+// No confirmed receiver-to-sender keyframe request for joining/rekeying peers.
+// Bound decoder recovery at startup, then reduce steady-state refresh overhead.
+const VIDEO_KEYFRAME_INTERVAL_US = 3_000_000;
+const VIDEO_STARTUP_KEYFRAME_INTERVAL_US = 1_000_000;
+const VIDEO_STARTUP_WINDOW_US = 5_000_000;
 
 /** Stable, bounded stream identity for one actual encrypted camera quality layer.
  * Each derived stream gets a distinct MLS traffic key context through its stream ID.
@@ -463,9 +467,13 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       let lastLowKeyframeTimestamp = Number.NEGATIVE_INFINITY;
       let lowFramesSinceKeyframe = Number.POSITIVE_INFINITY;
       let lastLowTimestamp = -LOW_CAMERA_INTERVAL_US;
+      let streamStartTimestamp = Number.NaN;
       const due = (timestamp: number, last: number, since: number) => {
         const clock = Number.isFinite(timestamp) ? timestamp : 0;
-        return since >= 300 || clock - last >= VIDEO_KEYFRAME_INTERVAL_US;
+        if (Number.isNaN(streamStartTimestamp)) streamStartTimestamp = clock;
+        const interval = clock - streamStartTimestamp < VIDEO_STARTUP_WINDOW_US
+          ? VIDEO_STARTUP_KEYFRAME_INTERVAL_US : VIDEO_KEYFRAME_INTERVAL_US;
+        return since >= 300 || clock - last >= interval;
       };
       while (generation === this.#generation) {
         const result = await reader.read();
