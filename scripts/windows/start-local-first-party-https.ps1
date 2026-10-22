@@ -78,11 +78,6 @@ function Start-Ucr([string]$exe,[string[]]$arguments,[string]$name) {
 
 Require-File $vc
 Require-File (Join-Path $opensslRoot 'include\openssl\ssl.h')
-foreach ($asset in @(
-    'crates\ucr-realtime-web\static\endpoint-media\reference_browser_media_installer.js',
-    'crates\ucr-realtime-web\static\endpoint-wasm\ucr_endpoint_wasm.js',
-    'crates\ucr-realtime-web\static\endpoint-wasm\ucr_endpoint_wasm_bg.wasm'
-)) { Require-File (Join-Path $root $asset) }
 Require-Tool 'cargo'
 $openssl = (Get-Command openssl.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
 if (!$openssl) {
@@ -92,8 +87,22 @@ if (!$openssl) {
 }
 if (!$openssl) { throw 'OpenSSL executable not found; install OpenSSL CLI. No TLS security downgrade is permitted.' }
 
-# Read the existing revision-matched local media files but never claim that presence proves live media.
-if (!(Test-Path $cert) -or !(Test-Path $privateKey)) {
+# An expired/mismatched certificate is never reused. Check before trusting it.
+# Rotate proactively with at least 24 hours remaining, to avoid dying mid-session.
+$renewCertificate = !(Test-Path -LiteralPath $cert -PathType Leaf) -or
+    !(Test-Path -LiteralPath $privateKey -PathType Leaf)
+if (!$renewCertificate) {
+    & $openssl 'x509' '-in' $cert '-noout' '-checkend' '86400' 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { $renewCertificate = $true }
+    if (!$renewCertificate) {
+        $certPublic = (& $openssl 'x509' '-in' $cert '-pubkey' '-noout' | Out-String).Trim()
+        $keyPublic = (& $openssl 'pkey' '-in' $privateKey '-pubout' | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or !$certPublic -or $certPublic -ne $keyPublic) {
+            $renewCertificate = $true
+        }
+    }
+}
+if ($renewCertificate) {
     Write-Host 'Generating a localhost-only development TLS certificate. NOT for production use.'
     # Some Windows OpenSSL distributions (notably Strawberry Perl) point at a
     # non-existent built-in openssl.cnf. Use an explicit, minimal certificate
@@ -113,7 +122,16 @@ if (!(Test-Path $cert) -or !(Test-Path $privateKey)) {
         'subjectAltName = DNS:localhost,IP:127.0.0.1'
     )
     [IO.File]::WriteAllLines($config, [string[]]$profile, [Text.Encoding]::ASCII)
-    Invoke-Checked $openssl @('req','-x509','-nodes','-newkey','rsa:3072','-sha256','-days','30','-config',$config,'-extensions','localhost_extensions','-keyout',$privateKey,'-out',$cert)
+    # Generate replacements off-path; never leave a fresh key paired with an old certificate.
+    $nextCert = Join-Path $state 'localhost.next.crt.pem'
+    $nextKey = Join-Path $state 'localhost.next.key.pem'
+    try {
+        Invoke-Checked $openssl @('req','-x509','-nodes','-newkey','rsa:3072','-sha256','-days','30','-config',$config,'-extensions','localhost_extensions','-keyout',$nextKey,'-out',$nextCert)
+        Move-Item -LiteralPath $nextKey -Destination $privateKey -Force
+        Move-Item -LiteralPath $nextCert -Destination $cert -Force
+    } finally {
+        Remove-Item -LiteralPath $nextCert,$nextKey -Force -ErrorAction SilentlyContinue
+    }
 }
 # Trust changes require an explicit user decision. A trust failure halts, not falls back to HTTP.
 $thumbprint = (& $openssl x509 -in $cert -noout -fingerprint -sha256 | Out-String).Trim()
@@ -157,15 +175,18 @@ foreach ($port in @(50051,50052,8080,8081,8443)) {
     if ($listeners.Count -gt 0) { throw "Port $port already occupied; refusing to take over an unrelated service" }
 }
 Start-Sleep -Milliseconds 600
-# The browser installer is generated and ignored by Git. Rebuild from the checked-out
-# TypeScript SDK on every launch, otherwise Rust serves stale Call validation code.
-# This uses a pinned esbuild version and does not rebuild the existing WASM asset.
+# Browser WASM and installer are generated, gitignored outputs. Their existence
+# says nothing about source revision. Build BOTH from this checkout on every launch.
+# The shared builder pins wasm-bindgen and esbuild and verifies nonempty outputs.
 Require-Tool 'npm.cmd'
-Write-Host 'Bundling the canonical first-party browser SDK from this checkout...'
-Invoke-Checked 'npm.cmd' @('exec','--yes','--package=esbuild@0.25.5','--','esbuild',
-    'sdk/typescript/src/reference_browser_media_installer.ts',
-    '--bundle','--platform=browser','--format=esm','--target=es2022',
-    '--outfile=crates/ucr-realtime-web/static/endpoint-media/reference_browser_media_installer.js')
+Write-Host 'Rebuilding revision-matched endpoint WASM and browser media...'
+& (Join-Path $root 'scripts\windows\build-browser-media.ps1')
+if (!$?) { throw 'Revision-matched browser media build failed' }
+foreach ($asset in @(
+    'crates\ucr-realtime-web\static\endpoint-media\reference_browser_media_installer.js',
+    'crates\ucr-realtime-web\static\endpoint-wasm\ucr_endpoint_wasm.js',
+    'crates\ucr-realtime-web\static\endpoint-wasm\ucr_endpoint_wasm_bg.wasm'
+)) { Require-File (Join-Path $root $asset) }
 Write-Host 'Building runtime + browser gateway + HTTPS edge from the currently checked-out revision...'
 Invoke-Checked 'cargo' @('build','-p','ucr-runtime','-p','ucr-realtime-web','-p','ucr-https-edge','--locked')
 $runtimeExe = Join-Path $root 'target\debug\ucr-runtime.exe'
