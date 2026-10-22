@@ -2698,6 +2698,7 @@ async function renewLocalRoomGrant(){
   if(isLocalRoom&&(!roomApi||!user))return;
   renewLocalRoomGrant.busy=true;
   const generation=sessionLifecycleGeneration;
+  let handoffWatchdog=null;
   try{
     let data;
     if(isLocalRoom){
@@ -2758,6 +2759,16 @@ async function renewLocalRoomGrant(){
     // the generation again for the replacement session.
     ++sessionLifecycleGeneration;
     const handoff=sessionLifecycleGeneration;
+    // A heartbeat begun on the old generation cannot release its own in-flight
+    // guard after handoff. Retire it so the new Join can heartbeat normally.
+    clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;
+    heartbeatInFlight=false;++heartbeatRequestGeneration;
+    // The old heartbeat watchdog is generation-fenced. A hung WebRTC close
+    // must still fail closed and stop physical capture during renewal.
+    handoffWatchdog=setTimeout(()=>{
+      if(sessionActive&&handoff===sessionLifecycleGeneration)
+        void endUnverifiedMedia(handoff,"Call renewal timed out; local media capture stopped.");
+    },HEARTBEAT_AUTH_TIMEOUT_MS);
     const oldToken=token;
     const oldBody=body();
     await closeServerPeer();
@@ -2786,6 +2797,7 @@ async function renewLocalRoomGrant(){
   }catch(e){
     if(generation===sessionLifecycleGeneration&&sessionActive)ui.status.textContent="Call access renewal failed: "+e.message;
   }finally{
+    clearTimeout(handoffWatchdog);
     renewLocalRoomGrant.busy=false;
   }
 }
