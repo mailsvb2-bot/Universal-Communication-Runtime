@@ -18,6 +18,8 @@ import {
   UcrBrowserWebCodecsProducer,
   ucrCameraLayerStreamId,
   ucrVideoEncodingTarget,
+  ucrVideoEncodeSize,
+  ucrVideoStageProfile,
   ucrAdaptiveVideoStep,
   ucrNormalizeOpusAudio,
 } from "./src/browser_webcodecs_media.ts";
@@ -1781,7 +1783,7 @@ assert.match(browser, /restoreSealedState/);
 assert.match(browser, /sealState/);
 assert.match(browser, /validAdaptiveQualityTarget/);
 assert.match(browser, /preferredCameraCapture\(ui\.camera\.value\)/);
-assert.match(browser, /width:\{ideal:1920\},height:\{ideal:1080\}/);
+assert.match(browser, /width:\{ideal:1280,max:1920\},height:\{ideal:720,max:1080\}/);
 assert.match(browser, /e2eeAdapterReady=true/);
 assert.match(browser, /!e2eeAdapterReady/);
 assert.match(browser, /adapter\.applyReceiveMediaDecision\(target\)/);
@@ -2017,9 +2019,15 @@ assert.ok(screenUpdates >= 2, "revocation must signal empty E2EE source list");
 
 // Real RT0 portable pipeline integration: an authenticated, active adapter receives
 // per-subscriber quality commands, leaves the sender alone, and stops after revocation.
-assert.deepEqual(ucrVideoEncodingTarget(1920, 1080), {frameRate: 30, bitrate: 4_000_000});
-assert.deepEqual(ucrVideoEncodingTarget(1280, 720), {frameRate: 30, bitrate: 2_000_000});
-assert.deepEqual(ucrVideoEncodingTarget(640, 360), {frameRate: 12, bitrate: 384_000});
+assert.deepEqual(ucrVideoEncodingTarget(1920, 1080), {frameRate: 30, bitrate: 2_488_000});
+assert.deepEqual(ucrVideoEncodingTarget(1280, 720), {frameRate: 30, bitrate: 2_488_000});
+assert.deepEqual(ucrVideoEncodingTarget(640, 480), {frameRate: 30, bitrate: 829_000});
+assert.deepEqual(ucrVideoEncodingTarget(640, 360), {frameRate: 30, bitrate: 622_000});
+assert.deepEqual(ucrVideoEncodeSize(1920, 1080, 1), {width: 1280, height: 720});
+assert.deepEqual(ucrVideoEncodeSize(1080, 1920, 1), {width: 720, height: 1280});
+assert.deepEqual(ucrVideoEncodeSize(1280, 720, 0.5), {width: 640, height: 360});
+assert.deepEqual(ucrVideoEncodeSize(640, 480, 1), {width: 640, height: 480});
+assert.equal(ucrVideoStageProfile(2).frameRate, 24);
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
 assert.deepEqual(ucrAdaptiveVideoStep(0, 1_500_000, 0, 0), {stage:1, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(1, 1_500_000, 0, 0), {stage:2, healthySamples:0});
@@ -2483,7 +2491,7 @@ try {
   await layerProducer.stop();
   assert.equal(producerConfigured.length, 2, "one camera creates at most two encoders");
   assert.deepEqual(producerConfigured.map((c: any) => [c.width, c.height]),
-    [[1920, 1080], [640, 360]]);
+    [[1280, 720], [640, 360]]);
   assert.equal(outputFrames.filter(f => f.streamId === "camera123").length, 12);
   assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length >= 3);
   assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length <= 6);
