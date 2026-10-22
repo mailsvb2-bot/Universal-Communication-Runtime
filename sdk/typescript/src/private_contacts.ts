@@ -36,7 +36,7 @@ function cryptoApi(): Crypto {
   }
   return globalThis.crypto;
 }
-function encode(value: string): Uint8Array { return new TextEncoder().encode(value); }
+function encode(value: string): Uint8Array<ArrayBuffer> { return new TextEncoder().encode(value); }
 function checkOpaque(value: unknown): asserts value is string {
   if (typeof value !== "string" || !value || encode(value).length > 128) {
     throw new Error("invalid canonical Identity/scope identifier");
@@ -70,8 +70,8 @@ function checkContacts(input: unknown): UcrPrivateContact[] {
   }
   return input.map(item => ({id:item.id, displayName:item.displayName, peerIdentityId:item.peerIdentityId}));
 }
-function randomBytes(length: number): Uint8Array {return cryptoApi().getRandomValues(new Uint8Array(length));}
-function bytes(input: unknown, expected: number | null = null): Uint8Array {
+function randomBytes(length: number): Uint8Array<ArrayBuffer> {return cryptoApi().getRandomValues(new Uint8Array(length));}
+function bytes(input: unknown, expected: number | null = null): Uint8Array<ArrayBuffer> {
   if (!Array.isArray(input) || input.length > MAX_BYTES + 32 ||
       (expected !== null && input.length !== expected) ||
       input.some(x => !Number.isInteger(x) || x < 0 || x > 255)) throw new Error("corrupt encrypted contacts record");
@@ -82,7 +82,7 @@ function toBase64(value: Uint8Array): string {
   for (let i = 0; i < value.length; i += 8192) s += String.fromCharCode(...value.subarray(i, i + 8192));
   return btoa(s);
 }
-function fromBase64(s: unknown, max: number): Uint8Array {
+function fromBase64(s: unknown, max: number): Uint8Array<ArrayBuffer> {
   if (typeof s !== "string" || s.length > Math.ceil(max / 3) * 4 + 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(s)) {
     throw new Error("invalid encrypted contact backup encoding");
   }
@@ -98,7 +98,7 @@ function parseContacts(data: Uint8Array, scope: string): UcrPrivateContact[] {
   if (p.version !== 1 || p.scope !== scope) throw new Error("contact book owner mismatch");
   return checkContacts(p.contacts);
 }
-function serialize(contacts: UcrPrivateContact[], scope: string): Uint8Array {
+function serialize(contacts: UcrPrivateContact[], scope: string): Uint8Array<ArrayBuffer> {
   const data = encode(JSON.stringify({version:1, scope, contacts:checkContacts(contacts)}));
   if (data.length > MAX_BYTES) throw new Error("contact book too large");
   return data;
@@ -109,7 +109,7 @@ function validKey(key: CryptoKey): void {
     throw new Error("invalid local contact encryption key");
   }
 }
-async function transferKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
+async function transferKey(password: string, salt: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
   if (typeof password !== "string" || encode(password).length < 12 || encode(password).length > 1024) {
     throw new Error("backup passphrase must contain at least 12 UTF-8 bytes (max 1024)");
   }

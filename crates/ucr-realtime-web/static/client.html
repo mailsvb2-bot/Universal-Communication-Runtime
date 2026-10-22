@@ -37,6 +37,10 @@ button{border:0;font-weight:700;cursor:pointer}
 button.primary{background:var(--ucr-accent);color:var(--ucr-accent-text)}
 button.secondary{background:var(--ucr-border);color:var(--ucr-text)}
 button:disabled,select:disabled,input:disabled{opacity:.45;cursor:not-allowed}
+#ucr-diagnostics{margin-top:16px;padding:14px;border:1px solid var(--ucr-border);border-radius:12px;background:var(--ucr-panel)}
+#ucr-diagnostics summary{cursor:pointer;font-weight:700}
+#ucr-diagnostics pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,monospace;max-height:300px;overflow:auto}
+#ucr-diagnostics button{margin:6px 8px 4px 0}
 #status{white-space:pre-wrap;background:var(--ucr-panel-deep);border-radius:12px;padding:12px;min-height:48px}
 .small{font-size:.85rem;color:#94a3b8}
 .hidden{display:none}
@@ -85,6 +89,7 @@ canvas.remote-media.hidden{display:none}
 <select id="microphone" aria-label="Microphone"><option value="">Default microphone</option></select>
 <select id="camera" aria-label="Camera"><option value="">Default camera</option></select>
 <button id="mic-toggle" class="secondary" disabled>Mute microphone</button>
+<button id="sound-unlock" class="secondary" disabled>Enable sound</button>
 <button id="camera-toggle" class="secondary" disabled>Turn camera off</button>
 <button id="screen-toggle" class="secondary" disabled>Share screen</button>
 <button id="hand-toggle" class="secondary" disabled>Raise hand</button>
@@ -111,12 +116,190 @@ canvas.remote-media.hidden{display:none}
 <button id="leave" class="secondary" disabled>Leave</button>
 </div>
 <div id="status" role="status" aria-live="polite">Reading signed join grant…</div>
+<details id="ucr-diagnostics" open>
+  <summary>Диагностика звонка — состояние и ошибки</summary>
+  <p class="small">Без паролей, токенов, ключей, содержимого сообщений и идентификаторов участников. Работает без F12.</p>
+  <button id="ucr-diagnostics-copy" class="secondary" type="button">Скопировать отчёт</button>
+  <button id="ucr-diagnostics-save" class="secondary" type="button">Сохранить JSON</button>
+  <pre id="ucr-diagnostics-live" aria-live="off">Подготовка диагностики…</pre>
+</details>
 <p id="footer-note" class="small">Media permission is requested only after joining. Recording is a separate explicit UCR capability with consent and retention policy.</p>
 </section>
 </main>
 <script>
 "use strict";
 const $=id=>document.getElementById(id);
+// Bounded, privacy-preserving local diagnostics. No bearer tokens, join grants,
+// participant IDs, device IDs, SDP, room messages, local paths or media payloads.
+const ucrDiagnosticsEvents=[];
+let ucrPreLeaveSnapshot=null;
+function ucrFreezePreLeaveSnapshot(){
+  // Observability is best-effort; it must NEVER veto security revocation,
+  // synchronous track stop, or authenticated Leave on a partially torn-down UI.
+  if( ucrPreLeaveSnapshot )return;
+  try {
+    ucrPreLeaveSnapshot=ucrDiagnosticReport();
+    ucrRecordDiagnostic("Pre-disconnect media snapshot captured","lifecycle");
+  } catch (_) {
+    ucrRecordDiagnostic("Pre-disconnect snapshot unavailable","lifecycle");
+  }
+}
+const ucrDiagnosticAllowedPaths=new Set([
+ "/v1/realtime/join","/v1/realtime/heartbeat","/v1/realtime/audio-level",
+ "/v1/realtime/active-speaker","/v1/realtime/chat/list",
+ "/v1/realtime/reactions/list","/v1/realtime/media/stream",
+ "/v1/realtime/webrtc/offer","/v1/realtime/webrtc/answer",
+ "/v1/realtime/webrtc/close","/v1/realtime/leave"
+]);
+function ucrRecordDiagnostic(event,category="runtime"){
+  const safe=String(event).replace(/[^a-zA-Z0-9_ .:()/-]/g,"?").slice(0,180);
+  ucrDiagnosticsEvents.push({time:new Date().toISOString(),category,safe});
+  if(ucrDiagnosticsEvents.length>80)ucrDiagnosticsEvents.shift();
+}
+function ucrDiagnosticReason(value){
+  const message=String(value||"").toLowerCase();
+  const stage=message.match(/ucr_media_(outbound|inbound)_(publish_authorization|seal_wire|datachannel_send|receive_authorization|signing_key_resolution|verify_and_decrypt|decode_and_play)/);
+  if(stage)return "MEDIA_"+stage[1].toUpperCase()+"_"+stage[2].toUpperCase();
+  if(/epoch/.test(message))return "MLS_EPOCH_MISMATCH";
+  if(/trusted|revoked|device signer|device trust/.test(message))return "DEVICE_TRUST_REJECTED";
+  if(/codec|audioencoder|audiodecoder|webcodecs/.test(message))return "MEDIA_CODEC_FAILURE";
+  if(/wasm|module|import/.test(message))return "MEDIA_MODULE_LOAD_FAILURE";
+  if(/expired|grant/.test(message))return "GRANT_INVALID_OR_EXPIRED";
+  if(/409|conflict/.test(message))return "SESSION_CONFLICT";
+  if(/congest|buffered|queue capacity/.test(message))return "MEDIA_TRANSPORT_CONGESTION";
+  if(/publish authorization/.test(message))return "MEDIA_PUBLISH_REJECTED";
+  if(/encoded media|opus|microphone|pcm/.test(message))return "AUDIO_ENCODE_OR_PUBLISH_FAILURE";
+  if(/permission|notallowed/.test(message))return "DEVICE_PERMISSION_DENIED";
+  if(/ice|webrtc|peer/.test(message))return "WEBRTC_CONNECTION_FAILURE";
+  return "MEDIA_ACTIVATION_FAILURE";
+}
+// Receive failures from the actual codec/MLS media owner. Never log raw
+// exception strings: they may contain sensitive internal context.
+let ucrLastMediaError="",ucrLastMediaErrorAt=0;
+let ucrMediaFailureCount=0,ucrMediaFailureWindowStart=0,ucrMediaFailureStopped=false;
+window.ucrEndpointMediaError=error=>{
+  const category=ucrDiagnosticReason(error?.message||"");
+  const now=Date.now();
+  if(now-ucrMediaFailureWindowStart>20000){ucrMediaFailureWindowStart=now;ucrMediaFailureCount=0;}
+  ucrMediaFailureCount++;
+  if(ucrMediaFailureCount>=8&&!ucrMediaFailureStopped){
+    ucrMediaFailureStopped=true;
+    ucrRecordDiagnostic("Protected media fail-closed after repeated "+category,"media");
+    if(typeof sessionLifecycleGeneration!=="undefined"&&typeof endUnverifiedMedia==="function"){
+      void endUnverifiedMedia(sessionLifecycleGeneration,
+        "Protected media stopped after repeated "+category+". Retry the call after checking device authorization.");
+    }
+  }
+  if(category===ucrLastMediaError&&now-ucrLastMediaErrorAt<2000)return;
+  ucrLastMediaError=category;ucrLastMediaErrorAt=now;
+  ucrRecordDiagnostic("Protected media pipeline failure: "+category,"media");
+  const status=document.getElementById("status");
+  if(status)status.textContent="Protected media pipeline error: "+category;
+};
+function ucrDiagnosticTrack(track){
+  return track?{state:track.readyState,enabled:track.enabled,muted:track.muted}:null;
+}
+function ucrDiagnosticReport(){
+  const local=typeof localStream!=="undefined"?localStream:null;
+  const audio=typeof local?.getAudioTracks==="function"?local.getAudioTracks()[0]||null:null;
+  const video=typeof local?.getVideoTracks==="function"?local.getVideoTracks()[0]||null:null;
+  const context=window.ucrLocalRoomAudioContext;
+  const grant=typeof claims!=="undefined"?claims:null;
+  return {
+    schema:"ucr-local-diagnostics-v1",
+    capturedAt:new Date().toISOString(),
+    preDisconnect:ucrPreLeaveSnapshot,
+    page:"conference",
+    state:document.getElementById("state")?.textContent||"unknown",
+    webrtc:document.getElementById("webrtc-state")?.textContent||"unknown",
+    encryptedPackets:Number(document.getElementById("packets")?.textContent)||0,
+    authorization:{sessionActive:typeof sessionActive!=="undefined"&&sessionActive,
+      mediaActive:typeof mediaActive!=="undefined"&&mediaActive,
+      expiresInSeconds:grant?.expires?Math.round((grant.expires-Date.now())/1000):null,
+      sessionSequenceValid:typeof activeSessionSequence!=="undefined"&&activeSessionSequence>0},
+    crypto:{adapterReady:typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady,
+      transportOpen:typeof e2eeChannel!=="undefined"&&e2eeChannel?.readyState==="open"},
+    microphone:ucrDiagnosticTrack(audio),
+    camera:ucrDiagnosticTrack(video),
+    audioPlayback:context?context.state:"unavailable",
+    mediaStageMetrics:window.__ucrMediaStageMetrics?{
+      authorizationMs:window.__ucrMediaStageMetrics.authorizationMs,
+      authorizationMaxMs:window.__ucrMediaStageMetrics.authorizationMaxMs,
+      expiredBeforeSeal:window.__ucrMediaStageMetrics.expiredBeforeSeal,
+      outboundFrames:window.__ucrMediaStageMetrics.outboundFrames,
+      sealAndSendMs:window.__ucrMediaStageMetrics.sealAndSendMs,
+      audioExpired:window.__ucrMediaStageMetrics.audioExpired,
+      audioQueueFull:window.__ucrMediaStageMetrics.audioQueueFull,
+      audioAuthorizationRejected:window.__ucrMediaStageMetrics.audioAuthorizationRejected,
+      audioSealFailure:window.__ucrMediaStageMetrics.audioSealFailure,
+      audioTransportFailure:window.__ucrMediaStageMetrics.audioTransportFailure,
+      audioDecodeFailure:window.__ucrMediaStageMetrics.audioDecodeFailure,
+      videoExpired:window.__ucrMediaStageMetrics.videoExpired,
+      videoQueueFull:window.__ucrMediaStageMetrics.videoQueueFull,
+      videoKeyframeRequests:window.__ucrMediaStageMetrics.videoKeyframeRequests,
+      sendChannelClosed:window.__ucrMediaStageMetrics.sendChannelClosed,
+      sendQueueCongested:window.__ucrMediaStageMetrics.sendQueueCongested,
+      sendInvalidEnvelope:window.__ucrMediaStageMetrics.sendInvalidEnvelope,
+      sendUnexpectedFailure:window.__ucrMediaStageMetrics.sendUnexpectedFailure,
+      sendUnavailable:window.__ucrMediaStageMetrics.sendUnavailable
+    }:null,
+    audioFrames:(window.__ucrAudioCounters?{
+      captured:window.__ucrAudioCounters.captured,
+      encoded:window.__ucrAudioCounters.encoded,
+      transportQueued:window.__ucrAudioCounters.transportQueued,
+      received:window.__ucrAudioCounters.received,
+      decoded:window.__ucrAudioCounters.decoded,
+      scheduled:window.__ucrAudioCounters.scheduled,
+      dropped:window.__ucrAudioCounters.dropped,
+      inputPeak:window.__ucrAudioCounters.inputPeak,
+      outputPeak:window.__ucrAudioCounters.outputPeak,
+      playoutQueuedMs:window.__ucrAudioCounters.playoutQueuedMs,
+      playoutJitterMs:window.__ucrAudioCounters.playoutJitterMs,
+      playoutRebases:window.__ucrAudioCounters.playoutRebases
+    }:null),
+    videoAdaptation:(window.__ucrVideoAdaptation?{
+      stage:window.__ucrVideoAdaptation.stage,
+      changes:window.__ucrVideoAdaptation.changes,
+      bufferedBytes:window.__ucrVideoAdaptation.bufferedBytes,
+      encoderQueued:window.__ucrVideoAdaptation.encoderQueued,
+      encodeLatencyMs:window.__ucrVideoAdaptation.encodeLatencyMs,
+      encodeLatencyMaxMs:window.__ucrVideoAdaptation.encodeLatencyMaxMs
+    }:null),
+    videoFrames:(window.__ucrVideoCounters?{
+      captured:window.__ucrVideoCounters.captured,
+      encoded:window.__ucrVideoCounters.encoded,
+      received:window.__ucrVideoCounters.received,
+      decoded:window.__ucrVideoCounters.decoded,
+      rendered:window.__ucrVideoCounters.rendered,
+      lastRenderedAt:window.__ucrVideoCounters.lastRenderedAt,
+      renderStallMs:window.__ucrVideoCounters.lastRenderedAt?Date.now()-window.__ucrVideoCounters.lastRenderedAt:null,
+      keyframes:window.__ucrVideoCounters.keyframes
+    }:null),
+    mediaFailure:{category:ucrLastMediaError||null,count:ucrMediaFailureCount,stopped:ucrMediaFailureStopped},
+    remoteVideo:{hasStream:!!document.getElementById("remote-video")?.srcObject,
+      canvasVisible:!document.getElementById("remote-e2ee-canvas")?.classList.contains("hidden")},
+    recentEvents:ucrDiagnosticsEvents.slice()
+  };
+}
+function ucrRenderDiagnostics(){
+  const area=document.getElementById("ucr-diagnostics-live");
+  if(!area)return;
+  area.textContent=JSON.stringify(ucrDiagnosticReport(),null,2);
+}
+function ucrDiagnosticJson(){return JSON.stringify(ucrDiagnosticReport(),null,2);}
+document.getElementById("ucr-diagnostics-copy")?.addEventListener("click",async()=>{
+  try{await navigator.clipboard.writeText(ucrDiagnosticJson());ucrRecordDiagnostic("Report copied","diagnostics");}
+  catch(_){ucrRecordDiagnostic("Clipboard unavailable; use Save JSON","diagnostics");}
+  ucrRenderDiagnostics();
+});
+document.getElementById("ucr-diagnostics-save")?.addEventListener("click",()=>{
+  const blob=new Blob([ucrDiagnosticJson()],{type:"application/json"});
+  const url=URL.createObjectURL(blob);
+  const link=document.createElement("a");link.href=url;link.download="ucr-call-diagnostics.json";
+  link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+// Snapshot after top-level media state has finished initializing.
+setInterval(ucrRenderDiagnostics,1500);
 const ui={
   join:$("join"),leave:$("leave"),state:$("state"),webrtcState:$("webrtc-state"),
   packets:$("packets"),expires:$("expires"),status:$("status"),
@@ -124,7 +307,7 @@ const ui={
   stateLabel:$("state-label"),webrtcLabel:$("webrtc-label"),packetsLabel:$("packets-label"),expiresLabel:$("expires-label"),
   localLabel:$("local-label"),screenLabel:$("screen-label"),remoteLabel:$("remote-label"),footerNote:$("footer-note"),chatCard:$("chat-card"),
   localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),remoteCanvas:$("remote-e2ee-canvas"),
-  privacyMode:$("privacy-mode"),mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
+  privacyMode:$("privacy-mode"),mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),soundUnlock:$("sound-unlock"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false,adaptiveMediaGeneration=0;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
@@ -140,7 +323,7 @@ let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
 let receiveRosterGeneration=0,receiveRosterInFlight=false,receiveSubscriptionFingerprint=null;
 let receiveSubscriptionInFlight=false,receiveSubscriptionDirty=false;
 let receiveRosterSources=[],receiveSpeakerId=null,receiveSpeakerCandidate=null,receiveSpeakerSamples=0;
-let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
+let handRaised=false,reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_ENDPOINT_CONTRACT_VERSION="ucr.endpoint-e2ee.v1";
 const ENDPOINT_STATE_STORE_CONTRACT_VERSION="ucr.endpoint-state-store.v1";
@@ -285,7 +468,25 @@ function body(){return {tenant_id:claims.tenant_id,namespace_id:claims.namespace
 async function api(path,payload,signal,keepalive=false){
   const r=await fetch(path,{method:"POST",headers:{"Authorization":"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify(payload),signal,keepalive});
   if(!r.ok){
+    if(ucrDiagnosticAllowedPaths.has(path))ucrRecordDiagnostic(path+" HTTP "+r.status,"http");
     let detail=null;try{detail=await r.clone().json();}catch(_){}
+    // Telemetry/chat conflicts after grant retirement must not create an
+    // unbounded request storm or display a stale "Connected" status.
+    // Fail closed, but only for control-plane session-bound polling endpoints.
+    if(r.status===409&&sessionActive&&
+       ["/v1/realtime/audio-level","/v1/realtime/active-speaker",
+        "/v1/realtime/chat/list","/v1/realtime/reactions/list"].includes(path)){
+      const generation=sessionLifecycleGeneration;
+      if(!api.retiringConflictGeneration||api.retiringConflictGeneration!==generation){
+        api.retiringConflictGeneration=generation;
+        queueMicrotask(()=>{
+          if(generation===sessionLifecycleGeneration&&sessionActive){
+            void endUnverifiedMedia(generation,
+              "Realtime session conflict: audio/video stopped. Start a new authorized call.");
+          }
+        });
+      }
+    }
     const error=new Error(detail&&detail.message?detail.message:"Request failed: "+r.status);
     error.code=detail&&detail.code?detail.code:"request_failed";
     error.status=r.status;
@@ -758,6 +959,82 @@ function requireCompatibleE2eeAdapter(adapter){
 // package, or begin signalling when the product has supplied no trusted
 // Device media signer/authorization integration. Presence is not proof of
 // trust: actual per-frame authority is still checked at adapter activation.
+// First-party calls use the SAME authenticated Device/Trust owner as /start.
+// Never use the local-room authority for a first-party Call, and never infer
+// trust from a Join URL or a browser-side key alone.
+let firstPartyDeviceAuthorityPromise=null;
+async function installFirstPartyDeviceAuthority(){
+  if(!claims||typeof claims.call_id!=="string"||!claims.call_id.startsWith("fp-")||
+     sessionStorage.getItem("ucrLocalRoom")==="1")return;
+  if(firstPartyDeviceAuthorityPromise)return firstPartyDeviceAuthorityPromise;
+  firstPartyDeviceAuthorityPromise=(async()=>{
+    const module=await import("./endpoint-media/reference_browser_media_installer.js");
+    const vault=module.createUcrBrowserProtectedDeviceVault();
+    const host=module.createUcrFirstPartyHttpHost(vault,{origin:location.origin});
+    const claimedBinding={
+      tenantId:claims.tenant_id,namespaceId:claims.namespace_id??null,
+      participantId:claims.participant_id,deviceId:claims.device_id
+    };
+    // The conference is a separate page. Its HTTP-only session cookie may
+    // expire between Call acceptance and Join; recover only by proving
+    // possession of the already-enrolled, protected Device signing key.
+    let user;
+    try{user=await host.resumeAuthenticatedDevice();}
+    catch(_){
+      user=await module.authenticateUcrFirstPartyDevice(
+        vault,{origin:location.origin},claimedBinding);
+    }
+    if(user.tenantId!==claims.tenant_id||
+       user.namespaceId!==(claims.namespace_id??null)||
+       user.participantId!==claims.participant_id||
+       user.deviceId!==claims.device_id){
+      throw new Error("Signed Join does not match authenticated first-party Device");
+    }
+    const scope={tenantId:user.tenantId,namespaceId:user.namespaceId,deviceId:user.deviceId};
+    const signer=await vault.load(scope);
+    const trust=await host.inspect(user);
+    if(!trust.deviceActive||trust.deviceRevoked||!signer||!trust.activeKey||
+       signer.keyId!==trust.activeKey.keyId||
+       signer.publicKey.length!==trust.activeKey.publicKey.length||
+       signer.publicKey.some((byte,index)=>byte!==trust.activeKey.publicKey[index])){
+      throw new Error("Authenticated Device signer is not currently trusted");
+    }
+    window.ucrProtectedDeviceKeyVault=vault;
+    window.ucrCanonicalDeviceAuthority=host;
+    window.ucrFirstPartyAuthenticatedBinding=user;
+    // The BFF's HTTP-only login cookie expires independently of a live
+    // signed media grant. Renewal must prove possession of the same enrolled
+    // Device key; a media fragment alone cannot authenticate this session.
+    window.ucrRefreshFirstPartyDeviceSession=async()=>{
+      const authenticated=await module.authenticateUcrFirstPartyDevice(
+        vault,{origin:location.origin},claimedBinding);
+      if(authenticated.tenantId!==user.tenantId||
+         authenticated.namespaceId!==user.namespaceId||
+         authenticated.participantId!==user.participantId||
+         authenticated.deviceId!==user.deviceId){
+        throw new Error("Device reauthentication changed first-party principal");
+      }
+      const trustNow=await host.inspect(authenticated);
+      if(!trustNow.deviceActive||trustNow.deviceRevoked||
+         !trustNow.activeKey||trustNow.activeKey.keyId!==signer.keyId||
+         trustNow.activeKey.publicKey.length!==signer.publicKey.length||
+         trustNow.activeKey.publicKey.some((byte,index)=>byte!==signer.publicKey[index])){
+        throw new Error("Device signer is no longer trusted");
+      }
+      return authenticated;
+    };
+    // The server binds an ACTIVE, fully accepted direct Call to a derived
+    // two-member MLS media Group Call; its canonical mls-context names the
+    // trusted Device keys. Use the same resolver as the local room unless a
+    // host injected its own media integration.
+    if(typeof window.ucrCanonicalMediaAdmissionResolver!=="function"&&
+       typeof window.ucrCanonicalAuthorizedMediaFactory!=="function"&&
+       typeof window.ucrInstallAuthorizedMediaEndpoint!=="function"){
+      window.ucrCanonicalMediaAdmissionResolver=createEndpointAdmissionResolver();
+    }
+  })().catch(error=>{firstPartyDeviceAuthorityPromise=null;throw error;});
+  return firstPartyDeviceAuthorityPromise;
+}
 function requireCanonicalMediaHostReady(){
   const adapter=e2eeAdapter();
   if(adapter){requireCompatibleE2eeAdapter(adapter);return;}
@@ -839,15 +1116,25 @@ function receiveE2eeChunk(data){
   for(const part of pending.parts){wire.set(part,offset);offset+=part.length;}
   return wire;
 }
-function sendE2eeEnvelope(wire){
-  if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media channel is not open");
+// Aggregate encrypted transport pressure only: no ciphertext, keys or peers.
+window.ucrEncryptedTransportBufferedAmount=()=>e2eeChannel?.readyState==="open"?
+  e2eeChannel.bufferedAmount:Number.POSITIVE_INFINITY;
+function ucrTransportError(code,message){const error=new Error(message);error.code=code;return error;}
+function sendE2eeEnvelope(wire,mediaKind){
+  if(!e2eeChannel||e2eeChannel.readyState!=="open")throw ucrTransportError("UCR_TRANSPORT_CHANNEL_CLOSED","Encrypted media channel is not open");
   const bytes=wire instanceof Uint8Array?wire:new Uint8Array(wire);
-  if(bytes.length===0||bytes.length>E2EE_MAX_WIRE_BYTES)throw new Error("Encrypted media envelope exceeds transport bounds");
-  if(e2eeChannel.bufferedAmount+bytes.length+Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES)*E2EE_CHUNK_HEADER_BYTES>E2EE_MAX_BUFFERED_SEND_BYTES){
-    throw new Error("Encrypted media transport congested; frame not queued");
+  if(bytes.length===0||bytes.length>E2EE_MAX_WIRE_BYTES)throw ucrTransportError("UCR_TRANSPORT_INVALID_ENVELOPE","Encrypted media envelope exceeds transport bounds");
+  // Video must not consume the final 512 KiB of the same ordered data channel:
+  // small encrypted Opus frames need space even during keyframe bursts.
+  // This is a congestion preference, NEVER an authorization bypass.
+  // Bound queueing delay on the shared reliable ordered channel: large video
+  // backlogs block subsequent Opus even when the audio packets are small.
+  const ceiling=mediaKind==="video"?256*1024:384*1024;
+  if(e2eeChannel.bufferedAmount+bytes.length+Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES)*E2EE_CHUNK_HEADER_BYTES>ceiling){
+    throw ucrTransportError("UCR_TRANSPORT_QUEUE_CONGESTED","Encrypted media transport congested; frame not queued");
   }
   const count=Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES);
-  if(count>65535)throw new Error("Encrypted media envelope requires too many chunks");
+  if(count>65535)throw ucrTransportError("UCR_TRANSPORT_INVALID_ENVELOPE","Encrypted media envelope requires too many chunks");
   const messageId=BigInt(e2eeMessageId++);
   for(let index=0;index<count;index++){
     const start=index*E2EE_CHUNK_PAYLOAD_BYTES,end=Math.min(bytes.length,start+E2EE_CHUNK_PAYLOAD_BYTES);
@@ -858,6 +1145,7 @@ function sendE2eeEnvelope(wire){
     chunk.set(bytes.subarray(start,end),E2EE_CHUNK_HEADER_BYTES);
     e2eeChannel.send(chunk);
   }
+  if(mediaKind==="audio"&&window.__ucrAudioCounters)window.__ucrAudioCounters.transportQueued++;
 }
 function endpointMediaSources(){
   return {stream:localStream,cameraStream:localStream,screenStream};
@@ -1080,6 +1368,7 @@ async function activateE2eeAdapter(){
   const persisted=await persistEndpointState(adapter);
   if(!isCurrent())return;
   e2eeAdapterReady=true;
+  ucrMediaFailureCount=0;ucrMediaFailureWindowStart=Date.now();ucrMediaFailureStopped=false;
   ui.state.textContent="Connected"; // only authenticated E2EE media is a connected call
   // A connected ICE transport alone is never evidence of recovered E2EE.
   webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
@@ -1104,6 +1393,12 @@ function attachE2eeDataChannel(channel){
     closeE2eeTransport();ui.webrtcState.textContent="E2EE unavailable";
     ui.state.textContent="Protected media unavailable";
     ui.status.textContent="Endpoint E2EE adapter failed; encrypted transport closed: "+e.message;
+    ucrRecordDiagnostic("E2EE adapter activation failed: "+ucrDiagnosticReason(e?.message),"crypto");
+    // An opened peer transport is not proof of an authorized E2EE media
+    // pipeline. Retire the complete capture/call session on activation failure.
+    const generation=sessionLifecycleGeneration;
+    void endUnverifiedMedia(generation,
+      "Protected media activation failed ("+ucrDiagnosticReason(e?.message)+"); media capture stopped.");
   });};
   channel.onmessage=event=>{
     try{
@@ -1314,7 +1609,15 @@ async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims
   try{
     await api("/v1/realtime/webrtc/close",{...(retiredClaims||body()),offer_id:offerId},undefined,keepalive);
     if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
-  }catch(_){}
+  }catch(error){
+    const message=String(error?.message||error);
+    if(/\b404\b|not_found|offer_not_found/i.test(message)){
+      ucrRecordDiagnostic("WebRTC offer already retired on close","webrtc");
+      if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
+    }else{
+      ucrRecordDiagnostic("WebRTC close failed: "+ucrDiagnosticReason(message),"webrtc");
+    }
+  }
 }
 function scheduleWebRtcRetry(immediate=false){
   if(!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine||restarting)return;
@@ -1440,7 +1743,9 @@ async function startWebRtcOnce(forceMedia=false){
   remoteDescriptionAccepted=true;
   for(const candidate of pendingCandidates.splice(0)){ensureOwnedPeer();await sendCandidate(candidate);}
   ensureOwnedPeer();
-  ui.webrtcState.textContent="Connecting";
+  // SDP signalling completion must not overwrite a later ICE/DTLS state.
+  // Render the peer's actual current state, not a stale assumption.
+  ui.webrtcState.textContent=pc.connectionState||"Connecting";
 }
 async function restartIce(){
   if(restarting||!sessionActive||!mediaActive||!navigator.onLine||!peer)return false;
@@ -1719,6 +2024,7 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
   requireCanonicalMediaHostReady();
 }
 async function join(){
+  if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Join requested","lifecycle");
   if(signedGrantRetired){
     ui.state.textContent="Access ended";
     ui.status.textContent="This session grant has ended. Open a fresh authorized call link.";
@@ -1729,7 +2035,7 @@ async function join(){
   // A signed join URL alone does not provision an authorized media signer.
   // Reject before opening a realtime session/heartbeat when the host omitted
   // the canonical Device media authority; the user may retry after setup.
-  try{requireCanonicalMediaHostReady();prewarmAuthorizedMediaRuntime();}
+  try{await installFirstPartyDeviceAuthority();requireCanonicalMediaHostReady();prewarmAuthorizedMediaRuntime();}
   catch(error){
     ui.state.textContent="Secure media unavailable";
     ui.status.textContent=error.message;
@@ -1761,12 +2067,26 @@ async function join(){
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
     heartbeatTimer=setInterval(()=>{
       const generation=sessionLifecycleGeneration;
+      if(sessionActive&&claims&&Date.now()>=claims.expires){
+        // A renewal may be in flight when the timer ticks; let it complete
+        // within the existing heartbeat authorization watchdog, never publish
+        // or capture beyond the watchdog if the signed handoff stalls.
+        if(renewLocalRoomGrant.busy)return;
+        void renewLocalRoomGrant().then(()=>{
+          if(generation!==sessionLifecycleGeneration||!sessionActive)return;
+          if(Date.now()>=claims.expires){
+            void endUnverifiedMedia(generation,
+              "Signed session expired without renewal; media capture stopped.");
+          }
+        }).catch(()=>endUnverifiedMedia(generation,
+          "Signed session renewal rejected; media capture stopped."));
+        return;
+      }
       heartbeat().catch(e=>{
         // Re-authorize before a rejected heartbeat when the room's grant expired.
         // Never allow an old response to retain capture after a newer Leave.
         const expired=claims&&typeof claims.expires==="number"&&Date.now()>=claims.expires;
-        const localRoom=typeof sessionStorage!=="undefined"&&sessionStorage.getItem("ucrLocalRoom")==="1";
-        if(e.code==="heartbeat_rejected"&&expired&&localRoom&&typeof renewLocalRoomGrant==="function"){
+        if(e.code==="heartbeat_rejected"&&expired&&typeof renewLocalRoomGrant==="function"){
           void renewLocalRoomGrant().then(()=>{
             if(generation!==sessionLifecycleGeneration||!sessionActive)return;
             heartbeat().catch(()=>endUnverifiedMedia(generation,"Conference authorization could not be verified; media capture stopped."));
@@ -1809,10 +2129,18 @@ async function endUnverifiedMedia(generation,message){
   const cleanup=leave();
   ui.state.textContent="Access ended";ui.status.textContent=message;
   await cleanup;
-  if(generation+1===sessionLifecycleGeneration){ui.state.textContent="Access ended";ui.status.textContent=message;}
+  // The retired-grant Join guard may have already told the user to obtain a
+  // fresh link. Do not overwrite that security decision with a late watchdog
+  // completion (or with a stale session's status after a new admission).
+  if(generation+1===sessionLifecycleGeneration&&
+     ui.status.textContent===message){
+    ui.state.textContent="Access ended";
+  }
 }
 async function leave(){
+  if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Leave requested","lifecycle");
   const wasActive=sessionActive;
+  if(wasActive)ucrFreezePreLeaveSnapshot();
   const leavingClaims=wasActive?body():null;
   const leavingSequence=activeSessionSequence;
   const leavingOfferId=startWebRtc.offerId;
@@ -2237,6 +2565,22 @@ async function toggleRaisedHand(){
   ui.status.textContent=handRaised?tr("handRaised"):tr("handLowered");
 }
 ui.handToggle.addEventListener("click",()=>{toggleRaisedHand().catch(e=>{ui.status.textContent="Raised hand failed: "+e.message;});});
+ui.soundUnlock.addEventListener("click",()=>{
+  const context=window.ucrLocalRoomAudioContext;
+  if(!sessionActive||!context||context.state==="closed"){
+    ui.status.textContent="Audio playback is unavailable until secure media joins.";
+    return;
+  }
+  const pending=context.resume();
+  if(pending&&typeof pending.then==="function"){
+    pending.then(()=>{
+      if(!sessionActive)return;
+      ui.soundUnlock.textContent="Sound enabled";
+      ui.soundUnlock.disabled=true;
+      ui.status.textContent="Audio playback context is running.";
+    }).catch(e=>{if(sessionActive)ui.status.textContent="Audio playback failed: "+e.message;});
+  }
+});
 ui.micToggle.addEventListener("click",async()=>{try{let track=localStream&&localStream.getAudioTracks()[0];if(!track){await ensureLocalTrack("audio");return;}track.enabled=!track.enabled;applyToggleLabels();}catch(e){ui.status.textContent="Microphone failed: "+e.message;}});
 ui.cameraToggle.addEventListener("click",async()=>{try{let track=localStream&&localStream.getVideoTracks()[0];if(!track){await ensureLocalTrack("camera");return;}track.enabled=!track.enabled;applyToggleLabels();}catch(e){ui.status.textContent="Camera failed: "+e.message;}});
 ui.screenToggle.addEventListener("click",async()=>{try{if(screenStream){await stopScreenShare(true);ui.status.textContent="Screen sharing stopped.";}else{await startScreenShare();ui.status.textContent="Screen sharing active through the endpoint E2EE adapter.";}}catch(e){ui.status.textContent="Screen sharing failed: "+e.message;}});
@@ -2301,6 +2645,7 @@ function resumeRoomAudio(audioContext){
   if(!audioContext||audioContext.state==="closed")return;
   // resume() stays pending forever when this document has no user gesture.
   // Waiting here blocks the encrypted camera and microphone.
+  ui.soundUnlock.disabled=false;
   const attempt=()=>{
     const pending=audioContext.resume();
     if(pending&&typeof pending.catch==="function")pending.catch(()=>{});
@@ -2311,6 +2656,7 @@ function resumeRoomAudio(audioContext){
   const unlock=()=>{
     attempt();
     if(audioContext.state==="running"){
+      ui.soundUnlock.textContent="Sound enabled";ui.soundUnlock.disabled=true;
       window.removeEventListener("pointerdown",unlock,true);
       window.removeEventListener("keydown",unlock,true);
     }
@@ -2318,8 +2664,8 @@ function resumeRoomAudio(audioContext){
   window.addEventListener("pointerdown",unlock,true);
   window.addEventListener("keydown",unlock,true);
   setTimeout(()=>{
-    if(audioContext.state==="suspended"&&sessionActive&&sessionStorage.getItem("ucrLocalRoom")==="1"){
-      ui.status.textContent="Камера подключена. Нажмите в любое место страницы, чтобы включить звук.";
+    if(audioContext.state==="suspended"&&sessionActive){
+      ui.status.textContent="Encrypted video is connected, but audio playback is suspended. Click Enable sound.";
     }
   },800);
 }
@@ -2338,36 +2684,91 @@ function holdRoomPresence(){
 // onto that session without dropping the camera the page already holds.
 async function renewLocalRoomGrant(){
   if(typeof sessionStorage==="undefined"||typeof fetch!=="function")return;
-  if(sessionStorage.getItem("ucrLocalRoom")!=="1"||!sessionActive||!claims)return;
+  const isLocalRoom=sessionStorage.getItem("ucrLocalRoom")==="1";
+  const directCallId=!isLocalRoom&&claims?.call_id?.startsWith("fp-")
+    ? sessionStorage.getItem("ucrFirstPartyDirectCall"):null;
+  if((!isLocalRoom&&!directCallId)||!sessionActive||!claims)return;
   if(typeof claims.expires!=="number"||renewLocalRoomGrant.busy)return;
   // Also run after expiry. A sleeping laptop misses the last two minutes,
   // and the next heartbeat is rejected before the old end-of-success hook.
   const remaining=claims.expires-Date.now();
   if(remaining>120000)return;
-  const roomApi=sessionStorage.getItem("ucrRoomApi");
-  const user=sessionStorage.getItem("ucrRoomUser");
-  if(!roomApi||!user)return;
+  const roomApi=isLocalRoom?sessionStorage.getItem("ucrRoomApi"):null;
+  const user=isLocalRoom?sessionStorage.getItem("ucrRoomUser"):null;
+  if(isLocalRoom&&(!roomApi||!user))return;
   renewLocalRoomGrant.busy=true;
   const generation=sessionLifecycleGeneration;
+  let handoffWatchdog=null;
   try{
-    const response=await fetch(localRoomRequestUrl("/v1/room/join"),{
-      method:"POST",
-      headers:{"content-type":"application/json"},
-      body:JSON.stringify({externalUserId:user})
-    });
-    const data=await response.json().catch(()=>null);
-    if(generation!==sessionLifecycleGeneration||!sessionActive||!response.ok||!data||data.ok!==true)return;
+    let data;
+    if(isLocalRoom){
+      const response=await fetch(localRoomRequestUrl("/v1/room/join"),{
+        method:"POST",
+        headers:{"content-type":"application/json"},
+        body:JSON.stringify({externalUserId:user})
+      });
+      data=await response.json().catch(()=>null);
+      if(!response.ok||!data||data.ok!==true)throw new Error("Room Join renewal rejected");
+    }else{
+      // Re-enter the canonical Call owner. Neither the fragment nor the
+      // derived MLS Group Call can mint new identity or device authority.
+      const host=window.ucrCanonicalDeviceAuthority;
+      const binding=window.ucrFirstPartyAuthenticatedBinding;
+      if(!host||!binding)throw new Error("Authenticated Device authority unavailable");
+      let call;
+      try{
+        call=await host.getDirectCall(binding,directCallId);
+      }catch(error){
+        // Only an expired BFF login may trigger a new signed Device proof.
+        // Policy, revocation, conflicts and server failures stay fatal.
+        if(!/HTTP 401\b/.test(String(error?.message||error)))throw error;
+        const reauthenticate=window.ucrRefreshFirstPartyDeviceSession;
+        if(typeof reauthenticate!=="function")throw error;
+        await reauthenticate();
+        if(generation!==sessionLifecycleGeneration||!sessionActive)return;
+        call=await host.getDirectCall(binding,directCallId);
+      }
+      if(call.state!=="active"||!Number.isSafeInteger(call.revision))
+        throw new Error("Direct Call is no longer active");
+      data=await host.issueSignedJoinForAcceptedCall(binding,{
+        callId:directCallId,expectedRevision:call.revision
+      });
+      if(data.callId!==directCallId)
+        throw new Error("Direct Call renewal returned a foreign Call");
+    }
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!data)return;
     const fragment=typeof data.joinFragment==="string"?data.joinFragment:"";
     const next=new URLSearchParams(fragment.startsWith("#")?fragment.slice(1):fragment).get("ucr_join");
     if(!next||next===token)return;
     let nextClaims;
     try{nextClaims=readGrant(next);}catch(_){return;}
     if(!nextClaims||nextClaims.session_id===claims.session_id||nextClaims.expires<=claims.expires)return;
+    // The newly signed grant must preserve the exact canonical tenant,
+    // participant, Device and media Group Call. Cross-principal handoff is
+    // forbidden even if an authenticated response is malformed or stale.
+    if(nextClaims.tenant_id!==claims.tenant_id||
+       nextClaims.namespace_id!==claims.namespace_id||
+       nextClaims.call_id!==claims.call_id||
+       nextClaims.participant_kind!==claims.participant_kind||
+       nextClaims.participant_id!==claims.participant_id||
+       nextClaims.device_id!==claims.device_id){
+      throw new Error("Renewed Join changed canonical Call or Device identity");
+    }
     if(generation!==sessionLifecycleGeneration||!sessionActive)return;
     // Drop in-flight heartbeats before the session id changes. join() advances
     // the generation again for the replacement session.
     ++sessionLifecycleGeneration;
     const handoff=sessionLifecycleGeneration;
+    // A heartbeat begun on the old generation cannot release its own in-flight
+    // guard after handoff. Retire it so the new Join can heartbeat normally.
+    clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;
+    heartbeatInFlight=false;++heartbeatRequestGeneration;
+    // The old heartbeat watchdog is generation-fenced. A hung WebRTC close
+    // must still fail closed and stop physical capture during renewal.
+    handoffWatchdog=setTimeout(()=>{
+      if(sessionActive&&handoff===sessionLifecycleGeneration)
+        void endUnverifiedMedia(handoff,"Call renewal timed out; local media capture stopped.");
+    },HEARTBEAT_AUTH_TIMEOUT_MS);
     const oldToken=token;
     const oldBody=body();
     await closeServerPeer();
@@ -2391,11 +2792,12 @@ async function renewLocalRoomGrant(){
     sessionActive=false;
     if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
     ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
-    ui.status.textContent="Renewing room access before the signed grant expires.";
+    ui.status.textContent="Renewing authorized call access before the signed grant expires.";
     await join();
   }catch(e){
-    if(generation===sessionLifecycleGeneration&&sessionActive)ui.status.textContent="Room access renewal failed: "+e.message;
+    if(generation===sessionLifecycleGeneration&&sessionActive)ui.status.textContent="Call access renewal failed: "+e.message;
   }finally{
+    clearTimeout(handoffWatchdog);
     renewLocalRoomGrant.busy=false;
   }
 }
@@ -2458,7 +2860,12 @@ function installLocalRoomMediaHost(){
       });
     }
   };
-  window.ucrCanonicalMediaAdmissionResolver=async bootstrap=>{
+  window.ucrCanonicalMediaAdmissionResolver=createEndpointAdmissionResolver();
+}
+// ONE admission resolver for the local room and first-party Calls: trust comes
+// from the canonical mls-context trusted_device_keys of the media Group Call.
+function createEndpointAdmissionResolver(){
+  return async bootstrap=>{
     const context=await fetchEndpointMlsContext();
     if(!context.media_negotiation_ref||!context.media_negotiation_generation){
       throw new Error("Canonical media negotiation is not active yet");
@@ -3063,7 +3470,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){const generation=sessionLifecycleGeneration;ui.webrtcState.textContent="Offline";void endUnverifiedMedia(generation,"Network unavailable; capture stopped until fresh authorization.");}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
-window.addEventListener("pagehide",()=>{releaseRoomPresence();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;++roomGestureEpoch;clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;retireEndpointMlsState();if(sessionActive){closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;stopLocalCapture();});
+window.addEventListener("pagehide",()=>{releaseRoomPresence();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;++roomGestureEpoch;clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;retireEndpointMlsState();if(sessionActive){ucrFreezePreLeaveSnapshot();closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;stopLocalCapture();});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>

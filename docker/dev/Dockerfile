@@ -10,7 +10,7 @@ RUN rustup target add wasm32-unknown-unknown \
       --manifest-path crates/ucr-endpoint-wasm/Cargo.toml \
       --target wasm32-unknown-unknown \
     && mkdir -p crates/ucr-realtime-web/static/endpoint-wasm \
-    && wasm-bindgen target/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm \
+    && wasm-bindgen crates/ucr-endpoint-wasm/target/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm \
       --target web \
       --out-dir crates/ucr-realtime-web/static/endpoint-wasm \
       --out-name ucr_endpoint_wasm \

@@ -31,6 +31,17 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
             .contains("cargo build --locked --release -p ucr-realtime-web --bin ucr-realtime-web")
     );
     assert!(dockerfile.contains("--manifest-path crates/ucr-endpoint-wasm/Cargo.toml"));
+    // Regression: the endpoint WASM crate is its own workspace, so `--locked`
+    // needs its committed lock file and its output lives under its own target.
+    assert!(
+        workspace
+            .join("crates/ucr-endpoint-wasm/Cargo.lock")
+            .is_file(),
+        "`cargo build --locked` of the endpoint WASM requires a committed Cargo.lock"
+    );
+    assert!(dockerfile.contains(
+        "wasm-bindgen crates/ucr-endpoint-wasm/target/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm"
+    ));
     assert!(dockerfile.contains("sdk/typescript/src/reference_browser_media_installer.ts"));
     assert!(dockerfile.contains("COPY --from=browser-sdk /out/endpoint-media/"));
     assert!(
@@ -57,8 +68,17 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
     );
     assert!(!entrypoint.contains("python3 -m http.server"));
     assert!(entrypoint.contains("webhook_receiver.py"));
-    assert!(entrypoint.contains("turnserver -n"));
+    // The explicit 0600 config replaces the image default (formerly `-n`).
+    assert!(entrypoint.contains("turnserver -c \"$TURN_CONFIG\""));
     assert!(entrypoint.contains("--use-auth-secret"));
+    // Regression: a fixed, publicly known TURN secret shipped in compose.yaml
+    // and as the entrypoint default; it was also visible in argv.
+    for source in [&compose, &entrypoint] {
+        assert!(!source.contains("0123456789abcdef0123456789abcdef"));
+    }
+    assert!(!entrypoint.contains("--static-auth-secret"));
+    assert!(entrypoint.contains("secrets.token_hex(32)"));
+    assert!(entrypoint.contains("umask 077"));
 
     let dev_main =
         fs::read_to_string(workspace.join("crates/ucr-dev/src/main.rs")).expect("read ucr dev CLI");

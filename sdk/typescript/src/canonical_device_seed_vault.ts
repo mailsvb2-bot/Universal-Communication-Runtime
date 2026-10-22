@@ -71,7 +71,7 @@ function validateScope(scope: UcrDeviceVaultScope): string {
   return key;
 }
 
-function bytes(value: number[], len: number, field: string): Uint8Array {
+function bytes(value: number[], len: number, field: string): Uint8Array<ArrayBuffer> {
   if (!Array.isArray(value) || value.length !== len ||
       value.some(x => !Number.isInteger(x) || x < 0 || x > 255)) {
     throw new Error(`corrupt protected Device ${field}`);
@@ -79,7 +79,7 @@ function bytes(value: number[], len: number, field: string): Uint8Array {
   return Uint8Array.from(value);
 }
 
-function aad(key: string, signer: UcrLocalDeviceSigner): Uint8Array {
+function aad(key: string, signer: UcrLocalDeviceSigner): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(DOMAIN + JSON.stringify([
     key, signer.keyId, Array.from(signer.publicKey),
   ]));
@@ -114,7 +114,7 @@ async function decryptSeed(key: string, record: UcrLocalSignerRecord): Promise<U
   return plaintext;
 }
 
-function pkcs8(seed: Uint8Array): Uint8Array {
+function pkcs8(seed: Uint8Array): Uint8Array<ArrayBuffer> {
   if (!(seed instanceof Uint8Array) || seed.length !== 32) {
     throw new Error("protected Device signing seed must be 32 bytes");
   }
@@ -223,7 +223,7 @@ export function createUcrBrowserProtectedDeviceVault(
       );
       const publicKey = new Uint8Array(await provider.subtle.exportKey("raw", pair.publicKey));
       const secret = new Uint8Array(await provider.subtle.exportKey("pkcs8", pair.privateKey));
-      let seed: Uint8Array | null = null;
+      let seed: Uint8Array<ArrayBuffer> | null = null;
       try {
         if (secret.length !== 48 ||
             !PKCS8_PREFIX.every((value, i) => secret[i] === value)) {

@@ -1,11 +1,23 @@
-import {
+// Report a missing generated browser bundle instead of hanging at login.
+let media;
+try {
+  media = await import("/endpoint-media/reference_browser_media_installer.js");
+} catch (error) {
+  const who = document.getElementById("who");
+  if (who) who.textContent = "Вход недоступен: браузерный пакет не установлен.";
+  const status = document.getElementById("status");
+  if (status) status.textContent = "Не загружен браузерный пакет: " +
+    (error instanceof Error ? error.message : String(error));
+  throw error;
+}
+const {
   createUcrBrowserProtectedDeviceVault,
   createUcrFirstPartyHttpHost,
   authenticateUcrFirstPartyDevice,
   registerUcrFirstPartyUser,
   recoverUcrFirstPartyDevice,
   createUcrContactCallJourney,
-} from "/endpoint-media/reference_browser_media_installer.js";
+} = media;
 
 const el = (id) => document.getElementById(id);
 const status = el("status");
@@ -17,6 +29,50 @@ let knownContacts = [];
 let accountScope = null;
 const idempotency = new Map();
 const HINT_KEY = "ucr.first-party.last-device.v1";
+const authDiagnostics=[];
+function authHttpCode(error){
+  const match=String(error instanceof Error?error.message:"").match(/HTTP (401|403|404|409|429|500|502|503)/);
+  return match?Number(match[1]):null;
+}
+function authFailureCategory(error){
+  const code=authHttpCode(error);
+  if(code===401)return "HTTP_401_AUTHORITY_REJECTED";
+  if(code===403)return "HTTP_403_ACCESS_DENIED";
+  if(code===409)return "HTTP_409_STATE_CONFLICT";
+  if(code===503)return "HTTP_503_AUTHORITY_UNAVAILABLE";
+  return code?"HTTP_"+code:"CLIENT_OR_NETWORK_ERROR";
+}
+function authDiagnostic(stage,outcome,error){
+  // Explicit allowlist: do not include arbitrary error messages or IDs.
+  const allowed=new Set(["resume_session","device_reauthentication","device_scope_verification","list_devices","list_contacts","incoming_calls","inspect_call","initialization","periodic_refresh"]);
+  if(!allowed.has(stage))return;
+  authDiagnostics.push({timestamp:new Date().toISOString(),stage,outcome,
+    reason:error?authFailureCategory(error):null,httpStatus:error?authHttpCode(error):null});
+  if(authDiagnostics.length>60)authDiagnostics.shift();
+  authRenderDiagnostics();
+}
+function authRenderDiagnostics(){
+  const panel=el("auth-diagnostics-report");
+  if(!panel)return;
+  panel.textContent=JSON.stringify({schema:"ucr-auth-diagnostics-v1",
+    generatedAt:new Date().toISOString(),events:authDiagnostics},null,2);
+}
+el("auth-diagnostics-copy").addEventListener("click",async()=>{
+  try{await navigator.clipboard.writeText(el("auth-diagnostics-report").textContent);}
+  catch{message("Буфер обмена недоступен. Используйте «Сохранить JSON».");}
+});
+el("auth-diagnostics-save").addEventListener("click",()=>{
+  const blob=new Blob([el("auth-diagnostics-report").textContent],{type:"application/json"});
+  const url=URL.createObjectURL(blob);const link=document.createElement("a");
+  link.href=url;link.download="ucr-auth-diagnostics.json";link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+authRenderDiagnostics();
+async function authTrace(stage,operation){
+  try{const result=await operation();authDiagnostic(stage,"ok");return result;}
+  catch(error){authDiagnostic(stage,"failed",error);throw error;}
+}
+
 // A convenience hint only: never a login credential, authorization grant,
 // private Device signer, recovery code or second Identity database.
 function rememberBinding(binding) {
@@ -42,16 +98,34 @@ function lastBinding() {
     return hint;
   } catch {return null;}
 }
+// Keep the public identity fields visible for an existing trusted Device.
+// The localStorage hint cannot authorize anything without the IndexedDB signer
+// and fresh server challenge. This never registers or trusts a new Device.
+{
+  const saved = lastBinding();
+  if (saved) {
+    el("login-tenant").value = saved.tenantId;
+    el("login-namespace").value = saved.namespaceId ?? "";
+    el("login-identity").value = saved.participantId;
+    el("login-device").value = saved.deviceId;
+  }
+}
 async function restoreSession() {
-  try {return await host.resumeAuthenticatedDevice();}
+  try {return await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());}
   catch(error) {
     const hint=lastBinding();
-    if(!hint)throw error;
+    if(!hint){
+      authDiagnostic("device_reauthentication","unavailable");
+      // A missing public binding cannot authorize a replacement identity.
+      // Preserve the existing protected signer and require explicit re-login.
+      throw new Error("HTTP 401: session expired; no saved Device binding. Enter your existing Tenant, Identity and Device IDs to sign in with the original protected key. If that key is unavailable, use account recovery.");
+    }
     // Only a real protected, previously registered signer may re-login.
     // If the server revoked this Device, do not turn the hint into trust.
-    const verified=await authenticateUcrFirstPartyDevice(
-      vault,{origin:location.origin},hint);
+    const verified=await authTrace("device_reauthentication",()=>authenticateUcrFirstPartyDevice(
+      vault,{origin:location.origin},hint));
     if(principalScope(verified)!==principalScope(hint)){
+      authDiagnostic("device_scope_verification","failed");
       forgetBinding();
       throw Error("восстановленная учётная запись или Device не совпадает");
     }
@@ -190,6 +264,9 @@ async function beginMedia(callId) {
   setCallStage(3, active?.call.media === "video" ? "Допуск подтверждён. Открывается защищённый видеоэкран…" : "Допуск подтверждён. Открывается защищённый экран аудиосвязи…");
   clearInterval(timer);
   const next = new URL("/client.html",location.origin);
+  // The signed media Join names the derived Group Call. Preserve only the
+  // accepted canonical Direct Call id for independently authenticated renewal.
+  sessionStorage.setItem("ucrFirstPartyDirectCall", callId);
   next.hash = grant.joinFragment.slice(1);
   location.replace(next.href);
 }
@@ -201,8 +278,10 @@ async function dial(contact,media) {
   const requestId = idempotency.get(key) ?? crypto.randomUUID();
   idempotency.set(key,requestId);
   message("Проверка Device и создание канонического вызова…");
+  // Re-establish device authority before making an irreversible canonical Call.
+  // A stale cookie must not create a Call which the UI then fails to display.
+  const session = await restoreSession();
   const call = await calls.start(contact.id,media,requestId);
-  const session = await host.resumeAuthenticatedDevice();
   active = {call,identity:session.participantId};
   showActive();
   message("Вызов создан. Ожидается реальное принятие другим участником.");
@@ -247,7 +326,7 @@ async function refresh() {
   if (refreshing || navigating) return;
   refreshing = true;
   try {
-    const user = await host.resumeAuthenticatedDevice();
+    const user = await restoreSession();
     if (accountScope !== principalScope(user)) {
       // Fail closed immediately if the user logs out or changes Device in
       // another tab. Never keep the former user's contacts/Call on screen.
@@ -261,10 +340,10 @@ async function refresh() {
       showActive();
       throw Error("учётная запись сменилась — требуется повторная проверка");
     }
-    const incoming = await calls.incoming();
+    const incoming = await authTrace("incoming_calls",()=>calls.incoming());
     renderIncoming(incoming);
     if (active) {
-      const fresh = await calls.inspect(active.call.callId);
+      const fresh = await authTrace("inspect_call",()=>calls.inspect(active.call.callId));
       active = {...active,call:fresh};
       showActive();
       if (fresh.state === "active") await beginMedia(fresh.callId);
@@ -276,6 +355,7 @@ async function refresh() {
   } finally {refreshing = false;}
 }
 async function initialize() {
+  authDiagnostic("initialization","started");
   clearInterval(timer);
   message("Проверка независимо авторизованной Identity и Device…");
   const user = await restoreSession();
@@ -292,18 +372,29 @@ async function initialize() {
     renderIncoming([]);
     renderContacts([]);
   }
-  await updateContacts();
-  await updateDevices();
+  await authTrace("list_contacts",()=>updateContacts());
+  await authTrace("list_devices",()=>updateDevices());
   el("who").textContent = "Identity: " + user.participantId + " · Device: " + user.deviceId;
-  await refresh();
+  // Successful device reauthentication is independent from Call state.
+  // A malformed/stale canonical Call must not invalidate a trusted Device.
+  message("Доверенное устройство подтверждено. Проверяем состояние вызовов…");
+  try {
+    await refresh();
+    message("Устройство подтверждено. Входящие звонки проверяются.");
+  } catch (error) {
+    message("Устройство подтверждено; проверка вызовов завершилась ошибкой: " +
+      (error instanceof Error ? error.message : String(error)));
+  }
   timer = setInterval(() => {
     if (busy || navigating || document.hidden) return;
     void refresh().catch(err => {
-      clearInterval(timer);
-      message("Проверка входящих остановлена: " + (err instanceof Error ? err.message : String(err)));
+      authDiagnostic("periodic_refresh","failed",err);
+      // Retain the authenticated device and keep polling rather than requiring
+      // fresh registration. Do not bypass server-side Call authority.
+      message("Устройство авторизовано; ошибка проверки вызовов: " +
+        (err instanceof Error ? err.message : String(err)));
     });
   },2500);
-  message("Учётная запись подтверждена. Исходящие и входящие проверяются каноническим сервером.");
 }
 el("device-login").addEventListener("submit", event => {
   event.preventDefault();
@@ -315,9 +406,9 @@ el("device-login").addEventListener("submit", event => {
       deviceId:el("login-device").value.trim(),
     };
     message("Проверка владения существующим защищённым Device…");
-    const verified = await authenticateUcrFirstPartyDevice(vault,{
+    const verified = await authTrace("device_reauthentication",()=>authenticateUcrFirstPartyDevice(vault,{
       origin:location.origin,
-    },binding);
+    },binding));
     if (principalScope(verified)!==principalScope(binding)) {
       throw Error("сервер вернул другую Identity или Device");
     }
@@ -325,7 +416,23 @@ el("device-login").addEventListener("submit", event => {
     await initialize();
   });
 });
-el("retry").addEventListener("click",() => void run(initialize));
+// A manual retry must be visible immediately, even when another action is busy.
+// The existing init lock prevents duplicate requests; explain this next to the button.
+el("retry").addEventListener("click",() => {
+  const control = el("retry");
+  control.textContent = busy ? "Проверка уже выполняется…" : "Проверяем вход…";
+  control.disabled = true;
+  message(busy ? "Проверка входа уже выполняется. Дождитесь результата." : "Повторная проверка защищённого устройства…");
+  if (busy || navigating) {
+    control.disabled = false;
+    control.textContent = "Повторить проверку входа";
+    return;
+  }
+  void run(initialize).finally(() => {
+    control.disabled = false;
+    control.textContent = "Повторить проверку входа";
+  });
+});
 el("new-contact").addEventListener("submit", event => {
   event.preventDefault();
   void run(async () => {
@@ -395,4 +502,21 @@ el("logout").addEventListener("click",()=>void run(async()=>{
 }));
 
 window.addEventListener("pagehide", () => clearInterval(timer));
-void run(initialize);
+function explainEntryFailure(error) {
+  const detail = error instanceof Error ? error.message : String(error);
+  let hint = "Войдите с доверенного устройства, создайте учётную запись или восстановите доступ.";
+  if (/HTTP 503/.test(detail)) hint = "Сервер входа не подключён: запустите first-party BFF.";
+  else if (/HTTP 403/.test(detail)) hint = "Origin не совпадает с публичным HTTPS-адресом сервера.";
+  else if (location.protocol !== "https:") hint += " Для защищённой сессии нужен HTTPS.";
+  el("who").textContent = "Нет подтверждённой сессии. " + hint;
+}
+void (async () => {
+  if (busy || navigating) return;
+  busy = true;
+  try { await initialize(); }
+  catch (error) {
+    explainEntryFailure(error);
+    message("Действие не подтверждено: " + (error instanceof Error ? error.message : String(error)));
+  }
+  finally { busy = false; }
+})();

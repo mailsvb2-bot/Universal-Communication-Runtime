@@ -481,6 +481,14 @@ impl LiveWebRtcProvider {
     fn start(
         e2ee_ingress: Option<tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
     ) -> Result<Self, WebRtcProviderError> {
+        // DTLS asks rustls for the process-level provider. When one build
+        // unifies features that enable BOTH ring and aws-lc-rs (e.g.
+        // `cargo build -p ucr-runtime -p ucr-https-edge`, or a workspace
+        // build), auto-detection panics on the peer worker and every browser
+        // stays at ICE "connected" / DTLS "connecting" with no media. Select
+        // the same ring provider as the HTTPS edge and SFU node; installation
+        // is process-global and single-shot, so a prior install is kept.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let (command_tx, command_rx) =
             tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);

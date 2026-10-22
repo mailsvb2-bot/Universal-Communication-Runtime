@@ -1,0 +1,15 @@
+{
+  "//": "Strict type check of the SDK sources: npx -p typescript@5.9 tsc -p sdk/typescript/tsconfig.strict.json",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "es2022",
+    "lib": ["es2022", "dom"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": ["src/*.ts"]
+}

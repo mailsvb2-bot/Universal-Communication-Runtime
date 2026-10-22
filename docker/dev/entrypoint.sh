@@ -1,7 +1,17 @@
 #!/bin/sh
 set -eu
 
-TURN_SECRET="${UCR_DEV_TURN_SECRET:-0123456789abcdef0123456789abcdef}"
+# Never ship a fixed TURN secret: generate one per container start unless the
+# operator supplies UCR_DEV_TURN_SECRET. It is never printed; only short-lived
+# derived TURN credentials are.
+TURN_SECRET="${UCR_DEV_TURN_SECRET:-}"
+if [ -z "$TURN_SECRET" ]; then
+  TURN_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+fi
+if [ "${#TURN_SECRET}" -lt 32 ]; then
+  echo "UCR_DEV_TURN_SECRET must be at least 32 characters" >&2
+  exit 1
+fi
 TURN_REALM="${UCR_DEV_TURN_REALM:-ucr-dev.local}"
 RUNTIME_LOG=/run/ucr/ucr-dev.log
 
@@ -59,13 +69,18 @@ PIDS="$PIDS $!"
 python3 /opt/ucr/dev/webhook_receiver.py --bind 0.0.0.0 --port 8090 &
 PIDS="$PIDS $!"
 
-UCR_DEV_TURN_SECRET="$TURN_SECRET" turnserver -n   --no-cli   --fingerprint   --use-auth-secret   --static-auth-secret="$TURN_SECRET"   --realm="$TURN_REALM"   --listening-ip=0.0.0.0   --relay-ip=0.0.0.0   --external-ip=127.0.0.1   --listening-port=3478   --min-port=49160   --max-port=49170   --no-tls   --no-dtls   --pidfile=/run/ucr/coturn.pid   --log-file=stdout &
+# The secret goes into a 0600 config file, not argv (visible in `ps`).
+TURN_CONFIG=/run/ucr/turnserver.conf
+( umask 077 && printf 'static-auth-secret=%s\n' "$TURN_SECRET" >"$TURN_CONFIG" )
+turnserver -c "$TURN_CONFIG"   --no-cli   --fingerprint   --use-auth-secret   --realm="$TURN_REALM"   --listening-ip=0.0.0.0   --relay-ip=0.0.0.0   --external-ip=127.0.0.1   --listening-port=3478   --min-port=49160   --max-port=49170   --no-tls   --no-dtls   --pidfile=/run/ucr/coturn.pid   --log-file=stdout &
 PIDS="$PIDS $!"
 
 echo "UCR_DEV_BROWSER=http://127.0.0.1:8080/"
 echo "UCR_DEV_GRPC=http://127.0.0.1:50051"
 echo "UCR_DEV_WEBHOOK_RECEIVER=http://127.0.0.1:8090/"
 echo "UCR_DEV_TURN_URL=turn:127.0.0.1:3478?transport=udp"
+# /start needs the first-party BFF + HTTPS edge, which this package does not run.
+echo "UCR_DEV_FIRST_PARTY=disabled see=docs/operations/first-party-realtime-gateway.md"
 UCR_DEV_TURN_SECRET="$TURN_SECRET" python3 /opt/ucr/dev/turn_credentials.py --session ucr-dev
 
 while :; do

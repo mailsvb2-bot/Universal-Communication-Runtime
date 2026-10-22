@@ -5,9 +5,11 @@
   try {
     const response = await fetch("/readyz", {cache:"no-store", credentials:"same-origin"});
     output.textContent = response.ok
-      ? "Медиашлюз готов. Для звонка нужны два доверенных устройства и принятый вызов."
+      // /readyz checks only the sign-in BFF and the browser E2EE assets; the
+      // media path (realtime, SFU, TURN) is verified when a call connects.
+      ? "Сервер входа и браузерные E2EE-модули доступны. Медиасоединение проверяется при подключении к звонку: нужны два доверенных устройства и принятый вызов."
       : "Медиа пока недоступно (HTTP " + response.status + "). Проверьте BFF авторизации и сборку браузерных E2EE-модулей.";
   } catch {
-    output.textContent = "Проверка медиашлюза не удалась. Убедитесь, что сервер запущен.";
+    output.textContent = "Проверка готовности сервера не удалась. Убедитесь, что сервер запущен.";
   }
 })();

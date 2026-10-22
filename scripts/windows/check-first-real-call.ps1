@@ -17,6 +17,39 @@ function Get-Http([string]$url) {
  catch { if($_.Exception.Response) { return $_.Exception.Response }; return $null }
 }
 function Status($response) { if($null -eq $response) { return 0 }; return [int]$response.StatusCode }
+# Windows Server 2016 PowerShell/.NET may fail rustls HTTPS negotiation
+# despite a healthy local edge. Use the same Git-for-Windows curl with explicit
+# certificate verification as start-local-first-party-https.ps1.
+$cert = Join-Path $env:LOCALAPPDATA 'UCR-Local-Test\localhost.crt.pem'
+$curl = $null
+foreach($candidate in @('C:\Program Files\Git\mingw64\bin\curl.exe','C:\Program Files\Git\usr\bin\curl.exe')) {
+ if(Test-Path -LiteralPath $candidate -PathType Leaf) { $curl=$candidate; break }
+}
+if(!$curl) {
+ $command=Get-Command curl.exe -ErrorAction SilentlyContinue
+ if($command) { $curl=$command.Source }
+}
+function Get-Https([string]$url) {
+ if(!$curl) { Write-Host 'HTTPS probe: curl.exe unavailable; install Git for Windows'; return @{StatusCode=0;Content=''} }
+ if(!(Test-Path -LiteralPath $cert -PathType Leaf)) {
+  Write-Host "HTTPS probe: trusted localhost certificate missing at $cert"
+  return @{StatusCode=0;Content=''}
+ }
+ $temporary = [IO.Path]::GetTempFileName()
+ try {
+  $status = & $curl '--cacert' $cert '--silent' '--show-error' '--max-time' "$TimeoutSeconds" '--output' $temporary '--write-out' '%{http_code}' $url
+  $exit = $LASTEXITCODE
+  if($exit -ne 0 -or "$status" -notmatch '^[0-9]{3}$') {
+   Write-Host "HTTPS probe TLS/connection failed (curl exit $exit): $url"
+   return @{StatusCode=0;Content=''}
+  }
+  $body = ''
+  if($url.EndsWith('/v1/first-party/bootstrap')) { $body=[IO.File]::ReadAllText($temporary) }
+  return @{StatusCode=[int]$status;Content=$body}
+ } finally {
+  Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+ }
+}
 if($PublicOrigin -notmatch '^https://[a-zA-Z0-9.-]+(:[0-9]{1,5})?$') {
  throw "PublicOrigin must be an exact HTTPS origin without a path, credentials or query"
 }
@@ -37,7 +70,7 @@ $health=Get-Http ($Gateway+"/healthz")
 Report "gateway-health" ((Status $health) -eq 200) ("HTTP "+(Status $health))
 $ready=Get-Http ($Gateway+"/readyz")
 Report "gateway-ready" ((Status $ready) -eq 200) ("HTTP "+(Status $ready))
-$bootstrap=Get-Http ($PublicOrigin+"/v1/first-party/bootstrap")
+$bootstrap=Get-Https ($PublicOrigin+"/v1/first-party/bootstrap")
 $tenantValid=$false
 if((Status $bootstrap) -eq 200) {
  try {
@@ -46,11 +79,11 @@ if((Status $bootstrap) -eq 200) {
  } catch {}
 }
 Report "https-bootstrap-with-tenant" $tenantValid ("HTTP "+(Status $bootstrap))
-$session=Get-Http ($PublicOrigin+"/v1/first-party/session")
+$session=Get-Https ($PublicOrigin+"/v1/first-party/session")
 Report "anonymous-session-denied" ((Status $session) -eq 401) ("HTTP "+(Status $session))
-$start=Get-Http ($PublicOrigin+"/start")
+$start=Get-Https ($PublicOrigin+"/start")
 Report "https-browser-entry" ((Status $start) -eq 200) ("HTTP "+(Status $start))
-$wasm=Get-Http ($PublicOrigin+"/endpoint-wasm/ucr_endpoint_wasm_bg.wasm")
+$wasm=Get-Https ($PublicOrigin+"/endpoint-wasm/ucr_endpoint_wasm_bg.wasm")
 Report "https-wasm-served" ((Status $wasm) -eq 200) ("HTTP "+(Status $wasm))
 if($failures.Count -gt 0) {
  Write-Host ("UCR_FIRST_REAL_CALL_PREFLIGHT_FAILED count="+$failures.Count)

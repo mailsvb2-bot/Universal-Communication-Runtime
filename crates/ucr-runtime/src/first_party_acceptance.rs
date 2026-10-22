@@ -49,7 +49,8 @@ fn state(path: &PathBuf) -> State {
             tenant_id: TenantId::from_opaque(OpaqueId::new("public-self-service").unwrap()),
             namespace_id: None,
         }),
-        pending: Mutex::new(Vec::new()),
+        challenge_key: [7; 32],
+        consumed: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     }
 }
@@ -323,4 +324,458 @@ fn verify_revoked_device_stays_revoked(
         Some(StatusCode::UNAUTHORIZED)
     );
     signed_login(&revoked, alice, alice_signer);
+}
+
+fn session_of(state: &State, binding: &Binding) -> Session {
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|session| session.binding == *binding)
+        .cloned()
+        .expect("authenticated first-party session")
+}
+
+fn call(state: &State, binding: &Binding, path: &str, body: &Value) -> Result<Value, StatusCode> {
+    let session = session_of(state, binding);
+    call_route(state, &session, path, &serde_json::to_vec(body).unwrap())
+}
+
+fn join_accepted(
+    state: &State,
+    binding: &Binding,
+    call_id: &str,
+    revision: u64,
+) -> Result<Value, StatusCode> {
+    call(
+        state,
+        binding,
+        "/v1/first-party/call/join-accepted",
+        &json!({"binding": binding, "callId": call_id, "expectedRevision": revision}),
+    )
+}
+
+fn signal(
+    state: &State,
+    binding: &Binding,
+    call_id: &str,
+    revision: u64,
+    action: &str,
+) -> Result<Value, StatusCode> {
+    call(
+        state,
+        binding,
+        "/v1/first-party/call/signal",
+        &json!({"binding": binding, "callId": call_id, "expectedRevision": revision, "action": action}),
+    )
+}
+
+fn realtime_join_request(
+    claims: &ucr_realtime::RealtimeSessionClaims,
+    token: &str,
+) -> tonic::Request<ucr_api_grpc::pb::RealtimeJoinRequest> {
+    use ucr_api_grpc::pb;
+    let mut request = tonic::Request::new(pb::RealtimeJoinRequest {
+        scope: Some(pb::TenantScope {
+            tenant_id: Some(pb::OpaqueId {
+                value: claims.scope.tenant_id.as_opaque().as_wire_bytes().to_vec(),
+            }),
+            namespace_id: claims
+                .scope
+                .namespace_id
+                .as_ref()
+                .map(|namespace| pb::OpaqueId {
+                    value: namespace.as_opaque().as_wire_bytes().to_vec(),
+                }),
+        }),
+        call_id: Some(pb::OpaqueId {
+            value: claims.call_id.as_opaque().as_wire_bytes().to_vec(),
+        }),
+        session_id: Some(pb::OpaqueId {
+            value: claims.session_id.as_opaque().as_wire_bytes().to_vec(),
+        }),
+    });
+    request.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    request
+}
+
+/// Regression: a first-party direct Call started through `/start` was refused
+/// by Realtime with 401 "realtime join rejected" because Realtime admits only
+/// Group Calls. Both accepted participants must now be admitted to the derived
+/// media Group Call through the SAME issuer and canonical `SQLite` owner, while
+/// a third party, an unaccepted callee and a hung-up Call stay refused.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One end-to-end acceptance narrative.
+async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_participants_only() {
+    use ucr_api_grpc::{
+        GrpcRealtimeService, pb, pb::realtime_service_server::RealtimeService as _,
+    };
+    use ucr_core::{CallStore, GroupStore};
+    use ucr_model::{GroupMemberState, PrincipalRef};
+
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, _, _) = signup(&server, 41);
+    let (bob, _, _) = signup(&server, 42);
+    let (carol, _, _) = signup(&server, 43);
+
+    // The non-loginable media host is never a callable contact.
+    assert_eq!(
+        call(
+            &server,
+            &alice,
+            "/v1/first-party/call/start",
+            &json!({"binding": alice, "intent": {"peerIdentityId": "fp-media-host", "media": "video", "idempotencyKey": "host"}}),
+        )
+        .err(),
+        Some(StatusCode::NOT_FOUND)
+    );
+    let started = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/start",
+        &json!({"binding": alice, "intent": {"peerIdentityId": bob.participant_id, "media": "video", "idempotencyKey": "media-acceptance"}}),
+    )
+    .expect("canonical direct Call start");
+    let call_id = started["callId"].as_str().unwrap().to_owned();
+    let revision = started["revision"].as_u64().unwrap();
+
+    // Before the callee accepted, nobody gets media authority.
+    assert_eq!(
+        join_accepted(&server, &alice, &call_id, revision).err(),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(
+        join_accepted(&server, &bob, &call_id, revision).err(),
+        Some(StatusCode::FORBIDDEN)
+    );
+    let accepted = signal(&server, &bob, &call_id, revision, "accept").expect("callee accepts");
+    assert_eq!(accepted["state"], "active");
+    let revision = accepted["revision"].as_u64().unwrap();
+    // A third person never sees nor joins the Call.
+    assert!(join_accepted(&server, &carol, &call_id, revision).is_err());
+
+    let grants = [&alice, &bob].map(|binding| {
+        join_accepted(&server, binding, &call_id, revision).expect("accepted participant Join")
+    });
+    let tokens = grants.clone().map(|grant| {
+        // The SDK contract is unchanged: the response names the direct Call.
+        assert_eq!(grant["callId"], call_id.as_str());
+        grant["joinFragment"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("#ucr_join=")
+            .unwrap()
+            .to_owned()
+    });
+    let claims = tokens.clone().map(|token| {
+        server
+            .issuer
+            .verify_signed_claims(&token, now_unix_ms().unwrap())
+            .expect("first-party grant signed by the realtime issuer")
+    });
+    // Both grants name ONE derived media Group Call, bound to the exact Device.
+    assert_eq!(claims[0].call_id, claims[1].call_id);
+    assert!(claims[0].call_id.as_opaque().as_str().starts_with("fp-m-"));
+    assert_ne!(claims[0].call_id.as_opaque().as_str(), call_id);
+    assert_eq!(
+        claims[0].device_id.as_ref().map(|d| d.as_opaque().as_str()),
+        Some(alice.device.as_str())
+    );
+    assert_eq!(
+        claims[1].device_id.as_ref().map(|d| d.as_opaque().as_str()),
+        Some(bob.device.as_str())
+    );
+
+    // Repeating the Join is idempotent and keeps the media Group exact.
+    join_accepted(&server, &alice, &call_id, revision).expect("idempotent re-prepare");
+    let media = server
+        .store
+        .call(&claims[0].scope, &claims[0].call_id)
+        .unwrap()
+        .expect("media Call");
+    assert_eq!(media.participants.len(), 2);
+    let group_id = first_party_media::media_runtime_ids(
+        &claims[0].scope,
+        &CallId::from_opaque(opaque(&call_id).unwrap()),
+    )
+    .unwrap()
+    .group_id;
+    let members = server
+        .store
+        .group_memberships(&claims[0].scope, &group_id, 16)
+        .unwrap()
+        .into_iter()
+        .filter(|membership| membership.state == GroupMemberState::Active)
+        .map(|membership| membership.member)
+        .collect::<Vec<PrincipalRef>>();
+    assert_eq!(
+        members.len(),
+        3,
+        "exactly host + both participants: {members:?}"
+    );
+    assert!(members.contains(&claims[0].participant));
+    assert!(members.contains(&claims[1].participant));
+
+    // The real gRPC Realtime owner over the SAME SQLite store and issuer.
+    let realtime = GrpcRealtimeService::new(
+        Arc::new(ucr_core::SystemServiceQuotaClock),
+        Arc::clone(&server.store),
+        Arc::clone(&server.store),
+        Arc::clone(&server.issuer),
+        Arc::new(ucr_realtime::RealtimeSessionRegistry::new(16, 4)),
+        Arc::new(ucr_conference::ConferenceRuntimeState::new()),
+    )
+    .with_mls_admission_store(Arc::clone(&server.store));
+    let mut generations = Vec::new();
+    for (claim, token) in claims.iter().zip(&tokens) {
+        let joined = realtime
+            .join_realtime(realtime_join_request(claim, token))
+            .await
+            .unwrap()
+            .into_inner();
+        match joined.result {
+            Some(pb::realtime_join_response::Result::Session(session)) => {
+                assert_eq!(
+                    session.admission_state,
+                    pb::RealtimeAdmissionState::Admitted as i32
+                );
+                generations.push(session.session_sequence);
+            }
+            other => panic!("direct-call participant was not admitted: {other:?}"),
+        }
+    }
+    // Heartbeat keeps the Join generation fence.
+    for ((claim, token), generation) in claims.iter().zip(&tokens).zip(&generations) {
+        let join = realtime_join_request(claim, token).into_inner();
+        for (sequence, ok) in [(*generation, true), (generation + 1, false)] {
+            let mut beat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
+                scope: join.scope.clone(),
+                call_id: join.call_id.clone(),
+                session_id: join.session_id.clone(),
+                expected_session_sequence: sequence,
+            });
+            beat.metadata_mut().insert(
+                ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+                format!("Bearer {token}").parse().unwrap(),
+            );
+            let result = realtime
+                .heartbeat_realtime(beat)
+                .await
+                .unwrap()
+                .into_inner()
+                .result;
+            assert_eq!(
+                matches!(
+                    result,
+                    Some(pb::realtime_heartbeat_response::Result::Acknowledgement(_))
+                ),
+                ok,
+                "heartbeat sequence {sequence}: {result:?}"
+            );
+        }
+    }
+
+    // A plain media Group Call has no Universal mute policy: a speaking level
+    // is accepted (regression: every level > 0 was refused with 409).
+    let audio = |claim: &ucr_realtime::RealtimeSessionClaims, token: &str| {
+        let join = realtime_join_request(claim, token).into_inner();
+        let mut request = tonic::Request::new(pb::RealtimeReportAudioLevelRequest {
+            scope: join.scope,
+            call_id: join.call_id,
+            session_id: join.session_id,
+            level: 42,
+        });
+        request.metadata_mut().insert(
+            ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        request
+    };
+    let level = realtime
+        .report_audio_level(audio(&claims[0], &tokens[0]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            level.result,
+            Some(pb::realtime_report_audio_level_response::Result::Acknowledgement(_))
+        ),
+        "{level:?}"
+    );
+
+    // Hang-up ends the media Call too; no new Join grant and no re-admission.
+    let hung = signal(&server, &bob, &call_id, revision, "hangup").expect("hangup");
+    assert_eq!(hung["state"], "terminated");
+    let media = server
+        .store
+        .call(&claims[0].scope, &claims[0].call_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(media.signalling_state, CallSignallingState::Terminated);
+    assert!(
+        join_accepted(
+            &server,
+            &alice,
+            &call_id,
+            hung["revision"].as_u64().unwrap()
+        )
+        .is_err()
+    );
+    let rejoin = realtime
+        .join_realtime(realtime_join_request(&claims[0], &tokens[0]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            rejoin.result,
+            Some(pb::realtime_join_response::Result::Error(_))
+        ),
+        "ended direct Call must not be re-admitted: {rejoin:?}"
+    );
+    // An already-open session of the ended Call cannot keep heartbeating.
+    let join = realtime_join_request(&claims[1], &tokens[1]).into_inner();
+    let mut beat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
+        scope: join.scope,
+        call_id: join.call_id,
+        session_id: join.session_id,
+        expected_session_sequence: generations[1],
+    });
+    beat.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[1]).parse().unwrap(),
+    );
+    let after = realtime
+        .heartbeat_realtime(beat)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            after.result,
+            Some(pb::realtime_heartbeat_response::Result::Error(_))
+        ),
+        "{after:?}"
+    );
+}
+
+/// Regression: 512 anonymous challenge requests used to fill ONE global pending
+/// pool and answer 429 to every user for 90 s. Challenges are now stateless
+/// (MAC-sealed, bound to binding/purpose/key) and only verified proofs are
+/// remembered, so a flood cannot lock anybody out, while replay, tampering
+/// and cross-purpose use stay rejected.
+#[test]
+fn anonymous_challenge_flood_cannot_lock_out_signup_or_login() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, alice_signer, _) = signup(&server, 51);
+    for _ in 0..4096 {
+        account_route(&server, "/v1/first-party/signup/begin", b"{}").expect("never 429");
+        login_route(
+            &server,
+            "/v1/first-party/login/challenge",
+            &serde_json::to_vec(&alice).unwrap(),
+        )
+        .expect("never 429");
+    }
+    assert!(server.consumed.lock().unwrap().len() <= 1);
+    // Everybody can still sign up and log in.
+    let (bob, _, _) = signup(&server, 52);
+    signed_login(&server, &alice, &alice_signer);
+    assert_ne!(alice.participant_id, bob.participant_id);
+
+    let (issued, _) = login_route(
+        &server,
+        "/v1/first-party/login/challenge",
+        &serde_json::to_vec(&alice).unwrap(),
+    )
+    .unwrap();
+    let sign = |challenge_id: &str, nonce: &str| {
+        let payload = encoded_proof(
+            "ucr-first-party-device-login.v1",
+            &json!([
+                alice.tenant_id,
+                alice.namespace_id,
+                alice.participant_id,
+                alice.device,
+                challenge_id,
+                nonce
+            ]),
+        )
+        .unwrap();
+        URL_SAFE_NO_PAD.encode(alice_signer.sign(payload.as_bytes()).to_bytes())
+    };
+    let id = issued["challengeId"].as_str().unwrap();
+    let nonce = issued["challengeBytesBase64Url"].as_str().unwrap();
+    let verify = |binding: &Binding, challenge_id: &str, signature: String| {
+        login_route(
+            &server,
+            "/v1/first-party/login/verify",
+            &serde_json::to_vec(&json!({"binding": binding, "challengeId": challenge_id, "signatureBase64Url": signature})).unwrap(),
+        )
+        .map(|_| ())
+    };
+    // A wrong signature does not spend the challenge...
+    let mut bad = sign(id, nonce);
+    bad.replace_range(0..2, if bad.starts_with("AA") { "BB" } else { "AA" });
+    assert!(verify(&alice, id, bad).is_err());
+    // ...a tampered id or another binding is refused...
+    let mut tampered = URL_SAFE_NO_PAD.decode(id).unwrap();
+    tampered[3] ^= 1;
+    let tampered = URL_SAFE_NO_PAD.encode(tampered);
+    assert_eq!(
+        verify(&alice, &tampered, sign(&tampered, nonce)),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+    assert_eq!(
+        verify(&bob, id, sign(id, nonce)),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+    // ...a signup challenge never serves as a login challenge...
+    let (signup_issued, _) = account_route(&server, "/v1/first-party/signup/begin", b"{}").unwrap();
+    let signup_id = signup_issued["challengeId"].as_str().unwrap();
+    assert_eq!(
+        verify(
+            &alice,
+            signup_id,
+            sign(
+                signup_id,
+                signup_issued["challengeBytesBase64Url"].as_str().unwrap()
+            )
+        ),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+    // ...the genuine proof succeeds exactly once.
+    verify(&alice, id, sign(id, nonce)).expect("genuine login");
+    assert_eq!(
+        verify(&alice, id, sign(id, nonce)),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+
+    // Repeated logins of one Identity evict only its own oldest sessions.
+    for _ in 0..(MAX_SESSIONS_PER_IDENTITY + 4) {
+        signed_login(&server, &alice, &alice_signer);
+    }
+    let sessions = server.sessions.lock().unwrap();
+    assert_eq!(
+        sessions
+            .iter()
+            .filter(|s| s.binding.participant_id == alice.participant_id)
+            .count(),
+        MAX_SESSIONS_PER_IDENTITY
+    );
+    assert_eq!(
+        sessions
+            .iter()
+            .filter(|s| s.binding.participant_id == bob.participant_id)
+            .count(),
+        1
+    );
 }

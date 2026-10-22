@@ -48,6 +48,7 @@ const CLIENT_HTML: &str = include_str!("../static/client.html");
 const FIRST_PARTY_START_HTML: &str = include_str!("../static/start.html");
 const FIRST_PARTY_START_JS: &str = include_str!("../static/start.js");
 const FIRST_PARTY_READINESS_JS: &str = include_str!("../static/readiness.js");
+const MOBILE_BROWSER_PROBE_JS: &str = include_str!("../static/mobile-browser-probe.js");
 
 // Generated endpoint-only public code: no secrets, grants or MLS state in these
 // artifacts. The gateway serves only an explicit allowlist, never a directory.
@@ -710,15 +711,42 @@ async fn browser_ready_response(state: &AppState) -> HttpResponse {
     text_response(StatusCode::OK, "ready")
 }
 
-fn first_party_readiness_js_response() -> HttpResponse {
+fn static_script_response(source: &'static str) -> HttpResponse {
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
         .header(CACHE_CONTROL, "no-store")
-        .body(full_body(Bytes::from_static(
-            FIRST_PARTY_READINESS_JS.as_bytes(),
-        )))
-        .expect("static readiness response")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(full_body(Bytes::from_static(source.as_bytes())))
+        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+/// Browsers request it on every page; a 405 was logged as a load error.
+fn favicon_response() -> HttpResponse {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(CACHE_CONTROL, "public, max-age=86400")
+        .body(full_body(Bytes::new()))
+        .unwrap_or_else(|_| Response::new(full_body(Bytes::new())))
+}
+
+fn first_party_readiness_js_response() -> HttpResponse {
+    static_script_response(FIRST_PARTY_READINESS_JS)
+}
+
+fn mobile_browser_probe_js_response() -> HttpResponse {
+    static_script_response(MOBILE_BROWSER_PROBE_JS)
+}
+
+fn first_party_static_response(path: &str) -> Option<HttpResponse> {
+    Some(match path {
+        "/start" | "/start.html" => first_party_start_response(),
+        "/start.js" => first_party_start_js_response(),
+        "/readiness.js" => first_party_readiness_js_response(),
+        "/mobile-browser-probe.js" => mobile_browser_probe_js_response(),
+        "/favicon.ico" => favicon_response(),
+        _ => return None,
+    })
 }
 
 async fn handle_request(
@@ -742,14 +770,10 @@ async fn handle_request(
     if method == Method::GET && path == "/readyz" {
         return Ok(browser_ready_response(&state).await);
     }
-    if method == Method::GET && matches!(path.as_str(), "/start" | "/start.html") {
-        return Ok(first_party_start_response());
-    }
-    if method == Method::GET && path == "/start.js" {
-        return Ok(first_party_start_js_response());
-    }
-    if method == Method::GET && path == "/readiness.js" {
-        return Ok(first_party_readiness_js_response());
+    if method == Method::GET
+        && let Some(response) = first_party_static_response(&path)
+    {
+        return Ok(response);
     }
     if method == Method::GET && path == "/room" {
         return Ok(html_body_response(StatusCode::OK, room_page()));
@@ -3617,6 +3641,158 @@ mod tests {
     }
 
     #[test]
+    fn first_party_entry_reports_missing_bundle_and_failed_session_instead_of_hanging() {
+        let html = super::FIRST_PARTY_START_HTML;
+        let js = super::FIRST_PARTY_START_JS;
+        assert!(!js.contains("} from \"/endpoint-media/"));
+        assert!(
+            js.contains("await import(\"/endpoint-media/reference_browser_media_installer.js\")")
+        );
+        assert!(js.contains("Вход недоступен: браузерный пакет не установлен."));
+        assert!(js.contains("function explainEntryFailure(error)"));
+        assert!(js.contains("explainEntryFailure(error);"));
+        assert!(!js.contains("void run(initialize);"));
+        assert!(html.contains("section h2:not(:first-child){margin-top:28px"));
+    }
+
+    #[test]
+    fn e2ee_failure_and_expired_renewal_revoke_capture() {
+        let client = super::CLIENT_HTML;
+        assert!(client.contains("Protected media activation failed ("));
+        assert!(client.contains("void endUnverifiedMedia(generation,"));
+        assert!(client.contains("if(renewLocalRoomGrant.busy)return;"));
+        assert!(client.contains("Signed session renewal rejected; media capture stopped."));
+        assert!(client.contains("Signed session expired without renewal; media capture stopped."));
+    }
+
+    #[test]
+    fn first_party_auth_diagnostics_expose_only_stages_and_http_categories() {
+        let page = super::FIRST_PARTY_START_HTML;
+        let script = super::FIRST_PARTY_START_JS;
+        assert!(page.contains("id=\"auth-diagnostics-report\""));
+        assert!(page.contains("id=\"auth-diagnostics-save\""));
+        assert!(script.contains("schema:\"ucr-auth-diagnostics-v1\""));
+        assert!(script.contains("authDiagnostics.length>60"));
+        assert!(script.contains("HTTP_401_AUTHORITY_REJECTED"));
+        assert!(script.contains("authTrace(\"resume_session\""));
+        assert!(script.contains("authTrace(\"device_reauthentication\""));
+        assert!(script.contains("authTrace(\"list_contacts\""));
+        assert!(script.contains("authTrace(\"list_devices\""));
+        assert!(script.contains("authTrace(\"incoming_calls\""));
+        assert!(!script.contains("authDiagnostics.push({error:"));
+    }
+
+    #[test]
+    fn call_diagnostics_are_bounded_exportable_and_do_not_include_credentials() {
+        let client = super::CLIENT_HTML;
+        assert!(client.contains("id=\"ucr-diagnostics\""));
+        assert!(client.contains("id=\"ucr-diagnostics-save\""));
+        assert!(client.contains("id=\"ucr-diagnostics-copy\""));
+        assert!(client.contains("ucrDiagnosticsEvents.length>80"));
+        assert!(client.contains("schema:\"ucr-local-diagnostics-v1\""));
+        assert!(client.contains("ucrDiagnosticReason(e?.message)"));
+        assert!(client.contains("MLS_EPOCH_MISMATCH"));
+        assert!(client.contains("MEDIA_CODEC_FAILURE"));
+        assert!(client.contains("SESSION_CONFLICT"));
+        assert!(client.contains("URL.revokeObjectURL(url)"));
+    }
+
+    #[test]
+    fn expired_realtime_grant_and_session_conflict_fail_closed() {
+        let client = super::CLIENT_HTML;
+        assert!(client.contains("r.status===409&&sessionActive"));
+        assert!(client.contains("\"/v1/realtime/audio-level\""));
+        assert!(client.contains("\"/v1/realtime/active-speaker\""));
+        assert!(client.contains("\"/v1/realtime/chat/list\""));
+        assert!(client.contains("\"/v1/realtime/reactions/list\""));
+        assert!(client.contains("api.retiringConflictGeneration=generation"));
+        assert!(client.contains("Realtime session conflict: audio/video stopped."));
+        assert!(client.contains("Date.now()>=claims.expires"));
+        assert!(client.contains("Signed session expired without renewal; media capture stopped."));
+    }
+
+    #[test]
+    fn accepted_direct_call_renews_via_canonical_owner_and_audio_can_be_unlocked() {
+        let client = super::CLIENT_HTML;
+        let start = super::FIRST_PARTY_START_JS;
+        assert!(start.contains("sessionStorage.setItem(\"ucrFirstPartyDirectCall\", callId)"));
+        assert!(client.contains("host.getDirectCall(binding,directCallId)"));
+        assert!(client.contains("window.ucrRefreshFirstPartyDeviceSession=async()=>"));
+        assert!(client.contains("Device reauthentication changed first-party principal"));
+        assert!(client.contains("Device signer is no longer trusted"));
+        assert!(client.contains("nextClaims.device_id!==claims.device_id"));
+        assert!(client.contains("nextClaims.call_id!==claims.call_id"));
+        assert!(client.contains("host.issueSignedJoinForAcceptedCall(binding,"));
+        assert!(client.contains("if(call.state!==\"active\""));
+        assert!(client.contains("expectedRevision:call.revision"));
+        assert!(client.contains("data.callId!==directCallId"));
+        assert!(client.contains("if(!next||next===token)return"));
+        assert!(client.contains("await join();"));
+        assert!(client.contains("id=\"sound-unlock\""));
+        assert!(client.contains("ui.soundUnlock.addEventListener(\"click\""));
+        assert!(client.contains(
+            "Encrypted video is connected, but audio playback is suspended. Click Enable sound."
+        ));
+    }
+
+    #[test]
+    fn first_party_device_authority_installs_the_shared_admission_resolver() {
+        // Regression: with Device authority alone, every /start call stopped at
+        // "Canonical Device signing/trust integration is unavailable".
+        let client = super::CLIENT_HTML;
+        assert_eq!(
+            client
+                .matches(
+                    "window.ucrCanonicalMediaAdmissionResolver=createEndpointAdmissionResolver();"
+                )
+                .count(),
+            2
+        );
+        assert!(client.contains("function createEndpointAdmissionResolver(){"));
+    }
+
+    #[test]
+    fn client_page_declares_raised_hand_state_in_strict_mode() {
+        assert!(super::CLIENT_HTML.contains("let handRaised=false,"));
+    }
+
+    #[test]
+    fn favicon_is_answered_without_a_load_error() {
+        // Regression: every page logged "Failed to load resource: 405".
+        assert_eq!(
+            super::favicon_response().status(),
+            super::StatusCode::NO_CONTENT
+        );
+    }
+
+    #[test]
+    fn readiness_badge_claims_only_what_readyz_checks() {
+        // Regression: "Медиашлюз готов" was shown although /readyz checks only
+        // the BFF and the browser E2EE assets, never realtime gRPC, SFU or TURN.
+        let js = super::FIRST_PARTY_READINESS_JS;
+        assert!(!js.contains("Медиашлюз готов"));
+        assert!(js.contains("Сервер входа и браузерные E2EE-модули доступны"));
+    }
+
+    #[test]
+    fn client_page_scripts_are_served_with_nosniff() {
+        assert!(super::CLIENT_HTML.contains("<script src=\"./mobile-browser-probe.js\"></script>"));
+        for response in [
+            super::mobile_browser_probe_js_response(),
+            super::first_party_readiness_js_response(),
+        ] {
+            assert_eq!(response.status(), super::StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("X-Content-Type-Options")
+                    .expect("nosniff header"),
+                "nosniff"
+            );
+        }
+    }
+
+    #[test]
     fn first_party_contact_call_entry_has_complete_fail_closed_user_route() {
         let html = super::FIRST_PARTY_START_HTML;
         let js = super::FIRST_PARTY_START_JS;
@@ -3652,11 +3828,13 @@ mod tests {
         assert!(js.contains("await calls.contacts()"));
         assert!(js.contains("await calls.addContact(name,peer)"));
         assert!(js.contains("await calls.start(contact.id,media,requestId)"));
-        assert!(js.contains("await calls.incoming()"));
+        assert!(js.contains("await authTrace(\"incoming_calls\",()=>calls.incoming())"));
         assert!(js.contains("await calls.signal(call.callId,\"accept\")"));
         assert!(js.contains("await calls.signal(call.callId,\"reject\")"));
         assert!(js.contains("await calls.signal(active.call.callId,action)"));
-        assert!(js.contains("await calls.inspect(active.call.callId)"));
+        assert!(
+            js.contains("await authTrace(\"inspect_call\",()=>calls.inspect(active.call.callId))")
+        );
         assert!(js.contains("if (accountScope !== principalScope(user))"));
         assert!(js.contains("idempotency.clear()"));
         assert!(js.contains("clearRetryKey(active.call)"));

@@ -50,6 +50,8 @@ export interface UcrMediaProducer {
     emit: (frame: UcrEncodedMediaFrame) => void | Promise<void>,
   ): void | Promise<void>;
   updateSources?(sources: UcrEndpointMediaSources): void | Promise<void>;
+  /** Request a clean reference frame after a pre-encryption video drop. */
+  requestVideoKeyframe?(streamId: string): void;
   stop(): void | Promise<void>;
 }
 
@@ -87,6 +89,19 @@ export interface UcrEndpointPipelineOptions {
 
 type InboundHeader = SfuForwardEnvelopeWire["frame"]["header"];
 
+// Aggregate endpoint stage counters. Never expose plaintext, peer IDs or keys.
+const ucrMediaStageMetrics = {
+  authorizationMs: 0, authorizationMaxMs: 0, expiredBeforeSeal: 0,
+  outboundFrames: 0, sealAndSendMs: 0,
+  audioExpired: 0, audioQueueFull: 0, audioAuthorizationRejected: 0,
+  audioSealFailure: 0, audioTransportFailure: 0, audioDecodeFailure: 0,
+  videoExpired: 0, videoQueueFull: 0, videoKeyframeRequests: 0,
+  sendChannelClosed: 0, sendQueueCongested: 0, sendInvalidEnvelope: 0,
+  sendUnexpectedFailure: 0, sendUnavailable: 0,
+};
+(globalThis as unknown as {__ucrMediaStageMetrics?: typeof ucrMediaStageMetrics})
+  .__ucrMediaStageMetrics = ucrMediaStageMetrics;
+
 export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1 {
   readonly contractVersion = UCR_ENDPOINT_E2EE_CONTRACT_VERSION;
   readonly #bridge: UcrGroupMediaCryptoBridge;
@@ -118,7 +133,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   #active = false;
   #retired = false;
   #generation = 0;
-  #sender: ((wire: Uint8Array) => void) | null = null;
+  #sender: ((wire: Uint8Array, kind?: "audio" | "video") => void) | null = null;
 
   constructor(options: UcrEndpointPipelineOptions) {
     if (!options.bridge || typeof options.bridge.revoke !== "function") {
@@ -178,7 +193,19 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   async updateSources(sources: UcrEndpointMediaSources): Promise<void> {
     if (!this.#active) throw new Error("endpoint media not started");
     if (!this.#producer.updateSources) throw new Error("media source updates unsupported by platform producer");
-    await this.#producer.updateSources(sources);
+    try {
+      await this.#producer.updateSources(sources);
+    } catch (error) {
+      // The producer may already have torn down the previous media sources.
+      // Never retain a live MLS signer and report an active call after failed
+      // source replacement. Retire the whole endpoint and require fresh Join.
+      try {
+        await this.stop();
+      } catch (cleanupError) {
+        this.#onError(cleanupError);
+      }
+      throw error;
+    }
   }
 
   /** No placeholder CPU/battery/thermal metrics: absent measurement means no report. */
@@ -224,9 +251,11 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     }
     this.#pending++;
     const generation = this.#generation;
+    let inboundAudio = false;
     try {
       const envelope = decodeSfuForwardEnvelopeWire(wire);
       const header = envelope.frame.header;
+      inboundAudio = header.mediaKind === "audio";
       const binding = this.#binding;
       if (binding && (header.tenantId !== binding.tenantId ||
           header.namespaceId !== binding.namespaceId ||
@@ -250,14 +279,17 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       }
       this.#reserved.add(reservation);
       const previous = this.#receiveTails.get(replayKey) ?? Promise.resolve();
+      let inboundStage = "RECEIVE_AUTHORIZATION";
       const current: Promise<void> = previous.catch(() => {}).then(async () => {
       if (!this.#active || this.#generation !== generation) return;
       if (this.#authorizeFrame && !(await this.#authorizeFrame(header))) {
         throw new Error("media recipient or source authorization revoked");
       }
+      inboundStage = "SIGNING_KEY_RESOLUTION";
       const key = await this.#trustedKeys.resolve(header, envelope.frame.sourceSignature.keyId);
       if (!(key instanceof Uint8Array) || key.byteLength !== 32) throw new Error("untrusted endpoint signing key");
       if (!this.#active || this.#generation !== generation) return;
+      inboundStage = "VERIFY_AND_DECRYPT";
       const plaintext = this.#bridge.open_wire(wire, key);
       if (!(plaintext instanceof Uint8Array) || plaintext.byteLength > this.#maxFrameBytes) {
         throw new Error("invalid decrypted media payload");
@@ -271,6 +303,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         throw new Error("replayed endpoint media frame");
       }
       this.#received.set(replayKey, header.sequence);
+      inboundStage = "DECODE_AND_PLAY";
       await this.#consumer.play({
         mediaKind: header.mediaKind,
         videoSourceKind: header.videoSourceKind ?? undefined,
@@ -295,6 +328,12 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       this.#receiveTails.set(replayKey, current);
       try {
         await current;
+      } catch (_error) {
+        if (inboundAudio && inboundStage === "DECODE_AND_PLAY")
+          ucrMediaStageMetrics.audioDecodeFailure++;
+        const code = "UCR_MEDIA_INBOUND_" + inboundStage;
+        this.#onError(new Error(code));
+        throw _error;
       } finally {
         this.#reserved.delete(reservation);
         if (this.#receiveTails.get(replayKey) === current) {
@@ -354,6 +393,11 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       return;
     }
     if (this.#pendingOutbound >= this.#maxPendingFrames) {
+      if (frame.mediaKind === "video") {
+        ucrMediaStageMetrics.videoQueueFull++;
+        this.#producer.requestVideoKeyframe?.(frame.streamId);
+        ucrMediaStageMetrics.videoKeyframeRequests++;
+      } else ucrMediaStageMetrics.audioQueueFull++;
       this.#onError(new Error("outbound endpoint media queue capacity exceeded"));
       return;
     }
@@ -363,14 +407,51 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     // A codec/producer may recycle its output buffer as soon as emit() returns.
     // Keep an owned, bounded snapshot until the authorization queue drains.
     const ownedFrame = {...frame, bytes: frame.bytes.slice()};
+    const queuedAt = performance.now();
+    // Only bounded aggregate stage metrics are exposed: no payload, sender ID,
+    // keys, or timestamps of individual captured speech leave this process.
+    const metrics = (globalThis as unknown as {__ucrMediaStageMetrics?: {
+      authorizationMs: number; authorizationMaxMs: number; expiredBeforeSeal: number;
+      outboundFrames: number; sealAndSendMs: number;
+    }}).__ucrMediaStageMetrics;
+
+    // Fresh voice matters more than an old frame: asynchronous authorization
+    // or sealing can otherwise accumulate seconds of *valid but obsolete* media.
+    const maxQueueAgeMs = frame.mediaKind === "audio" ? 150 : 250;
     const previous = this.#sendTails.get(streamKey) ?? Promise.resolve();
     this.#pendingOutbound++;
+    let outboundStage = "PUBLISH_AUTHORIZATION";
     const current: Promise<void> = previous.then(async () => {
       if (!this.#active || generation !== this.#generation) return;
-      if (!(await this.#authorizePublish(ownedFrame))) {
+      if (performance.now() - queuedAt > maxQueueAgeMs) {
+        if (metrics) metrics.expiredBeforeSeal++;
+        if (frame.mediaKind === "video") {
+          ucrMediaStageMetrics.videoExpired++;
+          this.#producer.requestVideoKeyframe?.(frame.streamId);
+          ucrMediaStageMetrics.videoKeyframeRequests++;
+        } else ucrMediaStageMetrics.audioExpired++;
+        return;
+      }
+      const authStarted = performance.now();
+      const authorized = await this.#authorizePublish(ownedFrame);
+      if (metrics) {
+        const elapsed = performance.now() - authStarted;
+        metrics.authorizationMs = Math.round(elapsed);
+        metrics.authorizationMaxMs = Math.max(metrics.authorizationMaxMs, Math.round(elapsed));
+      }
+      if (!authorized) {
         throw new Error("media publish authorization revoked");
       }
       if (!this.#active || generation !== this.#generation) return;
+      if (performance.now() - queuedAt > maxQueueAgeMs) {
+        if (metrics) metrics.expiredBeforeSeal++;
+        if (frame.mediaKind === "video") {
+          ucrMediaStageMetrics.videoExpired++;
+          this.#producer.requestVideoKeyframe?.(frame.streamId);
+          ucrMediaStageMetrics.videoKeyframeRequests++;
+        } else ucrMediaStageMetrics.audioExpired++;
+        return;
+      }
       const sequence = (this.#sequences.get(streamKey) ?? 0n) + 1n;
       if (sequence > 18_446_744_073_709_551_615n) {
         throw new Error("media sequence exhausted; rotate session");
@@ -381,6 +462,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       // Reserve BEFORE encryption: even a crypto or transport error must never
       // allow a previously used sequence/nonce to be retried with new plaintext.
       this.#sequences.set(streamKey, sequence);
+      outboundStage = "SEAL_WIRE";
       const wire = this.#bridge.seal_wire(
         ownedFrame.streamId, ownedFrame.mediaKind === "audio" ? 1 : 2,
         videoSourceCode, sequence, ownedFrame.timestamp, ownedFrame.keyframe, ownedFrame.bytes,
@@ -389,9 +471,38 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         throw new Error("encrypted media exceeds transport bounds");
       }
       if (!this.#active || generation !== this.#generation) return;
-      this.#sender?.(wire);
-    }).catch((error: unknown) => {
-      this.#onError(error);
+      outboundStage = "DATACHANNEL_SEND";
+      if (!this.#sender) {
+        ucrMediaStageMetrics.sendUnavailable++;
+        throw new Error("media sender unavailable");
+      }
+      this.#sender(wire, ownedFrame.mediaKind);
+      if (metrics) {
+        metrics.outboundFrames++;
+        metrics.sealAndSendMs = Math.round(performance.now() - queuedAt);
+      }
+    }).catch((_error: unknown) => {
+      if (outboundStage === "DATACHANNEL_SEND" && this.#sender) {
+        // Only codes issued by the first-party transport are trusted.
+        // Do not expose arbitrary exception text, URLs, devices or identifiers.
+        const code = (_error && typeof _error === "object" &&
+          "code" in _error) ? (_error as {code?: unknown}).code : null;
+        if (code === "UCR_TRANSPORT_CHANNEL_CLOSED") ucrMediaStageMetrics.sendChannelClosed++;
+        else if (code === "UCR_TRANSPORT_QUEUE_CONGESTED") ucrMediaStageMetrics.sendQueueCongested++;
+        else if (code === "UCR_TRANSPORT_INVALID_ENVELOPE") ucrMediaStageMetrics.sendInvalidEnvelope++;
+        else ucrMediaStageMetrics.sendUnexpectedFailure++;
+      }
+      if (frame.mediaKind === "audio") {
+        if (outboundStage === "PUBLISH_AUTHORIZATION") ucrMediaStageMetrics.audioAuthorizationRejected++;
+        else if (outboundStage === "SEAL_WIRE") ucrMediaStageMetrics.audioSealFailure++;
+        else ucrMediaStageMetrics.audioTransportFailure++;
+      }
+      // Stable, non-sensitive stage labels; never expose keys, ciphertext or source identity.
+      if (frame.mediaKind === "video") {
+        this.#producer.requestVideoKeyframe?.(frame.streamId);
+        ucrMediaStageMetrics.videoKeyframeRequests++;
+      }
+      this.#onError(new Error("UCR_MEDIA_OUTBOUND_" + outboundStage));
     }).finally(() => {
       this.#pendingOutbound--;
       if (this.#sendTails.get(streamKey) === current) {

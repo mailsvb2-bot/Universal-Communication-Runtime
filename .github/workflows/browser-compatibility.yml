@@ -324,10 +324,24 @@ jobs:
         run: |
           set -euo pipefail
           export CARGO_TARGET_DIR="$RUNNER_TEMP/ucr-endpoint-wasm-target"
-          cargo build \
-            --manifest-path crates/ucr-endpoint-wasm/Cargo.toml \
-            --target wasm32-unknown-unknown \
-            --release
+          # Retry transient registry/DNS failures; each attempt still builds
+          # the exact pinned WASM from source, never substitutes fake evidence.
+          built=false
+          for attempt in 1 2 3 4; do
+            if CARGO_NET_RETRY=8 cargo build \
+              --locked \
+              --manifest-path crates/ucr-endpoint-wasm/Cargo.toml \
+              --target wasm32-unknown-unknown \
+              --release; then
+              built=true
+              break
+            fi
+            if [ "$attempt" -lt 4 ]; then sleep $((attempt * 15)); fi
+          done
+          if [ "$built" != true ]; then
+            echo "iOS WASM build failed after real retries" >&2
+            exit 1
+          fi
           mkdir -p crates/ucr-realtime-web/static/endpoint-wasm
           wasm-bindgen \
             "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm" \

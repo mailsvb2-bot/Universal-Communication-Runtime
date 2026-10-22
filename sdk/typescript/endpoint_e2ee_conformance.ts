@@ -18,6 +18,8 @@ import {
   UcrBrowserWebCodecsProducer,
   ucrCameraLayerStreamId,
   ucrVideoEncodingTarget,
+  ucrAdaptiveVideoStep,
+  ucrNormalizeOpusAudio,
 } from "./src/browser_webcodecs_media.ts";
 import { createUcrCanonicalBrowserMediaFactory } from "./src/canonical_browser_media_factory.ts";
 import { createUcrCanonicalDevicePreparation } from "./src/canonical_device_enrollment.ts";
@@ -26,6 +28,45 @@ import {
   UcrChameleonReceiveHandover,
   type UcrEncryptedReceivePath,
 } from "./src/chameleon_receive_handover.ts";
+
+// Real microphone PCM is not guaranteed to match the configured Opus profile.
+// Exercise endpoint-only conversion without requiring browser permissions.
+{
+  const original = globalThis.AudioData;
+  const created: Array<Record<string, unknown>> = [];
+  class FakeAudioData {
+    sampleRate: number; numberOfChannels: number; numberOfFrames: number; timestamp: number;
+    planes: Float32Array[];
+    constructor(config: {sampleRate: number; numberOfChannels: number;
+      numberOfFrames: number; timestamp: number; data: Float32Array}) {
+      this.sampleRate=config.sampleRate;this.numberOfChannels=config.numberOfChannels;
+      this.numberOfFrames=config.numberOfFrames;this.timestamp=config.timestamp;
+      this.planes=[config.data];
+      created.push(config);
+    }
+    copyTo(dest: Float32Array,{planeIndex}: {planeIndex: number}) {
+      dest.set(this.planes[planeIndex]);
+    }
+    close() {}
+  }
+  try {
+    Object.assign(globalThis,{AudioData:FakeAudioData});
+    const stereo=Object.create(FakeAudioData.prototype) as FakeAudioData;
+    stereo.sampleRate=44100;stereo.numberOfChannels=2;stereo.numberOfFrames=441;
+    stereo.timestamp=1234;
+    stereo.planes=[new Float32Array(441).fill(.5),new Float32Array(441).fill(-.25)];
+    const output=ucrNormalizeOpusAudio(stereo as unknown as AudioData);
+    assert.equal(output.sampleRate,48000);
+    assert.equal(output.numberOfChannels,1);
+    assert.equal(output.numberOfFrames,480);
+    assert.equal(output.timestamp,1234);
+    assert.ok(Math.abs((created[0].data as Float32Array)[0]-.125)<.0001);
+    assert.equal(ucrNormalizeOpusAudio(output),output);
+  } finally {
+    if(original===undefined) Reflect.deleteProperty(globalThis,"AudioData");
+    else Object.assign(globalThis,{AudioData:original});
+  }
+}
 
 // Real first/repeat-login orchestration over externally authenticated canonical
 // Device/Trust and endpoint-owned key vault; never create a second key owner.
@@ -780,6 +821,7 @@ const earlyBlockedCtx: Record<string, any> = {
   claims: {expires: Date.now() + 5000},
   ui: {privacyMode: {value: "secure"}},
   mediaCaptureGeneration: 1,
+  installFirstPartyDeviceAuthority: async () => {},
   requireCanonicalMediaHostReady: preflightCtx.preflight,
   ensureLocalMedia: async () => {unexpectedCapture++;},
   api: async () => {unexpectedSignalling++;},
@@ -871,6 +913,7 @@ const acceptedJoinCtx: Record<string, any> = {
   ui: {state: {textContent: ""}, status: {textContent: ""},
     join: {disabled: false}, leave: {disabled: true},
     privacyMode: {disabled: false}, expires: {textContent: ""}},
+  installFirstPartyDeviceAuthority: async () => {},
   requireCanonicalMediaHostReady() {}, prewarmAuthorizedMediaRuntime() {},
   prepareCanonicalDeviceAfterJoin: async (_generation: number, beforeJoin = false) => {
     // This fixture models an already trusted Device: prepare prior to Join,
@@ -1978,6 +2021,19 @@ assert.deepEqual(ucrVideoEncodingTarget(1920, 1080), {frameRate: 30, bitrate: 4_
 assert.deepEqual(ucrVideoEncodingTarget(1280, 720), {frameRate: 30, bitrate: 2_000_000});
 assert.deepEqual(ucrVideoEncodingTarget(640, 360), {frameRate: 12, bitrate: 384_000});
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
+assert.deepEqual(ucrAdaptiveVideoStep(0, 1_500_000, 0, 0), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(1, 1_500_000, 0, 0), {stage:2, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(2, 1_500_000, 0, 0), {stage:2, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(2, 0, 0, 4), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(1, 0, 0, 4), {stage:0, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(1, 300_000, 0, 4), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 2, 0), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 0, 0, true), {stage:1, healthySamples:0},
+  "local encode pressure must reduce quality without transport congestion");
+assert.deepEqual(ucrAdaptiveVideoStep(1, 0, 0, 4, false), {stage:0, healthySamples:0},
+  "quality must recover after five healthy device and transport samples");
+assert.throws(() => ucrAdaptiveVideoStep(0, -1, 0, 0), /invalid video congestion sample/);
+
 const endpointQualityCalls: string[] = [];
 const crypto = {
   seal_wire() { return new Uint8Array([1, 2]); },
@@ -2024,6 +2080,38 @@ assert.equal(await endpoint.getReceiveMediaTelemetry(), null);
 await assert.rejects(endpoint.applyReceiveMediaDecision({
   stage: "audio", video: null, opus_target_bitrate_bps: 48_000,
 }), /not active/);
+// A failed capture replacement must atomically retire encryption and stop
+// BOTH platform endpoints: a media-less UI must never keep a live MLS signer.
+const failedSourceEvents: string[] = [];
+const failedSourceEndpoint = new UcrPortableEndpointMediaAdapter({
+  bridge: {
+    seal_wire() { return new Uint8Array(); },
+    open_wire() { return new Uint8Array(); },
+    revoke() { failedSourceEvents.push("revoke"); },
+  },
+  consumer: {
+    play() {},
+    stop() { failedSourceEvents.push("consumer:stop"); },
+  },
+  producer: {
+    start() { failedSourceEvents.push("producer:start"); },
+    updateSources() { throw new Error("capture replacement failed"); },
+    stop() { failedSourceEvents.push("producer:stop"); },
+  },
+  trustedKeys: {resolve() { return new Uint8Array(32); }},
+  binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+    groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+    negotiationGeneration: 1n},
+  authorizeFrame: () => true,
+  authorizePublish: () => true,
+});
+await failedSourceEndpoint.start({...src, sendEnvelope() {}});
+await assert.rejects(failedSourceEndpoint.updateSources(src), /capture replacement failed/);
+assert.deepEqual(failedSourceEvents, [
+  "producer:start", "revoke", "producer:stop", "consumer:stop",
+]);
+await assert.rejects(failedSourceEndpoint.start({...src, sendEnvelope() {}}),
+  /retired/);
 const decoder = new UcrBrowserWebCodecsConsumer();
 decoder.setReceiveQuality({stage: "audio", video: null, opus_target_bitrate_bps: 48_000});
 // Video is ignored before needing WebCodecs APIs: no forbidden plaintext fallbacks.
@@ -2240,6 +2328,8 @@ try {
   // Two speakers' audio is mixed in parallel on WebAudio. A shared playback
   // watermark must not serialize independent speaker buffers back-to-back.
   const audioStartTimes: number[] = [];
+  let audioStops = 0;
+  let audioDisconnects = 0;
   const audioSink = {
     currentTime: 100,
     destination: {},
@@ -2248,6 +2338,7 @@ try {
     },
     createBufferSource() {
       return {buffer: null as unknown, connect() {},
+        stop() {audioStops++;}, disconnect() {audioDisconnects++;},
         start(time: number) {audioStartTimes.push(time);}};
     },
   };
@@ -2273,9 +2364,37 @@ try {
   mixing.play(audioFrame("mic-a"), sourceHeader("alice"));
   mixing.play(audioFrame("mic-a"), sourceHeader("alice"));
   mixing.play(audioFrame("mic-b"), sourceHeader("bob"));
-  assert.deepEqual(audioStartTimes, [100, 100.01, 100],
+  assert.equal(audioStartTimes.length, 3);
+  assert.ok(Math.abs(audioStartTimes[0] - 100.06) < 0.000001);
+  assert.ok(Math.abs(audioStartTimes[1] - 100.07) < 0.000001);
+  assert.ok(Math.abs(audioStartTimes[2] - audioStartTimes[0]) < 0.000001,
     "independent authenticated speakers must overlap while own frames stay ordered");
+  // Drive a stalled sender queue past the bounded playout horizon.
+  // Old WebAudio nodes must be stopped and disconnected before rebasing.
+  for (let i = 0; i < 30; i++) mixing.play(audioFrame("mic-a"), sourceHeader("alice"));
+  assert.ok(audioStops > 0, "congested audio must cancel old scheduled PCM");
+  const disconnectedBeforeStop = audioDisconnects;
+  assert.ok(disconnectedBeforeStop > 0, "congested audio must release old audio nodes");
   mixing.stop();
+  assert.ok(audioDisconnects >= disconnectedBeforeStop,
+    "consumer teardown must not leak its remaining scheduled audio nodes");
+
+  // A burst of jitter must not poison a fresh audio session or cause the
+  // sender's queue to grow unbounded when wall-clock arrival catches up.
+  const adaptive = new UcrBrowserWebCodecsConsumer({
+    audioContext: audioSink as unknown as AudioContext,
+  });
+  const startsBefore = audioStartTimes.length;
+  audioSink.currentTime = 200;
+  adaptive.play(audioFrame("jitter-test"), sourceHeader("alice"));
+  audioSink.currentTime = 200.03;
+  adaptive.play(audioFrame("jitter-test"), sourceHeader("alice"));
+  audioSink.currentTime = 200.12;
+  adaptive.play(audioFrame("jitter-test"), sourceHeader("alice"));
+  assert.equal(audioStartTimes.length, startsBefore + 3);
+  assert.ok(audioStartTimes[startsBefore + 2] >= 200.12,
+    "playout must recover after input starvation instead of scheduling in the past");
+  adaptive.stop();
 } finally {
   for (const item of savedGlobals) {
     if (item.original) Object.defineProperty(globalThis, item.key, item.original);
@@ -2414,6 +2533,146 @@ try {
   }
 }
 
+// Audio always retains protected DataChannel headroom under heavy encrypted
+// video. This tests the real browser transport function, not a mock priority
+// implementation; permission/MLS checks stay in the portable adapter.
+{
+  const start = browser.indexOf("function ucrTransportError(code,message){");
+  const end = browser.indexOf("function endpointMediaSources(){", start);
+  assert.ok(start >= 0 && end > start, "encrypted sender must accept media class");
+  const sentChunks: Uint8Array[] = [];
+  const context: Record<string, any> = {
+    e2eeChannel: {readyState: "open", bufferedAmount: 300_000,
+      send(chunk: Uint8Array) {sentChunks.push(chunk);}},
+    e2eeMessageId: 1, E2EE_MAX_WIRE_BYTES: 2 * 1024 * 1024 + 8192,
+    E2EE_MAX_BUFFERED_SEND_BYTES: 2 * 1024 * 1024,
+    E2EE_CHUNK_HEADER_BYTES: 24, E2EE_CHUNK_PAYLOAD_BYTES: 16000 - 24,
+    E2EE_CHUNK_MAGIC: "UCRCHK01", window: {__ucrAudioCounters: {transportQueued: 0}},
+    BigInt, Uint8Array, TextEncoder, DataView, Math, Error,
+  };
+  runInNewContext(browser.slice(start,end) +
+    "\nthis.publish = sendE2eeEnvelope;",context);
+  assert.throws(()=>context.publish(Uint8Array.of(7,8), "video"),/congested/);
+  assert.equal(sentChunks.length,0,"congested camera must not starve protected audio");
+  context.publish(Uint8Array.of(1,2), "audio");
+  assert.equal(sentChunks.length,1,"encrypted Opus must use reserved channel capacity");
+  assert.equal(context.window.__ucrAudioCounters.transportQueued,1);
+  // Bounded latency is more important than accepting ever-growing Opus
+  // backlog: above the audio limit even voice frames must be refused.
+  context.e2eeChannel.bufferedAmount = 400_000;
+  assert.throws(()=>context.publish(Uint8Array.of(3,4), "audio"),/congested/);
+  assert.equal(sentChunks.length,1,"overloaded transport must not accumulate stale voice");
+}
+
+// The same canonical MLS transport must preserve the authenticated media class
+// on the outbound path. Audio metadata is necessary for protecting Opus queue
+// space; it must never select a different key or skip the secure bridge.
+{
+  const sent: Array<{kind: string | undefined; sealed: number}> = [];
+  const outbound = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire(_streamId, mediaKind) { return Uint8Array.of(mediaKind); },
+      open_wire() { return Uint8Array.of(1); },
+      revoke() {},
+    },
+    producer: {
+      async start(_sources, emit) {
+        await emit({mediaKind: "audio", streamId: "microphone", timestamp: 1n,
+          keyframe: false, bytes: Uint8Array.of(9)});
+        await emit({mediaKind: "video", videoSourceKind: "camera", streamId: "camera",
+          timestamp: 2n, keyframe: true, bytes: Uint8Array.of(8)});
+      },
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() { return new Uint8Array(32); }},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => true, authorizePublish: () => true,
+  });
+  await outbound.start({
+    stream: {} as MediaStream, cameraStream: {} as MediaStream,
+    sendEnvelope(wire, kind) {sent.push({kind, sealed: wire[0]});},
+  });
+  assert.deepEqual(sent, [
+    {kind: "audio", sealed: 1}, {kind: "video", sealed: 2},
+  ], "sealing and transport must both preserve real audio/video kind");
+  await outbound.stop();
+}
+
+// Authorization can be temporarily slow on a real Windows machine. Frames
+// must not be encrypted/sent after they become obsolete while awaiting it.
+{
+  let sealed = 0, delivered = 0;
+  const delayed = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire() { sealed++; return Uint8Array.of(1); },
+      open_wire() { return Uint8Array.of(1); }, revoke() {},
+    },
+    producer: {
+      async start(_sources, emit) {
+        await emit({mediaKind: "audio", streamId: "mic", timestamp: 1n,
+          keyframe: false, bytes: Uint8Array.of(9)});
+      },
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() { return new Uint8Array(32); }},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => true,
+    authorizePublish: async () => {
+      await new Promise(resolve => setTimeout(resolve, 180));
+      return true;
+    },
+  });
+  await delayed.start({stream: {} as MediaStream, cameraStream: {} as MediaStream,
+    sendEnvelope() {delivered++;}});
+  assert.equal(sealed, 0, "stale authorized speech must not be encrypted");
+  assert.equal(delivered, 0, "stale authorized speech must not reach DataChannel");
+  await delayed.stop();
+}
+
+// Exercise fail-closed stage attribution for the real portable sender. The
+// failure must remain observable without leaking transport payloads or keys.
+for (const [name, publish, seal, transport] of [
+  ["PUBLISH_AUTHORIZATION", false, false, false],
+  ["SEAL_WIRE", true, true, false],
+  ["DATACHANNEL_SEND", true, false, true],
+] as const) {
+  const errors: string[] = [];
+  const stageAdapter = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire() { if (seal) throw Error("sensitive crypto detail"); return Uint8Array.of(3); },
+      open_wire() { return Uint8Array.of(2); },
+      revoke() {},
+    },
+    producer: {
+      async start(_sources, emit) {
+        await emit({mediaKind: "audio", streamId: "mic", timestamp: 1n,
+          keyframe: true, bytes: Uint8Array.of(4)});
+      },
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() { return new Uint8Array(32); }},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => true,
+    authorizePublish: () => publish,
+    onError(error) { errors.push((error as Error).message); },
+  });
+  await stageAdapter.start({...src, sendEnvelope() {
+    if (transport) throw Error("sensitive websocket detail");
+  }});
+  assert.deepEqual(errors, ["UCR_MEDIA_OUTBOUND_" + name],
+    "outbound failure must identify the exact failing stage without leaking details");
+  await stageAdapter.stop();
+}
+
 // Different frames on one DataChannel may finish async trust lookups out of
 // order. The E2EE receiver must commit them in arrival order PER source/stream,
 // without stalling another participant and without weakening replay rejection.
@@ -2472,6 +2731,38 @@ assert.deepEqual(receivedSequences, ["bob:1", "alice:1", "alice:2", "alice:1"],
 await assert.rejects(inbound.onEnvelope(inboundWire(1n, "alice", "audio")),
   /replayed endpoint media frame/);
 await inbound.stop();
+
+// Verify the inbound pipeline identifies authorization, key resolution, authenticated
+// decryption and decoder/playout failures without exposing private exception strings.
+for (const stage of ["RECEIVE_AUTHORIZATION", "SIGNING_KEY_RESOLUTION",
+  "VERIFY_AND_DECRYPT", "DECODE_AND_PLAY"] as const) {
+  const errors: string[] = [];
+  const receiver = new UcrPortableEndpointMediaAdapter({
+    bridge: {seal_wire() {return Uint8Array.of(1);},
+      open_wire() {
+        if (stage === "VERIFY_AND_DECRYPT") throw Error("private key material");
+        return Uint8Array.of(8);
+      }, revoke() {}},
+    producer: {start() {}, stop() {}},
+    consumer: {play() {
+      if (stage === "DECODE_AND_PLAY") throw Error("private decoder detail");
+    }, stop() {}},
+    trustedKeys: {resolve() {
+      if (stage === "SIGNING_KEY_RESOLUTION") throw Error("private trust detail");
+      return new Uint8Array(32).fill(3);
+    }},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => stage !== "RECEIVE_AUTHORIZATION",
+    authorizePublish: () => true,
+    onError(error) {errors.push((error as Error).message);},
+  });
+  await receiver.start({...src, sendEnvelope() {}});
+  await assert.rejects(receiver.onEnvelope(inboundWire(1n, "alice", "audio")));
+  assert.deepEqual(errors, ["UCR_MEDIA_INBOUND_" + stage]);
+  await receiver.stop();
+}
 
 // The only permitted default browser factory needs active canonical identity,
 // locally held device signing seed, exact epoch and matching published signer.

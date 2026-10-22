@@ -98,7 +98,7 @@ function checkedCall(
   if (raw.callerIdentityId === raw.calleeIdentityId ||
       ![raw.callerIdentityId,raw.calleeIdentityId].includes(auth.participantId) ||
       !["audio","video"].includes(raw.media) || !STATES.includes(raw.state) ||
-      !Number.isSafeInteger(raw.revision) || raw.revision < 1) {
+      !Number.isSafeInteger(raw.revision) || raw.revision < 0) {
     throw new Error("canonical Call participants, revision or state invalid");
   }
   return Object.freeze({

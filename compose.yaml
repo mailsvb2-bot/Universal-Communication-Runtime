@@ -12,7 +12,8 @@ services:
       - "127.0.0.1:3478:3478/udp"
       - "127.0.0.1:49160-49170:49160-49170/udp"
     environment:
-      UCR_DEV_TURN_SECRET: "0123456789abcdef0123456789abcdef"
+      # Empty = a random TURN secret is generated per container start.
+      UCR_DEV_TURN_SECRET: "${UCR_DEV_TURN_SECRET:-}"
       UCR_DEV_TURN_REALM: "ucr-dev.local"
     tmpfs:
       - /run/ucr
