@@ -3300,7 +3300,43 @@ async fn run_webrtc_e2ee_bridge(
     registry: Arc<RealtimeSessionRegistry>,
     service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
 ) {
+    // Independent ordered ingress lanes prevent one sender from blocking
+    // every other sender's encrypted media forwarding.
+    let mut lanes: std::collections::HashMap<
+        ucr_model::SessionId,
+        tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>,
+    > = std::collections::HashMap::new();
     while let Some(frame) = ingress.recv().await {
+        lanes.retain(|_, lane| !lane.is_closed());
+        let session_id = frame.session_id.clone();
+        if !lanes.contains_key(&session_id) && lanes.len() >= LIVE_WEBRTC_MAX_SESSIONS {
+            continue;
+        }
+        let lane = lanes.entry(session_id).or_insert_with(|| {
+            let (lane_tx, lane_rx) = tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
+            tokio::spawn(run_webrtc_e2ee_session_lane(
+                lane_rx,
+                Arc::clone(&provider),
+                Arc::clone(&registry),
+                service.clone(),
+            ));
+            lane_tx
+        });
+        let _ = lane.try_send(frame);
+    }
+}
+
+async fn run_webrtc_e2ee_session_lane(
+    mut lane: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
+    provider: Arc<LiveWebRtcProvider>,
+    registry: Arc<RealtimeSessionRegistry>,
+    service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+) {
+    loop {
+        let frame = match tokio::time::timeout(Duration::from_secs(120), lane.recv()).await {
+            Ok(Some(frame)) => frame,
+            _ => break,
+        };
         if service.has_sfu_media_router() {
             let _ = route_webrtc_e2ee_frame_via_configured_route(
                 &service, &registry, &provider, &frame,
