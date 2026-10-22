@@ -3304,15 +3304,26 @@ async fn run_webrtc_e2ee_bridge(
     // every other sender's encrypted media forwarding.
     let mut lanes: std::collections::HashMap<
         ucr_model::SessionId,
-        tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>,
+        (tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>, u64),
     > = std::collections::HashMap::new();
+    let mut activity = 0_u64;
     while let Some(frame) = ingress.recv().await {
-        lanes.retain(|_, lane| !lane.is_closed());
+        lanes.retain(|_, (lane, _)| !lane.is_closed());
         let session_id = frame.session_id.clone();
         if !lanes.contains_key(&session_id) && lanes.len() >= LIVE_WEBRTC_MAX_SESSIONS {
-            continue;
+            // A disconnected sender may leave an idle lane until its timeout.
+            // Reclaim least-recently-used capacity rather than silently muting
+            // a newly admitted publisher for two minutes.
+            if let Some(oldest) = lanes
+                .iter()
+                .min_by_key(|(_, (_, last_activity))| *last_activity)
+                .map(|(id, _)| id.clone())
+            {
+                lanes.remove(&oldest);
+            }
         }
-        let lane = lanes.entry(session_id).or_insert_with(|| {
+        activity = activity.wrapping_add(1);
+        let (lane, last_activity) = lanes.entry(session_id).or_insert_with(|| {
             let (lane_tx, lane_rx) = tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
             tokio::spawn(run_webrtc_e2ee_session_lane(
                 lane_rx,
@@ -3320,8 +3331,9 @@ async fn run_webrtc_e2ee_bridge(
                 Arc::clone(&registry),
                 service.clone(),
             ));
-            lane_tx
+            (lane_tx, activity)
         });
+        *last_activity = activity;
         let _ = lane.try_send(frame);
     }
 }
