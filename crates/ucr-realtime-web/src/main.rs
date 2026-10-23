@@ -4047,7 +4047,14 @@ mod tests {
         // signer. A new peer and fresh canonical admission are required.
         // The previous single-line test rejected this stricter recovery path.
         for required in [
-            "channel.onclose=()=>{if(e2eeChannel===channel){",
+            "let terminalHandled=false;",
+            "const recoverTerminalEncryptedChannel=()=>{",
+            "if(terminalHandled||e2eeChannel!==channel)return;",
+            "if(channel.readyState!==\"closed\"&&channel.readyState!==\"closing\")return;",
+            "channel.onerror=()=>{",
+            "channel.onclose=()=>{",
+            "if(e2eeChannel!==channel||terminalHandled)return;",
+            "if(sessionActive&&mediaActive){",
             "webrtcNeedsPeerRebuild=true;",
             "closeE2eeTransport();",
             "scheduleWebRtcRetry();",
