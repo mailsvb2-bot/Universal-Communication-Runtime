@@ -198,6 +198,42 @@ where
             .map_err(ChatError::from)
     }
 
+    /// Persists the user text and establishes the canonical durable delivery attempt.
+    ///
+    /// This is a restart-safe *submission* boundary, not transport delivery.
+    /// A crash after message persistence but before attempt creation is repaired by
+    /// replaying the same Message/Attempt IDs: canonical stores deduplicate both.
+    /// Never advances to Encrypted, Queued, Acknowledged or Delivered without
+    /// independent evidence from the relevant owners.
+    ///
+    /// # Errors
+    /// Rejects mismatched Message/Attempt/Evidence, wrong initial state,
+    /// cross-scope operations or authorization/storage errors.
+    pub fn persist_offline_text(
+        &self,
+        subject: &ScopedPrincipal,
+        message: &MessageEnvelope,
+        attempt: &ucr_model::DeliveryAttempt,
+        persisted_evidence: &DeliveryEvidence,
+    ) -> Result<DurableRecordStatus, ChatError> {
+        require_exact_subject_scope(subject, &message.scope)?;
+        require_direct_message(message)?;
+        if attempt.scope != message.scope
+            || attempt.message_id != message.message_id
+            || attempt.state != DeliveryState::Persisted
+            || persisted_evidence.scope != message.scope
+            || persisted_evidence.message_id != message.message_id
+            || persisted_evidence.delivery_id != attempt.delivery_id
+            || persisted_evidence.kind != DeliveryEvidenceKind::PersistedLocal
+        {
+            return Err(ChatError::DeliveryMessageMismatch);
+        }
+        let runtime = AuthorizedDurableRuntime::new(self.authorization, self.store);
+        runtime.persist_message(subject, message)?;
+        runtime.create_delivery_attempt(subject, attempt, persisted_evidence)
+            .map_err(ChatError::from)
+    }
+
     /// Reads one exact direct-chat Message through the canonical Message owner.
     ///
     /// # Errors
