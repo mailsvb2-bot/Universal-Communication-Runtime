@@ -295,6 +295,85 @@ fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
     );
 }
 
+
+#[test]
+fn transcript_page_preserves_canonical_order_and_cursor_boundaries() {
+    let store = MemoryLocalStore::default();
+    let authorization = AllowAll;
+    let sink = RecordingSink::default();
+    let clock = FixedClock(10_000);
+    let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
+    let direct = conversation(ConversationKind::Direct);
+    chat.open_direct_chat(&subject(), &direct)
+        .expect("open direct chat");
+
+    let first = message("page-first", 10, b"first");
+    let middle = message("page-middle", 20, b"middle");
+    let last = message("page-last", 30, b"last");
+    for item in [&last, &first, &middle] {
+        chat.send_text(&subject(), item).expect("persist message");
+    }
+    let ids = [
+        last.message_id.clone(),
+        first.message_id.clone(),
+        middle.message_id.clone(),
+        last.message_id.clone(),
+    ];
+    let conversation_id = &direct.conversation.conversation_id;
+
+    let (page, cursor) = chat
+        .load_transcript_page(&subject(), &scope(), conversation_id, &ids, None, 2)
+        .expect("first page");
+    assert_eq!(
+        page.iter().map(|item| item.message_id.clone()).collect::<Vec<_>>(),
+        vec![first.message_id.clone(), middle.message_id.clone()]
+    );
+    assert_eq!(cursor, Some(middle.message_id.clone()));
+
+    let (tail, end) = chat
+        .load_transcript_page(
+            &subject(),
+            &scope(),
+            conversation_id,
+            &ids,
+            Some(&middle.message_id),
+            2,
+        )
+        .expect("last page");
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].message_id, last.message_id);
+    assert_eq!(end, None);
+
+    let (empty, end) = chat
+        .load_transcript_page(
+            &subject(),
+            &scope(),
+            conversation_id,
+            &ids,
+            Some(&last.message_id),
+            2,
+        )
+        .expect("cursor at end");
+    assert!(empty.is_empty());
+    assert_eq!(end, None);
+
+    assert_eq!(
+        chat.load_transcript_page(
+            &subject(),
+            &scope(),
+            conversation_id,
+            &ids,
+            Some(&MessageId::from_opaque(oid("absent-cursor"))),
+            2,
+        ),
+        Err(ChatError::NotFound)
+    );
+    assert_eq!(
+        chat.load_transcript_page(&subject(), &scope(), conversation_id, &ids, None, 0),
+        Err(ChatError::TranscriptBatchSize)
+    );
+}
+
 #[test]
 fn transcript_enforces_aggregate_semantic_byte_budget() {
     let store = MemoryLocalStore::default();
