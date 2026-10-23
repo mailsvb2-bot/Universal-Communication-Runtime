@@ -195,7 +195,28 @@ const LOW_CAMERA_WIDTH = 640;
 const LOW_CAMERA_HEIGHT = 360;
 const LOW_CAMERA_FPS = 12;
 const LOW_CAMERA_BITRATE_BPS = 384_000;
-const LOW_CAMERA_INTERVAL_US = 1_000_000 / LOW_CAMERA_FPS;
+/** Fractional-timestamp scheduler: 30 fps capture must yield 24/12 fps, not 15/10.
+ * Advance the deadline only after the encoder actually accepts a frame.
+ * Large capture gaps re-anchor rather than creating a catch-up burst.
+ */
+export function ucrAdvanceVideoPacing(
+  timestampUs: number, nextDueUs: number, targetFps: number,
+): {publish: boolean; nextDueUs: number} {
+  if (!Number.isFinite(timestampUs) || !Number.isFinite(targetFps) ||
+      targetFps <= 0 || targetFps > 240 ||
+      (!Number.isFinite(nextDueUs) && nextDueUs !== Number.NEGATIVE_INFINITY)) {
+    throw new Error("invalid video pacing timestamp or frame rate");
+  }
+  const intervalUs = 1_000_000 / targetFps;
+  // Real cameras may report each nominal 30 fps frame as exactly 33_333 us.
+  // Allow <=1% timestamp quantization drift without admitting an extra
+  // 30 fps frame at the lower 24/12 fps publish targets.
+  const toleranceUs = Math.min(1_000, intervalUs / 100);
+  if (timestampUs + toleranceUs < nextDueUs) return {publish: false, nextDueUs};
+  return {publish: true, nextDueUs:
+    !Number.isFinite(nextDueUs) || timestampUs - nextDueUs > intervalUs
+      ? timestampUs + intervalUs : nextDueUs + intervalUs};
+}
 // A subscriber can decode only from a keyframe. Tie that to wall time, not to
 // a fixed frame count: a busy or slow camera would otherwise hide the picture
 // for many seconds after someone joins.
@@ -472,6 +493,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     // DataChannel owner; absence is treated as no observed network congestion.
     let qualityStage = 0, healthySamples = 0, lastQualitySample = 0;
     let lastVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
+    let nextVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
     let videoEncodeCostMs = 0;
     let videoPressureSamples = 0;
     let lastWallSample = performance.now();
@@ -496,7 +518,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       let framesSinceKeyframe = Number.POSITIVE_INFINITY;
       let lastLowKeyframeTimestamp = Number.NEGATIVE_INFINITY;
       let lowFramesSinceKeyframe = Number.POSITIVE_INFINITY;
-      let lastLowTimestamp = -LOW_CAMERA_INTERVAL_US;
+      let nextLowEncodeTimestamp = Number.NEGATIVE_INFINITY;
+      let lastLowEncodeTimestamp = Number.NEGATIVE_INFINITY;
       let streamStartTimestamp = Number.NaN;
       const due = (timestamp: number, last: number, since: number) => {
         const clock = Number.isFinite(timestamp) ? timestamp : 0;
@@ -541,6 +564,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               ucrVideoAdaptation.changes++;
               ucrVideoAdaptation.stage = next.stage;
               qualityStage = next.stage;
+              nextVideoEncodeTimestamp = lastVideoEncodeTimestamp +
+                1_000_000 / ucrVideoStageProfile(qualityStage).frameRate;
               const settings = track.getSettings();
               const width = settings.width ?? VIDEO_WIDTH;
               const height = settings.height ?? VIDEO_HEIGHT;
@@ -559,12 +584,14 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               forceKeyframe = true;
             }
           }
-          const maxFps = kind === "video" ?
-            ucrVideoStageProfile(qualityStage).frameRate : 0;
-          const videoPacingOk = kind !== "video" ||
-            // Capture timestamps are integer microseconds; allow sub-microsecond
-            // rounding so a nominal 30 fps source (33_333 us) is not halved.
-            frame.timestamp - lastVideoEncodeTimestamp >= Math.floor(1_000_000 / maxFps) - 1;
+          if (kind === "video" && frame.timestamp < lastVideoEncodeTimestamp)
+            nextVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
+          if (kind === "video" && frame.timestamp < lastLowEncodeTimestamp)
+            nextLowEncodeTimestamp = Number.NEGATIVE_INFINITY;
+          const videoPacing = kind === "video" ?
+            ucrAdvanceVideoPacing(frame.timestamp, nextVideoEncodeTimestamp,
+              ucrVideoStageProfile(qualityStage).frameRate) : null;
+          const videoPacingOk = videoPacing?.publish ?? true;
           if (videoPacingOk && ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
             const keyframe = kind === "video" &&
               (forceKeyframe || due(frame.timestamp, lastKeyframeTimestamp, framesSinceKeyframe));
@@ -592,6 +619,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               if (ucrVideoAdaptation.encodeLatencyMs > 120 || videoEncodeCostMs > 12 || encoder.encodeQueueSize >= 2)
                 videoPressureSamples++;
               lastVideoEncodeTimestamp = frame.timestamp;
+              nextVideoEncodeTimestamp = videoPacing!.nextDueUs;
               forceKeyframe = false;
             }
             if (kind === "video") {
@@ -601,9 +629,11 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               } else framesSinceKeyframe++;
             }
           }
+          const lowPacing = lowEncoder ?
+            ucrAdvanceVideoPacing(frame.timestamp, nextLowEncodeTimestamp, LOW_CAMERA_FPS) : null;
           if (lowEncoder && lowCanvas && generation === this.#generation &&
               ucrCodecCanEnqueue("video", lowEncoder.encodeQueueSize) &&
-              frame.timestamp - lastLowTimestamp >= LOW_CAMERA_INTERVAL_US) {
+              lowPacing?.publish) {
             const context = lowCanvas.getContext("2d");
             if (!context) throw new Error("layered capture canvas unavailable");
             context.drawImage(frame as VideoFrame, 0, 0, LOW_CAMERA_WIDTH, LOW_CAMERA_HEIGHT);
@@ -616,7 +646,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
                 lowFramesSinceKeyframe = 0;
                 if (Number.isFinite(frame.timestamp)) lastLowKeyframeTimestamp = frame.timestamp;
               } else lowFramesSinceKeyframe++;
-              lastLowTimestamp = frame.timestamp;
+              lastLowEncodeTimestamp = frame.timestamp;
+              nextLowEncodeTimestamp = lowPacing.nextDueUs;
               forceLowKeyframe = false;
             } finally {
               downscaled.close();
