@@ -351,28 +351,58 @@ fn offline_retry_keeps_failure_pending_and_only_transport_acknowledged() {
         kind: DeliveryEvidenceKind::PersistedLocal,
         logical_order: 1,
     };
-    store.create_delivery_attempt(&attempt, &evidence).expect("attempt");
-    store.transition_delivery(&scope(), &delivery_id, DeliveryState::Persisted, DeliveryState::Encrypted, None)
+    store
+        .create_delivery_attempt(&attempt, &evidence)
+        .expect("attempt");
+    store
+        .transition_delivery(
+            &scope(),
+            &delivery_id,
+            DeliveryState::Persisted,
+            DeliveryState::Encrypted,
+            None,
+        )
         .expect("encrypted");
-    store.transition_delivery(&scope(), &delivery_id, DeliveryState::Encrypted, DeliveryState::Queued, None)
+    store
+        .transition_delivery(
+            &scope(),
+            &delivery_id,
+            DeliveryState::Encrypted,
+            DeliveryState::Queued,
+            None,
+        )
         .expect("queued");
 
-    let unavailable = TestOfflineDispatch { outcome: Err(OfflineDispatchError::Unavailable) };
+    let unavailable = TestOfflineDispatch {
+        outcome: Err(OfflineDispatchError::Unavailable),
+    };
     assert_eq!(
         chat.retry_encrypted_delivery(&subject(), &scope(), &delivery_id, &unavailable, 2),
-        Err(OfflineRetryError::Transport(OfflineDispatchError::Unavailable))
+        Err(OfflineRetryError::Transport(
+            OfflineDispatchError::Unavailable
+        ))
     );
     assert_eq!(
-        store.delivery_attempt(&scope(), &delivery_id).expect("load").expect("attempt").state,
+        store
+            .delivery_attempt(&scope(), &delivery_id)
+            .expect("load")
+            .expect("attempt")
+            .state,
         DeliveryState::InFlight
     );
-    let accepted = TestOfflineDispatch { outcome: Ok(OfflineDispatchOutcome::AcceptedByTransport) };
+    let accepted = TestOfflineDispatch {
+        outcome: Ok(OfflineDispatchOutcome::AcceptedByTransport),
+    };
     assert_eq!(
         chat.retry_encrypted_delivery(&subject(), &scope(), &delivery_id, &accepted, 2),
         Ok(OfflineDispatchOutcome::AcceptedByTransport)
     );
     assert_eq!(
-        store.delivery_attempt(&scope(), &delivery_id).expect("load").expect("attempt").state,
+        store
+            .delivery_attempt(&scope(), &delivery_id)
+            .expect("load")
+            .expect("attempt")
+            .state,
         DeliveryState::Acknowledged
     );
 }
@@ -391,26 +421,52 @@ fn offline_retry_refuses_unencrypted_message_before_transport() {
     chat.send_text(&subject(), &plain).expect("persist");
     let delivery_id = DeliveryId::from_opaque(oid("retry-plaintext-delivery"));
     let attempt = DeliveryAttempt {
-        delivery_id: delivery_id.clone(), scope: scope(),
-        message_id: plain.message_id.clone(), state: DeliveryState::Persisted,
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: plain.message_id.clone(),
+        state: DeliveryState::Persisted,
     };
     let evidence = DeliveryEvidence {
-        delivery_id: delivery_id.clone(), scope: scope(),
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
         message_id: plain.message_id.clone(),
-        kind: DeliveryEvidenceKind::PersistedLocal, logical_order: 1,
+        kind: DeliveryEvidenceKind::PersistedLocal,
+        logical_order: 1,
     };
-    store.create_delivery_attempt(&attempt, &evidence).expect("attempt");
-    store.transition_delivery(&scope(), &delivery_id, DeliveryState::Persisted, DeliveryState::Encrypted, None)
+    store
+        .create_delivery_attempt(&attempt, &evidence)
+        .expect("attempt");
+    store
+        .transition_delivery(
+            &scope(),
+            &delivery_id,
+            DeliveryState::Persisted,
+            DeliveryState::Encrypted,
+            None,
+        )
         .expect("encrypted state");
-    store.transition_delivery(&scope(), &delivery_id, DeliveryState::Encrypted, DeliveryState::Queued, None)
+    store
+        .transition_delivery(
+            &scope(),
+            &delivery_id,
+            DeliveryState::Encrypted,
+            DeliveryState::Queued,
+            None,
+        )
         .expect("queued state");
-    let accepted = TestOfflineDispatch { outcome: Ok(OfflineDispatchOutcome::AcceptedByTransport) };
+    let accepted = TestOfflineDispatch {
+        outcome: Ok(OfflineDispatchOutcome::AcceptedByTransport),
+    };
     assert_eq!(
         chat.retry_encrypted_delivery(&subject(), &scope(), &delivery_id, &accepted, 2),
         Err(OfflineRetryError::NotEncrypted)
     );
     assert_eq!(
-        store.delivery_attempt(&scope(), &delivery_id).expect("load").expect("attempt").state,
+        store
+            .delivery_attempt(&scope(), &delivery_id)
+            .expect("load")
+            .expect("attempt")
+            .state,
         DeliveryState::Queued
     );
 }
