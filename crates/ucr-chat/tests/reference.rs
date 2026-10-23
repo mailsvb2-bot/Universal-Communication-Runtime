@@ -295,7 +295,6 @@ fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
     );
 }
 
-
 #[test]
 fn transcript_page_preserves_canonical_order_and_cursor_boundaries() {
     let store = MemoryLocalStore::default();
