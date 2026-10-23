@@ -255,6 +255,8 @@ fn offline_submission_survives_retry_and_never_fakes_delivery() {
     let auth = AllowAll;
     let sink = RecordingSink::default();
     let chat = ChatRuntime::new(&clock, &auth, &store, &sink);
+    chat.open_direct_chat(&subject(), &conversation(ConversationKind::Direct))
+        .expect("open authorized direct chat");
     let outgoing = message("offline-message-one", 1, b"ciphertext-envelope");
     let delivery_id = DeliveryId::from_opaque(oid("offline-delivery-one"));
     let attempt = DeliveryAttempt {
