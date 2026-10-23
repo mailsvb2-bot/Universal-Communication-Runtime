@@ -36,11 +36,12 @@ import {
 // The real capture cadence must be preserved at each adaptive encode target.
 // Integer microsecond timestamps must not turn 24 fps into 15 or 12 into 10.
 {
-  const pacedFrames = (targetFps: number): number => {
+  const pacedFrames = (targetFps: number, integerStepUs?: number): number => {
     let nextDueUs = Number.NEGATIVE_INFINITY;
     let published = 0;
     for (let i = 0; i < 300; i++) {
-      const frame = ucrAdvanceVideoPacing(Math.round(i * 1_000_000 / 30),
+      const timestamp = integerStepUs === undefined ? Math.round(i * 1_000_000 / 30) : i * integerStepUs;
+      const frame = ucrAdvanceVideoPacing(timestamp,
         nextDueUs, targetFps);
       if (frame.publish) {
         published++;
@@ -50,6 +51,10 @@ import {
     return published;
   };
   assert.equal(pacedFrames(30), 300, "uncongested camera must retain 30 fps");
+  assert.equal(pacedFrames(30, 33_333), 300,
+    "integer-truncated 30 fps capture timestamps must not drop every 12th frame");
+  assert.equal(pacedFrames(24, 33_333), 240);
+  assert.equal(pacedFrames(12, 33_333), 120);
   assert.equal(pacedFrames(24), 240, "stage-2 encoder must actually publish 24 fps");
   assert.equal(pacedFrames(12), 120, "low camera layer must actually publish 12 fps");
   const afterGap = ucrAdvanceVideoPacing(20_000_000, 1_000_000 / 24, 24);
