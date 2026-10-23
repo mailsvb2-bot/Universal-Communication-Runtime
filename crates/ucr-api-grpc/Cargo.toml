@@ -30,7 +30,7 @@ ucr-sfu = { path = "../ucr-sfu" }
 ucr-store-forward = { path = "../ucr-store-forward" }
 ucr-transport-internet = { path = "../ucr-transport-internet" }
 ucr-webrtc = { path = "../ucr-webrtc" }
-tokio = { version = "=1.53.1", features = ["rt"] }
+tokio = { version = "=1.53.3", features = ["rt"] }
 tokio-stream = "=0.1.17"
 
 [build-dependencies]
@@ -41,7 +41,7 @@ tonic-prost-build = "=0.14.6"
 [dev-dependencies]
 rcgen = "=0.13.2"
 ucr-crypto = { path = "../ucr-crypto" }
-tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "=1.53.3", features = ["macros", "net", "rt-multi-thread", "time"] }
 tokio-stream = { version = "=0.1.17", features = ["net"] }
 ucr-storage-memory = { path = "../ucr-storage-memory" }
 ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
