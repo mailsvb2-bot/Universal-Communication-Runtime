@@ -249,6 +249,59 @@ fn setup_chat_message(store: &MemoryLocalStore) -> MessageEnvelope {
 }
 
 #[test]
+fn offline_submission_survives_retry_and_never_fakes_delivery() {
+    let store = MemoryLocalStore::default();
+    let clock = FixedClock(1_700_000_000_000);
+    let auth = AllowAll;
+    let sink = RecordingSink::default();
+    let chat = ChatRuntime::new(&clock, &auth, &store, &sink);
+    let outgoing = message("offline-message-one", 1, b"ciphertext-envelope");
+    let delivery_id = DeliveryId::from_opaque(oid("offline-delivery-one"));
+    let attempt = DeliveryAttempt {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: outgoing.message_id.clone(),
+        state: DeliveryState::Persisted,
+    };
+    let persisted = DeliveryEvidence {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: outgoing.message_id.clone(),
+        kind: DeliveryEvidenceKind::PersistedLocal,
+        logical_order: 1,
+    };
+    assert_eq!(
+        chat.persist_offline_text(&subject(), &outgoing, &attempt, &persisted),
+        Ok(DurableRecordStatus::Inserted)
+    );
+    assert_eq!(
+        store
+            .delivery_attempt(&scope(), &delivery_id)
+            .expect("load persisted attempt")
+            .expect("attempt exists")
+            .state,
+        DeliveryState::Persisted
+    );
+    // Replaying the same identifiers is safe after a process restart.
+    assert_eq!(
+        chat.persist_offline_text(&subject(), &outgoing, &attempt, &persisted),
+        Ok(DurableRecordStatus::Duplicate)
+    );
+    let mut forged = persisted.clone();
+    forged.kind = DeliveryEvidenceKind::ReceivedByDevice;
+    assert_eq!(
+        chat.persist_offline_text(&subject(), &outgoing, &attempt, &forged),
+        Err(ChatError::DeliveryMessageMismatch)
+    );
+    let mut other = attempt.clone();
+    other.message_id = MessageId::from_opaque(oid("other-message"));
+    assert_eq!(
+        chat.persist_offline_text(&subject(), &outgoing, &other, &persisted),
+        Err(ChatError::DeliveryMessageMismatch)
+    );
+}
+
+#[test]
 fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
     let store = MemoryLocalStore::default();
     let authorization = AllowAll;
