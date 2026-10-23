@@ -300,7 +300,9 @@ where
         };
         let end = start.saturating_add(page_size).min(messages.len());
         let next_after = if end < messages.len() {
-            messages.get(end.saturating_sub(1)).map(|item| item.message_id.clone())
+            messages
+                .get(end.saturating_sub(1))
+                .map(|item| item.message_id.clone())
         } else {
             None
         };
