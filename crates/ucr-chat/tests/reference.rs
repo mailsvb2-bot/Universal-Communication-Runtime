@@ -303,6 +303,118 @@ fn offline_submission_survives_retry_and_never_fakes_delivery() {
     );
 }
 
+#[derive(Debug)]
+struct TestOfflineDispatch {
+    outcome: Result<ucr_chat::OfflineDispatchOutcome, ucr_chat::OfflineDispatchError>,
+}
+
+impl ucr_chat::OfflineDispatchSink for TestOfflineDispatch {
+    fn dispatch_encrypted(
+        &self,
+        _message: &MessageEnvelope,
+    ) -> Result<ucr_chat::OfflineDispatchOutcome, ucr_chat::OfflineDispatchError> {
+        self.outcome
+    }
+}
+
+#[test]
+fn offline_retry_keeps_failure_pending_and_only_transport_acknowledged() {
+    use ucr_chat::{OfflineDispatchError, OfflineDispatchOutcome, OfflineRetryError};
+    use ucr_model::{CryptoSuite, MessageCryptoMetadata};
+
+    let store = MemoryLocalStore::default();
+    let authorization = AllowAll;
+    let sink = RecordingSink::default();
+    let clock = FixedClock(10_000);
+    let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
+    chat.open_direct_chat(&subject(), &conversation(ConversationKind::Direct))
+        .expect("open chat");
+
+    let mut encrypted = message("retry-encrypted", 20, b"opaque-ciphertext");
+    encrypted.crypto_metadata = Some(MessageCryptoMetadata {
+        suite: CryptoSuite::UcrV1,
+        key_id: None,
+        opaque_metadata: vec![],
+    });
+    chat.send_text(&subject(), &encrypted).expect("persist");
+    let delivery_id = DeliveryId::from_opaque(oid("retry-encrypted-delivery"));
+    let attempt = DeliveryAttempt {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: encrypted.message_id.clone(),
+        state: DeliveryState::Persisted,
+    };
+    let evidence = DeliveryEvidence {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: encrypted.message_id.clone(),
+        kind: DeliveryEvidenceKind::PersistedLocal,
+        logical_order: 1,
+    };
+    store.create_delivery_attempt(&attempt, &evidence).expect("attempt");
+    store.transition_delivery(&scope(), &delivery_id, DeliveryState::Persisted, DeliveryState::Encrypted, None)
+        .expect("encrypted");
+    store.transition_delivery(&scope(), &delivery_id, DeliveryState::Encrypted, DeliveryState::Queued, None)
+        .expect("queued");
+
+    let unavailable = TestOfflineDispatch { outcome: Err(OfflineDispatchError::Unavailable) };
+    assert_eq!(
+        chat.retry_encrypted_delivery(&subject(), &scope(), &delivery_id, &unavailable, 2),
+        Err(OfflineRetryError::Transport(OfflineDispatchError::Unavailable))
+    );
+    assert_eq!(
+        store.delivery_attempt(&scope(), &delivery_id).expect("load").expect("attempt").state,
+        DeliveryState::InFlight
+    );
+    let accepted = TestOfflineDispatch { outcome: Ok(OfflineDispatchOutcome::AcceptedByTransport) };
+    assert_eq!(
+        chat.retry_encrypted_delivery(&subject(), &scope(), &delivery_id, &accepted, 2),
+        Ok(OfflineDispatchOutcome::AcceptedByTransport)
+    );
+    assert_eq!(
+        store.delivery_attempt(&scope(), &delivery_id).expect("load").expect("attempt").state,
+        DeliveryState::Acknowledged
+    );
+}
+
+#[test]
+fn offline_retry_refuses_unencrypted_message_before_transport() {
+    use ucr_chat::{OfflineDispatchOutcome, OfflineRetryError};
+    let store = MemoryLocalStore::default();
+    let authorization = AllowAll;
+    let sink = RecordingSink::default();
+    let clock = FixedClock(10_000);
+    let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
+    chat.open_direct_chat(&subject(), &conversation(ConversationKind::Direct))
+        .expect("open chat");
+    let plain = message("retry-plaintext", 20, b"plaintext");
+    chat.send_text(&subject(), &plain).expect("persist");
+    let delivery_id = DeliveryId::from_opaque(oid("retry-plaintext-delivery"));
+    let attempt = DeliveryAttempt {
+        delivery_id: delivery_id.clone(), scope: scope(),
+        message_id: plain.message_id.clone(), state: DeliveryState::Persisted,
+    };
+    let evidence = DeliveryEvidence {
+        delivery_id: delivery_id.clone(), scope: scope(),
+        message_id: plain.message_id.clone(),
+        kind: DeliveryEvidenceKind::PersistedLocal, logical_order: 1,
+    };
+    store.create_delivery_attempt(&attempt, &evidence).expect("attempt");
+    store.transition_delivery(&scope(), &delivery_id, DeliveryState::Persisted, DeliveryState::Encrypted, None)
+        .expect("encrypted state");
+    store.transition_delivery(&scope(), &delivery_id, DeliveryState::Encrypted, DeliveryState::Queued, None)
+        .expect("queued state");
+    let accepted = TestOfflineDispatch { outcome: Ok(OfflineDispatchOutcome::AcceptedByTransport) };
+    assert_eq!(
+        chat.retry_encrypted_delivery(&subject(), &scope(), &delivery_id, &accepted, 2),
+        Err(OfflineRetryError::NotEncrypted)
+    );
+    assert_eq!(
+        store.delivery_attempt(&scope(), &delivery_id).expect("load").expect("attempt").state,
+        DeliveryState::Queued
+    );
+}
+
 #[test]
 fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
     let store = MemoryLocalStore::default();
