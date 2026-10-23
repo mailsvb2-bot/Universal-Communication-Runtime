@@ -133,7 +133,14 @@ export function createUcrIndexedDbDeviceSignerStore(): UcrLocalSignerRecordStore
     if (!globalThis.indexedDB) throw new Error("canonical local IndexedDB vault unavailable");
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
+      // A blocked upgrade can succeed after the caller has already failed.
+      // Never leak that late IndexedDB connection or continue a rejected upgrade.
+      let abandoned = false;
       request.onupgradeneeded = () => {
+        if (abandoned) {
+          request.transaction?.abort();
+          return;
+        }
         const db = request.result;
         if (!db.objectStoreNames.contains("sealed-snapshots")) {
           db.createObjectStore("sealed-snapshots");
@@ -142,9 +149,22 @@ export function createUcrIndexedDbDeviceSignerStore(): UcrLocalSignerRecordStore
           db.createObjectStore(RECORD_STORE);
         }
       };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error ?? new Error("Device vault open failed"));
-      request.onblocked = () => reject(new Error("Device vault upgrade blocked"));
+      request.onsuccess = () => {
+        const db = request.result;
+        if (abandoned) {
+          db.close();
+          return;
+        }
+        resolve(db);
+      };
+      request.onerror = () => {
+        abandoned = true;
+        reject(request.error ?? new Error("Device vault open failed"));
+      };
+      request.onblocked = () => {
+        abandoned = true;
+        reject(new Error("Device vault upgrade blocked"));
+      };
     });
   }
   return {

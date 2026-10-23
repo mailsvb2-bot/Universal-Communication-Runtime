@@ -1097,6 +1097,81 @@ injected.remove();
                 f"{heartbeat_revocation_browser!r}"
             )
 
+        # Real Chrome IndexedDB regression: an old version-1 connection
+        # blocks the canonical vault's version-2 open. The vault must reject,
+        # and its late request must not retain a handle that blocks version 3.
+        # This is isolated to the disposable browser-probe origin, AFTER all
+        # existing persistence/reload checks. It is NOT a two-device call.
+        blocked_upgrade_browser = None
+        if args.browser == "chrome":
+            blocked_upgrade_browser = execute_async(
+                base,
+                """
+const done = arguments[arguments.length - 1];
+(async () => {
+  const name = "ucr-endpoint-state-v1";
+  const timeout = (label) => new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(label + " timed out")), 5000));
+  const deleteDb = () => Promise.race([
+    new Promise((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(name);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error || new Error("delete failed"));
+      request.onblocked = () => reject(new Error("probe database delete blocked"));
+    }),
+    timeout("probe database delete")
+  ]);
+  await deleteDb();
+  const old = await Promise.race([
+    new Promise((resolve, reject) => {
+      const request = indexedDB.open(name, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("sealed-snapshots");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("v1 open failed"));
+    }),
+    timeout("version 1 open")
+  ]);
+  let rejected = false;
+  try {
+    const mod = await import("./endpoint-media/reference_browser_media_installer.js");
+    const vault = mod.createUcrBrowserProtectedDeviceVault();
+    try {
+      await Promise.race([
+        vault.load({tenantId:"probe",namespaceId:null,deviceId:"blocked-upgrade"}),
+        timeout("blocked vault open")
+      ]);
+    } catch (error) {
+      rejected = String(error).includes("Device vault upgrade blocked");
+    }
+  } finally {
+    old.close();
+  }
+  if (!rejected) throw new Error("blocked vault open did not fail closed");
+  // If the rejected v2 request later succeeds without closing its IDBDatabase,
+  // this real v3 upgrade remains blocked. A bounded success proves cleanup.
+  const upgraded = await Promise.race([
+    new Promise((resolve, reject) => {
+      const request = indexedDB.open(name, 3);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("v3 open failed"));
+    }),
+    timeout("late-open orphan blocked version 3")
+  ]);
+  upgraded.close();
+  await deleteDb();
+  done({ok:true,blockedRejected:rejected,lateConnectionDidNotBlockNextUpgrade:true});
+})().catch(error => done({ok:false,error:String(error)}));
+""",
+            )
+            if (
+                not isinstance(blocked_upgrade_browser, dict)
+                or blocked_upgrade_browser.get("ok") is not True
+            ):
+                raise RuntimeError(
+                    "Chrome IndexedDB blocked-upgrade regression failed: "
+                    f"{blocked_upgrade_browser!r}"
+                )
+
         branding_failures = []
         if probe.get("brandName") != "UCR Browser Probe":
             branding_failures.append("brandName")
@@ -1165,6 +1240,7 @@ injected.remove();
         evidence = {
             "schema": "ucr.browser-compatibility.v1",
             "heartbeat_revocation_browser": heartbeat_revocation_browser,
+            "indexeddb_blocked_upgrade_browser": blocked_upgrade_browser,
             "browser_requested": args.browser,
             "browser_name": reported.get("browserName"),
             "browser_version": reported.get("browserVersion"),

@@ -12,7 +12,7 @@ base64 = "=0.22.1"
 bytes = "=1.12.1"
 openssl = "=0.10.81"
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
-tokio = { version = "=1.53.1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "sync", "time"] }
 webrtc = "=0.17.2"
 zeroize = { version = "=1.9.0", features = ["derive"] }
 ucr-model = { path = "../ucr-model" }
