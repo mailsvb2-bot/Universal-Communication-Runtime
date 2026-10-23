@@ -230,7 +230,8 @@ where
         }
         let runtime = AuthorizedDurableRuntime::new(self.authorization, self.store);
         runtime.persist_message(subject, message)?;
-        runtime.create_delivery_attempt(subject, attempt, persisted_evidence)
+        runtime
+            .create_delivery_attempt(subject, attempt, persisted_evidence)
             .map_err(ChatError::from)
     }
 
