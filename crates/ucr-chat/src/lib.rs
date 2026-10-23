@@ -19,6 +19,45 @@ use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, DEFAULT_MAX_PAYLOAD_LEN, MESSAGE_WRITE_PERMISSION,
 };
 
+/// Transport dispatch is a side-effect boundary, not a Delivery owner.
+/// A successful dispatch means remote transport acceptance only, never recipient delivery.
+pub trait OfflineDispatchSink: fmt::Debug + Send + Sync {
+    /// # Errors
+    /// A transport failure must not be recorded as acknowledged or delivered.
+    fn dispatch_encrypted(
+        &self,
+        message: &MessageEnvelope,
+    ) -> Result<OfflineDispatchOutcome, OfflineDispatchError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfflineDispatchOutcome {
+    Pending,
+    AcceptedByTransport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfflineDispatchError {
+    Unavailable,
+    Backpressure,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfflineRetryError {
+    Chat(ChatError),
+    Transport(OfflineDispatchError),
+    NotEncrypted,
+    NotRetryable,
+    WrongMessage,
+}
+
+impl From<ChatError> for OfflineRetryError {
+    fn from(value: ChatError) -> Self {
+        Self::Chat(value)
+    }
+}
+
 pub const MAX_TRANSCRIPT_BATCH_ITEMS: usize = 256;
 /// Aggregate semantic-memory budget for one transcript projection.
 ///
@@ -233,6 +272,87 @@ where
         runtime
             .create_delivery_attempt(subject, attempt, persisted_evidence)
             .map_err(ChatError::from)
+    }
+
+    /// Retries an explicitly selected canonical queued/in-flight delivery after reconnect.
+    ///
+    /// The caller schedules retries and enumerates authorized pending IDs using the canonical
+    /// Delivery owner. No private queue or duplicate Message owner is introduced. Only an
+    /// already encrypted envelope may reach the transport. A transport failure leaves the
+    /// attempt in InFlight for a later retry, including after process restart.
+    /// Transport acceptance never implies recipient delivery or user read.
+    ///
+    /// # Errors
+    /// Fails closed on unauthorized, mismatched, plaintext or non-retryable attempts.
+    pub fn retry_encrypted_delivery<T: OfflineDispatchSink>(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        delivery_id: &DeliveryId,
+        sink: &T,
+        accepted_evidence_order: u64,
+    ) -> Result<OfflineDispatchOutcome, OfflineRetryError> {
+        require_exact_subject_scope(subject, scope)?;
+        let runtime = AuthorizedDurableRuntime::new(self.authorization, self.store);
+        let attempt = runtime
+            .delivery_attempt(subject, scope, delivery_id)
+            .map_err(ChatError::from)?
+            .ok_or(ChatError::NotFound)?;
+        let message = runtime
+            .message(subject, scope, &attempt.message_id)
+            .map_err(ChatError::from)?
+            .ok_or(ChatError::NotFound)?;
+        require_direct_message(&message)?;
+        if message.scope != *scope || message.message_id != attempt.message_id {
+            return Err(OfflineRetryError::WrongMessage);
+        }
+        if message.crypto_metadata.is_none() {
+            return Err(OfflineRetryError::NotEncrypted);
+        }
+        match attempt.state {
+            DeliveryState::Queued => {
+                runtime
+                    .transition_delivery(
+                        subject, scope, delivery_id,
+                        DeliveryState::Queued, DeliveryState::RoutePlanned, None,
+                    )
+                    .map_err(ChatError::from)?;
+                runtime
+                    .transition_delivery(
+                        subject, scope, delivery_id,
+                        DeliveryState::RoutePlanned, DeliveryState::InFlight, None,
+                    )
+                    .map_err(ChatError::from)?;
+            }
+            DeliveryState::RoutePlanned => {
+                runtime
+                    .transition_delivery(
+                        subject, scope, delivery_id,
+                        DeliveryState::RoutePlanned, DeliveryState::InFlight, None,
+                    )
+                    .map_err(ChatError::from)?;
+            }
+            DeliveryState::InFlight => {}
+            _ => return Err(OfflineRetryError::NotRetryable),
+        }
+        let outcome = sink.dispatch_encrypted(&message).map_err(OfflineRetryError::Transport)?;
+        if outcome == OfflineDispatchOutcome::AcceptedByTransport {
+            let evidence = DeliveryEvidence {
+                delivery_id: delivery_id.clone(),
+                scope: scope.clone(),
+                message_id: attempt.message_id,
+                kind: DeliveryEvidenceKind::AcceptedByTransport,
+                logical_order: accepted_evidence_order,
+            };
+            runtime
+                .transition_delivery(
+                    subject, scope, delivery_id,
+                    DeliveryState::InFlight, DeliveryState::Acknowledged,
+                    Some(&evidence),
+                )
+                .map_err(ChatError::from)?;
+        }
+        Ok(outcome)
     }
 
     /// Reads one exact direct-chat Message through the canonical Message owner.
