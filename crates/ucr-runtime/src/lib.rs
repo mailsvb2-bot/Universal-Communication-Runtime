@@ -3300,7 +3300,55 @@ async fn run_webrtc_e2ee_bridge(
     registry: Arc<RealtimeSessionRegistry>,
     service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
 ) {
+    // Independent ordered ingress lanes prevent one sender from blocking
+    // every other sender's encrypted media forwarding.
+    let mut lanes: std::collections::HashMap<
+        ucr_model::SessionId,
+        (tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>, u64),
+    > = std::collections::HashMap::new();
+    let mut activity = 0_u64;
     while let Some(frame) = ingress.recv().await {
+        lanes.retain(|_, (lane, _)| !lane.is_closed());
+        let session_id = frame.session_id.clone();
+        if !lanes.contains_key(&session_id) && lanes.len() >= LIVE_WEBRTC_MAX_SESSIONS {
+            // A disconnected sender may leave an idle lane until its timeout.
+            // Reclaim least-recently-used capacity rather than silently muting
+            // a newly admitted publisher for two minutes.
+            if let Some(oldest) = lanes
+                .iter()
+                .min_by_key(|(_, (_, last_activity))| *last_activity)
+                .map(|(id, _)| id.clone())
+            {
+                lanes.remove(&oldest);
+            }
+        }
+        activity = activity.wrapping_add(1);
+        let (lane, last_activity) = lanes.entry(session_id).or_insert_with(|| {
+            let (lane_tx, lane_rx) = tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
+            tokio::spawn(run_webrtc_e2ee_session_lane(
+                lane_rx,
+                Arc::clone(&provider),
+                Arc::clone(&registry),
+                service.clone(),
+            ));
+            (lane_tx, activity)
+        });
+        *last_activity = activity;
+        let _ = lane.try_send(frame);
+    }
+}
+
+async fn run_webrtc_e2ee_session_lane(
+    mut lane: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
+    provider: Arc<LiveWebRtcProvider>,
+    registry: Arc<RealtimeSessionRegistry>,
+    service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+) {
+    loop {
+        let Ok(Some(frame)) = tokio::time::timeout(Duration::from_mins(2), lane.recv()).await
+        else {
+            break;
+        };
         if service.has_sfu_media_router() {
             let _ = route_webrtc_e2ee_frame_via_configured_route(
                 &service, &registry, &provider, &frame,

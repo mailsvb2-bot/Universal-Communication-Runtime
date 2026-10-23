@@ -65,6 +65,13 @@ export function ucrWebCodecsSupported(): boolean {
 
 const AUDIO_CODEC = "opus";
 const VIDEO_CODEC = "vp8";
+const VIDEO_CODEC_H264 = "avc1.42002a";
+/** H.264 Annex B start codes are carried inside authenticated E2EE frames. */
+export function ucrDetectVideoCodec(bytes: Uint8Array): string {
+  return bytes.length >= 5 && bytes[0] === 0 && bytes[1] === 0 &&
+    (bytes[2] === 1 || (bytes[2] === 0 && bytes[3] === 1))
+    ? VIDEO_CODEC_H264 : VIDEO_CODEC;
+}
 const AUDIO_RATE = 48_000;
 const AUDIO_CHANNELS = 1;
 
@@ -117,14 +124,46 @@ export function ucrVideoEncodingTarget(width: number, height: number): {
       width < 1 || height < 1 || width > 7680 || height > 4320) {
     throw new Error("invalid measured source video dimensions");
   }
-  const pixels = width * height;
-  // The browser's encrypted DataChannel is not a congestion-controlled
-  // RTP sender. Conservative realtime VP8 budgets prevent bursty camera
-  // packets from starving latency-sensitive encrypted Opus.
-  if (pixels >= 1920 * 1080) return {frameRate: 30, bitrate: 4_000_000};
-  if (pixels >= 1280 * 720) return {frameRate: 30, bitrate: 2_000_000};
-  if (pixels >= 854 * 480) return {frameRate: 30, bitrate: 1_000_000};
-  return {frameRate: 12, bitrate: 384_000};
+  const {width: w, height: h} = ucrVideoEncodeSize(width, height, 1);
+  const bitrate = Math.round(Math.min(2_500_000, Math.max(600_000, w * h * 30 * 0.09)) / 1000) * 1000;
+  return {frameRate: 30, bitrate};
+}
+export function ucrVideoEncodeSize(width: number, height: number, scale: number): {
+  width: number; height: number;
+} {
+  const cap = Math.min(1, 1280 / Math.max(width, height), 720 / Math.min(width, height));
+  const f = Math.min(1, cap) * Math.min(1, Math.max(0.25, scale));
+  const even = (v: number) => Math.max(2, Math.round(v * f / 2) * 2);
+  return {width: even(width), height: even(height)};
+}
+export function ucrVideoStageProfile(stage: number): {scale: number; bitrateFactor: number; frameRate: number} {
+  if (stage <= 0) return {scale: 1, bitrateFactor: 1, frameRate: 30};
+  if (stage === 1) return {scale: 0.75, bitrateFactor: 0.6, frameRate: 30};
+  return {scale: 0.5, bitrateFactor: 0.35, frameRate: 24};
+}
+let ucrVideoForceSoftware = false;
+let ucrVideoH264Hardware: boolean | null = null;
+const ucrVideoUsesH264 = (): boolean =>
+  !ucrVideoForceSoftware && ucrVideoH264Hardware === true &&
+  (globalThis as {ucrVideoCodecPreference?: unknown}).ucrVideoCodecPreference !== "vp8";
+const ucrVideoHw = (): "no-preference" | "prefer-software" | "prefer-hardware" =>
+  ucrVideoForceSoftware ? "prefer-software" :
+  ucrVideoUsesH264() ? "prefer-hardware" : "no-preference";
+const ucrVideoCodecConfig = (): {codec: string; avc?: {format: "annexb"}} =>
+  ucrVideoUsesH264() ? {codec: VIDEO_CODEC_H264, avc: {format: "annexb"}} : {codec: VIDEO_CODEC};
+async function ucrProbeH264Hardware(): Promise<void> {
+  if (ucrVideoH264Hardware !== null) return;
+  ucrVideoH264Hardware = false;
+  const b = browser() as {VideoEncoder?: {isConfigSupported?(c: unknown): Promise<{supported?: boolean}>};
+    VideoDecoder?: {isConfigSupported?(c: unknown): Promise<{supported?: boolean}>}};
+  try {
+    const enc = await b.VideoEncoder?.isConfigSupported?.({codec: VIDEO_CODEC_H264,
+      width: 1280, height: 720, framerate: 30, bitrate: 2_500_000,
+      bitrateMode: "variable", latencyMode: "realtime", avc: {format: "annexb"},
+      hardwareAcceleration: "prefer-hardware"});
+    const dec = await b.VideoDecoder?.isConfigSupported?.({codec: VIDEO_CODEC_H264});
+    ucrVideoH264Hardware = enc?.supported === true && dec?.supported === true;
+  } catch { ucrVideoH264Hardware = false; }
 }
 /** Source-owned congestion adaptation. Only verified encrypted transport queue
  * depth and local encoder pressure influence publish quality. Never change MLS
@@ -160,7 +199,11 @@ const LOW_CAMERA_INTERVAL_US = 1_000_000 / LOW_CAMERA_FPS;
 // A subscriber can decode only from a keyframe. Tie that to wall time, not to
 // a fixed frame count: a busy or slow camera would otherwise hide the picture
 // for many seconds after someone joins.
-const VIDEO_KEYFRAME_INTERVAL_US = 1_000_000;
+// No confirmed receiver-to-sender keyframe request for joining/rekeying peers.
+// Bound decoder recovery at startup, then reduce steady-state refresh overhead.
+const VIDEO_KEYFRAME_INTERVAL_US = 3_000_000;
+const VIDEO_STARTUP_KEYFRAME_INTERVAL_US = 1_000_000;
+const VIDEO_STARTUP_WINDOW_US = 5_000_000;
 
 /** Stable, bounded stream identity for one actual encrypted camera quality layer.
  * Each derived stream gets a distinct MLS traffic key context through its stream ID.
@@ -292,6 +335,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     const video = sources.cameraStream.getVideoTracks()[0];
     const screen = sources.screenStream?.getVideoTracks()[0];
     if (audio) this.#capture(audio, "audio", undefined, generation);
+    if (video || screen) await ucrProbeH264Hardware();
+    if (generation !== this.#generation) return;
     if (video) this.#capture(video, "video", "camera", generation);
     if (screen) this.#capture(screen, "video", "screen_share", generation);
   }
@@ -355,6 +400,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     if (kind === "video") this.#keyframeRequests.set(encodedStreamId, () => { forceKeyframe = true; });
     const onError = (error: Error) => {
       if (generation !== this.#generation || !this.#emit) return;
+      if (kind === "video") ucrVideoForceSoftware = true;
       this.#onError(error);
       const now = Date.now();
       if (now - this.#lastCodecFailureAt > 60_000) this.#codecRecoveryAttempts = 0;
@@ -372,24 +418,26 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       : new b.VideoEncoder!({output: emitChunkFor(encodedStreamId), error: onError});
     if (kind === "audio") {
       encoder.configure({codec: AUDIO_CODEC, sampleRate: AUDIO_RATE,
-        numberOfChannels: AUDIO_CHANNELS, bitrate: 32_000});
+        numberOfChannels: AUDIO_CHANNELS, bitrate: 48_000,
+        opus: {complexity: 8, useinbandfec: true, frameDuration: 20_000}} as never);
     } else {
       const settings = track.getSettings();
       const width = settings.width ?? VIDEO_WIDTH;
       const height = settings.height ?? VIDEO_HEIGHT;
       const quality = ucrVideoEncodingTarget(width, height);
-      const config = {codec: VIDEO_CODEC, width, height,
+      const size = ucrVideoEncodeSize(width, height, 1);
+      const config = {...ucrVideoCodecConfig(), width: size.width, height: size.height,
         framerate: Math.min(
           Math.max(1, settings.frameRate ?? VIDEO_FRAMERATE), quality.frameRate,
         ),
-        bitrate: quality.bitrate, latencyMode: "realtime"};
+        bitrate: quality.bitrate, bitrateMode: "variable", latencyMode: "realtime"};
       // On some Windows GPU stacks configure(prefer-hardware) succeeds but
       // the asynchronous first encode fails, leaving a live camera and zero
       // encoded video frames. Prefer a software VP8 encoder for the first call;
       // preserve resolution and bitrate, and fall back to default negotiation
       // only if this browser rejects that preference synchronously.
       try {
-        encoder.configure({...config, hardwareAcceleration: "prefer-software"});
+        encoder.configure({...config, hardwareAcceleration: ucrVideoHw()});
       } catch {
         encoder.configure(config);
       }
@@ -414,7 +462,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         lowEncoder.configure({
           codec: VIDEO_CODEC, width: LOW_CAMERA_WIDTH, height: LOW_CAMERA_HEIGHT,
           framerate: LOW_CAMERA_FPS, bitrate: LOW_CAMERA_BITRATE_BPS,
-          latencyMode: "realtime", hardwareAcceleration: "prefer-software",
+          latencyMode: "realtime", hardwareAcceleration: ucrVideoHw(),
         });
         this.#encoders.push(lowEncoder);
         this.#keyframeRequests.set(lowStreamId, () => { forceLowKeyframe = true; });
@@ -449,9 +497,13 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       let lastLowKeyframeTimestamp = Number.NEGATIVE_INFINITY;
       let lowFramesSinceKeyframe = Number.POSITIVE_INFINITY;
       let lastLowTimestamp = -LOW_CAMERA_INTERVAL_US;
+      let streamStartTimestamp = Number.NaN;
       const due = (timestamp: number, last: number, since: number) => {
         const clock = Number.isFinite(timestamp) ? timestamp : 0;
-        return since >= 30 || clock - last >= VIDEO_KEYFRAME_INTERVAL_US;
+        if (Number.isNaN(streamStartTimestamp)) streamStartTimestamp = clock;
+        const interval = clock - streamStartTimestamp < VIDEO_STARTUP_WINDOW_US
+          ? VIDEO_STARTUP_KEYFRAME_INTERVAL_US : VIDEO_KEYFRAME_INTERVAL_US;
+        return since >= 300 || clock - last >= interval;
       };
       while (generation === this.#generation) {
         const result = await reader.read();
@@ -493,14 +545,14 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               const width = settings.width ?? VIDEO_WIDTH;
               const height = settings.height ?? VIDEO_HEIGHT;
               const full = ucrVideoEncodingTarget(width, height);
-              const factor = qualityStage === 0 ? 1 : qualityStage === 1 ? 0.45 : 0.2;
-              const fps = qualityStage === 0 ? full.frameRate : qualityStage === 1 ? 15 : 10;
-              const config = {codec: VIDEO_CODEC, width, height,
-                framerate: Math.min(settings.frameRate ?? VIDEO_FRAMERATE, fps),
-                bitrate: Math.max(150_000, Math.round(full.bitrate * factor)),
-                latencyMode: "realtime"};
+              const profile = ucrVideoStageProfile(qualityStage);
+              const size = ucrVideoEncodeSize(width, height, profile.scale);
+              const config = {...ucrVideoCodecConfig(), width: size.width, height: size.height,
+                framerate: Math.min(settings.frameRate ?? VIDEO_FRAMERATE, profile.frameRate),
+                bitrate: Math.max(250_000, Math.round(full.bitrate * profile.bitrateFactor)),
+                bitrateMode: "variable", latencyMode: "realtime"};
               try {
-                encoder.configure({...config, hardwareAcceleration: "prefer-software"});
+                encoder.configure({...config, hardwareAcceleration: ucrVideoHw()});
               } catch {
                 encoder.configure(config);
               }
@@ -508,14 +560,11 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             }
           }
           const maxFps = kind === "video" ?
-            (qualityStage === 0 ? ucrVideoEncodingTarget(
-              track.getSettings().width ?? VIDEO_WIDTH,
-              track.getSettings().height ?? VIDEO_HEIGHT).frameRate :
-              qualityStage === 1 ? 15 : 10) : 0;
+            ucrVideoStageProfile(qualityStage).frameRate : 0;
           const videoPacingOk = kind !== "video" ||
             // Capture timestamps are integer microseconds; allow sub-microsecond
             // rounding so a nominal 30 fps source (33_333 us) is not halved.
-            frame.timestamp - lastVideoEncodeTimestamp >= Math.floor(1_000_000 / maxFps);
+            frame.timestamp - lastVideoEncodeTimestamp >= Math.floor(1_000_000 / maxFps) - 1;
           if (videoPacingOk && ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
             const keyframe = kind === "video" &&
               (forceKeyframe || due(frame.timestamp, lastKeyframeTimestamp, framesSinceKeyframe));
@@ -523,11 +572,13 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               ucrAudioCounters.captured++;
               const pcm = ucrNormalizeOpusAudio(frame as AudioData);
               try {
-                const samples = new Float32Array(pcm.numberOfFrames);
-                pcm.copyTo(samples, {planeIndex: 0, format: "f32-planar"});
-                let peak = 0;
-                for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
-                ucrAudioCounters.inputPeak = Math.round(peak * 1000) / 1000;
+                if ((ucrAudioCounters.captured & 15) === 0) {
+                  const samples = new Float32Array(pcm.numberOfFrames);
+                  pcm.copyTo(samples, {planeIndex: 0, format: "f32-planar"});
+                  let peak = 0;
+                  for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
+                  ucrAudioCounters.inputPeak = Math.round(peak * 1000) / 1000;
+                }
                 encoder.encode(pcm);
               }
               finally { if (pcm !== frame) pcm.close(); }
@@ -588,6 +639,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   readonly #videoCanvas?: HTMLCanvasElement | OffscreenCanvas;
   readonly #audioContext?: AudioContext;
   readonly #decoders = new Map<string, DecoderLike>();
+  readonly #decoderCodecs = new Map<string, string>();
   // WebAudio mixes independent AudioBufferSources automatically. Only frames
   // from the SAME authenticated audio stream must be sequenced; a global clock
   // serializes different speakers and makes conferences fall behind real time.
@@ -790,9 +842,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               // keyframe, failed decode or rendering error must retain live video.
               if (canvas.width !== width) canvas.width = width;
               if (canvas.height !== height) canvas.height = height;
-              (context as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
-              ucrVideoCounters.rendered++;
-              ucrVideoCounters.lastRenderedAt = Date.now();
+              // Preserve decode reference frames, but avoid unnecessary canvas
+              // copies while this page is hidden or minimized.
+              const doc = (globalThis as {document?: {hidden?: boolean}}).document;
+              if (!doc?.hidden) {
+                (context as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
+                ucrVideoCounters.rendered++;
+                ucrVideoCounters.lastRenderedAt = Date.now();
+              }
               if (selectedSourceKey !== null && oldVisible !== selectedStreamId) {
                 this.#activeVideoStreams.set(selectedSourceKey, selectedStreamId);
                 this.#pendingVideoStreams.delete(selectedSourceKey);
@@ -847,9 +904,17 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
             this.#onError(error);
           },
         });
-        decoder.configure({codec: VIDEO_CODEC});
+        const codec = ucrDetectVideoCodec(frame.bytes);
+        decoder.configure({codec});
+        this.#decoderCodecs.set(key, codec);
       }
       this.#decoders.set(key, decoder);
+    } else if (frame.mediaKind === "video" && frame.keyframe) {
+      const codec = ucrDetectVideoCodec(frame.bytes);
+      if (this.#decoderCodecs.get(key) !== codec) {
+        (decoder as {configure(c: unknown): void}).configure({codec});
+        this.#decoderCodecs.set(key, codec);
+      }
     }
     const data = frame.bytes;
     const timestamp = Number(frame.timestamp);

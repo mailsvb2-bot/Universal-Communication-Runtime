@@ -1,5 +1,5 @@
 # Local Windows first-party HTTPS smoke launcher; does not prove a two-person E2EE call.
-param([string]$RepositoryRoot = '', [switch]$OpenSecondPersistentProfile)
+param([string]$RepositoryRoot = '', [switch]$OpenSecondPersistentProfile, [switch]$DebugBuild)
 # Keeps the existing canonical SQLite and in-process first-party BFF owner.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -166,7 +166,7 @@ $env:CARGO_PROFILE_DEV_DEBUG = '0'
 # On Windows an executing .exe is locked and link.exe fails with LNK1104.
 # Only stop UCR-owned binaries in this checkout; never kill unrelated listener processes.
 foreach ($process in (Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('ucr-runtime.exe','ucr-realtime-web.exe','ucr-https-edge.exe') })) {
-    if ($process.ExecutablePath -and $process.ExecutablePath.StartsWith((Join-Path $root 'target\debug\'),[StringComparison]::OrdinalIgnoreCase)) {
+    if ($process.ExecutablePath -and ($process.ExecutablePath.StartsWith((Join-Path $root 'target\debug\'),[StringComparison]::OrdinalIgnoreCase) -or $process.ExecutablePath.StartsWith((Join-Path $root 'target\release\'),[StringComparison]::OrdinalIgnoreCase))) {
         Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
     }
 }
@@ -188,10 +188,17 @@ foreach ($asset in @(
     'crates\ucr-realtime-web\static\endpoint-wasm\ucr_endpoint_wasm_bg.wasm'
 )) { Require-File (Join-Path $root $asset) }
 Write-Host 'Building runtime + browser gateway + HTTPS edge from the currently checked-out revision...'
-Invoke-Checked 'cargo' @('build','-p','ucr-runtime','-p','ucr-realtime-web','-p','ucr-https-edge','--locked')
-$runtimeExe = Join-Path $root 'target\debug\ucr-runtime.exe'
-$webExe = Join-Path $root 'target\debug\ucr-realtime-web.exe'
-$edgeExe = Join-Path $root 'target\debug\ucr-https-edge.exe'
+# Release by default to avoid slow unoptimized encrypted media forwarding.
+$profileDir = if ($DebugBuild) { 'debug' } else { 'release' }
+$cargoArgs = @('build','-p','ucr-runtime','-p','ucr-realtime-web','-p','ucr-https-edge','--locked')
+if (!$DebugBuild) { $cargoArgs += '--release' }
+Invoke-Checked 'cargo' $cargoArgs
+$runtimeExe = Join-Path $root "target\$profileDir\ucr-runtime.exe"
+$webExe = Join-Path $root "target\$profileDir\ucr-realtime-web.exe"
+$edgeExe = Join-Path $root "target\$profileDir\ucr-https-edge.exe"
+Write-Host 'NOTE: Windows Firewall may ask about ucr-runtime.exe (WebRTC UDP socket).'
+Write-Host '      For same-host testing, permit only Private networks if needed.'
+Write-Host '      A second LAN device may require allowing Private networks.'
 foreach ($exe in @($runtimeExe,$webExe,$edgeExe)) { Require-File $exe }
 # One-command first launch: initialize ONLY when no local database exists.
 # Never overwrite an existing Identity, Contact, Device or Call database.
