@@ -58,6 +58,10 @@ impl From<ChatError> for OfflineRetryError {
     }
 }
 
+/// Per-delivery recovery results; transport acceptance is not a recipient receipt.
+pub type OfflineBatchDispatchResults =
+    Vec<(DeliveryId, Result<OfflineDispatchOutcome, OfflineRetryError>)>;
+
 pub const MAX_TRANSCRIPT_BATCH_ITEMS: usize = 256;
 /// Aggregate semantic-memory budget for one transcript projection.
 ///
@@ -388,13 +392,7 @@ where
         delivery_ids: &[DeliveryId],
         sink: &T,
         evidence_order: u64,
-    ) -> Result<
-        Vec<(
-            DeliveryId,
-            Result<OfflineDispatchOutcome, OfflineRetryError>,
-        )>,
-        ChatError,
-    > {
+    ) -> Result<OfflineBatchDispatchResults, ChatError> {
         require_exact_subject_scope(subject, scope)?;
         if delivery_ids.is_empty() || delivery_ids.len() > MAX_TRANSCRIPT_BATCH_ITEMS {
             return Err(ChatError::TranscriptBatchSize);
