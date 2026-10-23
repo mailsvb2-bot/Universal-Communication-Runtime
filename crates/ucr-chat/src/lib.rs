@@ -265,6 +265,50 @@ where
         Ok(messages)
     }
 
+    /// Deterministic bounded page of a caller-supplied canonical transcript batch.
+    ///
+    /// Caller obtains message IDs from authorized Sync/Event/query owners. This method
+    /// neither discovers message IDs nor stores a second timeline. A page is strictly
+    /// scoped to the supplied batch, not necessarily the entire conversation history.
+    /// `after` must be present in the supplied batch, otherwise `NotFound` is returned
+    /// rather than silently skipping events on a partially synchronized device.
+    ///
+    /// # Errors
+    /// Propagates authorization, not-found, scope and transcript-bound failures.
+    /// Rejects page sizes outside `1..=MAX_TRANSCRIPT_BATCH_ITEMS`.
+    pub fn load_transcript_page(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        conversation_id: &ConversationId,
+        message_ids: &[MessageId],
+        after: Option<&MessageId>,
+        page_size: usize,
+    ) -> Result<(Vec<MessageEnvelope>, Option<MessageId>), ChatError> {
+        if page_size == 0 || page_size > MAX_TRANSCRIPT_BATCH_ITEMS {
+            return Err(ChatError::TranscriptBatchSize);
+        }
+        // Reuse the existing authorized canonical read and aggregate byte budget.
+        let messages = self.load_transcript_batch(subject, scope, conversation_id, message_ids)?;
+        let start = match after {
+            Some(cursor) => messages
+                .iter()
+                .position(|item| &item.message_id == cursor)
+                .ok_or(ChatError::NotFound)?
+                .saturating_add(1),
+            None => 0,
+        };
+        let end = start.saturating_add(page_size).min(messages.len());
+        let next_after = if end < messages.len() {
+            messages
+                .get(end.saturating_sub(1))
+                .map(|item| item.message_id.clone())
+        } else {
+            None
+        };
+        Ok((messages[start..end].to_vec(), next_after))
+    }
+
     /// Records explicit `READ_BY_USER` evidence and advances Delivered -> Read.
     ///
     /// Transport/relay acknowledgement is intentionally insufficient; the caller must invoke this
