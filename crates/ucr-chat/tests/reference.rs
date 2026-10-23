@@ -324,7 +324,9 @@ fn transcript_page_preserves_canonical_order_and_cursor_boundaries() {
         .load_transcript_page(&subject(), &scope(), conversation_id, &ids, None, 2)
         .expect("first page");
     assert_eq!(
-        page.iter().map(|item| item.message_id.clone()).collect::<Vec<_>>(),
+        page.iter()
+            .map(|item| item.message_id.clone())
+            .collect::<Vec<_>>(),
         vec![first.message_id.clone(), middle.message_id.clone()]
     );
     assert_eq!(cursor, Some(middle.message_id.clone()));
