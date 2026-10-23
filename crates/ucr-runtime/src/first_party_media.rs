@@ -369,7 +369,15 @@ where
             // A stale revision loses to the concurrent writer; loop and re-read.
             let _ = store.apply_mls_backed_group_change(host, host_device, &change, &[]);
         }
-        if !admitted {
+        // The final bounded CAS attempt may have succeeded after the last
+        // pre-attempt read. Re-read the canonical membership before declaring
+        // a conflict; never turn an accepted two-person Join into a spurious
+        // failure merely because the success landed on the final retry.
+        if !admitted
+            && !store
+                .group_membership(&host.scope, &ids.group_id, participant)?
+                .is_some_and(|membership| membership.state == GroupMemberState::Active)
+        {
             return Err(MediaRuntimeError::Conflict);
         }
     }
