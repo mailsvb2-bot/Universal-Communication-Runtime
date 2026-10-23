@@ -272,7 +272,7 @@ fn offline_submission_survives_retry_and_never_fakes_delivery() {
     };
     assert_eq!(
         chat.persist_offline_text(&subject(), &outgoing, &attempt, &persisted),
-        Ok(DurableRecordStatus::Inserted)
+        Ok(DurableRecordStatus::Persisted)
     );
     assert_eq!(
         store
