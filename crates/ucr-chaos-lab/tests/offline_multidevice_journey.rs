@@ -106,7 +106,9 @@ fn journey_revocation_during_offline_period_is_fail_closed() {
         .apply(Fault::SetPeerOnline(PeerId(1), false))
         .expect("offline");
     let pending = DurableQueueLab::restart_from(&pending);
-    transport.apply(Fault::RevokePeer(PeerId(1))).expect("revoke");
+    transport
+        .apply(Fault::RevokePeer(PeerId(1)))
+        .expect("revoke");
     transport
         .apply(Fault::SetPeerOnline(PeerId(1), true))
         .expect("network returns");
