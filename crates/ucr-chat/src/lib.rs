@@ -313,29 +313,43 @@ where
             DeliveryState::Queued => {
                 runtime
                     .transition_delivery(
-                        subject, scope, delivery_id,
-                        DeliveryState::Queued, DeliveryState::RoutePlanned, None,
+                        subject,
+                        scope,
+                        delivery_id,
+                        DeliveryState::Queued,
+                        DeliveryState::RoutePlanned,
+                        None,
                     )
                     .map_err(ChatError::from)?;
                 runtime
                     .transition_delivery(
-                        subject, scope, delivery_id,
-                        DeliveryState::RoutePlanned, DeliveryState::InFlight, None,
+                        subject,
+                        scope,
+                        delivery_id,
+                        DeliveryState::RoutePlanned,
+                        DeliveryState::InFlight,
+                        None,
                     )
                     .map_err(ChatError::from)?;
             }
             DeliveryState::RoutePlanned => {
                 runtime
                     .transition_delivery(
-                        subject, scope, delivery_id,
-                        DeliveryState::RoutePlanned, DeliveryState::InFlight, None,
+                        subject,
+                        scope,
+                        delivery_id,
+                        DeliveryState::RoutePlanned,
+                        DeliveryState::InFlight,
+                        None,
                     )
                     .map_err(ChatError::from)?;
             }
             DeliveryState::InFlight => {}
             _ => return Err(OfflineRetryError::NotRetryable),
         }
-        let outcome = sink.dispatch_encrypted(&message).map_err(OfflineRetryError::Transport)?;
+        let outcome = sink
+            .dispatch_encrypted(&message)
+            .map_err(OfflineRetryError::Transport)?;
         if outcome == OfflineDispatchOutcome::AcceptedByTransport {
             let evidence = DeliveryEvidence {
                 delivery_id: delivery_id.clone(),
@@ -346,8 +360,11 @@ where
             };
             runtime
                 .transition_delivery(
-                    subject, scope, delivery_id,
-                    DeliveryState::InFlight, DeliveryState::Acknowledged,
+                    subject,
+                    scope,
+                    delivery_id,
+                    DeliveryState::InFlight,
+                    DeliveryState::Acknowledged,
                     Some(&evidence),
                 )
                 .map_err(ChatError::from)?;
