@@ -8,6 +8,7 @@ import {webcrypto} from "node:crypto";
 
 import {
   createUcrBrowserProtectedDeviceVault,
+  createUcrIndexedDbDeviceSignerStore,
   type UcrLocalSignerRecord,
   type UcrLocalSignerRecordStore,
 } from "./src/canonical_device_seed_vault.ts";
@@ -331,6 +332,66 @@ assert.equal(winnerStarted, true, "the competing tab must finish during the firs
 assert.equal(crossTabApprovals, 1, "matching concurrent signer requires only ONE approval");
 assert.equal((await sharedSignerVault.load(simultaneousScope))?.keyId,
   approvedCrossTabSigner?.keyId, "the winning canonical key must be the shared local signer");
+
+// Regression: IndexedDB fires "blocked" while an older tab keeps version 1
+// open. The rejected request can still succeed later when that tab closes.
+// That late connection must be closed instead of becoming an orphaned handle.
+// This event-order mock does not claim a physical browser/upgrade run.
+const previousIndexedDb = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
+const pendingOpens: IDBOpenDBRequest[] = [];
+let orphanCloses = 0;
+let abandonedUpgradeAborts = 0;
+let abandonedSchemaWrites = 0;
+Object.defineProperty(globalThis, "indexedDB", {
+  configurable: true,
+  value: {
+    open() {
+      const db = {
+        close() { orphanCloses++; },
+        objectStoreNames: {contains() {return false;}},
+        createObjectStore() {abandonedSchemaWrites++;},
+      } as unknown as IDBDatabase;
+      const request = {
+        result: db,
+        transaction: {abort() {abandonedUpgradeAborts++;}},
+        onblocked: null, onupgradeneeded: null,
+        onsuccess: null, onerror: null,
+      } as unknown as IDBOpenDBRequest;
+      pendingOpens.push(request);
+      return request;
+    },
+  },
+});
+try {
+  const indexedStore = createUcrIndexedDbDeviceSignerStore();
+  const blocked = indexedStore.get("blocked-upgrade");
+  assert.equal(pendingOpens.length, 1);
+  pendingOpens[0].onblocked?.call(pendingOpens[0], new Event("blocked"));
+  await assert.rejects(blocked, /Device vault upgrade blocked/);
+  pendingOpens[0].onsuccess?.call(pendingOpens[0], new Event("success"));
+  assert.equal(orphanCloses, 1,
+    "a late IndexedDB success after blocked rejection must close its handle");
+
+  const abandoned = indexedStore.get("blocked-before-upgrade");
+  assert.equal(pendingOpens.length, 2);
+  pendingOpens[1].onblocked?.call(pendingOpens[1], new Event("blocked"));
+  await assert.rejects(abandoned, /Device vault upgrade blocked/);
+  pendingOpens[1].onupgradeneeded?.call(
+    pendingOpens[1], new Event("upgradeneeded") as IDBVersionChangeEvent,
+  );
+  assert.equal(abandonedUpgradeAborts, 1,
+    "a rejected upgrade must abort if it later acquires the version lock");
+  assert.equal(abandonedSchemaWrites, 0,
+    "a rejected upgrade must not modify the shared canonical vault schema");
+} finally {
+  if (previousIndexedDb) {
+    Object.defineProperty(globalThis, "indexedDB", previousIndexedDb);
+  } else {
+    Reflect.deleteProperty(globalThis, "indexedDB");
+  }
+}
+
+console.log("UCR_INDEXEDDB_BLOCKED_OPEN_REGRESSION_OK");
 
 console.log("UCR_FIRST_PARTY_DEVICE_TO_GRANT_SEQUENCE_OK");
 
