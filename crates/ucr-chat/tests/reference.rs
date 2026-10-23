@@ -556,10 +556,7 @@ fn offline_recovery_batch_isolates_missing_id_and_only_acknowledges_transport() 
         results,
         vec![
             (missing, Err(OfflineRetryError::Chat(ChatError::NotFound))),
-            (
-                delivery_id.clone(),
-                Ok(OfflineDispatchOutcome::AcceptedByTransport)
-            ),
+            (delivery_id.clone(), Ok(OfflineDispatchOutcome::AcceptedByTransport)),
         ]
     );
     assert_eq!(
