@@ -20,6 +20,7 @@ import {
   ucrVideoEncodingTarget,
   ucrVideoEncodeSize,
   ucrVideoStageProfile,
+  ucrDetectVideoCodec,
   ucrAdaptiveVideoStep,
   ucrNormalizeOpusAudio,
 } from "./src/browser_webcodecs_media.ts";
@@ -2028,6 +2029,9 @@ assert.deepEqual(ucrVideoEncodeSize(1080, 1920, 1), {width: 720, height: 1280});
 assert.deepEqual(ucrVideoEncodeSize(1280, 720, 0.5), {width: 640, height: 360});
 assert.deepEqual(ucrVideoEncodeSize(640, 480, 1), {width: 640, height: 480});
 assert.equal(ucrVideoStageProfile(2).frameRate, 24);
+assert.equal(ucrDetectVideoCodec(new Uint8Array([0, 0, 0, 1, 0x65, 0x88])), "avc1.42002a");
+assert.equal(ucrDetectVideoCodec(new Uint8Array([0, 0, 1, 0x65, 0x88])), "avc1.42002a");
+assert.equal(ucrDetectVideoCodec(new Uint8Array([0x10, 0x00, 0x00, 0x9d, 0x01])), "vp8");
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
 assert.deepEqual(ucrAdaptiveVideoStep(0, 1_500_000, 0, 0), {stage:1, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(1, 1_500_000, 0, 0), {stage:2, healthySamples:0});
