@@ -488,9 +488,7 @@ fn offline_recovery_batch_rejects_empty_and_duplicate_ids_without_dispatch() {
         Err(ChatError::TranscriptBatchSize)
     );
     assert_eq!(
-        chat.retry_encrypted_delivery_batch(
-            &subject(), &scope(), &[id.clone(), id], &dispatch, 2
-        ),
+        chat.retry_encrypted_delivery_batch(&subject(), &scope(), &[id.clone(), id], &dispatch, 2),
         Err(ChatError::TranscriptBatchSize)
     );
 }
