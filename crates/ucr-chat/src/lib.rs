@@ -270,12 +270,12 @@ where
     /// Caller obtains message IDs from authorized Sync/Event/query owners. This method
     /// neither discovers message IDs nor stores a second timeline. A page is strictly
     /// scoped to the supplied batch, not necessarily the entire conversation history.
-    /// `after` must be present in the supplied batch, otherwise NotFound is returned
+    /// `after` must be present in the supplied batch, otherwise `NotFound` is returned
     /// rather than silently skipping events on a partially synchronized device.
     ///
     /// # Errors
     /// Propagates authorization, not-found, scope and transcript-bound failures.
-    /// Rejects page sizes outside 1..=MAX_TRANSCRIPT_BATCH_ITEMS.
+    /// Rejects page sizes outside `1..=MAX_TRANSCRIPT_BATCH_ITEMS`.
     pub fn load_transcript_page(
         &self,
         subject: &ScopedPrincipal,
