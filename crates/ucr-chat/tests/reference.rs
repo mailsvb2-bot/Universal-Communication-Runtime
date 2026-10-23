@@ -472,6 +472,30 @@ fn offline_retry_refuses_unencrypted_message_before_transport() {
 }
 
 #[test]
+fn offline_recovery_batch_rejects_empty_and_duplicate_ids_without_dispatch() {
+    use ucr_chat::OfflineDispatchOutcome;
+    let store = MemoryLocalStore::default();
+    let authorization = AllowAll;
+    let sink = RecordingSink::default();
+    let clock = FixedClock(10_000);
+    let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
+    let dispatch = TestOfflineDispatch {
+        outcome: Ok(OfflineDispatchOutcome::AcceptedByTransport),
+    };
+    let id = DeliveryId::from_opaque(oid("offline-batch-duplicate"));
+    assert_eq!(
+        chat.retry_encrypted_delivery_batch(&subject(), &scope(), &[], &dispatch, 2),
+        Err(ChatError::TranscriptBatchSize)
+    );
+    assert_eq!(
+        chat.retry_encrypted_delivery_batch(
+            &subject(), &scope(), &[id.clone(), id], &dispatch, 2
+        ),
+        Err(ChatError::TranscriptBatchSize)
+    );
+}
+
+#[test]
 fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
     let store = MemoryLocalStore::default();
     let authorization = AllowAll;
