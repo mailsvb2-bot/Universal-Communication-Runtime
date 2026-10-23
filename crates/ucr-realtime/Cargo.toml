@@ -10,7 +10,7 @@ repository.workspace = true
 base64 = "=0.22.1"
 hmac = "=0.12.1"
 sha2 = "=0.10.9"
-tokio = { version = "=1.53.1", features = ["sync"] }
+tokio = { version = "=1.53.3", features = ["sync"] }
 ucr-core = { path = "../ucr-core" }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
