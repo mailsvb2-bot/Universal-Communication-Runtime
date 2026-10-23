@@ -98,7 +98,9 @@ def available_iphones() -> list[tuple[tuple[int, int], str, str]]:
             udid = str(device.get("udid", ""))
             if device.get("isAvailable") and name.startswith("iPhone") and udid:
                 candidates.append((version, name, udid))
-    candidates.sort(reverse=True)
+    # Prefer lighter iPhone simulators: large newest devices can exhaust
+    # hosted macOS runner memory before Safari receives its first navigation.
+    candidates.sort(key=lambda item: (-item[0][0], -item[0][1], 0 if "SE" in item[1] else 1, item[1]))
     return candidates
 
 
@@ -215,19 +217,23 @@ def probe_device(
         # Do not ask CoreSimulator to open Safari until the real host probe
         # serves HTTP. This distinguishes probe startup failure from a
         # simulator hang and prevents wasted openurl attempts.
-        import urllib.request
+        import socket
         ready = False
-        for _ in range(40):
+        for _ in range(60):
             if process.poll() is not None:
-                raise RuntimeError("mobile probe terminated before HTTP readiness")
+                stdout = process.communicate(timeout=5)[0]
+                raise RuntimeError(
+                    "mobile probe terminated before HTTP readiness: " + stdout[-4000:]
+                )
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/client.html", timeout=2) as response:
-                    ready = response.status == 200
-            except (OSError, TimeoutError):
-                pass
+                # TCP readiness avoids transferring the whole client.html before
+                # Safari starts. The simulator can be heavily CPU constrained.
+                with socket.create_connection(("127.0.0.1", port), timeout=2):
+                    ready = True
+            except OSError:
+                time.sleep(0.5)
             if ready:
                 break
-            time.sleep(0.25)
         if not ready:
             raise RuntimeError("mobile probe HTTP listener did not become ready")
         url = f"http://127.0.0.1:{port}/client.html?ucr_mobile_probe=ios-safari"
