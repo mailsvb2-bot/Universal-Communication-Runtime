@@ -1412,15 +1412,44 @@ function attachE2eeDataChannel(channel){
         .catch(e=>{ui.status.textContent="Encrypted media frame rejected: "+e.message;});
     }catch(e){e2eePending=null;ui.status.textContent="Encrypted media transport rejected data: "+e.message;}
   };
-  channel.onerror=()=>{ui.status.textContent="Encrypted media DataChannel failed.";};
-  channel.onclose=()=>{if(e2eeChannel===channel){
-    // ICE restart cannot reopen a terminally closed encrypted DataChannel.
-    // Retire its MLS media bridge before scheduling a fresh WebRTC peer.
+  // Recover only after terminal closure. A transient DataChannel error
+  // does not authorize discarding the endpoint's authenticated MLS state.
+  let terminalHandled=false;
+  const recoverTerminalEncryptedChannel=()=>{
+    if(terminalHandled||e2eeChannel!==channel)return;
+    if(channel.readyState!=="closed"&&channel.readyState!=="closing")return;
+    terminalHandled=true;
     webrtcNeedsPeerRebuild=true;
     closeE2eeTransport();
-    if(sessionActive&&mediaActive)ui.state.textContent="Reconnecting";
-    scheduleWebRtcRetry();
-  }};
+    if(sessionActive&&mediaActive){
+      ui.state.textContent="Reconnecting";
+      scheduleWebRtcRetry();
+    }
+  };
+  channel.onerror=()=>{
+    if(e2eeChannel!==channel||terminalHandled)return;
+    ucrRecordDiagnostic("Encrypted DataChannel error ("+channel.readyState+")","webrtc");
+    if(channel.readyState==="closing"||channel.readyState==="closed"){
+      recoverTerminalEncryptedChannel();
+      return;
+    }
+    // Leave ICE restart to the existing peer recovery owner.
+    if(sessionActive&&mediaActive&&peer&&
+       (peer.connectionState==="failed"||peer.iceConnectionState==="failed")){
+      scheduleWebRtcRetry();
+    }
+  };
+  channel.onclose=()=>{
+    if(e2eeChannel!==channel||terminalHandled)return;
+    // A close event is terminal even if the browser lags updating readyState.
+    terminalHandled=true;
+    webrtcNeedsPeerRebuild=true;
+    closeE2eeTransport();
+    if(sessionActive&&mediaActive){
+      ui.state.textContent="Reconnecting";
+      scheduleWebRtcRetry();
+    }
+  };
 }
 function scheduleStreamRetry(){
   if(!sessionActive||!mediaActive||Date.now()>=claims.expires)return;
