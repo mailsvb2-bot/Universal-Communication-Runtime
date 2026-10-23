@@ -65,6 +65,13 @@ export function ucrWebCodecsSupported(): boolean {
 
 const AUDIO_CODEC = "opus";
 const VIDEO_CODEC = "vp8";
+const VIDEO_CODEC_H264 = "avc1.42002a";
+/** H.264 Annex B start codes are carried inside authenticated E2EE frames. */
+export function ucrDetectVideoCodec(bytes: Uint8Array): string {
+  return bytes.length >= 5 && bytes[0] === 0 && bytes[1] === 0 &&
+    (bytes[2] === 1 || (bytes[2] === 0 && bytes[3] === 1))
+    ? VIDEO_CODEC_H264 : VIDEO_CODEC;
+}
 const AUDIO_RATE = 48_000;
 const AUDIO_CHANNELS = 1;
 
@@ -135,8 +142,29 @@ export function ucrVideoStageProfile(stage: number): {scale: number; bitrateFact
   return {scale: 0.5, bitrateFactor: 0.35, frameRate: 24};
 }
 let ucrVideoForceSoftware = false;
-const ucrVideoHw = (): "no-preference" | "prefer-software" =>
-  ucrVideoForceSoftware ? "prefer-software" : "no-preference";
+let ucrVideoH264Hardware: boolean | null = null;
+const ucrVideoUsesH264 = (): boolean =>
+  !ucrVideoForceSoftware && ucrVideoH264Hardware === true &&
+  (globalThis as {ucrVideoCodecPreference?: unknown}).ucrVideoCodecPreference !== "vp8";
+const ucrVideoHw = (): "no-preference" | "prefer-software" | "prefer-hardware" =>
+  ucrVideoForceSoftware ? "prefer-software" :
+  ucrVideoUsesH264() ? "prefer-hardware" : "no-preference";
+const ucrVideoCodecConfig = (): {codec: string; avc?: {format: "annexb"}} =>
+  ucrVideoUsesH264() ? {codec: VIDEO_CODEC_H264, avc: {format: "annexb"}} : {codec: VIDEO_CODEC};
+async function ucrProbeH264Hardware(): Promise<void> {
+  if (ucrVideoH264Hardware !== null) return;
+  ucrVideoH264Hardware = false;
+  const b = browser() as {VideoEncoder?: {isConfigSupported?(c: unknown): Promise<{supported?: boolean}>};
+    VideoDecoder?: {isConfigSupported?(c: unknown): Promise<{supported?: boolean}>}};
+  try {
+    const enc = await b.VideoEncoder?.isConfigSupported?.({codec: VIDEO_CODEC_H264,
+      width: 1280, height: 720, framerate: 30, bitrate: 2_500_000,
+      bitrateMode: "variable", latencyMode: "realtime", avc: {format: "annexb"},
+      hardwareAcceleration: "prefer-hardware"});
+    const dec = await b.VideoDecoder?.isConfigSupported?.({codec: VIDEO_CODEC_H264});
+    ucrVideoH264Hardware = enc?.supported === true && dec?.supported === true;
+  } catch { ucrVideoH264Hardware = false; }
+}
 /** Source-owned congestion adaptation. Only verified encrypted transport queue
  * depth and local encoder pressure influence publish quality. Never change MLS
  * keys, Device authority, or a different participant's receive policy.
@@ -307,6 +335,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     const video = sources.cameraStream.getVideoTracks()[0];
     const screen = sources.screenStream?.getVideoTracks()[0];
     if (audio) this.#capture(audio, "audio", undefined, generation);
+    if (video || screen) await ucrProbeH264Hardware();
+    if (generation !== this.#generation) return;
     if (video) this.#capture(video, "video", "camera", generation);
     if (screen) this.#capture(screen, "video", "screen_share", generation);
   }
@@ -396,7 +426,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       const height = settings.height ?? VIDEO_HEIGHT;
       const quality = ucrVideoEncodingTarget(width, height);
       const size = ucrVideoEncodeSize(width, height, 1);
-      const config = {codec: VIDEO_CODEC, width: size.width, height: size.height,
+      const config = {...ucrVideoCodecConfig(), width: size.width, height: size.height,
         framerate: Math.min(
           Math.max(1, settings.frameRate ?? VIDEO_FRAMERATE), quality.frameRate,
         ),
@@ -517,7 +547,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               const full = ucrVideoEncodingTarget(width, height);
               const profile = ucrVideoStageProfile(qualityStage);
               const size = ucrVideoEncodeSize(width, height, profile.scale);
-              const config = {codec: VIDEO_CODEC, width: size.width, height: size.height,
+              const config = {...ucrVideoCodecConfig(), width: size.width, height: size.height,
                 framerate: Math.min(settings.frameRate ?? VIDEO_FRAMERATE, profile.frameRate),
                 bitrate: Math.max(250_000, Math.round(full.bitrate * profile.bitrateFactor)),
                 bitrateMode: "variable", latencyMode: "realtime"};
@@ -609,6 +639,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   readonly #videoCanvas?: HTMLCanvasElement | OffscreenCanvas;
   readonly #audioContext?: AudioContext;
   readonly #decoders = new Map<string, DecoderLike>();
+  readonly #decoderCodecs = new Map<string, string>();
   // WebAudio mixes independent AudioBufferSources automatically. Only frames
   // from the SAME authenticated audio stream must be sequenced; a global clock
   // serializes different speakers and makes conferences fall behind real time.
@@ -873,9 +904,17 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
             this.#onError(error);
           },
         });
-        decoder.configure({codec: VIDEO_CODEC});
+        const codec = ucrDetectVideoCodec(frame.bytes);
+        decoder.configure({codec});
+        this.#decoderCodecs.set(key, codec);
       }
       this.#decoders.set(key, decoder);
+    } else if (frame.mediaKind === "video" && frame.keyframe) {
+      const codec = ucrDetectVideoCodec(frame.bytes);
+      if (this.#decoderCodecs.get(key) !== codec) {
+        (decoder as {configure(c: unknown): void}).configure({codec});
+        this.#decoderCodecs.set(key, codec);
+      }
     }
     const data = frame.bytes;
     const timestamp = Number(frame.timestamp);
