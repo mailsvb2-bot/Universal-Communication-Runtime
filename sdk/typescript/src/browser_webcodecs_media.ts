@@ -208,7 +208,11 @@ export function ucrAdvanceVideoPacing(
     throw new Error("invalid video pacing timestamp or frame rate");
   }
   const intervalUs = 1_000_000 / targetFps;
-  if (timestampUs + 1 < nextDueUs) return {publish: false, nextDueUs};
+  // Real cameras may report each nominal 30 fps frame as exactly 33_333 us.
+  // Allow <=1% timestamp quantization drift without admitting an extra
+  // 30 fps frame at the lower 24/12 fps publish targets.
+  const toleranceUs = Math.min(1_000, intervalUs / 100);
+  if (timestampUs + toleranceUs < nextDueUs) return {publish: false, nextDueUs};
   return {publish: true, nextDueUs:
     !Number.isFinite(nextDueUs) || timestampUs - nextDueUs > intervalUs
       ? timestampUs + intervalUs : nextDueUs + intervalUs};
