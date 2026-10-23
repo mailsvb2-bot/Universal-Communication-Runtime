@@ -811,9 +811,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               // keyframe, failed decode or rendering error must retain live video.
               if (canvas.width !== width) canvas.width = width;
               if (canvas.height !== height) canvas.height = height;
-              (context as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
-              ucrVideoCounters.rendered++;
-              ucrVideoCounters.lastRenderedAt = Date.now();
+              // Preserve decode reference frames, but avoid unnecessary canvas
+              // copies while this page is hidden or minimized.
+              const doc = (globalThis as {document?: {hidden?: boolean}}).document;
+              if (!doc?.hidden) {
+                (context as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
+                ucrVideoCounters.rendered++;
+                ucrVideoCounters.lastRenderedAt = Date.now();
+              }
               if (selectedSourceKey !== null && oldVisible !== selectedStreamId) {
                 this.#activeVideoStreams.set(selectedSourceKey, selectedStreamId);
                 this.#pendingVideoStreams.delete(selectedSourceKey);
