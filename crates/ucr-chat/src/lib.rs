@@ -279,7 +279,7 @@ where
     /// The caller schedules retries and enumerates authorized pending IDs using the canonical
     /// Delivery owner. No private queue or duplicate Message owner is introduced. Only an
     /// already encrypted envelope may reach the transport. A transport failure leaves the
-    /// attempt in InFlight for a later retry, including after process restart.
+    /// attempt in `InFlight` for a later retry, including after process restart.
     /// Transport acceptance never implies recipient delivery or user read.
     ///
     /// # Errors
