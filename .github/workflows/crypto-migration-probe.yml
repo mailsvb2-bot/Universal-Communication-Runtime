@@ -1,0 +1,17 @@
+name: Crypto migration compatibility probe
+on:
+  pull_request:
+    paths:
+      - 'scripts/probe_rustsec_2026_0387_upgrade.sh'
+      - '.github/workflows/crypto-migration-probe.yml'
+  workflow_dispatch:
+jobs:
+  migration-probe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Exercise new RustCrypto chain in isolated checkout
+        run: bash scripts/probe_rustsec_2026_0387_upgrade.sh
