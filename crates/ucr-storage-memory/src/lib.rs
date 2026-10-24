@@ -2194,6 +2194,22 @@ impl DeliveryStore for MemoryLocalStore {
             .get(&delivery_key(scope, delivery_id))
             .cloned())
     }
+
+    fn pending_delivery_attempts(
+        &self,
+        scope: &TenantScope,
+        limit: usize,
+    ) -> Result<Vec<DeliveryAttempt>, DurableStoreError> {
+        if limit == 0 || limit > 256 { return Err(DurableStoreError::InvalidRecord); }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut attempts: Vec<_> = state.deliveries.values()
+            .filter(|a| a.scope == *scope && matches!(a.state,
+                DeliveryState::Queued | DeliveryState::RoutePlanned | DeliveryState::InFlight))
+            .cloned().collect();
+        attempts.sort_by(|a,b| a.delivery_id.as_opaque().as_str().cmp(b.delivery_id.as_opaque().as_str()));
+        attempts.truncate(limit);
+        Ok(attempts)
+    }
 }
 
 fn append_delivery_evidence(
