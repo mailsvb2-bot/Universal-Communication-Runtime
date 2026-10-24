@@ -3666,6 +3666,28 @@ mod tests {
     }
 
     #[test]
+    fn renewed_join_preflight_rejection_stops_local_capture() {
+        // The old peer is torn down before join() retries. A rejected Join
+        // preflight returns normally without setting sessionActive, so the
+        // browser must not retain the old camera/microphone preview.
+        let client = super::CLIENT_HTML;
+        let renewal = client
+            .split("async function renewLocalRoomGrant(){")
+            .nth(1)
+            .expect("renewal coordinator")
+            .split("function releaseRoomPresence(){")
+            .next()
+            .expect("renewal body");
+        assert!(renewal.contains("try{\n      await join();\n    }finally{"));
+        assert!(renewal.contains("await join();"));
+        assert!(renewal.contains("if(!sessionActive&&"));
+        assert!(renewal.contains("sessionLifecycleGeneration===handoff+1"));
+        assert!(renewal.contains("stopLocalCapture();"));
+        assert!(renewal.contains("Camera/microphone capture stopped pending fresh authorization."));
+        assert!(renewal.contains("Renewal Join not authorized; local capture stopped"));
+    }
+
+    #[test]
     fn first_party_auth_diagnostics_expose_only_stages_and_http_categories() {
         let page = super::FIRST_PARTY_START_HTML;
         let script = super::FIRST_PARTY_START_JS;
