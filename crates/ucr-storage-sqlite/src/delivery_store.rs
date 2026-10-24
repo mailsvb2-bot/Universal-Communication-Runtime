@@ -532,7 +532,7 @@ impl DeliveryStore for SqliteLocalStore {
                     scope.tenant_id.as_opaque().as_str(),
                     namespace.present,
                     namespace.value,
-                    limit as i64
+                    i64::try_from(limit).map_err(|_| DurableStoreError::InvalidRecord)?
                 ],
                 |row| row.get::<_, String>(0),
             )
