@@ -282,11 +282,11 @@ fn anonymous_signup_replay_and_write_limits_preserve_existing_device_login() {
 
     // Expired quota entries are removed; the process-local gate is not a
     // permanent lockout after a burst.
-    {
-        let mut admitted = server.signup_admissions.lock().unwrap();
-        admitted.clear();
-        admitted.push(Instant::now() - SIGNUP_WINDOW - Duration::from_secs(1));
-    }
+    let after_window = Instant::now()
+        .checked_add(SIGNUP_WINDOW + Duration::from_secs(1))
+        .expect("bounded monotonic test clock advance");
+    admit_signup_at(&server, after_window).expect("expired quota entries must be pruned");
+    assert_eq!(server.signup_admissions.lock().unwrap().len(), 1);
     signup(&server, 65);
 }
 
