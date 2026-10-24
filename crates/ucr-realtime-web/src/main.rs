@@ -3682,6 +3682,7 @@ mod tests {
         assert!(renewal.contains("if(!sessionActive&&"));
         assert!(renewal.contains("sessionLifecycleGeneration===handoff+1"));
         assert!(renewal.contains("stopLocalCapture();"));
+        assert!(renewal.contains("Camera/microphone capture stopped pending fresh authorization."));
         assert!(renewal.contains("Renewal Join not authorized; local capture stopped"));
     }
 
