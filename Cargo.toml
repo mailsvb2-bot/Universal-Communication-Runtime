@@ -101,4 +101,3 @@ openmls_traits = { git = "https://github.com/openmls/openmls", rev = "be248d4b13
 openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
 openmls_basic_credential = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
 openmls_memory_storage = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
-openmls_sqlite_storage = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
