@@ -3678,6 +3678,7 @@ mod tests {
             .split("function releaseRoomPresence(){")
             .next()
             .expect("renewal body");
+        assert!(renewal.contains("try{\n      await join();\n    }finally{"));
         assert!(renewal.contains("await join();"));
         assert!(renewal.contains("if(!sessionActive&&"));
         assert!(renewal.contains("sessionLifecycleGeneration===handoff+1"));
