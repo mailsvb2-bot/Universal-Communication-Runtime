@@ -1,5 +1,8 @@
 name: OpenMLS migration lockfile reconciliation
 on:
+  pull_request:
+    paths:
+      - .github/workflows/openmls-migration-locks.yml
   workflow_dispatch:
 permissions:
   contents: write
