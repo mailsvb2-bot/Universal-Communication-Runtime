@@ -3688,6 +3688,34 @@ mod tests {
     }
 
     #[test]
+    fn renewal_watchdog_revokes_pending_join_before_media_can_outlive_authority() {
+        let client = super::CLIENT_HTML;
+        let renewal = client
+            .split("async function renewLocalRoomGrant(){")
+            .nth(1)
+            .expect("renewal coordinator")
+            .split("function releaseRoomPresence(){")
+            .next()
+            .expect("renewal body");
+        let watchdog = renewal
+            .split("handoffWatchdog=setTimeout(()=>{")
+            .nth(1)
+            .expect("renewal watchdog")
+            .split("},HEARTBEAT_AUTH_TIMEOUT_MS);")
+            .next()
+            .expect("watchdog callback");
+        assert!(watchdog.contains("sessionLifecycleGeneration!==handoff"));
+        assert!(watchdog.contains("sessionLifecycleGeneration!==handoff+1"));
+        assert!(watchdog.contains("token!==oldToken&&token!==next"));
+        assert!(watchdog.contains("signedGrantRetired=true;"));
+        assert!(watchdog.contains("void leave();"));
+        assert!(watchdog.contains("Call renewal timed out; local media capture stopped."));
+        // In particular, a pending join() is not yet sessionActive. The old
+        // guard silently skipped this case and leaked physical capture.
+        assert!(!watchdog.contains("if(sessionActive&&handoff==="));
+    }
+
+    #[test]
     fn first_party_auth_diagnostics_expose_only_stages_and_http_categories() {
         let page = super::FIRST_PARTY_START_HTML;
         let script = super::FIRST_PARTY_START_JS;
