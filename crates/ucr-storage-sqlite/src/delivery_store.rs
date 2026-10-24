@@ -514,17 +514,29 @@ impl DeliveryStore for SqliteLocalStore {
         scope: &TenantScope,
         limit: usize,
     ) -> Result<Vec<DeliveryAttempt>, DurableStoreError> {
-        if limit == 0 || limit > 256 { return Err(DurableStoreError::InvalidRecord); }
+        if limit == 0 || limit > 256 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
         let connection = self.lock_connection()?;
         let namespace = namespace_storage_key(scope);
-        let mut stmt = connection.prepare(
-            "SELECT delivery_id FROM delivery_attempts WHERE tenant_id=?1 AND \
+        let mut stmt = connection
+            .prepare(
+                "SELECT delivery_id FROM delivery_attempts WHERE tenant_id=?1 AND \
              namespace_present=?2 AND namespace_id=?3 AND \
-             state IN ('queued','route_planned','in_flight') ORDER BY delivery_id LIMIT ?4"
-        ).map_err(|e| map_sqlite_error(&e))?;
-        let ids = stmt.query_map(params![scope.tenant_id.as_opaque().as_str(),
-            namespace.present, namespace.value, limit as i64],
-            |row| row.get::<_, String>(0)).map_err(|e| map_sqlite_error(&e))?;
+             state IN ('queued','route_planned','in_flight') ORDER BY delivery_id LIMIT ?4",
+            )
+            .map_err(|e| map_sqlite_error(&e))?;
+        let ids = stmt
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    limit as i64
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|e| map_sqlite_error(&e))?;
         let mut attempts = Vec::new();
         for id in ids {
             let id = id.map_err(|e| map_sqlite_error(&e))?;
@@ -614,23 +626,44 @@ mod tests {
             let store = SqliteLocalStore::open(db.path()).expect("open store");
             seed_message(&store);
             for item in [&queued, &acknowledged] {
-                store.create_delivery_attempt(
-                    item, &evidence(item, DeliveryEvidenceKind::PersistedLocal, 1)
-                ).expect("create");
+                store
+                    .create_delivery_attempt(
+                        item,
+                        &evidence(item, DeliveryEvidenceKind::PersistedLocal, 1),
+                    )
+                    .expect("create");
                 advance_to_in_flight(&store, item);
             }
-            store.transition_delivery(
-                &acknowledged.scope, &acknowledged.delivery_id,
-                DeliveryState::InFlight, DeliveryState::Acknowledged,
-                Some(&evidence(&acknowledged, DeliveryEvidenceKind::AcceptedByTransport, 2)),
-            ).expect("acknowledge");
+            store
+                .transition_delivery(
+                    &acknowledged.scope,
+                    &acknowledged.delivery_id,
+                    DeliveryState::InFlight,
+                    DeliveryState::Acknowledged,
+                    Some(&evidence(
+                        &acknowledged,
+                        DeliveryEvidenceKind::AcceptedByTransport,
+                        2,
+                    )),
+                )
+                .expect("acknowledge");
         }
         let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
-        let pending = reopened.pending_delivery_attempts(&queued.scope, 256).expect("pending");
+        let pending = reopened
+            .pending_delivery_attempts(&queued.scope, 256)
+            .expect("pending");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].delivery_id, queued.delivery_id);
-        assert!(reopened.pending_delivery_attempts(&queued.scope, 0).is_err());
-        assert!(reopened.pending_delivery_attempts(&queued.scope, 257).is_err());
+        assert!(
+            reopened
+                .pending_delivery_attempts(&queued.scope, 0)
+                .is_err()
+        );
+        assert!(
+            reopened
+                .pending_delivery_attempts(&queued.scope, 257)
+                .is_err()
+        );
     }
 
     #[test]

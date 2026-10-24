@@ -916,7 +916,8 @@ where
         limit: usize,
     ) -> Result<Vec<DeliveryAttempt>, AuthorizedMutationError> {
         self.require(subject, scope, DELIVERY_READ_PERMISSION)?;
-        self.store.pending_delivery_attempts(scope, limit)
+        self.store
+            .pending_delivery_attempts(scope, limit)
             .map_err(AuthorizedMutationError::Store)
     }
 }
