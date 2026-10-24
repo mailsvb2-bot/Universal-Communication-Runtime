@@ -2731,6 +2731,13 @@ async function renewLocalRoomGrant(){
   if(isLocalRoom&&(!roomApi||!user))return;
   renewLocalRoomGrant.busy=true;
   const generation=sessionLifecycleGeneration;
+  // Renewal can stall before a replacement grant is even issued. The
+  // heartbeat's busy guard must not let expired authorization hold capture.
+  const preflightWatchdog=setTimeout(()=>{
+    if(generation===sessionLifecycleGeneration&&sessionActive)
+      void endUnverifiedMedia(generation,
+        "Call renewal authorization timed out; local media capture stopped.");
+  },HEARTBEAT_AUTH_TIMEOUT_MS);
   let handoffWatchdog=null;
   try{
     let data;
@@ -2790,6 +2797,7 @@ async function renewLocalRoomGrant(){
     if(generation!==sessionLifecycleGeneration||!sessionActive)return;
     // Drop in-flight heartbeats before the session id changes. join() advances
     // the generation again for the replacement session.
+    clearTimeout(preflightWatchdog);
     ++sessionLifecycleGeneration;
     const handoff=sessionLifecycleGeneration;
     // A heartbeat begun on the old generation cannot release its own in-flight
@@ -2851,6 +2859,7 @@ async function renewLocalRoomGrant(){
   }catch(e){
     if(generation===sessionLifecycleGeneration&&sessionActive)ui.status.textContent="Call access renewal failed: "+e.message;
   }finally{
+    clearTimeout(preflightWatchdog);
     clearTimeout(handoffWatchdog);
     renewLocalRoomGrant.busy=false;
   }
