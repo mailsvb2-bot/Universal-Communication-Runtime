@@ -7,16 +7,22 @@ on:
       - Cargo.toml
       - .github/workflows/openmls-migration-locks.yml
   workflow_dispatch:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - .github/workflows/openmls-migration-locks.yml
 permissions:
   contents: write
 jobs:
   reconcile:
+    if: github.event_name != 'pull_request' || github.head_ref == 'security/openmls-rustcrypto-014-migration-20261024'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: true
+          ref: security/openmls-rustcrypto-014-migration-20261024
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
       - name: Resolve pinned OpenMLS migrations across all isolated lockfiles
         shell: bash
