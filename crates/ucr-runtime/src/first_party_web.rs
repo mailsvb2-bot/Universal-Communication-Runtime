@@ -1315,17 +1315,23 @@ fn account_finish(
         })?;
     }
     let subject = subject_for(state, &input.binding)?;
-    let (value, cookie) = issue_session(
+    // The canonical account/recovery transaction has already committed.
+    // Session admission is a separate bounded resource: rejecting the HTTP
+    // response here would permanently hide the freshly rotated recovery code.
+    // Return that code to the proven holder even if the session pool is full;
+    // the protected Device signer can authenticate again when capacity frees.
+    let value = serde_json::to_value(&input.binding)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let cookie = issue_session(
         state,
         input.binding,
         subject,
         signing_key.key_id.as_opaque().as_str().to_owned(),
         verifier_key,
-    )?;
-    Ok((
-        json!({"binding": value, "recoveryCode": next_code}),
-        Some(cookie),
-    ))
+    )
+    .ok()
+    .map(|(_, cookie)| cookie);
+    Ok((json!({"binding": value, "recoveryCode": next_code}), cookie))
 }
 
 fn login_route(
