@@ -22,3 +22,8 @@ The migration branch now vendors the upstream dtls 0.17.2 crate with its publish
 SHA-256 verified before import and changes its curve dependency declarations to
 p256/p384 0.14 and sec1 0.8. This is an unverified API migration until Cargo.lock
 regeneration, full compilation, DTLS interoperability and all RustSec audits pass.
+
+
+## Lockfile validation milestone
+
+Cargo regenerated the root lockfile after vendoring the integrity-verified DTLS migration candidate. It now contains only `crypto-bigint 0.7.6`. This is dependency-resolution evidence, not compilation or WebRTC interoperability evidence. The branch must pass CI, RustSec across all six lockfiles, and runtime E2EE tests before review or merge.
