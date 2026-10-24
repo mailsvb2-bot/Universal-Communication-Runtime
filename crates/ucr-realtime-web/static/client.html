@@ -2834,6 +2834,7 @@ async function renewLocalRoomGrant(){
     if(!sessionActive&&
        (sessionLifecycleGeneration===handoff||sessionLifecycleGeneration===handoff+1)){
       stopLocalCapture();
+      ui.status.textContent+=" Camera/microphone capture stopped pending fresh authorization.";
       ucrRecordDiagnostic("Renewal Join not authorized; local capture stopped","lifecycle");
     }
   }catch(e){
