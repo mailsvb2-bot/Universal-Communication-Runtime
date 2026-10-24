@@ -4902,10 +4902,12 @@ mod delivery_tests {
         assert_eq!(first[0].delivery_id, attempt("pending-000").delivery_id);
         let mut other_namespace = scope.clone();
         other_namespace.namespace_id = None;
-        assert!(store
-            .pending_delivery_attempts(&other_namespace, 256)
-            .expect("isolate namespace")
-            .is_empty());
+        assert!(
+            store
+                .pending_delivery_attempts(&other_namespace, 256)
+                .expect("isolate namespace")
+                .is_empty()
+        );
         assert_eq!(
             store.pending_delivery_attempts(&scope, 0),
             Err(DurableStoreError::InvalidRecord)
