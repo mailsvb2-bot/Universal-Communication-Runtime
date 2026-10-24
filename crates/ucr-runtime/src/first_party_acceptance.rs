@@ -198,6 +198,91 @@ fn signed_login(state: &State, binding: &Binding, signer: &SigningKey) {
 }
 
 #[test]
+fn anonymous_signup_replay_and_write_limits_preserve_existing_device_login() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, alice_signer, recovery_code) = signup(&server, 61);
+
+    // Even an attacker who can generate valid self-signed recovery/signup
+    // proofs cannot consume the independently authenticated login replay pool.
+    {
+        let mut untrusted = server.untrusted_consumed.lock().unwrap();
+        let expiry = Instant::now() + CHALLENGE_TTL;
+        for n in 0..MAX_UNTRUSTED_CONSUMED {
+            let mut tag = [0u8; 32];
+            tag[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            untrusted.push((tag, expiry));
+        }
+    }
+    signed_login(&server, &alice, &alice_signer);
+
+    let (issued, _) = account_route(&server, "/v1/first-party/signup/begin", b"{}").unwrap();
+    let blocked_binding: Binding = serde_json::from_value(issued["binding"].clone()).unwrap();
+    let blocked_signer = SigningKey::from_bytes(&[62; 32]);
+    let finish = proof(
+        &blocked_binding,
+        "key-62",
+        &blocked_signer,
+        &issued,
+        "ucr-first-party-signup.v1",
+    );
+    assert_eq!(
+        account_route(
+            &server,
+            "/v1/first-party/signup/finish",
+            &serde_json::to_vec(&finish).unwrap()
+        )
+        .err(),
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    assert!(
+        server
+            .store
+            .identity(&scope(&blocked_binding).unwrap(), &identity(&blocked_binding).unwrap())
+            .unwrap()
+            .is_none(),
+        "a rejected anonymous signup must not persist an Identity"
+    );
+
+    server.untrusted_consumed.lock().unwrap().clear();
+    {
+        let mut admitted = server.signup_admissions.lock().unwrap();
+        admitted.extend(std::iter::repeat_n(Instant::now(), MAX_SELF_SERVICE_SIGNUPS));
+    }
+    let (issued, _) = account_route(&server, "/v1/first-party/signup/begin", b"{}").unwrap();
+    let denied_binding: Binding = serde_json::from_value(issued["binding"].clone()).unwrap();
+    let denied_signer = SigningKey::from_bytes(&[63; 32]);
+    let denied = proof(
+        &denied_binding,
+        "key-63",
+        &denied_signer,
+        &issued,
+        "ucr-first-party-signup.v1",
+    );
+    assert_eq!(
+        account_route(
+            &server,
+            "/v1/first-party/signup/finish",
+            &serde_json::to_vec(&denied).unwrap()
+        )
+        .err(),
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    signed_login(&server, &alice, &alice_signer);
+    recover(&server, &alice, &recovery_code, "alice-second-device", 64)
+        .expect("a signup quota must not disable canonical recovery");
+
+    // Expired quota entries are removed; the process-local gate is not a
+    // permanent lockout after a burst.
+    {
+        let mut admitted = server.signup_admissions.lock().unwrap();
+        admitted.clear();
+        admitted.push(Instant::now() - SIGNUP_WINDOW - Duration::from_secs(1));
+    }
+    signup(&server, 65);
+}
+
+#[test]
 fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() {
     let db = TestDb::new();
     let server = state(&db.0);
