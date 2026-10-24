@@ -1,59 +1,43 @@
-name: Vendor patched DTLS migration candidate
+name: DTLS migration candidate integrity gate
 on:
   pull_request:
     paths:
       - '.github/workflows/dtls-migration-vendor.yml'
+      - 'Cargo.toml'
+      - 'crates/ucr-chaos-lab/Cargo.toml'
+      - 'third_party/dtls/**'
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
   vendor:
-    if: github.head_ref == 'security/openmls-rustcrypto-014-migration-20261024' || github.ref == 'refs/heads/security/openmls-rustcrypto-014-migration-20261024'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: security/openmls-rustcrypto-014-migration-20261024
-          persist-credentials: true
-      - name: Import integrity-pinned upstream dtls 0.17.2 source and migrate curve dependencies
+          persist-credentials: false
+      - name: Verify both Cargo roots use the same patched DTLS candidate
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f third_party/dtls/Cargo.toml ]; then echo 'DTLS already vendored'; exit 0; fi
           python3 - <<'PY'
-          import hashlib, io, pathlib, re, tarfile, urllib.request
-          url = 'https://static.crates.io/crates/dtls/dtls-0.17.2.crate'
-          expected = '01a431e87fc386bd5e02deb554a013f97bc406e47a7d8e97efb7c6366b980e9c'
-          data = urllib.request.urlopen(url, timeout=45).read()
-          assert hashlib.sha256(data).hexdigest() == expected, 'upstream archive SHA mismatch'
-          out = pathlib.Path('third_party/dtls')
-          out.mkdir(parents=True)
-          with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tar:
-              for item in tar.getmembers():
-                  components = pathlib.PurePosixPath(item.name).parts
-                  if len(components) < 2 or components[0] != 'dtls-0.17.2': continue
-                  name = pathlib.PurePosixPath(*components[1:])
-                  if name.is_absolute() or '..' in name.parts or not item.isfile(): continue
-                  target = out.joinpath(*name.parts)
-                  target.parent.mkdir(parents=True, exist_ok=True)
-                  with tar.extractfile(item) as source, target.open('wb') as dest: dest.write(source.read())
-          manifest = out / 'Cargo.toml'
-          content = manifest.read_text()
-          for package, version in [('p256','0.14.0'),('p384','0.14.0'),('sec1','0.8.1')]:
-              # Replace only normalized dependencies in published crate manifest.
-              pattern = r'(\[dependencies\.'+package+r'\][^\[]*?version\s*=\s*")[^"]+(")'
-              replaced, count = re.subn(pattern, lambda m: m[1]+version+m[2], content, flags=re.S)
-              if count != 1:
-                  raise RuntimeError(f'{package} exact dependency stanza not found: {count}')
-              content = replaced
-          manifest.write_text(content)
-          workspace = pathlib.Path('Cargo.toml')
-          base = workspace.read_text()
-          assert '[patch.crates-io]' in base
-          base += '\n# RUSTSEC-2026-0387 DTLS migration. Upstream 0.17.2 SHA256 verified above.\ndtls = { path = "third_party/dtls" }\n'
-          workspace.write_text(base)
+          from pathlib import Path
+          import tomllib
+
+          def manifest(path):
+              return tomllib.loads(Path(path).read_text())
+
+          root = manifest("Cargo.toml")
+          chaos = manifest("crates/ucr-chaos-lab/Cargo.toml")
+          dtls = manifest("third_party/dtls/Cargo.toml")
+          assert root["patch"]["crates-io"]["dtls"]["path"] == "third_party/dtls"
+          assert chaos["patch"]["crates-io"]["dtls"]["path"] == "../../third_party/dtls"
+          deps = dtls["dependencies"]
+          assert deps["p256"]["version"].startswith("0.14.")
+          assert deps["p384"]["version"].startswith("0.14.")
+          assert deps["sec1"]["version"].startswith("0.8.")
+          assert deps["rand_010"]["package"] == "rand"
+          assert deps["rand_010"]["version"].startswith("=0.10.")
+          print("Both Cargo roots resolve the same vendored DTLS migration candidate.")
           PY
-          git add -- third_party/dtls Cargo.toml
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'security(dtls): vendor pinned dtls 0.17.2 and upgrade RustCrypto curves'
-          git push origin HEAD:security/openmls-rustcrypto-014-migration-20261024
