@@ -2796,14 +2796,23 @@ async function renewLocalRoomGrant(){
     // guard after handoff. Retire it so the new Join can heartbeat normally.
     clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;
     heartbeatInFlight=false;++heartbeatRequestGeneration;
-    // The old heartbeat watchdog is generation-fenced. A hung WebRTC close
-    // must still fail closed and stop physical capture during renewal.
-    handoffWatchdog=setTimeout(()=>{
-      if(sessionActive&&handoff===sessionLifecycleGeneration)
-        void endUnverifiedMedia(handoff,"Call renewal timed out; local media capture stopped.");
-    },HEARTBEAT_AUTH_TIMEOUT_MS);
     const oldToken=token;
     const oldBody=body();
+    // A replacement Join can hang before sessionActive becomes true. Watch
+    // both the retiring session and the one replacement generation; never
+    // allow a late watchdog to close an unrelated newer call.
+    handoffWatchdog=setTimeout(()=>{
+      if((sessionLifecycleGeneration!==handoff&&
+          sessionLifecycleGeneration!==handoff+1)||
+         (token!==oldToken&&token!==next))return;
+      // leave() revokes in-flight joins and stops all physical tracks before
+      // its first asynchronous boundary, even if no new Join was accepted.
+      signedGrantRetired=true;
+      void leave();
+      ui.state.textContent="Access ended";
+      ui.status.textContent="Call renewal timed out; local media capture stopped.";
+      ucrRecordDiagnostic("Renewal Join watchdog stopped local capture","lifecycle");
+    },HEARTBEAT_AUTH_TIMEOUT_MS);
     await closeServerPeer();
     teardownPeer();
     retireEndpointMlsState();
