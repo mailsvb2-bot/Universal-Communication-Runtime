@@ -14,3 +14,11 @@ Before merging: remove the DTLS legacy branch using an audited and
 compatible WebRTC/DTLS upgrade, regenerate all six lockfiles with Cargo,
 run `cargo audit --deny warnings` for every lockfile, and validate
 UCR peer-connection compatibility, MLS persisted state and E2EE calls.
+
+
+## DTLS candidate
+
+The migration branch now vendors the upstream dtls 0.17.2 crate with its published
+SHA-256 verified before import and changes its curve dependency declarations to
+p256/p384 0.14 and sec1 0.8. This is an unverified API migration until Cargo.lock
+regeneration, full compilation, DTLS interoperability and all RustSec audits pass.
