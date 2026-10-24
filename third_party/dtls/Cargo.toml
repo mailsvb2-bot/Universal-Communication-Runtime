@@ -154,3 +154,7 @@ features = ["static_secrets"]
 version = "0.16"
 
 [dev-dependencies]
+
+[dependencies.rand_010]
+package = "rand"
+version = "=0.10.3"
