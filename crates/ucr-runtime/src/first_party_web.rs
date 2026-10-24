@@ -1319,20 +1319,29 @@ fn account_finish(
     // session pool may suppress delivery of the freshly rotated recovery code.
     // The protected Device signer can authenticate again when capacity frees.
     let value = json!(&input.binding);
-    let cookie = subject_for(state, &input.binding)
-        .ok()
-        .and_then(|subject| {
-            issue_session(
-                state,
-                input.binding,
-                subject,
-                signing_key.key_id.as_opaque().as_str().to_owned(),
-                verifier_key,
-            )
-            .ok()
-        })
-        .map(|(_, cookie)| cookie);
+    let cookie = account_session_after_commit(state, input.binding, &signing_key, verifier_key);
     Ok((json!({"binding": value, "recoveryCode": next_code}), cookie))
+}
+
+/// Account registration/recovery is already committed in the canonical store.
+/// Session admission is a separate best-effort operation: a full session pool
+/// must not hide the newly rotated recovery credential from its owner.
+fn account_session_after_commit(
+    state: &State,
+    binding: Binding,
+    signing_key: &PublicKeyDescriptor,
+    verifier_key: [u8; 32],
+) -> Option<String> {
+    let subject = subject_for(state, &binding).ok()?;
+    issue_session(
+        state,
+        binding,
+        subject,
+        signing_key.key_id.as_opaque().as_str().to_owned(),
+        verifier_key,
+    )
+    .ok()
+    .map(|(_, cookie)| cookie)
 }
 
 fn login_route(
