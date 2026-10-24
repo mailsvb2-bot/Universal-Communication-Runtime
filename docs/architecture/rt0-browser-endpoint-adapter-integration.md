@@ -292,6 +292,17 @@ per ten minutes before writing to canonical SQLite. Existing Device login and re
 slots. This preserves the canonical stores; no alternate identity or key
 database is introduced.
 
+The canonical signup/recovery SQLite transaction can succeed even when the
+separate bounded browser-session pool is full. After a committed credential
+rotation, the BFF returns the new one-time recovery code in its normal success
+body **without a Set-Cookie header** rather than discarding that sole new
+credential through a late HTTP 429. The endpoint must retain the code and
+independently sign in with its newly trusted Device when capacity is available;
+a successful account mutation does not imply that a browser session exists.
+A regression fills the unrelated-Identity session budget and confirms the
+rotated code remains available and usable. This does not relax the global
+session limit or permit unauthenticated calls.
+
 **This is not a production-wide anti-abuse guarantee.** The budget is
 process-local and resets on restart. It does not enforce cross-instance,
 per-origin or per-Identity limits, stop previously registered attackers from
