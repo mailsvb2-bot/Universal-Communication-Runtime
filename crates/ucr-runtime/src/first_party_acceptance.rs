@@ -382,6 +382,65 @@ fn successful_recovery_challenge_cannot_be_replayed_with_rotated_code() {
 }
 
 #[test]
+fn recovery_returns_rotated_code_even_when_browser_session_capacity_is_exhausted() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, _original_signer, old_code) = signup(&server, 90);
+
+    // Fill the global session budget with other identities. The canonical
+    // recovery CAS must not strand a rotated secret merely because an
+    // unrelated identity consumed the last browser-session slot.
+    {
+        let mut sessions = server.sessions.lock().unwrap();
+        let template = sessions[0].clone();
+        sessions.clear();
+        for n in 0..MAX_SESSIONS {
+            let mut other = template.clone();
+            other.binding.participant_id = format!("unrelated-{}", n / MAX_SESSIONS_PER_IDENTITY);
+            sessions.push(other);
+        }
+    }
+    let recovered = Binding {
+        device: "new-recovery-device".to_owned(),
+        ..alice.clone()
+    };
+    let (issued, _) = account_route(
+        &server,
+        "/v1/first-party/recover/begin",
+        &serde_json::to_vec(&recovered).unwrap(),
+    )
+    .expect("recovery challenge");
+    let signer = SigningKey::from_bytes(&[91; 32]);
+    let mut finish = proof(
+        &recovered,
+        "key-91",
+        &signer,
+        &issued,
+        "ucr-first-party-recover.v1",
+    );
+    finish["recoveryCode"] = json!(old_code);
+    let (response, cookie) = account_route(
+        &server,
+        "/v1/first-party/recover/finish",
+        &serde_json::to_vec(&finish).unwrap(),
+    )
+    .expect("committed recovery must still return the rotated secret");
+    assert!(cookie.is_none(), "global session capacity must remain enforced");
+    let next_code = response["recoveryCode"]
+        .as_str()
+        .expect("the committed recovery code must be delivered")
+        .to_owned();
+    assert_ne!(next_code, old_code);
+
+    // The endpoint owns the new signer; once session capacity is available it
+    // can independently authenticate, and the returned code can recover again.
+    server.sessions.lock().unwrap().clear();
+    signed_login(&server, &recovered, &signer);
+    recover(&server, &alice, &next_code, "subsequent-recovery", 92)
+        .expect("returned recovery code remains usable");
+}
+
+#[test]
 fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() {
     let db = TestDb::new();
     let server = state(&db.0);
