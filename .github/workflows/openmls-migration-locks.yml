@@ -1,0 +1,35 @@
+name: OpenMLS migration lockfile reconciliation
+on:
+  push:
+    branches:
+      - security/openmls-rustcrypto-014-migration-20261024
+    paths:
+      - Cargo.toml
+      - .github/workflows/openmls-migration-locks.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve pinned OpenMLS migrations across all isolated lockfiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in Cargo.toml fuzz/Cargo.toml crates/ucr-sdk/Cargo.toml crates/ucr-reference-messenger/Cargo.toml crates/ucr-ai-actor/Cargo.toml crates/ucr-chaos-lab/Cargo.toml; do
+            cargo update --manifest-path "$manifest"
+          done
+      - name: Commit only resolved Cargo.lock changes back to migration branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- Cargo.lock fuzz/Cargo.lock crates/ucr-sdk/Cargo.lock crates/ucr-reference-messenger/Cargo.lock crates/ucr-ai-actor/Cargo.lock crates/ucr-chaos-lab/Cargo.lock
+          if git diff --cached --quiet; then exit 0; fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'security(lock): regenerate pinned MLS migration locks with Cargo'
+          git push origin HEAD:security/openmls-rustcrypto-014-migration-20261024
