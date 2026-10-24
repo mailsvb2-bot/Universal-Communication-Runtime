@@ -332,6 +332,29 @@ where
     Ok(group)
 }
 
+/// Retry the canonical membership CAS and re-read after the *last* attempt.
+/// A successful final write must not be misreported as a conflict.
+fn bounded_membership_admission<IsActive, TryAdmit>(
+    mut is_active: IsActive,
+    mut try_admit: TryAdmit,
+) -> Result<(), MediaRuntimeError>
+where
+    IsActive: FnMut() -> Result<bool, MediaRuntimeError>,
+    TryAdmit: FnMut() -> Result<(), MediaRuntimeError>,
+{
+    for _ in 0..MAX_CAS_ATTEMPTS {
+        if is_active()? {
+            return Ok(());
+        }
+        try_admit()?;
+    }
+    if is_active()? {
+        Ok(())
+    } else {
+        Err(MediaRuntimeError::Conflict)
+    }
+}
+
 fn ensure_exact_membership<S>(
     store: &S,
     ids: &MediaRuntimeIds,
@@ -343,35 +366,33 @@ where
     S: GroupStore + GroupMlsAtomicStore,
 {
     for participant in participants {
-        let mut admitted = false;
-        for _ in 0..MAX_CAS_ATTEMPTS {
-            if store
-                .group_membership(&host.scope, &ids.group_id, participant)?
-                .is_some_and(|membership| membership.state == GroupMemberState::Active)
-            {
-                admitted = true;
-                break;
-            }
-            let group = store
-                .group(&host.scope, &ids.group_id)?
-                .ok_or(MediaRuntimeError::Unavailable)?;
-            let change = GroupChange {
-                event_id: derived_event(ids, "add-member", participant)?,
-                scope: host.scope.clone(),
-                group_id: ids.group_id.clone(),
-                expected_revision: group.revision,
-                kind: GroupChangeKind::AddMember {
-                    member: participant.clone(),
-                    role: GroupRole::Member,
-                },
-                next_crypto_state: None,
-            };
-            // A stale revision loses to the concurrent writer; loop and re-read.
-            let _ = store.apply_mls_backed_group_change(host, host_device, &change, &[]);
-        }
-        if !admitted {
-            return Err(MediaRuntimeError::Conflict);
-        }
+        bounded_membership_admission(
+            || {
+                Ok(store
+                    .group_membership(&host.scope, &ids.group_id, participant)?
+                    .is_some_and(|membership| membership.state == GroupMemberState::Active))
+            },
+            || {
+                let group = store
+                    .group(&host.scope, &ids.group_id)?
+                    .ok_or(MediaRuntimeError::Unavailable)?;
+                let change = GroupChange {
+                    event_id: derived_event(ids, "add-member", participant)?,
+                    scope: host.scope.clone(),
+                    group_id: ids.group_id.clone(),
+                    expected_revision: group.revision,
+                    kind: GroupChangeKind::AddMember {
+                        member: participant.clone(),
+                        role: GroupRole::Member,
+                    },
+                    next_crypto_state: None,
+                };
+                // A stale revision loses to a concurrent writer; retry and
+                // re-read canonical membership. Fatal errors still fail closed.
+                let _ = store.apply_mls_backed_group_change(host, host_device, &change, &[]);
+                Ok(())
+            },
+        )?;
     }
     // Defence in depth: the media Group must never contain anyone else.
     let memberships = store.group_memberships(&host.scope, &ids.group_id, 8)?;
@@ -637,6 +658,47 @@ mod tests {
             scope: scope("t", None),
             principal: person(id),
         }
+    }
+
+    #[test]
+    fn final_membership_cas_success_is_rechecked_and_failure_remains_closed() {
+        use std::cell::Cell;
+
+        let attempts = Cell::new(0);
+        let active = Cell::new(false);
+        assert_eq!(
+            bounded_membership_admission(
+                || Ok(active.get()),
+                || {
+                    let next = attempts.get() + 1;
+                    attempts.set(next);
+                    if next == MAX_CAS_ATTEMPTS {
+                        active.set(true);
+                    }
+                    Ok(())
+                },
+            ),
+            Ok(())
+        );
+        assert_eq!(attempts.get(), MAX_CAS_ATTEMPTS);
+
+        let reads = Cell::new(0);
+        let failed_attempts = Cell::new(0);
+        assert_eq!(
+            bounded_membership_admission(
+                || {
+                    reads.set(reads.get() + 1);
+                    Ok(false)
+                },
+                || {
+                    failed_attempts.set(failed_attempts.get() + 1);
+                    Ok(())
+                },
+            ),
+            Err(MediaRuntimeError::Conflict)
+        );
+        assert_eq!(failed_attempts.get(), MAX_CAS_ATTEMPTS);
+        assert_eq!(reads.get(), MAX_CAS_ATTEMPTS + 1);
     }
 
     #[test]
