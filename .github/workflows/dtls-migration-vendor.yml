@@ -1,0 +1,43 @@
+name: DTLS migration candidate integrity gate
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/dtls-migration-vendor.yml'
+      - 'Cargo.toml'
+      - 'crates/ucr-chaos-lab/Cargo.toml'
+      - 'third_party/dtls/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  vendor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify both Cargo roots use the same patched DTLS candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+
+          def manifest(path):
+              return tomllib.loads(Path(path).read_text())
+
+          root = manifest("Cargo.toml")
+          chaos = manifest("crates/ucr-chaos-lab/Cargo.toml")
+          dtls = manifest("third_party/dtls/Cargo.toml")
+          assert root["patch"]["crates-io"]["dtls"]["path"] == "third_party/dtls"
+          assert chaos["patch"]["crates-io"]["dtls"]["path"] == "../../third_party/dtls"
+          deps = dtls["dependencies"]
+          assert deps["p256"]["version"].startswith("0.14.")
+          assert deps["p384"]["version"].startswith("0.14.")
+          assert deps["sec1"]["version"].startswith("0.8.")
+          assert deps["rand_010"]["package"] == "rand"
+          assert deps["rand_010"]["version"].startswith("=0.10.")
+          print("Both Cargo roots resolve the same vendored DTLS migration candidate.")
+          PY

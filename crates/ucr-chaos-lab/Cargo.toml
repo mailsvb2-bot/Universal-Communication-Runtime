@@ -19,3 +19,9 @@ pedantic = "deny"
 ucr-model = { path = "../ucr-model" }
 ucr-realtime = { path = "../ucr-realtime" }
 ucr-webrtc = { path = "../ucr-webrtc" }
+
+# This excluded crate is its own Cargo root: root workspace patches do not
+# apply here. Reuse the exact same pinned, audited DTLS migration candidate
+# as the main workspace, rather than resolving legacy crypto-bigint 0.5.5.
+[patch.crates-io]
+dtls = { path = "../../third_party/dtls" }

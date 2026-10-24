@@ -936,7 +936,10 @@ pub fn export_group_media_secret<P: OpenMlsProvider>(
     let secret = group
         .export_secret(provider.crypto(), GROUP_MEDIA_EXPORT_LABEL, &context, 32)
         .map_err(|_| GroupMlsError::ExportSecret)?;
-    let bytes: [u8; 32] = secret.try_into().map_err(|_| GroupMlsError::ExportSecret)?;
+    let bytes: [u8; 32] = secret
+        .as_slice()
+        .try_into()
+        .map_err(|_| GroupMlsError::ExportSecret)?;
     Ok(GroupMediaEpochSecret::from_exporter_bytes(bytes))
 }
 

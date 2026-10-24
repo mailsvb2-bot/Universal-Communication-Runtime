@@ -119,20 +119,24 @@ fn phase29_hpke_rustsec_patch_is_machine_locked() {
     let root = workspace();
     let root_manifest = fs::read_to_string(root.join("Cargo.toml")).expect("root manifest");
     let lock = fs::read_to_string(root.join("Cargo.lock")).expect("root lock");
-    let hpke_manifest =
-        fs::read_to_string(root.join("third_party/hpke-rs/Cargo.toml")).expect("hpke manifest");
-    let hpke_kem =
-        fs::read_to_string(root.join("third_party/hpke-rs/src/kem.rs")).expect("hpke kem");
-    let patch =
-        fs::read_to_string(root.join("third_party/hpke-rs/UCR_PATCH.md")).expect("hpke patch note");
-    let license = fs::read_to_string(root.join("third_party/hpke-rs/LICENSE-MPL-2.0"))
-        .expect("hpke MPL-2.0 license text");
+    let hpke_root = root.join("third_party/hpke-rs-v08");
+    let hpke_manifest = fs::read_to_string(hpke_root.join("Cargo.toml")).expect("hpke manifest");
+    let hpke_kem = fs::read_to_string(hpke_root.join("src/kem.rs")).expect("hpke kem");
+    let patch = fs::read_to_string(hpke_root.join("UCR_PATCH.md")).expect("hpke patch note");
+    let license =
+        fs::read_to_string(hpke_root.join("LICENSE-MPL-2.0")).expect("hpke MPL-2.0 license text");
 
-    assert!(root_manifest.contains("hpke-rs = { path = \"third_party/hpke-rs\" }"));
+    // The audited dependency must be the actual Cargo patch target, not the
+    // retired 0.7 source tree left in the repository for provenance.
+    assert!(root_manifest.contains("hpke-rs = { path = \"third_party/hpke-rs-v08\" }"));
+    assert!(hpke_manifest.contains("version = \"0.8.0\""));
+    assert!(lock.contains("name = \"hpke-rs\"\nversion = \"0.8.0\""));
     assert!(hpke_manifest.contains("[dependencies.sha3]"));
     assert!(!hpke_manifest.contains("libcrux-sha3"));
     assert!(!hpke_manifest.contains("hpke-rs-libcrux"));
     assert!(hpke_kem.contains("use sha3::{"));
+    assert!(hpke_kem.contains("Shake256::default()"));
+    assert!(hpke_kem.contains("hasher.finalize_xof()"));
     assert!(hpke_kem.contains("shake256_seed::<32>(ikm)"));
     assert!(hpke_kem.contains("shake256_seed::<64>(ikm)"));
     for forbidden in [
@@ -140,6 +144,7 @@ fn phase29_hpke_rustsec_patch_is_machine_locked() {
         "name = \"libcrux-sha3\"",
         "name = \"hax-lib\"",
         "name = \"hpke-rs-libcrux\"",
+        "name = \"crypto-bigint\"\nversion = \"0.5.5\"",
     ] {
         assert!(
             !lock.contains(forbidden),

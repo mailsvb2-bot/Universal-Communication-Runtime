@@ -91,4 +91,16 @@ strip = "symbols"
 # SHAKE256-based PQ KEM seed derivation. The local patch preserves SHAKE256
 # semantics with RustCrypto sha3 and removes an unmaintained Hax macro dependency
 # from the audited lockfile. See third_party/hpke-rs/UCR_PATCH.md.
-hpke-rs = { path = "third_party/hpke-rs" }
+hpke-rs = { path = "third_party/hpke-rs-v08" }
+
+# RUSTSEC-2026-0387: pin the complete OpenMLS workspace release family to
+# one upstream source revision. Avoid mixing registry 0.6 (p256 0.13) with
+# git 0.6 (p256 0.14). This branch requires a fresh Cargo.lock and full E2EE CI.
+openmls = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
+openmls_traits = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
+openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
+openmls_basic_credential = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
+openmls_memory_storage = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
+
+# RUSTSEC-2026-0387 DTLS migration. Upstream 0.17.2 SHA256 verified above.
+dtls = { path = "third_party/dtls" }
