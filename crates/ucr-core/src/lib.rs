@@ -1164,7 +1164,7 @@ pub trait DeliveryStore: MessageStore {
     ) -> Result<Option<DeliveryAttempt>, DurableStoreError>;
 
     /// Returns at most `limit` nonterminal dispatch attempts from canonical durable state.
-    /// Empty/oversized limits are rejected. Ordering is stable by DeliveryId.
+    /// Empty/oversized limits are rejected. Ordering is stable by `DeliveryId`.
     /// No delivery receipt is inferred by enumerating this index.
     ///
     /// # Errors
