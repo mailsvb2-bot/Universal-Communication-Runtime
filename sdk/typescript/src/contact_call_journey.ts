@@ -263,6 +263,13 @@ export function createUcrContactCallJourney(
       }),auth);
       assertCallIdentity(before,result);
       if (result.revision<=before.revision) throw new Error("Call signal not committed");
+      // A successful HTTP response is not proof that the requested canonical
+      // transition happened. Never report a completed hangup while the Call
+      // owner still considers the microphone/video session active.
+      const expectedState = action==="accept" ? "active" : "terminated";
+      if (result.state!==expectedState) {
+        throw new Error("canonical Call signal returned unexpected state");
+      }
       await stillSame(auth);
       return result;
     },
@@ -279,6 +286,11 @@ export function createUcrContactCallJourney(
       await prepare({...auth,callId,sessionId:issued.sessionId},true);
       const current=await retrieve(auth,callId);
       assertCallIdentity(before,current);
+      // Join was issued against before.revision. An intervening Call change,
+      // even one that returns to ACTIVE, makes this grant stale for the SDK.
+      if (current.revision!==before.revision) {
+        throw new Error("canonical Call changed during signed Join issuance");
+      }
       if (current.state!=="active") throw new Error("Call ended before media admission");
       await stillSame(auth);
       return issued;
