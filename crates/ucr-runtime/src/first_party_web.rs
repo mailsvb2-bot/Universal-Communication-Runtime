@@ -49,6 +49,13 @@ const MAX_BODY: usize = 16 * 1024;
 /// Unproven challenges consume NO server memory, so anonymous challenge
 /// requests can never exhaust a shared pool and lock other users out.
 const MAX_CONSUMED: usize = 1 << 16;
+/// Anonymous self-service proofs cannot consume the replay capacity reserved
+/// for independently authenticated login and Device operations.
+const MAX_UNTRUSTED_CONSUMED: usize = 1024;
+/// Per-process signup budget; this is defense in depth, NOT a substitute for
+/// ingress-wide abuse controls and independently approved enrollment policy.
+const MAX_SELF_SERVICE_SIGNUPS: usize = 256;
+const SIGNUP_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// Global memory bound on live sessions; each Identity keeps at most
 /// `MAX_SESSIONS_PER_IDENTITY`, evicting only its OWN oldest session.
 const MAX_SESSIONS: usize = 1 << 16;
@@ -160,6 +167,7 @@ struct JoinRequest {
 
 #[derive(Debug, Clone)]
 struct Pending {
+    purpose: &'static str,
     /// Authenticated replay tag of the proven challenge.
     tag: [u8; 32],
     id: String,
@@ -188,6 +196,8 @@ struct State {
     /// Per-process MAC key sealing stateless challenges. A restart voids them.
     challenge_key: [u8; 32],
     consumed: Mutex<Vec<([u8; 32], Instant)>>,
+    untrusted_consumed: Mutex<Vec<([u8; 32], Instant)>>,
+    signup_admissions: Mutex<Vec<Instant>>,
     sessions: Mutex<Vec<Session>>,
 }
 
@@ -252,6 +262,8 @@ pub(super) async fn serve(
         registration_scope: config.registration_scope,
         challenge_key: random_key().map_err(|_| "first-party challenge key unavailable")?,
         consumed: Mutex::new(Vec::new()),
+        untrusted_consumed: Mutex::new(Vec::new()),
+        signup_admissions: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     });
     println!(
@@ -553,6 +565,7 @@ fn consume(
         public_key.as_ref(),
     )?;
     Ok(Pending {
+        purpose,
         tag: expected,
         id: id.to_owned(),
         nonce: URL_SAFE_NO_PAD.encode(nonce),
@@ -565,20 +578,42 @@ fn consume(
 /// Atomically spends a VERIFIED challenge before any side effect: a replayed
 /// or concurrently duplicated proof loses here.
 fn spend(state: &State, pending: &Pending) -> Result<(), StatusCode> {
-    let mut consumed = state
-        .consumed
-        .lock()
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    // A self-signed signup/recovery proof is not independently authenticated.
+    // Never let its replay tags evict or exhaust the login/Device replay pool.
+    let (pool, capacity) = if matches!(pending.purpose, "signup" | "recover") {
+        (&state.untrusted_consumed, MAX_UNTRUSTED_CONSUMED)
+    } else {
+        (&state.consumed, MAX_CONSUMED)
+    };
+    let mut consumed = pool.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let now = Instant::now();
     consumed.retain(|(_, until)| *until > now);
     if consumed.iter().any(|(tag, _)| *tag == pending.tag) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if consumed.len() >= MAX_CONSUMED {
-        // Reachable only by that many SUCCESSFUL proofs within one TTL.
+    if consumed.len() >= capacity {
+        // A successfully verified but unauthenticated self-service proof may
+        // exhaust only its own bounded pool, never existing Device logins.
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     consumed.push((pending.tag, pending.until));
+    Ok(())
+}
+
+/// Reserve a bounded anonymous signup slot before writing to canonical SQLite.
+/// The quota is process-local; multi-instance/global anti-abuse admission is a
+/// separate release gate and must not be represented as already enforced.
+fn admit_signup(state: &State) -> Result<(), StatusCode> {
+    let now = Instant::now();
+    let mut admitted = state
+        .signup_admissions
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    admitted.retain(|at| now.saturating_duration_since(*at) < SIGNUP_WINDOW);
+    if admitted.len() >= MAX_SELF_SERVICE_SIGNUPS {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    admitted.push(now);
     Ok(())
 }
 
@@ -1197,6 +1232,7 @@ fn account_finish(
         if input.recovery_code.is_some() {
             return Err(StatusCode::BAD_REQUEST);
         }
+        admit_signup(state)?;
         state
             .store
             .first_party_register_account(
