@@ -425,7 +425,10 @@ fn recovery_returns_rotated_code_even_when_browser_session_capacity_is_exhausted
         &serde_json::to_vec(&finish).unwrap(),
     )
     .expect("committed recovery must still return the rotated secret");
-    assert!(cookie.is_none(), "global session capacity must remain enforced");
+    assert!(
+        cookie.is_none(),
+        "global session capacity must remain enforced"
+    );
     let next_code = response["recoveryCode"]
         .as_str()
         .expect("the committed recovery code must be delivered")
