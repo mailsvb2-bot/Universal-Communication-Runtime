@@ -1314,23 +1314,24 @@ fn account_finish(
                 .map_err(|_| StatusCode::FORBIDDEN)
         })?;
     }
-    let subject = subject_for(state, &input.binding)?;
     // The canonical account/recovery transaction has already committed.
-    // Session admission is a separate bounded resource: rejecting the HTTP
-    // response here would permanently hide the freshly rotated recovery code.
-    // Return that code to the proven holder even if the session pool is full;
-    // the protected Device signer can authenticate again when capacity frees.
-    let value = serde_json::to_value(&input.binding)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let cookie = issue_session(
-        state,
-        input.binding,
-        subject,
-        signing_key.key_id.as_opaque().as_str().to_owned(),
-        verifier_key,
-    )
-    .ok()
-    .map(|(_, cookie)| cookie);
+    // Neither a transient canonical subject lookup failure nor a full browser
+    // session pool may suppress delivery of the freshly rotated recovery code.
+    // The protected Device signer can authenticate again when capacity frees.
+    let value = json!(&input.binding);
+    let cookie = subject_for(state, &input.binding)
+        .ok()
+        .and_then(|subject| {
+            issue_session(
+                state,
+                input.binding,
+                subject,
+                signing_key.key_id.as_opaque().as_str().to_owned(),
+                verifier_key,
+            )
+            .ok()
+        })
+        .map(|(_, cookie)| cookie);
     Ok((json!({"binding": value, "recoveryCode": next_code}), cookie))
 }
 
