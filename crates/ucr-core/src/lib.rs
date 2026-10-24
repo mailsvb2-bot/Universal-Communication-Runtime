@@ -1162,6 +1162,18 @@ pub trait DeliveryStore: MessageStore {
         scope: &TenantScope,
         delivery_id: &DeliveryId,
     ) -> Result<Option<DeliveryAttempt>, DurableStoreError>;
+
+    /// Returns at most `limit` nonterminal dispatch attempts from canonical durable state.
+    /// Empty/oversized limits are rejected. Ordering is stable by `DeliveryId`.
+    /// No delivery receipt is inferred by enumerating this index.
+    ///
+    /// # Errors
+    /// Returns invalid request, corrupt-state or storage errors without partial success.
+    fn pending_delivery_attempts(
+        &self,
+        scope: &TenantScope,
+        limit: usize,
+    ) -> Result<Vec<DeliveryAttempt>, DurableStoreError>;
 }
 
 /// Durable provider-independent Sync session/checkpoint capability.

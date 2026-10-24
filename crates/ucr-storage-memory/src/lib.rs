@@ -2194,6 +2194,45 @@ impl DeliveryStore for MemoryLocalStore {
             .get(&delivery_key(scope, delivery_id))
             .cloned())
     }
+
+    fn pending_delivery_attempts(
+        &self,
+        scope: &TenantScope,
+        limit: usize,
+    ) -> Result<Vec<DeliveryAttempt>, DurableStoreError> {
+        if limit == 0 || limit > 256 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        // Keep only the lowest `limit` IDs while scanning the canonical
+        // store. Collecting and sorting every pending record would make this
+        // bounded API allocate proportional to the entire offline backlog.
+        let mut attempts: Vec<&DeliveryAttempt> = Vec::with_capacity(limit);
+        for attempt in state.deliveries.values().filter(|attempt| {
+            attempt.scope == *scope
+                && matches!(
+                    attempt.state,
+                    DeliveryState::Queued | DeliveryState::RoutePlanned | DeliveryState::InFlight
+                )
+        }) {
+            let position = attempts
+                .binary_search_by(|current| {
+                    current
+                        .delivery_id
+                        .as_opaque()
+                        .as_str()
+                        .cmp(attempt.delivery_id.as_opaque().as_str())
+                })
+                .unwrap_or_else(|position| position);
+            if position < limit {
+                if attempts.len() == limit {
+                    attempts.pop();
+                }
+                attempts.insert(position, attempt);
+            }
+        }
+        Ok(attempts.into_iter().cloned().collect())
+    }
 }
 
 fn append_delivery_evidence(
@@ -4815,6 +4854,67 @@ mod delivery_tests {
             .persist_message(&super::message_tests::message())
             .expect("persist message");
         store
+    }
+
+    #[test]
+    fn pending_index_is_sorted_and_bounded_under_a_larger_backlog() {
+        let store = seeded_store();
+        let scope = attempt("pending-000").scope;
+        for n in (0..260).rev() {
+            let item = attempt(&format!("pending-{n:03}"));
+            store
+                .create_delivery_attempt(
+                    &item,
+                    &evidence(&item, DeliveryEvidenceKind::PersistedLocal, 1),
+                )
+                .expect("persist delivery attempt");
+            store
+                .transition_delivery(
+                    &scope,
+                    &item.delivery_id,
+                    DeliveryState::Persisted,
+                    DeliveryState::Encrypted,
+                    None,
+                )
+                .expect("encrypt");
+            store
+                .transition_delivery(
+                    &scope,
+                    &item.delivery_id,
+                    DeliveryState::Encrypted,
+                    DeliveryState::Queued,
+                    None,
+                )
+                .expect("queue");
+        }
+        let pending = store
+            .pending_delivery_attempts(&scope, 256)
+            .expect("bounded pending index");
+        assert_eq!(pending.len(), 256);
+        assert_eq!(pending[0].delivery_id, attempt("pending-000").delivery_id);
+        assert_eq!(pending[255].delivery_id, attempt("pending-255").delivery_id);
+        let first = store
+            .pending_delivery_attempts(&scope, 1)
+            .expect("single pending entry");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].delivery_id, attempt("pending-000").delivery_id);
+        let mut other_namespace = scope.clone();
+        let different_namespace = ucr_model::NamespaceId::from_opaque(oid("other-namespace"));
+        other_namespace.namespace_id = Some(different_namespace);
+        assert!(
+            store
+                .pending_delivery_attempts(&other_namespace, 256)
+                .expect("isolate namespace")
+                .is_empty()
+        );
+        assert_eq!(
+            store.pending_delivery_attempts(&scope, 0),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(
+            store.pending_delivery_attempts(&scope, 257),
+            Err(DurableStoreError::InvalidRecord)
+        );
     }
 
     #[test]

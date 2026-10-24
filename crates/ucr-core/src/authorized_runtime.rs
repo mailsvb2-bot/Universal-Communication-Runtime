@@ -904,6 +904,22 @@ where
             .delivery_attempt(scope, delivery_id)
             .map_err(AuthorizedMutationError::Store)
     }
+
+    /// Enumerates bounded retryable delivery state only after exact-scope authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or canonical store failure.
+    pub fn pending_delivery_attempts(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        limit: usize,
+    ) -> Result<Vec<DeliveryAttempt>, AuthorizedMutationError> {
+        self.require(subject, scope, DELIVERY_READ_PERMISSION)?;
+        self.store
+            .pending_delivery_attempts(scope, limit)
+            .map_err(AuthorizedMutationError::Store)
+    }
 }
 
 impl<A, S> AuthorizedDurableRuntime<'_, A, S>

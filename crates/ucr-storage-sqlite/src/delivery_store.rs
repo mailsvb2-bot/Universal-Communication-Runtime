@@ -508,6 +508,46 @@ impl DeliveryStore for SqliteLocalStore {
         let connection = self.lock_connection()?;
         load_attempt_from(&connection, scope, delivery_id)
     }
+
+    fn pending_delivery_attempts(
+        &self,
+        scope: &TenantScope,
+        limit: usize,
+    ) -> Result<Vec<DeliveryAttempt>, DurableStoreError> {
+        if limit == 0 || limit > 256 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let namespace = namespace_storage_key(scope);
+        let mut stmt = connection
+            .prepare(
+                "SELECT delivery_id FROM delivery_attempts WHERE tenant_id=?1 AND \
+             namespace_present=?2 AND namespace_id=?3 AND \
+             state IN ('queued','route_planned','in_flight') ORDER BY delivery_id LIMIT ?4",
+            )
+            .map_err(|e| map_sqlite_error(&e))?;
+        let ids = stmt
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    i64::try_from(limit).map_err(|_| DurableStoreError::InvalidRecord)?
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|e| map_sqlite_error(&e))?;
+        let mut attempts = Vec::new();
+        for id in ids {
+            let id = id.map_err(|e| map_sqlite_error(&e))?;
+            let opaque = OpaqueId::new(id).map_err(|_| DurableStoreError::Corrupt)?;
+            let delivery_id = DeliveryId::from_opaque(opaque);
+            let attempt = load_attempt_from(&connection, scope, &delivery_id)?
+                .ok_or(DurableStoreError::Corrupt)?;
+            attempts.push(attempt);
+        }
+        Ok(attempts)
+    }
 }
 
 #[cfg(test)]
@@ -575,6 +615,71 @@ mod tests {
                 Ok(DurableRecordStatus::Persisted)
             );
         }
+    }
+
+    #[test]
+    fn pending_index_survives_restart_and_excludes_terminal_attempts() {
+        let db = TestDb::new();
+        let queued = attempt("pending-queued");
+        let acknowledged = attempt("pending-acked");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            seed_message(&store);
+            for item in [&queued, &acknowledged] {
+                store
+                    .create_delivery_attempt(
+                        item,
+                        &evidence(item, DeliveryEvidenceKind::PersistedLocal, 1),
+                    )
+                    .expect("create");
+                advance_to_in_flight(&store, item);
+            }
+            store
+                .transition_delivery(
+                    &acknowledged.scope,
+                    &acknowledged.delivery_id,
+                    DeliveryState::InFlight,
+                    DeliveryState::Acknowledged,
+                    Some(&evidence(
+                        &acknowledged,
+                        DeliveryEvidenceKind::AcceptedByTransport,
+                        2,
+                    )),
+                )
+                .expect("acknowledge");
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        let pending = reopened
+            .pending_delivery_attempts(&queued.scope, 256)
+            .expect("pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].delivery_id, queued.delivery_id);
+        let mut other_namespace = queued.scope.clone();
+        other_namespace.namespace_id = None;
+        assert!(
+            reopened
+                .pending_delivery_attempts(&other_namespace, 256)
+                .expect("other namespace cannot read attempts")
+                .is_empty()
+        );
+        let mut other_tenant = queued.scope.clone();
+        other_tenant.tenant_id = ucr_model::TenantId::from_opaque(oid("other-tenant"));
+        assert!(
+            reopened
+                .pending_delivery_attempts(&other_tenant, 256)
+                .expect("other tenant cannot read attempts")
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .pending_delivery_attempts(&queued.scope, 0)
+                .is_err()
+        );
+        assert!(
+            reopened
+                .pending_delivery_attempts(&queued.scope, 257)
+                .is_err()
+        );
     }
 
     #[test]
