@@ -1,3 +1,4 @@
+use p256::elliptic_curve::sec1::ToSec1Point;
 use rand_core::OsRng; // requires 'getrandom' feature
 
 use crate::error::*;
@@ -39,7 +40,7 @@ fn elliptic_curve_keypair(curve: NamedCurve) -> Result<NamedCurveKeypair> {
     let (public_key, private_key) = match curve {
         NamedCurve::P256 => {
             let secret_key = p256::ecdh::EphemeralSecret::random(&mut rand_010::rng());
-            let public_key = secret_key.public_key().to_uncompressed_point();
+            let public_key = secret_key.public_key().to_sec1_point(false);
             (
                 public_key.as_bytes().to_vec(),
                 NamedCurvePrivateKey::EphemeralSecretP256(secret_key),
@@ -47,7 +48,7 @@ fn elliptic_curve_keypair(curve: NamedCurve) -> Result<NamedCurveKeypair> {
         }
         NamedCurve::P384 => {
             let secret_key = p384::ecdh::EphemeralSecret::random(&mut rand_010::rng());
-            let public_key = secret_key.public_key().to_uncompressed_point();
+            let public_key = secret_key.public_key().to_sec1_point(false);
             (
                 public_key.as_bytes().to_vec(),
                 NamedCurvePrivateKey::EphemeralSecretP384(secret_key),
