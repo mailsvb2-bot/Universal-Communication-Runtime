@@ -3688,6 +3688,29 @@ mod tests {
     }
 
     #[test]
+    fn renewal_grant_issuance_stall_has_bounded_capture_lifetime() {
+        let renewal = super::CLIENT_HTML
+            .split("async function renewLocalRoomGrant(){")
+            .nth(1)
+            .expect("renewal coordinator")
+            .split("function releaseRoomPresence(){")
+            .next()
+            .expect("renewal body");
+        let preflight = renewal
+            .split("const preflightWatchdog=setTimeout(()=>{")
+            .nth(1)
+            .expect("preflight watchdog")
+            .split("},HEARTBEAT_AUTH_TIMEOUT_MS);")
+            .next()
+            .expect("preflight watchdog callback");
+        assert!(preflight.contains("generation===sessionLifecycleGeneration&&sessionActive"));
+        assert!(preflight.contains("void endUnverifiedMedia(generation,"));
+        assert!(preflight.contains("Call renewal authorization timed out; local media capture stopped."));
+        assert!(renewal.contains("clearTimeout(preflightWatchdog);\n    ++sessionLifecycleGeneration;"));
+        assert!(renewal.contains("clearTimeout(preflightWatchdog);\n    clearTimeout(handoffWatchdog);"));
+    }
+
+    #[test]
     fn renewal_watchdog_revokes_pending_join_before_media_can_outlive_authority() {
         let client = super::CLIENT_HTML;
         let renewal = client
