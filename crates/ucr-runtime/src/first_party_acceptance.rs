@@ -51,6 +51,9 @@ fn state(path: &PathBuf) -> State {
         }),
         challenge_key: [7; 32],
         consumed: Mutex::new(Vec::new()),
+        untrusted_consumed: Mutex::new(Vec::new()),
+        recovery_consumed: Mutex::new(Vec::new()),
+        signup_admissions: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     }
 }
@@ -195,6 +198,249 @@ fn signed_login(state: &State, binding: &Binding, signer: &SigningKey) {
         *binding
     );
     assert!(cookie.unwrap().contains("HttpOnly; SameSite=Strict"));
+}
+
+#[test]
+fn anonymous_signup_replay_and_write_limits_preserve_existing_device_login() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, alice_signer, recovery_code) = signup(&server, 61);
+
+    // Even an attacker who can generate valid self-signed recovery/signup
+    // proofs cannot consume the independently authenticated login replay pool.
+    {
+        let mut untrusted = server.untrusted_consumed.lock().unwrap();
+        let expiry = Instant::now() + CHALLENGE_TTL;
+        for n in 0..MAX_UNTRUSTED_CONSUMED {
+            let mut tag = [0u8; 32];
+            tag[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            untrusted.push((tag, expiry));
+        }
+    }
+    signed_login(&server, &alice, &alice_signer);
+
+    let (issued, _) = account_route(&server, "/v1/first-party/signup/begin", b"{}").unwrap();
+    let blocked_binding: Binding = serde_json::from_value(issued["binding"].clone()).unwrap();
+    let blocked_signer = SigningKey::from_bytes(&[62; 32]);
+    let finish = proof(
+        &blocked_binding,
+        "key-62",
+        &blocked_signer,
+        &issued,
+        "ucr-first-party-signup.v1",
+    );
+    assert_eq!(
+        account_route(
+            &server,
+            "/v1/first-party/signup/finish",
+            &serde_json::to_vec(&finish).unwrap()
+        )
+        .err(),
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    assert!(
+        server
+            .store
+            .identity(
+                &scope(&blocked_binding).unwrap(),
+                &identity(&blocked_binding).unwrap()
+            )
+            .unwrap()
+            .is_none(),
+        "a rejected anonymous signup must not persist an Identity"
+    );
+
+    server.untrusted_consumed.lock().unwrap().clear();
+    {
+        let mut admitted = server.signup_admissions.lock().unwrap();
+        admitted.extend(std::iter::repeat_n(
+            Instant::now(),
+            MAX_SELF_SERVICE_SIGNUPS,
+        ));
+    }
+    let (issued, _) = account_route(&server, "/v1/first-party/signup/begin", b"{}").unwrap();
+    let denied_binding: Binding = serde_json::from_value(issued["binding"].clone()).unwrap();
+    let denied_signer = SigningKey::from_bytes(&[63; 32]);
+    let denied = proof(
+        &denied_binding,
+        "key-63",
+        &denied_signer,
+        &issued,
+        "ucr-first-party-signup.v1",
+    );
+    assert_eq!(
+        account_route(
+            &server,
+            "/v1/first-party/signup/finish",
+            &serde_json::to_vec(&denied).unwrap()
+        )
+        .err(),
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    signed_login(&server, &alice, &alice_signer);
+    recover(&server, &alice, &recovery_code, "alice-second-device", 64)
+        .expect("a signup quota must not disable canonical recovery");
+
+    // Expired quota entries are removed; the process-local gate is not a
+    // permanent lockout after a burst.
+    let after_window = Instant::now()
+        .checked_add(SIGNUP_WINDOW + Duration::from_secs(1))
+        .expect("bounded monotonic test clock advance");
+    admit_signup_at(&server, after_window).expect("expired quota entries must be pruned");
+    assert_eq!(server.signup_admissions.lock().unwrap().len(), 1);
+    signup(&server, 65);
+}
+
+#[test]
+fn guessed_recovery_credentials_cannot_exhaust_valid_recovery_capacity() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, alice_signer, recovery_code) = signup(&server, 81);
+
+    // Leave exactly one slot. An invalid but correctly self-signed proof
+    // must not take it from a holder of the real canonical recovery code.
+    {
+        let mut untrusted = server.recovery_consumed.lock().unwrap();
+        untrusted.clear();
+        let expiry = Instant::now() + CHALLENGE_TTL;
+        for n in 0..(MAX_RECOVERY_CONSUMED - 1) {
+            let mut tag = [0u8; 32];
+            tag[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            untrusted.push((tag, expiry));
+        }
+    }
+    // Even a full anonymous signup replay pool must not disable recovery.
+    {
+        let mut signup = server.untrusted_consumed.lock().unwrap();
+        let expiry = Instant::now() + CHALLENGE_TTL;
+        for n in 0..MAX_UNTRUSTED_CONSUMED {
+            let mut tag = [0u8; 32];
+            tag[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            signup.push((tag, expiry));
+        }
+    }
+    let guessed = URL_SAFE_NO_PAD.encode([99u8; 32]);
+    assert_eq!(
+        recover(&server, &alice, &guessed, "attacker-device", 82).err(),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(
+        server.recovery_consumed.lock().unwrap().len(),
+        MAX_RECOVERY_CONSUMED - 1,
+        "invalid recovery code must not spend a shared replay slot"
+    );
+    recover(&server, &alice, &recovery_code, "alice-recovered", 83)
+        .expect("valid recovery must retain its replay capacity");
+    assert_eq!(
+        server.recovery_consumed.lock().unwrap().len(),
+        MAX_RECOVERY_CONSUMED
+    );
+    signed_login(&server, &alice, &alice_signer);
+}
+
+#[test]
+fn successful_recovery_challenge_cannot_be_replayed_with_rotated_code() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, _signer, recovery_code) = signup(&server, 84);
+    let binding = Binding {
+        device: "recovered-once".to_owned(),
+        ..alice
+    };
+    let (issued, _) = account_route(
+        &server,
+        "/v1/first-party/recover/begin",
+        &serde_json::to_vec(&binding).unwrap(),
+    )
+    .expect("recovery challenge");
+    let signer = SigningKey::from_bytes(&[85; 32]);
+    let mut finish = proof(
+        &binding,
+        "key-85",
+        &signer,
+        &issued,
+        "ucr-first-party-recover.v1",
+    );
+    finish["recoveryCode"] = json!(recovery_code);
+    let (first, _) = account_route(
+        &server,
+        "/v1/first-party/recover/finish",
+        &serde_json::to_vec(&finish).unwrap(),
+    )
+    .expect("first credential rotation");
+    finish["recoveryCode"] = first["recoveryCode"].clone();
+    assert_eq!(
+        account_route(
+            &server,
+            "/v1/first-party/recover/finish",
+            &serde_json::to_vec(&finish).unwrap(),
+        )
+        .err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a consumed challenge must not authorize another credential rotation"
+    );
+}
+
+#[test]
+fn recovery_returns_rotated_code_even_when_browser_session_capacity_is_exhausted() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, _original_signer, old_code) = signup(&server, 90);
+
+    // Fill the global session budget with other identities. The canonical
+    // recovery CAS must not strand a rotated secret merely because an
+    // unrelated identity consumed the last browser-session slot.
+    {
+        let mut sessions = server.sessions.lock().unwrap();
+        let template = sessions[0].clone();
+        sessions.clear();
+        for n in 0..MAX_SESSIONS {
+            let mut other = template.clone();
+            other.binding.participant_id = format!("unrelated-{}", n / MAX_SESSIONS_PER_IDENTITY);
+            sessions.push(other);
+        }
+    }
+    let recovered = Binding {
+        device: "new-recovery-device".to_owned(),
+        ..alice.clone()
+    };
+    let (issued, _) = account_route(
+        &server,
+        "/v1/first-party/recover/begin",
+        &serde_json::to_vec(&recovered).unwrap(),
+    )
+    .expect("recovery challenge");
+    let signer = SigningKey::from_bytes(&[91; 32]);
+    let mut finish = proof(
+        &recovered,
+        "key-91",
+        &signer,
+        &issued,
+        "ucr-first-party-recover.v1",
+    );
+    finish["recoveryCode"] = json!(old_code);
+    let (response, cookie) = account_route(
+        &server,
+        "/v1/first-party/recover/finish",
+        &serde_json::to_vec(&finish).unwrap(),
+    )
+    .expect("committed recovery must still return the rotated secret");
+    assert!(
+        cookie.is_none(),
+        "global session capacity must remain enforced"
+    );
+    let next_code = response["recoveryCode"]
+        .as_str()
+        .expect("the committed recovery code must be delivered")
+        .to_owned();
+    assert_ne!(next_code, old_code);
+
+    // The endpoint owns the new signer; once session capacity is available it
+    // can independently authenticate, and the returned code can recover again.
+    server.sessions.lock().unwrap().clear();
+    signed_login(&server, &recovered, &signer);
+    recover(&server, &alice, &next_code, "subsequent-recovery", 92)
+        .expect("returned recovery code remains usable");
 }
 
 #[test]
