@@ -5,13 +5,17 @@ on:
       - 'scripts/probe_rustsec_2026_0387_upgrade.sh'
       - '.github/workflows/crypto-migration-probe.yml'
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   migration-probe:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: stable
       - name: Exercise new RustCrypto chain in isolated checkout
         run: bash scripts/probe_rustsec_2026_0387_upgrade.sh
