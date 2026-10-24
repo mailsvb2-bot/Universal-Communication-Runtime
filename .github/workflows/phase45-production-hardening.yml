@@ -17,6 +17,8 @@ jobs:
   candidate:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      UCR_DIAG_SQLITE_MIGRATION: '1'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Install pinned Rust toolchain
