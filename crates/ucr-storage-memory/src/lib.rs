@@ -4899,7 +4899,8 @@ mod delivery_tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].delivery_id, attempt("pending-000").delivery_id);
         let mut other_namespace = scope.clone();
-        other_namespace.namespace_id = Some(ucr_model::NamespaceId::from_opaque(oid("other-pending-namespace")));
+        let different_namespace = ucr_model::NamespaceId::from_opaque(oid("other-namespace"));
+        other_namespace.namespace_id = Some(different_namespace);
         assert!(
             store
                 .pending_delivery_attempts(&other_namespace, 256)
