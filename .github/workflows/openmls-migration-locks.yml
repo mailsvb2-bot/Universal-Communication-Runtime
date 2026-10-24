@@ -5,11 +5,13 @@ on:
       - security/openmls-rustcrypto-014-migration-20261024
     paths:
       - Cargo.toml
+      - crates/ucr-chaos-lab/Cargo.toml
       - .github/workflows/openmls-migration-locks.yml
   workflow_dispatch:
   pull_request:
     paths:
       - Cargo.toml
+      - crates/ucr-chaos-lab/Cargo.toml
       - .github/workflows/openmls-migration-locks.yml
 permissions:
   contents: write
