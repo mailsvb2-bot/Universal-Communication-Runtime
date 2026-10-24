@@ -106,11 +106,30 @@ const joinA=await a.join(first.callId);
 assert.equal(joinA.deviceId,"device-a");
 assert.notEqual(joinA.deviceId,joinB.deviceId);
 assert.equal(issuanceCount,2);
+// A signed grant may be returned after another participant advances the
+// canonical Call. An ACTIVE snapshot with a newer revision is still stale.
+const originalJoin = host.issueSignedJoinForAcceptedCall;
+host.issueSignedJoinForAcceptedCall = async (auth,request) => {
+  const issued = await originalJoin(auth,request);
+  call = {...call!,revision:call!.revision+1};
+  return issued;
+};
+await assert.rejects(a.join(first.callId),/changed during signed Join issuance/);
+host.issueSignedJoinForAcceptedCall = originalJoin;
+assert.equal(issuanceCount,3);
+// Never tell the user that Hangup succeeded if the canonical owner returns
+// a newer revision but still reports ACTIVE (e.g. a broken BFF adapter).
 current=bob;
+const originalSignal = host.signalDirectCall;
+host.signalDirectCall = async (_auth,request) =>
+  ({...call!,state:"active",revision:request.expectedRevision+1});
+await assert.rejects(b.signal(first.callId,"hangup"),/unexpected state/);
+assert.equal(call!.state,"active");
+host.signalDirectCall = originalSignal;
 assert.equal((await b.signal(first.callId,"hangup")).state,"terminated");
 current=alice;
 await assert.rejects(a.join(first.callId),/not accepted/);
-assert.equal(issuanceCount,2,"closed Call must not issue a new Join");
+assert.equal(issuanceCount,3,"closed Call must not issue a new Join");
 revoked=true;
 await assert.rejects(a.start(ac.id,"audio","new-call"),/revoked/);
 assert.equal(idempotentStarts,1,"revoked Device cannot initiate");
