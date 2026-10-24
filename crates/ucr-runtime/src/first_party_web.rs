@@ -1248,7 +1248,12 @@ fn account_finish(
             return Err(StatusCode::BAD_REQUEST);
         }
         register_self_service_account(
-            state, public, &account, &descriptor, &signing_key, next_verifier,
+            state,
+            public,
+            &account,
+            &descriptor,
+            &signing_key,
+            next_verifier,
         )?;
     } else {
         let existing = input
