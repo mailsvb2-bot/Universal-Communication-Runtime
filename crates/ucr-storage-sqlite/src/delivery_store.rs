@@ -654,6 +654,18 @@ mod tests {
             .expect("pending");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].delivery_id, queued.delivery_id);
+        let mut other_namespace = queued.scope.clone();
+        other_namespace.namespace_id = None;
+        assert!(reopened
+            .pending_delivery_attempts(&other_namespace, 256)
+            .expect("other namespace cannot read attempts")
+            .is_empty());
+        let mut other_tenant = queued.scope.clone();
+        other_tenant.tenant_id = ucr_model::TenantId::from_opaque(oid("other-tenant"));
+        assert!(reopened
+            .pending_delivery_attempts(&other_tenant, 256)
+            .expect("other tenant cannot read attempts")
+            .is_empty());
         assert!(
             reopened
                 .pending_delivery_attempts(&queued.scope, 0)
