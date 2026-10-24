@@ -51,6 +51,8 @@ fn state(path: &PathBuf) -> State {
         }),
         challenge_key: [7; 32],
         consumed: Mutex::new(Vec::new()),
+        untrusted_consumed: Mutex::new(Vec::new()),
+        signup_admissions: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     }
 }
