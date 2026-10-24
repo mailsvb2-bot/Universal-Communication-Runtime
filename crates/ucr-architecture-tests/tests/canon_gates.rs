@@ -1908,6 +1908,7 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "transition_delivery",
     "record_delivery_evidence",
     "delivery_attempt",
+    "pending_delivery_attempts",
     "create_sync_session",
     "transition_sync",
     "record_sync_checkpoint",
