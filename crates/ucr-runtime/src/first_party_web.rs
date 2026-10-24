@@ -49,6 +49,15 @@ const MAX_BODY: usize = 16 * 1024;
 /// Unproven challenges consume NO server memory, so anonymous challenge
 /// requests can never exhaust a shared pool and lock other users out.
 const MAX_CONSUMED: usize = 1 << 16;
+/// Anonymous self-service proofs cannot consume the replay capacity reserved
+/// for independently authenticated login and Device operations.
+const MAX_UNTRUSTED_CONSUMED: usize = 1024;
+/// A successful recovery must not compete with unauthenticated signup traffic.
+const MAX_RECOVERY_CONSUMED: usize = 1024;
+/// Per-process signup budget; this is defense in depth, NOT a substitute for
+/// ingress-wide abuse controls and independently approved enrollment policy.
+const MAX_SELF_SERVICE_SIGNUPS: usize = 256;
+const SIGNUP_WINDOW: Duration = Duration::from_mins(10);
 /// Global memory bound on live sessions; each Identity keeps at most
 /// `MAX_SESSIONS_PER_IDENTITY`, evicting only its OWN oldest session.
 const MAX_SESSIONS: usize = 1 << 16;
@@ -160,6 +169,7 @@ struct JoinRequest {
 
 #[derive(Debug, Clone)]
 struct Pending {
+    purpose: &'static str,
     /// Authenticated replay tag of the proven challenge.
     tag: [u8; 32],
     id: String,
@@ -188,6 +198,9 @@ struct State {
     /// Per-process MAC key sealing stateless challenges. A restart voids them.
     challenge_key: [u8; 32],
     consumed: Mutex<Vec<([u8; 32], Instant)>>,
+    untrusted_consumed: Mutex<Vec<([u8; 32], Instant)>>,
+    recovery_consumed: Mutex<Vec<([u8; 32], Instant)>>,
+    signup_admissions: Mutex<Vec<Instant>>,
     sessions: Mutex<Vec<Session>>,
 }
 
@@ -252,6 +265,9 @@ pub(super) async fn serve(
         registration_scope: config.registration_scope,
         challenge_key: random_key().map_err(|_| "first-party challenge key unavailable")?,
         consumed: Mutex::new(Vec::new()),
+        untrusted_consumed: Mutex::new(Vec::new()),
+        recovery_consumed: Mutex::new(Vec::new()),
+        signup_admissions: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     });
     println!(
@@ -553,6 +569,7 @@ fn consume(
         public_key.as_ref(),
     )?;
     Ok(Pending {
+        purpose,
         tag: expected,
         id: id.to_owned(),
         nonce: URL_SAFE_NO_PAD.encode(nonce),
@@ -565,8 +582,43 @@ fn consume(
 /// Atomically spends a VERIFIED challenge before any side effect: a replayed
 /// or concurrently duplicated proof loses here.
 fn spend(state: &State, pending: &Pending) -> Result<(), StatusCode> {
+    // A self-signed signup proof is not independently authenticated.
+    // Neither signup nor recovery may exhaust the login/Device replay pool.
+    let (pool, capacity) = if pending.purpose == "signup" {
+        (&state.untrusted_consumed, MAX_UNTRUSTED_CONSUMED)
+    } else {
+        (&state.consumed, MAX_CONSUMED)
+    };
+    let mut consumed = pool.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let now = Instant::now();
+    consumed.retain(|(_, until)| *until > now);
+    if consumed.iter().any(|(tag, _)| *tag == pending.tag) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if consumed.len() >= capacity {
+        // A successfully verified but unauthenticated self-service proof may
+        // exhaust only its own bounded pool, never existing Device logins.
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    consumed.push((pending.tag, pending.until));
+    Ok(())
+}
+
+/// Serialize recovery replay admission with the canonical `SQLite` credential CAS.
+/// A self-signed proof alone must not consume scarce shared recovery capacity.
+/// The challenge is spent only after the existing recovery verifier has been
+/// atomically checked and rotated; concurrent reuse of the same challenge
+/// cannot rotate two credentials.
+fn spend_verified_recovery<T>(
+    state: &State,
+    pending: &Pending,
+    recover: impl FnOnce() -> Result<T, StatusCode>,
+) -> Result<T, StatusCode> {
+    if pending.purpose != "recover" {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let mut consumed = state
-        .consumed
+        .recovery_consumed
         .lock()
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let now = Instant::now();
@@ -574,12 +626,49 @@ fn spend(state: &State, pending: &Pending) -> Result<(), StatusCode> {
     if consumed.iter().any(|(tag, _)| *tag == pending.tag) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if consumed.len() >= MAX_CONSUMED {
-        // Reachable only by that many SUCCESSFUL proofs within one TTL.
+    if consumed.len() >= MAX_RECOVERY_CONSUMED {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
+    // Hold the replay lock through the existing SQLite recovery transaction.
+    // Failed/guessed credentials cannot spend a shared replay slot.
+    let value = recover()?;
     consumed.push((pending.tag, pending.until));
+    Ok(value)
+}
+
+/// Reserve a bounded anonymous signup slot before writing to canonical `SQLite`.
+/// The quota is process-local; multi-instance/global anti-abuse admission is a
+/// separate release gate and must not be represented as already enforced.
+fn admit_signup(state: &State) -> Result<(), StatusCode> {
+    admit_signup_at(state, Instant::now())
+}
+
+fn admit_signup_at(state: &State, now: Instant) -> Result<(), StatusCode> {
+    let mut admitted = state
+        .signup_admissions
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    admitted.retain(|at| now.saturating_duration_since(*at) < SIGNUP_WINDOW);
+    if admitted.len() >= MAX_SELF_SERVICE_SIGNUPS {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    admitted.push(now);
     Ok(())
+}
+
+fn register_self_service_account(
+    state: &State,
+    public: &TenantScope,
+    account: &IdentityId,
+    descriptor: &DeviceDescriptor,
+    signing_key: &PublicKeyDescriptor,
+    verifier: [u8; 32],
+) -> Result<(), StatusCode> {
+    admit_signup(state)?;
+    state
+        .store
+        .first_party_register_account(public, account, descriptor, signing_key, verifier)
+        .map_err(|_| StatusCode::CONFLICT)
 }
 
 fn encoded_proof(prefix: &str, context: &Value) -> Result<String, StatusCode> {
@@ -1174,7 +1263,6 @@ fn account_finish(
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     verify_ed25519(verifier_key, &signed, &input.signature_base64_url)?;
-    spend(state, &pending)?;
     let account = identity(&input.binding)?;
     let device_id = device(&input.binding)?;
     let descriptor = DeviceDescriptor {
@@ -1197,46 +1285,63 @@ fn account_finish(
         if input.recovery_code.is_some() {
             return Err(StatusCode::BAD_REQUEST);
         }
-        state
-            .store
-            .first_party_register_account(
-                public,
-                &account,
-                &descriptor,
-                &signing_key,
-                next_verifier,
-            )
-            .map_err(|_| StatusCode::CONFLICT)?;
+        spend(state, &pending)?;
+        register_self_service_account(
+            state,
+            public,
+            &account,
+            &descriptor,
+            &signing_key,
+            next_verifier,
+        )?;
     } else {
         let existing = input
             .recovery_code
             .as_deref()
             .ok_or(StatusCode::FORBIDDEN)?;
         let verifier = recovery_verifier(existing)?;
-        state
-            .store
-            .first_party_recover_device(
-                public,
-                &account,
-                &descriptor,
-                &signing_key,
-                verifier,
-                next_verifier,
-            )
-            .map_err(|_| StatusCode::FORBIDDEN)?;
+        spend_verified_recovery(state, &pending, || {
+            state
+                .store
+                .first_party_recover_device(
+                    public,
+                    &account,
+                    &descriptor,
+                    &signing_key,
+                    verifier,
+                    next_verifier,
+                )
+                .map_err(|_| StatusCode::FORBIDDEN)
+        })?;
     }
-    let subject = subject_for(state, &input.binding)?;
-    let (value, cookie) = issue_session(
+    // The canonical account/recovery transaction has already committed.
+    // Neither a transient canonical subject lookup failure nor a full browser
+    // session pool may suppress delivery of the freshly rotated recovery code.
+    // The protected Device signer can authenticate again when capacity frees.
+    let value = json!(&input.binding);
+    let cookie = account_session_after_commit(state, input.binding, &signing_key, verifier_key);
+    Ok((json!({"binding": value, "recoveryCode": next_code}), cookie))
+}
+
+/// Account registration/recovery is already committed in the canonical store.
+/// Session admission is a separate best-effort operation: a full session pool
+/// must not hide the newly rotated recovery credential from its owner.
+fn account_session_after_commit(
+    state: &State,
+    binding: Binding,
+    signing_key: &PublicKeyDescriptor,
+    verifier_key: [u8; 32],
+) -> Option<String> {
+    let subject = subject_for(state, &binding).ok()?;
+    issue_session(
         state,
-        input.binding,
+        binding,
         subject,
         signing_key.key_id.as_opaque().as_str().to_owned(),
         verifier_key,
-    )?;
-    Ok((
-        json!({"binding": value, "recoveryCode": next_code}),
-        Some(cookie),
-    ))
+    )
+    .ok()
+    .map(|(_, cookie)| cookie)
 }
 
 fn login_route(
