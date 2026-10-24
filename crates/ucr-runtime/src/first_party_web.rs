@@ -604,7 +604,7 @@ fn spend(state: &State, pending: &Pending) -> Result<(), StatusCode> {
     Ok(())
 }
 
-/// Serialize recovery replay admission with the canonical SQLite credential CAS.
+/// Serialize recovery replay admission with the canonical `SQLite` credential CAS.
 /// A self-signed proof alone must not consume scarce shared recovery capacity.
 /// The challenge is spent only after the existing recovery verifier has been
 /// atomically checked and rotated; concurrent reuse of the same challenge
