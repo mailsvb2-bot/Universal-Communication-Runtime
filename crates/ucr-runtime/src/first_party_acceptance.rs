@@ -238,7 +238,10 @@ fn anonymous_signup_replay_and_write_limits_preserve_existing_device_login() {
     assert!(
         server
             .store
-            .identity(&scope(&blocked_binding).unwrap(), &identity(&blocked_binding).unwrap())
+            .identity(
+                &scope(&blocked_binding).unwrap(),
+                &identity(&blocked_binding).unwrap()
+            )
             .unwrap()
             .is_none(),
         "a rejected anonymous signup must not persist an Identity"
@@ -247,7 +250,10 @@ fn anonymous_signup_replay_and_write_limits_preserve_existing_device_login() {
     server.untrusted_consumed.lock().unwrap().clear();
     {
         let mut admitted = server.signup_admissions.lock().unwrap();
-        admitted.extend(std::iter::repeat_n(Instant::now(), MAX_SELF_SERVICE_SIGNUPS));
+        admitted.extend(std::iter::repeat_n(
+            Instant::now(),
+            MAX_SELF_SERVICE_SIGNUPS,
+        ));
     }
     let (issued, _) = account_route(&server, "/v1/first-party/signup/begin", b"{}").unwrap();
     let denied_binding: Binding = serde_json::from_value(issued["binding"].clone()).unwrap();
