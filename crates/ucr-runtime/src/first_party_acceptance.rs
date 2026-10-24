@@ -52,6 +52,7 @@ fn state(path: &PathBuf) -> State {
         challenge_key: [7; 32],
         consumed: Mutex::new(Vec::new()),
         untrusted_consumed: Mutex::new(Vec::new()),
+        recovery_consumed: Mutex::new(Vec::new()),
         signup_admissions: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     }
@@ -299,13 +300,23 @@ fn guessed_recovery_credentials_cannot_exhaust_valid_recovery_capacity() {
     // Leave exactly one slot. An invalid but correctly self-signed proof
     // must not take it from a holder of the real canonical recovery code.
     {
-        let mut untrusted = server.untrusted_consumed.lock().unwrap();
+        let mut untrusted = server.recovery_consumed.lock().unwrap();
         untrusted.clear();
         let expiry = Instant::now() + CHALLENGE_TTL;
-        for n in 0..(MAX_UNTRUSTED_CONSUMED - 1) {
+        for n in 0..(MAX_RECOVERY_CONSUMED - 1) {
             let mut tag = [0u8; 32];
             tag[..8].copy_from_slice(&(n as u64).to_be_bytes());
             untrusted.push((tag, expiry));
+        }
+    }
+    // Even a full anonymous signup replay pool must not disable recovery.
+    {
+        let mut signup = server.untrusted_consumed.lock().unwrap();
+        let expiry = Instant::now() + CHALLENGE_TTL;
+        for n in 0..MAX_UNTRUSTED_CONSUMED {
+            let mut tag = [0u8; 32];
+            tag[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            signup.push((tag, expiry));
         }
     }
     let guessed = URL_SAFE_NO_PAD.encode([99u8; 32]);
@@ -314,15 +325,15 @@ fn guessed_recovery_credentials_cannot_exhaust_valid_recovery_capacity() {
         Some(StatusCode::FORBIDDEN)
     );
     assert_eq!(
-        server.untrusted_consumed.lock().unwrap().len(),
-        MAX_UNTRUSTED_CONSUMED - 1,
+        server.recovery_consumed.lock().unwrap().len(),
+        MAX_RECOVERY_CONSUMED - 1,
         "invalid recovery code must not spend a shared replay slot"
     );
     recover(&server, &alice, &recovery_code, "alice-recovered", 83)
         .expect("valid recovery must retain its replay capacity");
     assert_eq!(
-        server.untrusted_consumed.lock().unwrap().len(),
-        MAX_UNTRUSTED_CONSUMED
+        server.recovery_consumed.lock().unwrap().len(),
+        MAX_RECOVERY_CONSUMED
     );
     signed_login(&server, &alice, &alice_signer);
 }
