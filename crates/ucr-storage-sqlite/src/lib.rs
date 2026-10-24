@@ -1939,6 +1939,10 @@ fn map_schema_change_error(error: &SqliteError) -> DurableStoreError {
 }
 
 const fn map_sqlite_error(error: &SqliteError) -> DurableStoreError {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("UCR_DIAG_SQLITE_MIGRATION").is_some() {
+        eprintln!("UCR SQLITE MIGRATION DIAGNOSTIC: {error:?}");
+    }
     match error {
         SqliteError::SqliteFailure(details, _) => match details.code {
             ErrorCode::DiskFull => DurableStoreError::Full,
