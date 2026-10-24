@@ -2827,6 +2827,15 @@ async function renewLocalRoomGrant(){
     ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
     ui.status.textContent="Renewing authorized call access before the signed grant expires.";
     await join();
+    // join() can return without throwing when preflight rejects the new grant
+    // before sessionActive becomes true. The old peer has already been retired,
+    // but the camera/microphone preview was intentionally retained for handoff.
+    // Never leave that physical capture running without a new authorized Join.
+    if(!sessionActive&&
+       (sessionLifecycleGeneration===handoff||sessionLifecycleGeneration===handoff+1)){
+      stopLocalCapture();
+      ucrRecordDiagnostic("Renewal Join not authorized; local capture stopped","lifecycle");
+    }
   }catch(e){
     if(generation===sessionLifecycleGeneration&&sessionActive)ui.status.textContent="Call access renewal failed: "+e.message;
   }finally{
