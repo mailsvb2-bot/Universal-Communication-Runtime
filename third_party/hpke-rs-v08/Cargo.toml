@@ -1,0 +1,62 @@
+# UCR-vendored HPKE 0.8.0; checksum-verified source: deb74477a6c7f6e8e9c68de06fe928db79b3b8b9e04c900bfb729bf096df7d22
+# Only RustCrypto provider is retained; SHAKE256 KEM derivation uses sha3 0.11.
+[package]
+name = "hpke-rs"
+version = "0.8.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "HPKE Implementation"
+repository = "https://github.com/celabshq/libcrux"
+autobins = false
+autotests = false
+autobenches = false
+autoexamples = false
+
+[lib]
+name = "hpke_rs"
+path = "src/lib.rs"
+
+[features]
+default = []
+draft-ietf-hpke-pq = []
+experimental = ["hpke-rs-rust-crypto?/experimental"]
+hazmat = []
+hpke-test = ["std"]
+rustcrypto = ["dep:hpke-rs-rust-crypto"]
+serialization = ["serde", "tls_codec", "tls_codec/serde", "std"]
+std = ["hpke-rs-crypto/std", "hpke-rs-rust-crypto?/std"]
+
+[dependencies.hpke-rs-crypto]
+version = "=0.8.0"
+default-features = false
+
+[dependencies.hpke-rs-rust-crypto]
+version = "=0.8.0"
+optional = true
+default-features = false
+
+[dependencies.log]
+version = "0.4"
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+optional = true
+
+[dependencies.subtle]
+version = "2.6"
+default-features = false
+
+[dependencies.tls_codec]
+version = "0.5.0"
+features = ["derive"]
+optional = true
+default-features = false
+
+[dependencies.zeroize]
+version = "1.5"
+features = ["zeroize_derive"]
+
+[dependencies.sha3]
+version = "=0.11.0"
+default-features = false

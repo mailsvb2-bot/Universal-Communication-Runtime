@@ -58,6 +58,12 @@ impl From<ChatError> for OfflineRetryError {
     }
 }
 
+/// Per-delivery recovery results; transport acceptance is not a recipient receipt.
+pub type OfflineBatchDispatchResults = Vec<(
+    DeliveryId,
+    Result<OfflineDispatchOutcome, OfflineRetryError>,
+)>;
+
 pub const MAX_TRANSCRIPT_BATCH_ITEMS: usize = 256;
 /// Aggregate semantic-memory budget for one transcript projection.
 ///
@@ -370,6 +376,42 @@ where
                 .map_err(ChatError::from)?;
         }
         Ok(outcome)
+    }
+
+    /// Replays a bounded set of pending IDs from the existing durable Delivery owner.
+    ///
+    /// This API is intentionally stateless: the caller obtains IDs from its authorized
+    /// durable index after restart, and owns scheduling/backoff. Each attempt is isolated,
+    /// so a failed peer never starves later recipients. Never reports a transport ACK as
+    /// a recipient delivery receipt.
+    ///
+    /// # Errors
+    /// Rejects empty or unbounded batches and duplicate delivery IDs before sending.
+    pub fn retry_encrypted_delivery_batch<T: OfflineDispatchSink>(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        delivery_ids: &[DeliveryId],
+        sink: &T,
+        evidence_order: u64,
+    ) -> Result<OfflineBatchDispatchResults, ChatError> {
+        require_exact_subject_scope(subject, scope)?;
+        if delivery_ids.is_empty() || delivery_ids.len() > MAX_TRANSCRIPT_BATCH_ITEMS {
+            return Err(ChatError::TranscriptBatchSize);
+        }
+        let unique: BTreeSet<_> = delivery_ids.iter().cloned().collect();
+        if unique.len() != delivery_ids.len() {
+            return Err(ChatError::TranscriptBatchSize);
+        }
+        Ok(delivery_ids
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    self.retry_encrypted_delivery(subject, scope, id, sink, evidence_order),
+                )
+            })
+            .collect())
     }
 
     /// Reads one exact direct-chat Message through the canonical Message owner.

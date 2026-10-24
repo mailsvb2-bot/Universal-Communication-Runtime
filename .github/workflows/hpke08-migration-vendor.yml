@@ -1,0 +1,78 @@
+name: Vendor audited HPKE 0.8 replacement candidate
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/hpke08-migration-vendor.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  vendor:
+    if: github.head_ref == 'security/openmls-rustcrypto-014-migration-20261024' || github.ref == 'refs/heads/security/openmls-rustcrypto-014-migration-20261024'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: security/openmls-rustcrypto-014-migration-20261024
+          persist-credentials: true
+      - name: Import SHA256-verified HPKE 0.8 crate and retain SHAKE256 semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f third_party/hpke-rs-v08/Cargo.toml ]; then exit 0; fi
+          python3 - <<'PY'
+          import hashlib,io,pathlib,re,tarfile,urllib.request
+          root=pathlib.Path('third_party/hpke-rs-v08')
+          buf=urllib.request.urlopen('https://static.crates.io/crates/hpke-rs/hpke-rs-0.8.0.crate',timeout=45).read()
+          expected='deb74477a6c7f6e8e9c68de06fe928db79b3b8b9e04c900bfb729bf096df7d22'
+          assert hashlib.sha256(buf).hexdigest()==expected, 'HPKE upstream checksum mismatch'
+          root.mkdir(parents=True)
+          with tarfile.open(fileobj=io.BytesIO(buf),mode='r:gz') as tar:
+              for member in tar.getmembers():
+                  parts=pathlib.PurePosixPath(member.name).parts
+                  if len(parts)<2 or parts[0]!='hpke-rs-0.8.0' or not member.isfile(): continue
+                  name=pathlib.PurePosixPath(*parts[1:])
+                  if '..' in name.parts or name.is_absolute() or name.parts[0] in ('tests','benches','examples'): continue
+                  dst=root.joinpath(*name.parts);dst.parent.mkdir(parents=True,exist_ok=True)
+                  with tar.extractfile(member) as src, dst.open('wb') as fd:fd.write(src.read())
+          kem=root/'src/kem.rs'
+          s=kem.read_text()
+          assert 'libcrux_sha3::shake256::<32>(ikm)' in s and 'libcrux_sha3::shake256::<64>(ikm)' in s
+          s=s.replace('libcrux_sha3::shake256::<32>(ikm)','shake256_seed::<32>(ikm)')
+          s=s.replace('libcrux_sha3::shake256::<64>(ikm)','shake256_seed::<64>(ikm)')
+          s='use sha3::{digest::{ExtendableOutput, Update, XofReader}, Shake256};\n\n'+s
+          pos=s.find('fn ciphersuite(')
+          assert pos>=0
+          helper='''fn shake256_seed<const N: usize>(ikm: &[u8]) -> [u8; N] {
+              let mut hasher = Shake256::default();
+              hasher.update(ikm);
+              let mut reader = hasher.finalize_xof();
+              let mut output = [0u8; N];
+              reader.read(&mut output);
+              output
+          }
+
+          '''
+          s=s[:pos]+helper+s[pos:]
+          kem.write_text(s)
+          manifest=root/'Cargo.toml'
+          text=manifest.read_text()
+          # Remove all unused optional libcrux backend edges and upstream developer fixtures
+          text=re.sub(r'(?m)^\[dependencies\.(?:libcrux-sha3|hpke-rs-libcrux)\]\n(?:(?!\[)[\s\S])*','',text)
+          text=re.sub(r'(?m)^\[(?:dev-dependencies[^\]]*|\[bench\][^\]]*|\[test\][^\]]*)\]\n(?:(?!\[)[\s\S])*','',text)
+          text=text.replace('    "hpke-rs-libcrux?/std",\n','').replace('    "hpke-rs-libcrux?/deterministic-prng",\n','')
+          text=re.sub(r'(?m)^libcrux = \[[^\n]*\]\n','',text)
+          # For multiline features, remove lines referencing deleted backend
+          text='\n'.join(l for l in text.splitlines() if not ('hpke-rs-libcrux' in l or 'libcrux-sha3' in l))+'\n'
+          text+='\n[dependencies.sha3]\nversion = "=0.11.0"\ndefault-features = false\n'
+          manifest.write_text(text)
+          workspace=pathlib.Path('Cargo.toml')
+          w=workspace.read_text()
+          old='hpke-rs = { path = "third_party/hpke-rs" }'
+          assert old in w
+          workspace.write_text(w.replace(old,'hpke-rs = { path = "third_party/hpke-rs-v08" }'))
+          PY
+          git add -- Cargo.toml third_party/hpke-rs-v08
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'security(hpke): vendor HPKE 0.8 and preserve SHAKE256 without unused Hax'
+          git push origin HEAD:security/openmls-rustcrypto-014-migration-20261024

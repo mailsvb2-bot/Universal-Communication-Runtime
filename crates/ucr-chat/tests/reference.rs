@@ -472,6 +472,107 @@ fn offline_retry_refuses_unencrypted_message_before_transport() {
 }
 
 #[test]
+fn offline_recovery_batch_rejects_empty_and_duplicate_ids_without_dispatch() {
+    use ucr_chat::OfflineDispatchOutcome;
+    let store = MemoryLocalStore::default();
+    let authorization = AllowAll;
+    let sink = RecordingSink::default();
+    let clock = FixedClock(10_000);
+    let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
+    let dispatch = TestOfflineDispatch {
+        outcome: Ok(OfflineDispatchOutcome::AcceptedByTransport),
+    };
+    let id = DeliveryId::from_opaque(oid("offline-batch-duplicate"));
+    assert_eq!(
+        chat.retry_encrypted_delivery_batch(&subject(), &scope(), &[], &dispatch, 2),
+        Err(ChatError::TranscriptBatchSize)
+    );
+    assert_eq!(
+        chat.retry_encrypted_delivery_batch(&subject(), &scope(), &[id.clone(), id], &dispatch, 2),
+        Err(ChatError::TranscriptBatchSize)
+    );
+}
+
+#[test]
+fn offline_recovery_batch_isolates_missing_id_and_only_acknowledges_transport() {
+    use ucr_chat::{OfflineDispatchOutcome, OfflineRetryError};
+    use ucr_model::{CryptoSuite, MessageCryptoMetadata};
+
+    let store = MemoryLocalStore::default();
+    let authorization = AllowAll;
+    let sink = RecordingSink::default();
+    let clock = FixedClock(10_000);
+    let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
+    chat.open_direct_chat(&subject(), &conversation(ConversationKind::Direct))
+        .expect("open chat");
+
+    let mut encrypted = message("batch-recovery-encrypted", 20, b"opaque-ciphertext");
+    encrypted.crypto_metadata = Some(MessageCryptoMetadata {
+        suite: CryptoSuite::UcrV1,
+        key_id: None,
+        opaque_metadata: vec![],
+    });
+    chat.send_text(&subject(), &encrypted).expect("persist");
+    let delivery_id = DeliveryId::from_opaque(oid("batch-recovery-delivery"));
+    let attempt = DeliveryAttempt {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: encrypted.message_id.clone(),
+        state: DeliveryState::Persisted,
+    };
+    let persisted = DeliveryEvidence {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: encrypted.message_id.clone(),
+        kind: DeliveryEvidenceKind::PersistedLocal,
+        logical_order: 1,
+    };
+    store
+        .create_delivery_attempt(&attempt, &persisted)
+        .expect("persist attempt");
+    for (from, to) in [
+        (DeliveryState::Persisted, DeliveryState::Encrypted),
+        (DeliveryState::Encrypted, DeliveryState::Queued),
+    ] {
+        store
+            .transition_delivery(&scope(), &delivery_id, from, to, None)
+            .expect("queue ciphertext");
+    }
+
+    let missing = DeliveryId::from_opaque(oid("batch-recovery-missing"));
+    let dispatch = TestOfflineDispatch {
+        outcome: Ok(OfflineDispatchOutcome::AcceptedByTransport),
+    };
+    let results = chat
+        .retry_encrypted_delivery_batch(
+            &subject(),
+            &scope(),
+            &[missing.clone(), delivery_id.clone()],
+            &dispatch,
+            2,
+        )
+        .expect("isolated batch results");
+    assert_eq!(
+        results,
+        vec![
+            (missing, Err(OfflineRetryError::Chat(ChatError::NotFound))),
+            (
+                delivery_id.clone(),
+                Ok(OfflineDispatchOutcome::AcceptedByTransport)
+            ),
+        ]
+    );
+    assert_eq!(
+        store
+            .delivery_attempt(&scope(), &delivery_id)
+            .expect("load attempt")
+            .expect("attempt")
+            .state,
+        DeliveryState::Acknowledged
+    );
+}
+
+#[test]
 fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
     let store = MemoryLocalStore::default();
     let authorization = AllowAll;
