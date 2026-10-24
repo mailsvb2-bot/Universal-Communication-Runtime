@@ -604,7 +604,10 @@ fn spend(state: &State, pending: &Pending) -> Result<(), StatusCode> {
 /// The quota is process-local; multi-instance/global anti-abuse admission is a
 /// separate release gate and must not be represented as already enforced.
 fn admit_signup(state: &State) -> Result<(), StatusCode> {
-    let now = Instant::now();
+    admit_signup_at(state, Instant::now())
+}
+
+fn admit_signup_at(state: &State, now: Instant) -> Result<(), StatusCode> {
     let mut admitted = state
         .signup_admissions
         .lock()
