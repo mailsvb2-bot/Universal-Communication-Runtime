@@ -38,16 +38,16 @@ pub struct NamedCurveKeypair {
 fn elliptic_curve_keypair(curve: NamedCurve) -> Result<NamedCurveKeypair> {
     let (public_key, private_key) = match curve {
         NamedCurve::P256 => {
-            let secret_key = p256::ecdh::EphemeralSecret::random(&mut OsRng);
-            let public_key = p256::EncodedPoint::from(secret_key.public_key());
+            let secret_key = p256::ecdh::EphemeralSecret::random(&mut rand_010::rng());
+            let public_key = secret_key.public_key().to_uncompressed_point();
             (
                 public_key.as_bytes().to_vec(),
                 NamedCurvePrivateKey::EphemeralSecretP256(secret_key),
             )
         }
         NamedCurve::P384 => {
-            let secret_key = p384::ecdh::EphemeralSecret::random(&mut OsRng);
-            let public_key = p384::EncodedPoint::from(secret_key.public_key());
+            let secret_key = p384::ecdh::EphemeralSecret::random(&mut rand_010::rng());
+            let public_key = secret_key.public_key().to_uncompressed_point();
             (
                 public_key.as_bytes().to_vec(),
                 NamedCurvePrivateKey::EphemeralSecretP384(secret_key),
