@@ -281,11 +281,14 @@ User account or Device changes abort the browser coordinator.
 
 When `UCR_FIRST_PARTY_SELF_SERVICE_TENANT` is enabled, the BFF allows
 self-signed first-entry accounts. Such signatures prove key possession, **not**
-a prior trusted real-world Identity. Anonymous signup/recovery challenge
-replay tags are isolated from the login/Device replay budget (1,024
-untrusted proofs per challenge TTL), and the single BFF process admits at most
-256 successfully signed signup attempts per ten minutes before writing to
-canonical SQLite. Existing Device login and recovery do not consume signup
+a prior trusted real-world Identity. Anonymous signup and successful recovery challenge
+replay tags use separate bounded pools (1,024 each per challenge TTL), both
+isolated from the login/Device replay budget. Recovery replay admission is
+serialized with the existing canonical SQLite recovery-code comparison and
+rotation: a self-signed proof with an invalid recovery code does not spend
+recovery capacity, and a successful challenge cannot be reused after rotation.
+The single BFF process admits at most 256 successfully signed signup attempts
+per ten minutes before writing to canonical SQLite. Existing Device login and recovery do not consume signup
 slots. This preserves the canonical stores; no alternate identity or key
 database is introduced.
 
