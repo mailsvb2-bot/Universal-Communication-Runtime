@@ -10,9 +10,9 @@ echo "=== Baseline dependency path ==="
 cargo tree --locked --workspace -i crypto-bigint@0.5.5 || true
 echo "=== Try RustSec-fixed bigint against current parent constraints ==="
 if cargo update -p crypto-bigint@0.5.5 --precise 0.7.6; then
-    echo "Direct update unexpectedly succeeded; validate all six locks before accepting."
+    echo "Direct update succeeded in scratch checkout; check all six lockfiles and full E2EE before claiming remediation."
 else
-    echo "Direct update blocked as expected; upstream elliptic-curve/p256/p384 migration required."
+    echo "::warning title=UCR vulnerable dependency remains::elliptic-curve 0.13 pins crypto-bigint ^0.5. This job checks only a standalone compatibility candidate; runtime migration and security audit still FAIL."
 fi
 echo "=== Try new RustCrypto curve chain in a scratch probe crate ==="
 mkdir -p migration-probe/src
