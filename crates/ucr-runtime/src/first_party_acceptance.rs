@@ -291,6 +291,86 @@ fn anonymous_signup_replay_and_write_limits_preserve_existing_device_login() {
 }
 
 #[test]
+fn guessed_recovery_credentials_cannot_exhaust_valid_recovery_capacity() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, alice_signer, recovery_code) = signup(&server, 81);
+
+    // Leave exactly one slot. An invalid but correctly self-signed proof
+    // must not take it from a holder of the real canonical recovery code.
+    {
+        let mut untrusted = server.untrusted_consumed.lock().unwrap();
+        untrusted.clear();
+        let expiry = Instant::now() + CHALLENGE_TTL;
+        for n in 0..(MAX_UNTRUSTED_CONSUMED - 1) {
+            let mut tag = [0u8; 32];
+            tag[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            untrusted.push((tag, expiry));
+        }
+    }
+    let guessed = URL_SAFE_NO_PAD.encode([99u8; 32]);
+    assert_eq!(
+        recover(&server, &alice, &guessed, "attacker-device", 82).err(),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(
+        server.untrusted_consumed.lock().unwrap().len(),
+        MAX_UNTRUSTED_CONSUMED - 1,
+        "invalid recovery code must not spend a shared replay slot"
+    );
+    recover(&server, &alice, &recovery_code, "alice-recovered", 83)
+        .expect("valid recovery must retain its replay capacity");
+    assert_eq!(
+        server.untrusted_consumed.lock().unwrap().len(),
+        MAX_UNTRUSTED_CONSUMED
+    );
+    signed_login(&server, &alice, &alice_signer);
+}
+
+#[test]
+fn successful_recovery_challenge_cannot_be_replayed_with_rotated_code() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, _signer, recovery_code) = signup(&server, 84);
+    let binding = Binding {
+        device: "recovered-once".to_owned(),
+        ..alice
+    };
+    let (issued, _) = account_route(
+        &server,
+        "/v1/first-party/recover/begin",
+        &serde_json::to_vec(&binding).unwrap(),
+    )
+    .expect("recovery challenge");
+    let signer = SigningKey::from_bytes(&[85; 32]);
+    let mut finish = proof(
+        &binding,
+        "key-85",
+        &signer,
+        &issued,
+        "ucr-first-party-recover.v1",
+    );
+    finish["recoveryCode"] = json!(recovery_code);
+    let (first, _) = account_route(
+        &server,
+        "/v1/first-party/recover/finish",
+        &serde_json::to_vec(&finish).unwrap(),
+    )
+    .expect("first credential rotation");
+    finish["recoveryCode"] = first["recoveryCode"].clone();
+    assert_eq!(
+        account_route(
+            &server,
+            "/v1/first-party/recover/finish",
+            &serde_json::to_vec(&finish).unwrap(),
+        )
+        .err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a consumed challenge must not authorize another credential rotation"
+    );
+}
+
+#[test]
 fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() {
     let db = TestDb::new();
     let server = state(&db.0);
