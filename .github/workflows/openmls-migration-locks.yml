@@ -24,6 +24,8 @@ jobs:
           persist-credentials: true
           ref: security/openmls-rustcrypto-014-migration-20261024
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: stable
       - name: Resolve pinned OpenMLS migrations across all isolated lockfiles
         shell: bash
         run: |
