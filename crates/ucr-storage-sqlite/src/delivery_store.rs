@@ -606,6 +606,34 @@ mod tests {
     }
 
     #[test]
+    fn pending_index_survives_restart_and_excludes_terminal_attempts() {
+        let db = TestDb::new();
+        let queued = attempt("pending-queued");
+        let acknowledged = attempt("pending-acked");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            seed_message(&store);
+            for item in [&queued, &acknowledged] {
+                store.create_delivery_attempt(
+                    item, &evidence(item, DeliveryEvidenceKind::PersistedLocal, 1)
+                ).expect("create");
+                advance_to_in_flight(&store, item);
+            }
+            store.transition_delivery(
+                &acknowledged.scope, &acknowledged.delivery_id,
+                DeliveryState::InFlight, DeliveryState::Acknowledged,
+                Some(&evidence(&acknowledged, DeliveryEvidenceKind::AcceptedByTransport, 2)),
+            ).expect("acknowledge");
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        let pending = reopened.pending_delivery_attempts(&queued.scope, 256).expect("pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].delivery_id, queued.delivery_id);
+        assert!(reopened.pending_delivery_attempts(&queued.scope, 0).is_err());
+        assert!(reopened.pending_delivery_attempts(&queued.scope, 257).is_err());
+    }
+
+    #[test]
     fn delivery_transition_chain_survives_restart_with_evidence() {
         let db = TestDb::new();
         let attempt = attempt("delivery-restart");
