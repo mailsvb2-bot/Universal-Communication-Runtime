@@ -91,7 +91,7 @@ strip = "symbols"
 # SHAKE256-based PQ KEM seed derivation. The local patch preserves SHAKE256
 # semantics with RustCrypto sha3 and removes an unmaintained Hax macro dependency
 # from the audited lockfile. See third_party/hpke-rs/UCR_PATCH.md.
-hpke-rs = { path = "third_party/hpke-rs" }
+hpke-rs = { path = "third_party/hpke-rs-v08" }
 
 # RUSTSEC-2026-0387: pin the complete OpenMLS workspace release family to
 # one upstream source revision. Avoid mixing registry 0.6 (p256 0.13) with
