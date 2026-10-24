@@ -277,6 +277,25 @@ recipient-scoped incoming list -> recipient CAS acceptance -> two distinct
 fresh, Device-bound accepted-Call Joins -> MLS/E2EE media -> canonical hangup.
 User account or Device changes abort the browser coordinator.
 
+### Public self-service signup abuse boundary (partial mitigation)
+
+When `UCR_FIRST_PARTY_SELF_SERVICE_TENANT` is enabled, the BFF allows
+self-signed first-entry accounts. Such signatures prove key possession, **not**
+a prior trusted real-world Identity. Anonymous signup/recovery challenge
+replay tags are isolated from the login/Device replay budget (1,024
+untrusted proofs per challenge TTL), and the single BFF process admits at most
+256 successfully signed signup attempts per ten minutes before writing to
+canonical SQLite. Existing Device login and recovery do not consume signup
+slots. This preserves the canonical stores; no alternate identity or key
+database is introduced.
+
+**This is not a production-wide anti-abuse guarantee.** The budget is
+process-local and resets on restart. It does not enforce cross-instance,
+per-origin or per-Identity limits, stop previously registered attackers from
+logging in, protect storage indefinitely, or replace ingress admission,
+retention and abuse-response policies. Do not claim public self-service
+production readiness from these unit tests alone.
+
 The independently authenticated, existing trusted signer is **required
 before login**. The BFF's enrollment proof is possession verification of the
 already-canonically-trusted key; it **does not** create a new trusted Device,
