@@ -55,7 +55,7 @@ const MAX_UNTRUSTED_CONSUMED: usize = 1024;
 /// Per-process signup budget; this is defense in depth, NOT a substitute for
 /// ingress-wide abuse controls and independently approved enrollment policy.
 const MAX_SELF_SERVICE_SIGNUPS: usize = 256;
-const SIGNUP_WINDOW: Duration = Duration::from_secs(10 * 60);
+const SIGNUP_WINDOW: Duration = Duration::from_mins(10);
 /// Global memory bound on live sessions; each Identity keeps at most
 /// `MAX_SESSIONS_PER_IDENTITY`, evicting only its OWN oldest session.
 const MAX_SESSIONS: usize = 1 << 16;
@@ -600,7 +600,7 @@ fn spend(state: &State, pending: &Pending) -> Result<(), StatusCode> {
     Ok(())
 }
 
-/// Reserve a bounded anonymous signup slot before writing to canonical SQLite.
+/// Reserve a bounded anonymous signup slot before writing to canonical `SQLite`.
 /// The quota is process-local; multi-instance/global anti-abuse admission is a
 /// separate release gate and must not be represented as already enforced.
 fn admit_signup(state: &State) -> Result<(), StatusCode> {
@@ -615,6 +615,21 @@ fn admit_signup(state: &State) -> Result<(), StatusCode> {
     }
     admitted.push(now);
     Ok(())
+}
+
+fn register_self_service_account(
+    state: &State,
+    public: &TenantScope,
+    account: &IdentityId,
+    descriptor: &DeviceDescriptor,
+    signing_key: &PublicKeyDescriptor,
+    verifier: [u8; 32],
+) -> Result<(), StatusCode> {
+    admit_signup(state)?;
+    state
+        .store
+        .first_party_register_account(public, account, descriptor, signing_key, verifier)
+        .map_err(|_| StatusCode::CONFLICT)
 }
 
 fn encoded_proof(prefix: &str, context: &Value) -> Result<String, StatusCode> {
@@ -1232,17 +1247,9 @@ fn account_finish(
         if input.recovery_code.is_some() {
             return Err(StatusCode::BAD_REQUEST);
         }
-        admit_signup(state)?;
-        state
-            .store
-            .first_party_register_account(
-                public,
-                &account,
-                &descriptor,
-                &signing_key,
-                next_verifier,
-            )
-            .map_err(|_| StatusCode::CONFLICT)?;
+        register_self_service_account(
+            state, public, &account, &descriptor, &signing_key, next_verifier,
+        )?;
     } else {
         let existing = input
             .recovery_code
