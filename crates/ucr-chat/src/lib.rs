@@ -59,8 +59,10 @@ impl From<ChatError> for OfflineRetryError {
 }
 
 /// Per-delivery recovery results; transport acceptance is not a recipient receipt.
-pub type OfflineBatchDispatchResults =
-    Vec<(DeliveryId, Result<OfflineDispatchOutcome, OfflineRetryError>)>;
+pub type OfflineBatchDispatchResults = Vec<(
+    DeliveryId,
+    Result<OfflineDispatchOutcome, OfflineRetryError>,
+)>;
 
 pub const MAX_TRANSCRIPT_BATCH_ITEMS: usize = 256;
 /// Aggregate semantic-memory budget for one transcript projection.
