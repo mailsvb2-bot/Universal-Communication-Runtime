@@ -52,6 +52,8 @@ const MAX_CONSUMED: usize = 1 << 16;
 /// Anonymous self-service proofs cannot consume the replay capacity reserved
 /// for independently authenticated login and Device operations.
 const MAX_UNTRUSTED_CONSUMED: usize = 1024;
+/// A successful recovery must not compete with unauthenticated signup traffic.
+const MAX_RECOVERY_CONSUMED: usize = 1024;
 /// Per-process signup budget; this is defense in depth, NOT a substitute for
 /// ingress-wide abuse controls and independently approved enrollment policy.
 const MAX_SELF_SERVICE_SIGNUPS: usize = 256;
@@ -197,6 +199,7 @@ struct State {
     challenge_key: [u8; 32],
     consumed: Mutex<Vec<([u8; 32], Instant)>>,
     untrusted_consumed: Mutex<Vec<([u8; 32], Instant)>>,
+    recovery_consumed: Mutex<Vec<([u8; 32], Instant)>>,
     signup_admissions: Mutex<Vec<Instant>>,
     sessions: Mutex<Vec<Session>>,
 }
@@ -263,6 +266,7 @@ pub(super) async fn serve(
         challenge_key: random_key().map_err(|_| "first-party challenge key unavailable")?,
         consumed: Mutex::new(Vec::new()),
         untrusted_consumed: Mutex::new(Vec::new()),
+        recovery_consumed: Mutex::new(Vec::new()),
         signup_admissions: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
     });
@@ -578,9 +582,9 @@ fn consume(
 /// Atomically spends a VERIFIED challenge before any side effect: a replayed
 /// or concurrently duplicated proof loses here.
 fn spend(state: &State, pending: &Pending) -> Result<(), StatusCode> {
-    // A self-signed signup/recovery proof is not independently authenticated.
-    // Never let its replay tags evict or exhaust the login/Device replay pool.
-    let (pool, capacity) = if matches!(pending.purpose, "signup" | "recover") {
+    // A self-signed signup proof is not independently authenticated.
+    // Neither signup nor recovery may exhaust the login/Device replay pool.
+    let (pool, capacity) = if pending.purpose == "signup" {
         (&state.untrusted_consumed, MAX_UNTRUSTED_CONSUMED)
     } else {
         (&state.consumed, MAX_CONSUMED)
@@ -614,7 +618,7 @@ fn spend_verified_recovery<T>(
         return Err(StatusCode::FORBIDDEN);
     }
     let mut consumed = state
-        .untrusted_consumed
+        .recovery_consumed
         .lock()
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let now = Instant::now();
@@ -622,7 +626,7 @@ fn spend_verified_recovery<T>(
     if consumed.iter().any(|(tag, _)| *tag == pending.tag) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if consumed.len() >= MAX_UNTRUSTED_CONSUMED {
+    if consumed.len() >= MAX_RECOVERY_CONSUMED {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     // Hold the replay lock through the existing SQLite recovery transaction.
