@@ -600,6 +600,38 @@ fn spend(state: &State, pending: &Pending) -> Result<(), StatusCode> {
     Ok(())
 }
 
+/// Serialize recovery replay admission with the canonical SQLite credential CAS.
+/// A self-signed proof alone must not consume scarce shared recovery capacity.
+/// The challenge is spent only after the existing recovery verifier has been
+/// atomically checked and rotated; concurrent reuse of the same challenge
+/// cannot rotate two credentials.
+fn spend_verified_recovery<T>(
+    state: &State,
+    pending: &Pending,
+    recover: impl FnOnce() -> Result<T, StatusCode>,
+) -> Result<T, StatusCode> {
+    if pending.purpose != "recover" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut consumed = state
+        .untrusted_consumed
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let now = Instant::now();
+    consumed.retain(|(_, until)| *until > now);
+    if consumed.iter().any(|(tag, _)| *tag == pending.tag) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if consumed.len() >= MAX_UNTRUSTED_CONSUMED {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    // Hold the replay lock through the existing SQLite recovery transaction.
+    // Failed/guessed credentials cannot spend a shared replay slot.
+    let value = recover()?;
+    consumed.push((pending.tag, pending.until));
+    Ok(value)
+}
+
 /// Reserve a bounded anonymous signup slot before writing to canonical `SQLite`.
 /// The quota is process-local; multi-instance/global anti-abuse admission is a
 /// separate release gate and must not be represented as already enforced.
@@ -1227,7 +1259,6 @@ fn account_finish(
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     verify_ed25519(verifier_key, &signed, &input.signature_base64_url)?;
-    spend(state, &pending)?;
     let account = identity(&input.binding)?;
     let device_id = device(&input.binding)?;
     let descriptor = DeviceDescriptor {
@@ -1250,6 +1281,7 @@ fn account_finish(
         if input.recovery_code.is_some() {
             return Err(StatusCode::BAD_REQUEST);
         }
+        spend(state, &pending)?;
         register_self_service_account(
             state,
             public,
@@ -1264,17 +1296,19 @@ fn account_finish(
             .as_deref()
             .ok_or(StatusCode::FORBIDDEN)?;
         let verifier = recovery_verifier(existing)?;
-        state
-            .store
-            .first_party_recover_device(
-                public,
-                &account,
-                &descriptor,
-                &signing_key,
-                verifier,
-                next_verifier,
-            )
-            .map_err(|_| StatusCode::FORBIDDEN)?;
+        spend_verified_recovery(state, &pending, || {
+            state
+                .store
+                .first_party_recover_device(
+                    public,
+                    &account,
+                    &descriptor,
+                    &signing_key,
+                    verifier,
+                    next_verifier,
+                )
+                .map_err(|_| StatusCode::FORBIDDEN)
+        })?;
     }
     let subject = subject_for(state, &input.binding)?;
     let (value, cookie) = issue_session(
