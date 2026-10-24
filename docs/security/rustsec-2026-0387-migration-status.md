@@ -27,3 +27,8 @@ regeneration, full compilation, DTLS interoperability and all RustSec audits pas
 ## Lockfile validation milestone
 
 Cargo regenerated the root lockfile after vendoring the integrity-verified DTLS migration candidate. It now contains only `crypto-bigint 0.7.6`. This is dependency-resolution evidence, not compilation or WebRTC interoperability evidence. The branch must pass CI, RustSec across all six lockfiles, and runtime E2EE tests before review or merge.
+
+
+DTLS API adaptation now uses RustCrypto 0.14 SEC1 public-key serialization and a
+separate cryptographic rand 0.10 generator. Cargo has resolved the single fixed
+crypto-bigint 0.7.6; compilation, end-to-end DTLS and RustSec remain gates.
