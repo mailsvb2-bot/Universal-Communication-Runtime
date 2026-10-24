@@ -81,6 +81,7 @@ features = [
 
 [dependencies.p384]
 version = "0.14.0"
+features = ["ecdh"]
 
 [dependencies.pem]
 version = "3"
