@@ -5,6 +5,8 @@ on:
     branches: [fix/phase44-audit-endpoint-wasm-lock-20261025]
     paths:
       - 'crates/ucr-endpoint-wasm/Cargo.toml'
+      - 'Cargo.toml'
+      - 'crates/ucr-chaos-lab/Cargo.toml'
       - '.github/workflows/e2ee-endpoint-lock-migration.yml'
   workflow_dispatch:
 
@@ -27,7 +29,11 @@ jobs:
         run: |
           set -euo pipefail
           cargo generate-lockfile --manifest-path crates/ucr-endpoint-wasm/Cargo.toml
+          cargo generate-lockfile --manifest-path Cargo.toml
+          cargo generate-lockfile --manifest-path crates/ucr-chaos-lab/Cargo.toml
           cargo metadata --manifest-path crates/ucr-endpoint-wasm/Cargo.toml --locked --format-version 1 > /dev/null
+          cargo metadata --manifest-path Cargo.toml --locked --format-version 1 > /dev/null
+          cargo metadata --manifest-path crates/ucr-chaos-lab/Cargo.toml --locked --format-version 1 > /dev/null
           cargo tree --manifest-path crates/ucr-endpoint-wasm/Cargo.toml -i crypto-bigint > crypto-bigint-tree.txt
           cat crypto-bigint-tree.txt
       - name: Commit Cargo-generated lock to isolated draft branch for reproducible tests
@@ -35,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           git diff --check
-          git add -- crates/ucr-endpoint-wasm/Cargo.lock
+          git add -- Cargo.lock crates/ucr-chaos-lab/Cargo.lock crates/ucr-endpoint-wasm/Cargo.lock
           if git diff --cached --quiet; then
             echo 'Lock already current'
             exit 0
@@ -50,4 +56,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo install cargo-audit --version 0.22.2 --locked
-          cargo audit --file crates/ucr-endpoint-wasm/Cargo.lock --deny warnings
+          result=0
+          cargo audit --file Cargo.lock --deny warnings || result=1
+          cargo audit --file crates/ucr-chaos-lab/Cargo.lock --deny warnings || result=1
+          cargo audit --file crates/ucr-endpoint-wasm/Cargo.lock --deny warnings || result=1
+          exit "$result"
