@@ -308,10 +308,20 @@ function showActive() {
 }
 async function beginMedia(callId) {
   if (navigating) return;
+  // A signed Join is valid only for the still-selected accepted Call/Device.
+  // A late grant must never navigate away from a newer or ended Call.
+  const selected = active;
+  if (!selected || selected.call.callId !== callId ||
+      selected.call.state !== "active") return;
+  const selectedCall = selected.call;
+  const selectedScope = accountScope;
+  const selectedLocator = activeCallLocator();
   // This coordinator permits Join ONLY after the recipient has accepted
   // and the canonical owner reports ACTIVE. It never creates trust or keys.
   const grant = await calls.join(callId);
   if (!grant || grant.callId !== callId) throw Error("Call admission mismatch");
+  if (navigating || accountScope !== selectedScope || active !== selected ||
+      active.call !== selectedCall || activeCallLocator() !== selectedLocator) return;
   navigating = true;
   setCallStage(3, active?.call.media === "video" ? "Допуск подтверждён. Открывается защищённый видеоэкран…" : "Допуск подтверждён. Открывается защищённый экран аудиосвязи…");
   clearInterval(timer);
@@ -405,12 +415,23 @@ async function refresh() {
     const incoming = await authTrace("incoming_calls",()=>calls.incoming());
     renderIncoming(incoming);
     if (active) {
-      const fresh = await authTrace("inspect_call",()=>calls.inspect(active.call.callId));
-      active = {...active,call:fresh};
+      // Snapshot the exact Call and Device generation before the async read.
+      // A concurrent dial, accept, hangup, logout or replacement locator
+      // must not be overwritten by a late response for the previous Call.
+      const inspected = active;
+      const inspectedCall = inspected.call;
+      const inspectedScope = accountScope;
+      const inspectedLocator = activeCallLocator();
+      const fresh = await authTrace("inspect_call",()=>calls.inspect(inspectedCall.callId));
+      if (accountScope !== inspectedScope || active !== inspected ||
+          active.call !== inspectedCall ||
+          activeCallLocator() !== inspectedLocator || navigating) return;
+      if (fresh.callId !== inspectedCall.callId) throw Error("Call inspection mismatch");
+      active = {...inspected,call:fresh};
       showActive();
       if (fresh.state === "active") await beginMedia(fresh.callId);
       if (fresh.state === "terminated") {
-        forgetActiveCall();
+        forgetActiveCall(inspectedLocator);
         if (active.identity === fresh.callerIdentityId) clearRetryKey(fresh);
         message("Вызов завершён сервером. Старая сессия больше не используется.");
       }
