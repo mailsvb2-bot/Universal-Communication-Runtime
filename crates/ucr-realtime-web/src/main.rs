@@ -3705,9 +3705,17 @@ mod tests {
             .expect("preflight watchdog callback");
         assert!(preflight.contains("generation===sessionLifecycleGeneration&&sessionActive"));
         assert!(preflight.contains("void endUnverifiedMedia(generation,"));
-        assert!(preflight.contains("Call renewal authorization timed out; local media capture stopped."));
-        assert!(renewal.contains("clearTimeout(preflightWatchdog);\n    ++sessionLifecycleGeneration;"));
-        assert!(renewal.contains("clearTimeout(preflightWatchdog);\n    clearTimeout(handoffWatchdog);"));
+        assert!(
+            preflight
+                .contains("Call renewal authorization timed out; local media capture stopped.")
+        );
+        assert!(
+            renewal.contains("clearTimeout(preflightWatchdog);\n    ++sessionLifecycleGeneration;")
+        );
+        assert!(
+            renewal
+                .contains("clearTimeout(preflightWatchdog);\n    clearTimeout(handoffWatchdog);")
+        );
     }
 
     #[test]
