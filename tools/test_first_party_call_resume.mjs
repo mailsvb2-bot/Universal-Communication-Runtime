@@ -214,6 +214,7 @@ context.navigating=false;
 navigatedTo=null;
 
 // A pending incoming-list response cannot repaint a former Device's Calls.
+forgetActiveCall();
 context.active=null;
 context.accountScope=scope;
 let releaseIncoming,signalIncoming;
