@@ -3737,11 +3737,17 @@ mod tests {
             .split("function releaseRoomPresence(){")
             .next()
             .expect("renewal body");
+        // A new Join can remain pending after the retiring grant expires.
+        // Its watchdog must be capped by the old signed authority, not merely
+        // by a fresh 12-second timeout after the handoff begins.
+        assert!(renewal.contains(
+            "const handoffDeadlineMs=Math.max(0,Math.min(HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()));"
+        ));
         let watchdog = renewal
             .split("handoffWatchdog=setTimeout(()=>{")
             .nth(1)
             .expect("renewal watchdog")
-            .split("},HEARTBEAT_AUTH_TIMEOUT_MS);")
+            .split("},handoffDeadlineMs);")
             .next()
             .expect("watchdog callback");
         assert!(watchdog.contains("sessionLifecycleGeneration!==handoff"));
