@@ -648,10 +648,10 @@ const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8
 // The first successful E2EE activation permanently settles its startup timer.
 // A later MLS refresh can temporarily reset readiness without reviving it.
 const startupGuardSnippet = browser.slice(
-  browser.indexOf("function cancelMediaStartupWatchdog("),
+  browser.indexOf("let pendingMediaStartupWatchdog=null;"),
   browser.indexOf("// This signed session grant is retired"),
 );
-assert.ok(startupGuardSnippet.startsWith("function cancelMediaStartupWatchdog("));
+assert.ok(startupGuardSnippet.startsWith("let pendingMediaStartupWatchdog=null;"));
 let startupTimerSequence=0,startupRevocations=0;
 const startupCallbacks = new Map<number, () => void>();
 const startupCtx: Record<string, any> = {
