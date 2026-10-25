@@ -26,6 +26,10 @@ const terminationEnd=source.indexOf('el("cancel").addEventListener',terminationB
 assert.ok(terminationBegin>=0 && terminationEnd>terminationBegin,
   "first-party pending hangup guard missing");
 const terminationSnippet=source.slice(terminationBegin,terminationEnd);
+const cancelListenerEnd=source.indexOf('\n\nel("signup")',terminationEnd);
+assert.ok(cancelListenerEnd>terminationEnd,"hangup click listener missing");
+const cancelListenerSnippet=source.slice(terminationEnd,cancelListenerEnd);
+let cancelClick=null;
 const user={tenantId:"tenant-a",namespaceId:null,participantId:"alice",deviceId:"device-a"};
 const call={callId:"call-123",callerIdentityId:"alice",calleeIdentityId:"bob",state:"ringing"};
 const scope=JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]);
@@ -49,10 +53,18 @@ const context={
     async incoming(){return [];}} ,
   authHttpCode:error=>Number(String(error.message).match(/HTTP (\d+)/)?.[1]??0),
   showActive(){rendered++;},
+  el(id){
+    assert.equal(id,"cancel");
+    return {addEventListener(type,listener){
+      assert.equal(type,"click");
+      cancelClick=listener;
+    }};
+  },
+  run(){throw Error("hangup must not pass through the busy UI action gate");},
 };
 runInNewContext(
   'const ACTIVE_CALL_HINT_KEY="ucr.first-party.active-call.v1";\n'+snippet+
-  "\n"+dialSnippet+"\n"+refreshSnippet+"\n"+mediaSnippet+"\n"+terminationSnippet+
+  "\n"+dialSnippet+"\n"+refreshSnippet+"\n"+mediaSnippet+"\n"+terminationSnippet+"\n"+cancelListenerSnippet+
   "\nthis.ops={rememberActiveCall,forgetActiveCall,restoreActiveCall,dial,refresh,beginMedia,terminateActiveCall};",
   context,
 );
@@ -291,6 +303,22 @@ completeOld({...acceptedCall,state:"terminated"});
 await oldHangup;
 assert.equal(context.active.call.callId,newer.callId);
 assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
+
+// The accepted incoming-Call handler awaits Join under the ordinary busy lock.
+// Its visible Hangup button must still fence the pending Join synchronously.
+context.active={call:acceptedCall,identity:"alice"};
+rememberActiveCall(acceptedCall,"alice");
+let finishBusyHangup;
+context.calls.signal=()=>new Promise(resolve=>{finishBusyHangup=resolve;});
+context.busy=true;
+assert.equal(typeof cancelClick,"function","real Hangup click handler must be wired");
+cancelClick();
+assert.equal(context.active.terminating,true,
+  "Hangup click must fence media even while another UI action is busy");
+finishBusyHangup({...acceptedCall,state:"terminated"});
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(context.active.call.state,"terminated");
+context.busy=false;
 
 assert.match(source,/const call = await calls\.start\(contact\.id,media,requestId\);[\s\S]*?rememberActiveCall\(call,session\.participantId\);/);
 assert.match(source,/const result = await calls\.signal\(call\.callId,"accept"\);[\s\S]*?rememberActiveCall\(result,session\.participantId\);/);
