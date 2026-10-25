@@ -18,7 +18,7 @@ import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1, UcrVerified
 const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0, playoutQueuedMs: 0, playoutJitterMs: 0, playoutRebases: 0};
 // Count actual encoded and rendered video separately; a connected DataChannel
 // and encrypted packet count are not evidence of remote picture delivery.
-const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, lastRenderedAt: 0, lastDecodedAt: 0, hiddenRenderSkips: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
+const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
 // Background rendering is intentionally suppressed. Track that time separately
 // so diagnostics never attribute hidden-tab inactivity to decoder failure.
 if (typeof document !== "undefined") {
@@ -29,6 +29,7 @@ if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
     const now = Date.now();
     if (document.hidden) {
+      ucrVideoCounters.firstVisibleUnrenderedDecodeAt = 0;
       ucrVideoCounters.hiddenSince = now;
       ucrVideoCounters.visibleSince = 0;
     } else {
@@ -36,6 +37,7 @@ if (typeof document !== "undefined") {
         ucrVideoCounters.hiddenTotalMs += Math.max(0, now - ucrVideoCounters.hiddenSince);
       }
       ucrVideoCounters.hiddenSince = 0;
+      ucrVideoCounters.firstVisibleUnrenderedDecodeAt = 0;
       ucrVideoCounters.visibleSince = now;
     }
   });
@@ -739,6 +741,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     this.#videoEnabled = video;
     ++this.#renderGeneration;
     if (!video) {
+      ucrVideoCounters.firstVisibleUnrenderedDecodeAt = 0;
       this.#activeVideoStreams.clear();
       this.#discardPendingVideo();
       this.#visibleVideoDecoderKey = null;
@@ -883,8 +886,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               if (selectedSourceKey !== null && oldVisible !== selectedStreamId &&
                   (pending?.streamId !== selectedStreamId || pending.decoderKey !== key)) return;
               const canvas = this.#videoCanvas!;
+              const doc = (globalThis as {document?: {hidden?: boolean}}).document;
               ucrVideoCounters.decoded++;
               ucrVideoCounters.lastDecodedAt = Date.now();
+              // Latch the FIRST decoded frame awaiting a visible render.
+              // Advancing lastDecodedAt must not conceal a persistent draw failure.
+              if (!doc?.hidden && !ucrVideoCounters.firstVisibleUnrenderedDecodeAt) {
+                ucrVideoCounters.firstVisibleUnrenderedDecodeAt = ucrVideoCounters.lastDecodedAt;
+              }
               const width = video.displayWidth, height = video.displayHeight;
               if (width < 1 || height < 1 || width > 7680 || height > 4320) {
                 throw new Error("decoded frame exceeds secure display bounds");
@@ -897,11 +906,11 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               if (canvas.height !== height) canvas.height = height;
               // Preserve decode reference frames, but avoid unnecessary canvas
               // copies while this page is hidden or minimized.
-              const doc = (globalThis as {document?: {hidden?: boolean}}).document;
               if (!doc?.hidden) {
                 (context as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
                 ucrVideoCounters.rendered++;
                 ucrVideoCounters.lastRenderedAt = Date.now();
+                ucrVideoCounters.firstVisibleUnrenderedDecodeAt = 0;
               } else {
                 ucrVideoCounters.hiddenRenderSkips++;
               }
@@ -1088,6 +1097,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   }
 
   stop(): void {
+    ucrVideoCounters.firstVisibleUnrenderedDecodeAt = 0;
     ++this.#renderGeneration;
     for (const decoder of this.#decoders.values()) decoder.close();
     this.#decoders.clear();
