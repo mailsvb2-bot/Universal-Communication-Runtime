@@ -970,6 +970,80 @@ assert.equal(acceptedJoinCtx.sessionActive, false, "no orphan active session");
 assert.equal(acceptedJoinHeartbeats, 0, "no heartbeat before failed policy activation");
 assert.equal(acceptedJoinCtx.ui.state.textContent, "Rejected");
 
+// The old grant's expiry must stop a pending/untrusted replacement, but it
+// must NOT terminate an independently authorized replacement Join whose
+// Device/Trust inspection has completed. Its new grant owns startup expiry.
+const oldHandoffWatchdog = browser.split("handoffWatchdog=setTimeout(()=>{")[1]
+  ?.split("},handoffDeadlineMs);")[0];
+const newStartupWatchdog = browser.split("mediaStartupWatchdog=setTimeout(()=>{")[1]
+  ?.split("},newGrantDeadlineMs);")[0];
+assert.ok(oldHandoffWatchdog?.includes("handoffState.trusted"));
+assert.ok(newStartupWatchdog?.includes("token===handoff.token"));
+for (const scenario of [
+  {name: "old pending", generation: 10, token: "old", trusted: false, expected: 1},
+  {name: "new untrusted", generation: 11, token: "new", trusted: false, expected: 1},
+  {name: "new trusted", generation: 11, token: "new", trusted: true, expected: 0},
+  {name: "new unrelated", generation: 12, token: "new", trusted: false, expected: 0},
+  {name: "foreign token", generation: 11, token: "foreign", trusted: false, expected: 0},
+]) {
+  let leaveCalls = 0;
+  const handoffState = {trusted: scenario.trusted};
+  const ctx: Record<string, any> = {
+    handoff: 10, oldToken: "old", next: "new",
+    token: scenario.token, sessionLifecycleGeneration: scenario.generation,
+    handoffState, pendingRenewalHandoff: handoffState,
+    signedGrantRetired: false,
+    ui: {state: {textContent: ""}, status: {textContent: ""}},
+    leave: () => {leaveCalls++;},
+    ucrRecordDiagnostic() {},
+  };
+  runInNewContext("(()=>{" + oldHandoffWatchdog + "})()", ctx);
+  assert.equal(leaveCalls, scenario.expected, scenario.name);
+  assert.equal(ctx.signedGrantRetired, scenario.expected === 1, scenario.name);
+}
+for (const scenario of [
+  {name: "current startup", generation: 11, token: "new", active: true, expected: 1},
+  {name: "already left", generation: 11, token: "new", active: false, expected: 0},
+  {name: "newer Join", generation: 12, token: "new", active: true, expected: 0},
+  {name: "different token", generation: 11, token: "other", active: true, expected: 0},
+]) {
+  let stopCalls = 0;
+  const ctx: Record<string, any> = {
+    sessionActive: scenario.active, generation: 11,
+    sessionLifecycleGeneration: scenario.generation,
+    token: scenario.token, handoff: {token: "new"},
+    endUnverifiedMedia: () => {stopCalls++;},
+  };
+  runInNewContext("(()=>{" + newStartupWatchdog + "})()", ctx);
+  assert.equal(stopCalls, scenario.expected, scenario.name);
+}
+
+// A pending asynchronous authority import must not resurrect a grant after
+// Leave or an old-grant watchdog advances the canonical lifecycle generation.
+let unblockStalePreflight: (() => void) | undefined;
+const blockedPreflight = new Promise<void>(resolve => {
+  unblockStalePreflight = resolve;
+});
+let staleJoinRequests = 0;
+const staleJoinCtx: Record<string, any> = {
+  claims: {not_before: 0}, token: "old", sessionLifecycleGeneration: 5,
+  signedGrantRetired: false,
+  ui: {state: {textContent: ""}, status: {textContent: ""},
+    join: {disabled: false}},
+  installFirstPartyDeviceAuthority: () => blockedPreflight,
+  requireCanonicalMediaHostReady() {}, prewarmAuthorizedMediaRuntime() {},
+  api: () => {staleJoinRequests++;throw new Error("stale Join resurrected");},
+};
+runInNewContext(preflightJoinSnippet + "\nthis.joinCall = join;", staleJoinCtx);
+const staleJoinPending = staleJoinCtx.joinCall();
+staleJoinCtx.signedGrantRetired = true;
+staleJoinCtx.sessionLifecycleGeneration = 6;
+unblockStalePreflight!();
+await staleJoinPending;
+assert.equal(staleJoinRequests, 0, "late preflight cannot redeem a retired signed grant");
+assert.equal(staleJoinCtx.sessionLifecycleGeneration, 6,
+  "late preflight cannot allocate a fresh lifecycle generation");
+
 // Chameleon lifecycle: no telemetry may be reported before the endpoint is
 // authenticated and running; the first report must start after E2EE activation.
 const activateSnippet = browser.slice(
