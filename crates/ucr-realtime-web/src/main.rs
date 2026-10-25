@@ -3788,7 +3788,10 @@ mod tests {
             "sessionActive&&generation===sessionLifecycleGeneration&&token===handoff.token"
         ));
         assert!(join.contains("void endUnverifiedMedia(generation,"));
+        assert!(join.contains("if(!sessionActive||!mediaActive||e2eeAdapterReady)"));
         assert!(join.contains("clearTimeout(mediaStartupWatchdog);"));
+        assert!(join.contains("token===handoff.token&&!e2eeAdapterReady"));
+        // SDP completion alone does not prove the endpoint E2EE adapter is ready.
         assert!(join.contains("Renewed Join expired during media startup; local capture stopped."));
 
         let renewal = client
