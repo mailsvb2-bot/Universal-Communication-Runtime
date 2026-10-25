@@ -2117,7 +2117,8 @@ async function join(){
         HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()));
       if(newGrantDeadlineMs===0)throw new Error("Renewed Join expired before media startup");
       mediaStartupWatchdog=setTimeout(()=>{
-        if(sessionActive&&generation===sessionLifecycleGeneration&&token===handoff.token)
+        if(sessionActive&&generation===sessionLifecycleGeneration&&
+           token===handoff.token&&!e2eeAdapterReady)
           void endUnverifiedMedia(generation,
             "Renewed Join media startup timed out; local capture stopped.");
       },newGrantDeadlineMs);
@@ -2175,7 +2176,11 @@ async function join(){
     }
     ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=signedGrantRetired;
   }finally{
-    clearTimeout(mediaStartupWatchdog);
+    // SDP negotiation may finish while the encrypted DataChannel and MLS
+    // adapter are still pending. Keep the deadline armed across asynchronous
+    // WebRTC retries until the endpoint E2EE adapter is actually ready.
+    if(!sessionActive||!mediaActive||e2eeAdapterReady)
+      clearTimeout(mediaStartupWatchdog);
     // An already-expired new grant must not keep physical capture when a
     // fast media-startup path cancels its watchdog before the timer fires.
     if(generation===sessionLifecycleGeneration&&sessionActive&&
