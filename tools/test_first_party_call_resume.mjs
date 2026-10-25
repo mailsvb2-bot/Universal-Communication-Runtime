@@ -13,6 +13,14 @@ const dialBegin=source.indexOf("async function dial(contact,media) {");
 const dialEnd=source.indexOf("function renderIncoming(items)",dialBegin);
 assert.ok(dialBegin>=0 && dialEnd>dialBegin,"first-party dialing implementation missing");
 const dialSnippet=source.slice(dialBegin,dialEnd);
+const refreshBegin=source.indexOf("async function refresh() {");
+const refreshEnd=source.indexOf("async function initialize() {",refreshBegin);
+assert.ok(refreshBegin>=0 && refreshEnd>refreshBegin,"first-party refresh implementation missing");
+const refreshSnippet=source.slice(refreshBegin,refreshEnd);
+const mediaBegin=source.indexOf("async function beginMedia(callId) {");
+const mediaEnd=source.indexOf("async function dial(contact,media) {",mediaBegin);
+assert.ok(mediaBegin>=0 && mediaEnd>mediaBegin,"first-party accepted-Join implementation missing");
+const mediaSnippet=source.slice(mediaBegin,mediaEnd);
 const user={tenantId:"tenant-a",namespaceId:null,participantId:"alice",deviceId:"device-a"};
 const call={callId:"call-123",callerIdentityId:"alice",calleeIdentityId:"bob",state:"ringing"};
 const scope=JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]);
@@ -28,17 +36,22 @@ const context={
   accountScope:scope,active:null,sessionStorage:storage,
   idempotency:new Map(),crypto:{randomUUID:()=>"retry-id"},
   restoreSession:async()=>user,message(){},
-  calls:{async inspect(id){inspections++;assert.equal(id,call.callId);return call;}},
+  refreshing:false,navigating:false,timer:null,knownContacts:[],
+  clearInterval(){},renderContacts(){},renderIncoming(){},
+  authTrace:async(_stage,operation)=>operation(),clearRetryKey(){},
+  setCallStage(){},location:{origin:"https://localhost",replace(){throw Error("stale Join navigated");}},
+  calls:{async inspect(id){inspections++;assert.equal(id,call.callId);return call;},
+    async incoming(){return [];}} ,
   authHttpCode:error=>Number(String(error.message).match(/HTTP (\d+)/)?.[1]??0),
   showActive(){rendered++;},
 };
 runInNewContext(
   'const ACTIVE_CALL_HINT_KEY="ucr.first-party.active-call.v1";\n'+snippet+
-  "\n"+dialSnippet+
-  "\nthis.ops={rememberActiveCall,forgetActiveCall,restoreActiveCall,dial};",
+  "\n"+dialSnippet+"\n"+refreshSnippet+"\n"+mediaSnippet+
+  "\nthis.ops={rememberActiveCall,forgetActiveCall,restoreActiveCall,dial,refresh,beginMedia};",
   context,
 );
-const {rememberActiveCall,forgetActiveCall,restoreActiveCall,dial}=context.ops;
+const {rememberActiveCall,forgetActiveCall,restoreActiveCall,dial,refresh,beginMedia}=context.ops;
 rememberActiveCall(call,"alice");
 assert.equal(JSON.parse(values.get(hintKey)).callId,call.callId);
 context.active=null; // Reload, not a new Call or a new identity owner.
@@ -144,6 +157,41 @@ assert.equal(starts,1);
 assert.equal(context.active.call.callId,newer.callId);
 assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
 assert.match(source,/if \(activeCallLocator\(\) !== null\) throw Error\("сначала дождитесь проверки незавершённого вызова"\);/);
+
+// A periodic inspect begun for an old Call must not overwrite a newly dialed Call.
+context.active={call,identity:"alice"};
+forgetActiveCall();
+rememberActiveCall(call,"alice");
+let releaseRefresh,signalRefresh;
+const refreshStarted=new Promise(resolve=>{signalRefresh=resolve;});
+context.calls.inspect=()=>new Promise(resolve=>{releaseRefresh=resolve;signalRefresh();});
+const oldRefresh=refresh();
+await refreshStarted;
+context.active={call:newer,identity:"alice"};
+rememberActiveCall(newer,"alice");
+releaseRefresh({...call,state:"terminated"});
+await oldRefresh;
+assert.equal(context.active.call.callId,newer.callId,"stale refresh must not replace newer Call");
+assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId,
+  "stale terminal refresh must not delete newer Call locator");
+
+// A delayed accepted-Call Join cannot navigate to an ended/replaced Call.
+const accepted={...call,state:"active"};
+context.active={call:accepted,identity:"alice"};
+forgetActiveCall();
+rememberActiveCall(accepted,"alice");
+let releaseJoin,signalJoin;
+const joinStarted=new Promise(resolve=>{signalJoin=resolve;});
+context.calls.join=()=>new Promise(resolve=>{releaseJoin=resolve;signalJoin();});
+const pendingJoin=beginMedia(accepted.callId);
+await joinStarted;
+context.active={call:newer,identity:"alice"};
+rememberActiveCall(newer,"alice");
+releaseJoin({callId:accepted.callId,joinFragment:"#signed"});
+await pendingJoin;
+assert.equal(context.navigating,false,"stale accepted Join must not navigate");
+assert.equal(context.active.call.callId,newer.callId);
+assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
 
 assert.match(source,/const call = await calls\.start\(contact\.id,media,requestId\);[\s\S]*?rememberActiveCall\(call,session\.participantId\);/);
 assert.match(source,/const result = await calls\.signal\(call\.callId,"accept"\);[\s\S]*?rememberActiveCall\(result,session\.participantId\);/);
