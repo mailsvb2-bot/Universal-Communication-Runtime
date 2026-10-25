@@ -3782,9 +3782,7 @@ mod tests {
             .expect("trusted replacement handoff");
         assert!(inspection < policy && policy < transfer);
         assert!(join.contains("handoff.generation===generation&&handoff.token===token"));
-        assert!(join.contains(
-            "HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()"
-        ));
+        assert!(join.contains("HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()"));
         assert!(join.contains("mediaStartupWatchdog=setTimeout(()=>{"));
         assert!(join.contains(
             "sessionActive&&generation===sessionLifecycleGeneration&&token===handoff.token"
@@ -3808,12 +3806,13 @@ mod tests {
             .next()
             .expect("watchdog body");
         assert!(renewal.contains("handoffState={generation:handoff+1,token:next,trusted:false};"));
-        assert!(watchdog.contains(
-            "if(pendingRenewalHandoff!==handoffState||handoffState.trusted)return;"
-        ));
-        assert!(renewal.contains(
-            "if(pendingRenewalHandoff===handoffState)pendingRenewalHandoff=null;"
-        ));
+        assert!(
+            watchdog
+                .contains("if(pendingRenewalHandoff!==handoffState||handoffState.trusted)return;")
+        );
+        assert!(
+            renewal.contains("if(pendingRenewalHandoff===handoffState)pendingRenewalHandoff=null;")
+        );
     }
 
     #[test]
@@ -3828,9 +3827,11 @@ mod tests {
         assert!(join.contains(
             "const preflightGeneration=sessionLifecycleGeneration,preflightToken=token;"
         ));
-        assert!(join.contains(
-            "if(signedGrantRetired||preflightGeneration!==sessionLifecycleGeneration||"
-        ));
+        assert!(
+            join.contains(
+                "if(signedGrantRetired||preflightGeneration!==sessionLifecycleGeneration||"
+            )
+        );
         assert!(join.contains("preflightToken!==token)return;"));
         let fence = join
             .find("if(signedGrantRetired||preflightGeneration!==sessionLifecycleGeneration||")
