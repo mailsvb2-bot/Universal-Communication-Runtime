@@ -273,6 +273,7 @@ function ucrDiagnosticReport(){
       rendered:window.__ucrVideoCounters.rendered,
       lastRenderedAt:window.__ucrVideoCounters.lastRenderedAt,
       lastDecodedAt:window.__ucrVideoCounters.lastDecodedAt,
+      firstVisibleUnrenderedDecodeAt:window.__ucrVideoCounters.firstVisibleUnrenderedDecodeAt,
       hiddenRenderSkips:window.__ucrVideoCounters.hiddenRenderSkips,
       // A hidden tab intentionally skips canvas drawing: it is not a media stall.
       renderStallMs:document.hidden?null:window.__ucrVideoCounters.lastRenderedAt?
@@ -286,10 +287,10 @@ function ucrDiagnosticReport(){
         (document.hidden&&window.__ucrVideoCounters?.hiddenSince?
           Math.max(0,Date.now()-window.__ucrVideoCounters.hiddenSince):0),
       visibleSince:document.hidden?null:(window.__ucrVideoCounters?.visibleSince||null),
-      // A stall is actionable only while visible AND after video actually decoded.
-      visibleDecodeWithoutRenderMs:!document.hidden&&window.__ucrVideoCounters?.lastDecodedAt &&
-        window.__ucrVideoCounters.lastDecodedAt>window.__ucrVideoCounters.lastRenderedAt?
-          Math.max(0,Date.now()-Math.max(window.__ucrVideoCounters.lastDecodedAt,
+      // Start at the FIRST decoded frame that has not been drawn, not the
+      // latest decode: a failing canvas must accumulate the full stall time.
+      visibleDecodeWithoutRenderMs:!document.hidden&&window.__ucrVideoCounters?.firstVisibleUnrenderedDecodeAt?
+          Math.max(0,Date.now()-Math.max(window.__ucrVideoCounters.firstVisibleUnrenderedDecodeAt,
             window.__ucrVideoCounters.visibleSince||0)):null
     },
     mediaFailure:{category:ucrLastMediaError||null,count:ucrMediaFailureCount,stopped:ucrMediaFailureStopped},
