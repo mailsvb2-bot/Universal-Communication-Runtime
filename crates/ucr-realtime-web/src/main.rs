@@ -3783,7 +3783,9 @@ mod tests {
         assert!(inspection < policy && policy < transfer);
         assert!(join.contains("handoff.generation===generation&&handoff.token===token"));
         assert!(join.contains("HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()"));
-        assert!(join.contains("armMediaStartupWatchdog(generation,handoff.token,newGrantDeadlineMs);"));
+        assert!(
+            join.contains("armMediaStartupWatchdog(generation,handoff.token,newGrantDeadlineMs);")
+        );
         assert!(client.contains("cancelMediaStartupWatchdog(sessionGeneration,sessionToken);"));
         assert!(client.contains("if(pendingMediaStartupWatchdog!==watchdog)return;"));
         let compact_client = client.split_whitespace().collect::<String>();
