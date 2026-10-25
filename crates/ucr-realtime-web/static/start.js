@@ -154,31 +154,44 @@ function rememberActiveCall(call,identity) {
     scope:accountScope,callId:call.callId,
   }));} catch {}
 }
-function forgetActiveCall() {
-  try {sessionStorage.removeItem(ACTIVE_CALL_HINT_KEY);} catch {}
+function activeCallLocator() {
+  try {return sessionStorage.getItem(ACTIVE_CALL_HINT_KEY);} catch {return null;}
+}
+function forgetActiveCall(expectedLocator) {
+  try {
+    // A stale inspection must not delete a newer Call's locator.
+    if (expectedLocator === undefined ||
+        sessionStorage.getItem(ACTIVE_CALL_HINT_KEY) === expectedLocator) {
+      sessionStorage.removeItem(ACTIVE_CALL_HINT_KEY);
+    }
+  } catch {}
 }
 async function restoreActiveCall(user) {
+  // Snapshot the exact locator: the Call owner, not sessionStorage, supplies state.
+  const locator = activeCallLocator();
+  if (locator === null) return;
   let hint;
-  try {hint=JSON.parse(sessionStorage.getItem(ACTIVE_CALL_HINT_KEY)??"null");}
-  catch {forgetActiveCall();return;}
-  if (hint===null) return;
+  try {hint=JSON.parse(locator);}
+  catch {forgetActiveCall(locator);return;}
   const scope=principalScope(user);
   if (!hint || typeof hint!=="object" || hint.scope!==scope ||
       accountScope!==scope || typeof hint.callId!=="string" ||
       !/^[A-Za-z0-9_.:@-]{1,128}$/.test(hint.callId)) {
-    forgetActiveCall();return;
+    forgetActiveCall(locator);return;
   }
   try {
     const call=await calls.inspect(hint.callId);
     // Inspect checks current canonical participant, Device and Call membership.
     // A delayed response cannot restore a Call after account/Device switch.
-    if (accountScope!==scope) {forgetActiveCall();return;}
-    if (call.state==="terminated") {forgetActiveCall();return;}
+    if (accountScope!==scope) {forgetActiveCall(locator);return;}
+    // A new Call (or a newer locator) wins over this in-flight inspection.
+    if (active || activeCallLocator()!==locator) return;
+    if (call.state==="terminated") {forgetActiveCall(locator);return;}
     active={call,identity:user.participantId};
     showActive();
   } catch(error) {
-    // A temporary network failure is not proof that the durable Call ended.
-    if ([403,404].includes(authHttpCode(error))) forgetActiveCall();
+    // A stale denial must not delete a newer Call's locator.
+    if ([403,404].includes(authHttpCode(error))) forgetActiveCall(locator);
     throw error;
   }
 }
@@ -295,10 +308,22 @@ function showActive() {
 }
 async function beginMedia(callId) {
   if (navigating) return;
+  // A signed Join is valid only for the still-selected accepted Call/Device.
+  // A late grant must never navigate away from a newer or ended Call.
+  const selected = active;
+  if (!selected || selected.call.callId !== callId ||
+      selected.call.state !== "active") return;
+  const selectedScope = accountScope;
+  const selectedLocator = activeCallLocator();
   // This coordinator permits Join ONLY after the recipient has accepted
   // and the canonical owner reports ACTIVE. It never creates trust or keys.
   const grant = await calls.join(callId);
   if (!grant || grant.callId !== callId) throw Error("Call admission mismatch");
+  // Periodic inspection may replace the object for the SAME active Call.
+  // Fence by canonical Call/Device state, not mutable UI object identity.
+  if (navigating || accountScope !== selectedScope || !active ||
+      active.call.callId !== callId || active.call.state !== "active" ||
+      activeCallLocator() !== selectedLocator) return;
   navigating = true;
   setCallStage(3, active?.call.media === "video" ? "Допуск подтверждён. Открывается защищённый видеоэкран…" : "Допуск подтверждён. Открывается защищённый экран аудиосвязи…");
   clearInterval(timer);
@@ -312,6 +337,11 @@ async function beginMedia(callId) {
 async function dial(contact,media) {
   if (active && active.call.state !== "terminated") {
     throw Error("сначала завершите текущий вызов");
+  }
+  // If a reload's canonical inspection failed transiently, a pending Call
+  // may still be ringing. Do not create a second Call before it is resolved.
+  if (activeCallLocator() !== null) {
+    throw Error("сначала дождитесь проверки или завершите незавершённый вызов");
   }
   const key = contact.id + ":" + media;
   const requestId = idempotency.get(key) ?? crypto.randomUUID();
@@ -342,6 +372,7 @@ function renderIncoming(items) {
     actions.append(
       btn("Принять",async () => {
         if (active && active.call.state !== "terminated") throw Error("вы уже участвуете в другом вызове");
+        if (activeCallLocator() !== null) throw Error("сначала дождитесь проверки незавершённого вызова");
         const result = await calls.signal(call.callId,"accept");
         const session = await host.resumeAuthenticatedDevice();
         active = {call:result,identity:session.participantId};
@@ -384,14 +415,27 @@ async function refresh() {
     }
     if (!active) await restoreActiveCall(user);
     const incoming = await authTrace("incoming_calls",()=>calls.incoming());
+    // Never paint a former Identity's incoming Calls after logout or Device switch.
+    if (accountScope !== principalScope(user) || navigating) return;
     renderIncoming(incoming);
     if (active) {
-      const fresh = await authTrace("inspect_call",()=>calls.inspect(active.call.callId));
-      active = {...active,call:fresh};
+      // Snapshot the exact Call and Device generation before the async read.
+      // A concurrent dial, accept, hangup, logout or replacement locator
+      // must not be overwritten by a late response for the previous Call.
+      const inspected = active;
+      const inspectedCall = inspected.call;
+      const inspectedScope = accountScope;
+      const inspectedLocator = activeCallLocator();
+      const fresh = await authTrace("inspect_call",()=>calls.inspect(inspectedCall.callId));
+      if (accountScope !== inspectedScope || active !== inspected ||
+          active.call !== inspectedCall ||
+          activeCallLocator() !== inspectedLocator || navigating) return;
+      if (fresh.callId !== inspectedCall.callId) throw Error("Call inspection mismatch");
+      active = {...inspected,call:fresh};
       showActive();
       if (fresh.state === "active") await beginMedia(fresh.callId);
       if (fresh.state === "terminated") {
-        forgetActiveCall();
+        forgetActiveCall(inspectedLocator);
         if (active.identity === fresh.callerIdentityId) clearRetryKey(fresh);
         message("Вызов завершён сервером. Старая сессия больше не используется.");
       }
