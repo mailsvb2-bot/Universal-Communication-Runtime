@@ -26,7 +26,7 @@ const terminationEnd=source.indexOf('el("cancel").addEventListener',terminationB
 assert.ok(terminationBegin>=0 && terminationEnd>terminationBegin,
   "first-party pending hangup guard missing");
 const terminationSnippet=source.slice(terminationBegin,terminationEnd);
-const cancelListenerEnd=source.indexOf('\n\nel("signup")',terminationEnd);
+const cancelListenerEnd=source.indexOf('el("signup").addEventListener',terminationEnd);
 assert.ok(cancelListenerEnd>terminationEnd,"hangup click listener missing");
 const cancelListenerSnippet=source.slice(terminationEnd,cancelListenerEnd);
 let cancelClick=null;
