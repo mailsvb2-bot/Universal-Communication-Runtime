@@ -980,6 +980,10 @@ const newStartupWatchdog = browser.split("mediaStartupWatchdog=setTimeout(()=>{"
   ?.split("},newGrantDeadlineMs);")[0];
 assert.ok(oldHandoffWatchdog?.includes("handoffState.trusted"));
 assert.ok(newStartupWatchdog?.includes("token===handoff.token"));
+assert.ok(newStartupWatchdog?.includes("!e2eeAdapterReady"),
+  "startup watchdog must not mistake SDP completion for endpoint E2EE readiness");
+assert.ok(browser.includes("if(!sessionActive||!mediaActive||e2eeAdapterReady)\n      clearTimeout(mediaStartupWatchdog);"),
+  "keep startup deadline armed when WebRTC signaling completes before E2EE adapter activation");
 for (const scenario of [
   {name: "old pending", generation: 10, token: "old", trusted: false, expected: 1},
   {name: "new untrusted", generation: 11, token: "new", trusted: false, expected: 1},
@@ -1003,15 +1007,16 @@ for (const scenario of [
   assert.equal(ctx.signedGrantRetired, scenario.expected === 1, scenario.name);
 }
 for (const scenario of [
-  {name: "current startup", generation: 11, token: "new", active: true, expected: 1},
+  {name: "current startup", generation: 11, token: "new", active: true, ready: false, expected: 1},
+  {name: "E2EE ready", generation: 11, token: "new", active: true, ready: true, expected: 0},
   {name: "already left", generation: 11, token: "new", active: false, expected: 0},
   {name: "newer Join", generation: 12, token: "new", active: true, expected: 0},
   {name: "different token", generation: 11, token: "other", active: true, expected: 0},
 ]) {
   let stopCalls = 0;
   const ctx: Record<string, any> = {
-    sessionActive: scenario.active, generation: 11,
-    sessionLifecycleGeneration: scenario.generation,
+    sessionActive: scenario.active, e2eeAdapterReady: scenario.ready ?? false,
+    generation: 11, sessionLifecycleGeneration: scenario.generation,
     token: scenario.token, handoff: {token: "new"},
     endUnverifiedMedia: () => {stopCalls++;},
   };
