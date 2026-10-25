@@ -564,7 +564,15 @@ async function terminateActiveCall() {
         activeCallLocator() === locator) active.terminating = false;
   }
 }
-el("cancel").addEventListener("click",() => void run(terminateActiveCall));
+// Hangup must bypass the ordinary UI busy lock: accepting an incoming Call
+// holds that lock while its signed Join is still in flight. A user click must
+// fence that Join immediately rather than being silently discarded.
+el("cancel").addEventListener("click", () => {
+  void terminateActiveCall().catch(error => {
+    message("Действие не подтверждено: " +
+      (error instanceof Error ? error.message : String(error)));
+  });
+});
 
 el("signup").addEventListener("click",()=>void run(async()=>{
   message("Создание Identity и первого защищённого устройства…");
