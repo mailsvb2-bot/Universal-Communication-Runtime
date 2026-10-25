@@ -13,6 +13,7 @@ on:
       - 'sdk/typescript/src/canonical_browser_media_factory.ts'
       - 'sdk/typescript/src/contact_call_journey.ts'
       - 'scripts/windows/start-local-first-party-https.ps1'
+      - 'scripts/windows/start-remote-device-test.ps1'
       - '.github/workflows/windows-first-party-ui.yml'
   workflow_dispatch:
 jobs:
@@ -35,3 +36,6 @@ jobs:
       - name: Check canonical media admission boundary
         shell: pwsh
         run: python tools/check_first_party_media_admission_contract.py
+      - name: Exercise fail-closed remote-host preflight
+        shell: pwsh
+        run: .\\scripts\\windows\\start-remote-device-test.ps1 -SelfTest
