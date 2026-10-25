@@ -2731,6 +2731,16 @@ async function renewLocalRoomGrant(){
   if(isLocalRoom&&(!roomApi||!user))return;
   renewLocalRoomGrant.busy=true;
   const generation=sessionLifecycleGeneration;
+  // Renewal can stall before a replacement grant is even issued. The
+  // heartbeat's busy guard must not let expired authorization hold capture.
+  // Never grant the pending request extra camera/microphone time after the
+  // current signed grant's own expiry, including after laptop sleep.
+  const preflightDeadlineMs=Math.max(0,Math.min(HEARTBEAT_AUTH_TIMEOUT_MS,remaining));
+  const preflightWatchdog=setTimeout(()=>{
+    if(generation===sessionLifecycleGeneration&&sessionActive)
+      void endUnverifiedMedia(generation,
+        "Call renewal authorization timed out; local media capture stopped.");
+  },preflightDeadlineMs);
   let handoffWatchdog=null;
   try{
     let data;
@@ -2790,20 +2800,33 @@ async function renewLocalRoomGrant(){
     if(generation!==sessionLifecycleGeneration||!sessionActive)return;
     // Drop in-flight heartbeats before the session id changes. join() advances
     // the generation again for the replacement session.
+    clearTimeout(preflightWatchdog);
     ++sessionLifecycleGeneration;
     const handoff=sessionLifecycleGeneration;
     // A heartbeat begun on the old generation cannot release its own in-flight
     // guard after handoff. Retire it so the new Join can heartbeat normally.
     clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;
     heartbeatInFlight=false;++heartbeatRequestGeneration;
-    // The old heartbeat watchdog is generation-fenced. A hung WebRTC close
-    // must still fail closed and stop physical capture during renewal.
-    handoffWatchdog=setTimeout(()=>{
-      if(sessionActive&&handoff===sessionLifecycleGeneration)
-        void endUnverifiedMedia(handoff,"Call renewal timed out; local media capture stopped.");
-    },HEARTBEAT_AUTH_TIMEOUT_MS);
     const oldToken=token;
     const oldBody=body();
+    // A stalled handoff must not retain capture beyond the retiring grant's
+    // signed expiry, even when the remaining lifetime is under 12 seconds.
+    const handoffDeadlineMs=Math.max(0,Math.min(HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()));
+    // A replacement Join can hang before sessionActive becomes true. Watch
+    // both the retiring session and the one replacement generation; never
+    // allow a late watchdog to close an unrelated newer call.
+    handoffWatchdog=setTimeout(()=>{
+      if((sessionLifecycleGeneration!==handoff&&
+          sessionLifecycleGeneration!==handoff+1)||
+         (token!==oldToken&&token!==next))return;
+      // leave() revokes in-flight joins and stops all physical tracks before
+      // its first asynchronous boundary, even if no new Join was accepted.
+      signedGrantRetired=true;
+      void leave();
+      ui.state.textContent="Access ended";
+      ui.status.textContent="Call renewal timed out; local media capture stopped.";
+      ucrRecordDiagnostic("Renewal Join watchdog stopped local capture","lifecycle");
+    },handoffDeadlineMs);
     await closeServerPeer();
     teardownPeer();
     retireEndpointMlsState();
@@ -2842,7 +2865,14 @@ async function renewLocalRoomGrant(){
   }catch(e){
     if(generation===sessionLifecycleGeneration&&sessionActive)ui.status.textContent="Call access renewal failed: "+e.message;
   }finally{
+    clearTimeout(preflightWatchdog);
     clearTimeout(handoffWatchdog);
+    // A rejected or invalid renewal can settle before its watchdog runs.
+    // Cancelling the timer must never preserve capture on an expired grant.
+    if(generation===sessionLifecycleGeneration&&sessionActive&&
+       claims&&Date.now()>=claims.expires)
+      void endUnverifiedMedia(generation,
+        "Signed session expired without renewal; media capture stopped.");
     renewLocalRoomGrant.busy=false;
   }
 }

@@ -3688,6 +3688,80 @@ mod tests {
     }
 
     #[test]
+    fn renewal_grant_issuance_stall_has_bounded_capture_lifetime() {
+        let renewal = super::CLIENT_HTML
+            .split("async function renewLocalRoomGrant(){")
+            .nth(1)
+            .expect("renewal coordinator")
+            .split("function releaseRoomPresence(){")
+            .next()
+            .expect("renewal body");
+        assert!(renewal.contains(
+            "const preflightDeadlineMs=Math.max(0,Math.min(HEARTBEAT_AUTH_TIMEOUT_MS,remaining));"
+        ));
+        let preflight = renewal
+            .split("const preflightWatchdog=setTimeout(()=>{")
+            .nth(1)
+            .expect("preflight watchdog")
+            .split("},preflightDeadlineMs);")
+            .next()
+            .expect("preflight watchdog callback");
+        assert!(preflight.contains("generation===sessionLifecycleGeneration&&sessionActive"));
+        assert!(preflight.contains("void endUnverifiedMedia(generation,"));
+        assert!(
+            preflight
+                .contains("Call renewal authorization timed out; local media capture stopped.")
+        );
+        assert!(
+            renewal.contains("clearTimeout(preflightWatchdog);\n    ++sessionLifecycleGeneration;")
+        );
+        assert!(
+            renewal
+                .contains("clearTimeout(preflightWatchdog);\n    clearTimeout(handoffWatchdog);")
+        );
+        let settled = renewal
+            .rsplit("}finally{")
+            .next()
+            .expect("renewal settlement guard");
+        assert!(settled.contains("claims&&Date.now()>=claims.expires"));
+        assert!(settled.contains("void endUnverifiedMedia(generation,"));
+    }
+
+    #[test]
+    fn renewal_watchdog_revokes_pending_join_before_media_can_outlive_authority() {
+        let client = super::CLIENT_HTML;
+        let renewal = client
+            .split("async function renewLocalRoomGrant(){")
+            .nth(1)
+            .expect("renewal coordinator")
+            .split("function releaseRoomPresence(){")
+            .next()
+            .expect("renewal body");
+        // A new Join can remain pending after the retiring grant expires.
+        // Its watchdog must be capped by the old signed authority, not merely
+        // by a fresh 12-second timeout after the handoff begins.
+        assert!(renewal.contains(
+            "const handoffDeadlineMs=Math.max(0,Math.min(HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()));"
+        ));
+        let watchdog = renewal
+            .split("handoffWatchdog=setTimeout(()=>{")
+            .nth(1)
+            .expect("renewal watchdog")
+            .split("},handoffDeadlineMs);")
+            .next()
+            .expect("watchdog callback");
+        assert!(watchdog.contains("sessionLifecycleGeneration!==handoff"));
+        assert!(watchdog.contains("sessionLifecycleGeneration!==handoff+1"));
+        assert!(watchdog.contains("token!==oldToken&&token!==next"));
+        assert!(watchdog.contains("signedGrantRetired=true;"));
+        assert!(watchdog.contains("void leave();"));
+        assert!(watchdog.contains("Call renewal timed out; local media capture stopped."));
+        // In particular, a pending join() is not yet sessionActive. The old
+        // guard silently skipped this case and leaked physical capture.
+        assert!(!watchdog.contains("if(sessionActive&&handoff==="));
+    }
+
+    #[test]
     fn first_party_auth_diagnostics_expose_only_stages_and_http_categories() {
         let page = super::FIRST_PARTY_START_HTML;
         let script = super::FIRST_PARTY_START_JS;
