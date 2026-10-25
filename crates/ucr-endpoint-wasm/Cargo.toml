@@ -19,3 +19,14 @@ getrandom02 = { package = "getrandom", version = "=0.2.17", features = ["js"] }
 wasm-bindgen = "=0.2.128"
 
 [workspace]
+
+# Match the audited OpenMLS source family used by the root workspace.
+# The endpoint is a separate workspace, so the root [patch.crates-io] is NOT inherited.
+# Do not declare this migration complete until Cargo has regenerated the endpoint lock
+# and native/WASM/MLS cryptographic regressions pass.
+[patch.crates-io]
+openmls = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
+openmls_traits = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
+openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
+openmls_basic_credential = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
+openmls_memory_storage = { git = "https://github.com/openmls/openmls", rev = "be248d4b1306d87a641ce24ed0ffcab2b27967f6" }
