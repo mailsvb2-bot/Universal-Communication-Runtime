@@ -413,6 +413,8 @@ async function refresh() {
     }
     if (!active) await restoreActiveCall(user);
     const incoming = await authTrace("incoming_calls",()=>calls.incoming());
+    // Never paint a former Identity's incoming Calls after logout or Device switch.
+    if (accountScope !== principalScope(user) || navigating) return;
     renderIncoming(incoming);
     if (active) {
       // Snapshot the exact Call and Device generation before the async read.
