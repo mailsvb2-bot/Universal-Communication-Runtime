@@ -31,7 +31,7 @@ const storage={
   removeItem:key=>values.delete(key),
 };
 const hintKey="ucr.first-party.active-call.v1";
-let inspections=0,rendered=0,incomingRendered=0;
+let inspections=0,rendered=0,incomingRendered=0,navigatedTo=null;
 const context={
   accountScope:scope,active:null,sessionStorage:storage,
   idempotency:new Map(),crypto:{randomUUID:()=>"retry-id"},
@@ -39,7 +39,7 @@ const context={
   refreshing:false,navigating:false,timer:null,knownContacts:[],
   clearInterval(){},renderContacts(){},renderIncoming(){incomingRendered++;},
   authTrace:async(_stage,operation)=>operation(),clearRetryKey(){},
-  setCallStage(){},location:{origin:"https://localhost",replace(){throw Error("stale Join navigated");}},
+  setCallStage(){},URL,location:{origin:"https://localhost",replace(url){navigatedTo=url;}},
   calls:{async inspect(id){inspections++;assert.equal(id,call.callId);return call;},
     async incoming(){return [];}} ,
   authHttpCode:error=>Number(String(error.message).match(/HTTP (\d+)/)?.[1]??0),
@@ -190,8 +190,28 @@ rememberActiveCall(newer,"alice");
 releaseJoin({callId:accepted.callId,joinFragment:"#signed"});
 await pendingJoin;
 assert.equal(context.navigating,false,"stale accepted Join must not navigate");
+assert.equal(navigatedTo,null,"stale Join must not replace location");
 assert.equal(context.active.call.callId,newer.callId);
 assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
+
+// The SAME accepted Call may be refreshed while Join is pending: do not
+// starve real slow-network connections by comparing mutable UI object identity.
+context.active={call:accepted,identity:"alice"};
+forgetActiveCall();
+rememberActiveCall(accepted,"alice");
+let resolveValidJoin,signalValidJoin;
+const validJoinStarted=new Promise(resolve=>{signalValidJoin=resolve;});
+context.calls.join=()=>new Promise(resolve=>{resolveValidJoin=resolve;signalValidJoin();});
+const validJoin=beginMedia(accepted.callId);
+await validJoinStarted;
+context.active={...context.active,call:{...accepted}};
+resolveValidJoin({callId:accepted.callId,joinFragment:"#signed"});
+await validJoin;
+assert.equal(context.navigating,true,"same active Call refresh must not block Join");
+assert.match(navigatedTo,/\/client\.html#signed$/);
+assert.equal(values.get("ucrFirstPartyDirectCall"),accepted.callId);
+context.navigating=false;
+navigatedTo=null;
 
 // A pending incoming-list response cannot repaint a former Device's Calls.
 context.active=null;
