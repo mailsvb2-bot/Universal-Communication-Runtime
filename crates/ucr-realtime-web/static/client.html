@@ -2864,6 +2864,12 @@ async function renewLocalRoomGrant(){
   }finally{
     clearTimeout(preflightWatchdog);
     clearTimeout(handoffWatchdog);
+    // A rejected or invalid renewal can settle before its watchdog runs.
+    // Cancelling the timer must never preserve capture on an expired grant.
+    if(generation===sessionLifecycleGeneration&&sessionActive&&
+       claims&&Date.now()>=claims.expires)
+      void endUnverifiedMedia(generation,
+        "Signed session expired without renewal; media capture stopped.");
     renewLocalRoomGrant.busy=false;
   }
 }
