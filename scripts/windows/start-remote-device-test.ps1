@@ -4,7 +4,8 @@
 param(
     [string]$PublicOrigin,
     [string]$TurnUrl,
-    [switch]$Json
+    [switch]$Json,
+    [switch]$SelfTest
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -32,6 +33,32 @@ function Is-PrivateHost([string]$hostName) {
             ($bytes[0] -eq 100 -and $bytes[1] -ge 64 -and $bytes[1] -le 127))
     }
     return $false
+}
+
+# Repo-local security regression; does not contact any external host.
+if ($SelfTest) {
+    $cases = @(
+        @{ Name = 'localhost'; Block = $true },
+        @{ Name = '127.0.0.1'; Block = $true },
+        @{ Name = '10.10.1.2'; Block = $true },
+        @{ Name = '192.168.1.2'; Block = $true },
+        @{ Name = '::1'; Block = $true },
+        @{ Name = '::'; Block = $true },
+        @{ Name = 'ff02::1'; Block = $true },
+        @{ Name = '::ffff:127.0.0.1'; Block = $true },
+        @{ Name = '::ffff:10.0.0.1'; Block = $true },
+        @{ Name = 'fd00::1'; Block = $true },
+        @{ Name = '8.8.8.8'; Block = $false },
+        @{ Name = '2001:4860:4860::8888'; Block = $false },
+        @{ Name = 'example.com'; Block = $false }
+    )
+    foreach ($case in $cases) {
+        if ((Is-PrivateHost $case.Name) -ne $case.Block) {
+            throw ('Remote preflight private-host regression: ' + $case.Name)
+        }
+    }
+    Write-Output 'PASS: remote preflight private-host exclusions'
+    exit 0
 }
 
 $blockers = New-Object 'System.Collections.Generic.List[string]'
