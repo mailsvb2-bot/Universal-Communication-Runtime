@@ -17,7 +17,12 @@ function Is-PrivateHost([string]$hostName) {
     if ([Net.IPAddress]::TryParse($h, [ref]$ip)) {
         $bytes = $ip.GetAddressBytes()
         if ($ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) {
-            return ($ip.IsIPv6LinkLocal -or $ip.IsIPv6SiteLocal -or $ip.Equals([Net.IPAddress]::IPv6Loopback) -or
+            # IPv4-mapped IPv6 loopback/private addresses must not bypass the
+            # IPv4 exclusions (e.g. ::ffff:127.0.0.1 or ::ffff:10.0.0.1).
+            if ($ip.IsIPv4MappedToIPv6) { return (Is-PrivateHost ($ip.MapToIPv4().ToString())) }
+            return ($ip.IsIPv6LinkLocal -or $ip.IsIPv6SiteLocal -or
+                $ip.IsIPv6Multicast -or $ip.Equals([Net.IPAddress]::IPv6Any) -or
+                $ip.Equals([Net.IPAddress]::IPv6Loopback) -or
                 (($bytes[0] -band 254) -eq 252))
         }
         return ($bytes[0] -eq 10 -or $bytes[0] -eq 127 -or $bytes[0] -eq 0 -or
