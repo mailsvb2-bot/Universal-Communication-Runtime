@@ -4018,8 +4018,10 @@ mod tests {
         assert!(js.contains("await calls.signal(call.callId,\"reject\")"));
         assert!(js.contains("await calls.signal(active.call.callId,action)"));
         assert!(
-            js.contains("await authTrace(\"inspect_call\",()=>calls.inspect(active.call.callId))")
+            js.contains("await authTrace(\"inspect_call\",()=>calls.inspect(inspectedCall.callId))")
         );
+        assert!(js.contains("active !== inspected"));
+        assert!(js.contains("activeCallLocator() !== inspectedLocator"));
         assert!(js.contains("if (accountScope !== principalScope(user))"));
         assert!(js.contains("idempotency.clear()"));
         assert!(js.contains("clearRetryKey(active.call)"));
