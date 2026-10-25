@@ -311,7 +311,7 @@ async function beginMedia(callId) {
   // A signed Join is valid only for the still-selected accepted Call/Device.
   // A late grant must never navigate away from a newer or ended Call.
   const selected = active;
-  if (!selected || selected.call.callId !== callId ||
+  if (!selected || selected.terminating || selected.call.callId !== callId ||
       selected.call.state !== "active") return;
   const selectedScope = accountScope;
   const selectedLocator = activeCallLocator();
@@ -322,7 +322,8 @@ async function beginMedia(callId) {
   // Periodic inspection may replace the object for the SAME active Call.
   // Fence by canonical Call/Device state, not mutable UI object identity.
   if (navigating || accountScope !== selectedScope || !active ||
-      active.call.callId !== callId || active.call.state !== "active" ||
+      active.terminating || active.call.callId !== callId ||
+      active.call.state !== "active" ||
       activeCallLocator() !== selectedLocator) return;
   navigating = true;
   setCallStage(3, active?.call.media === "video" ? "Допуск подтверждён. Открывается защищённый видеоэкран…" : "Допуск подтверждён. Открывается защищённый экран аудиосвязи…");
@@ -533,18 +534,45 @@ el("new-contact").addEventListener("submit", event => {
     message("Контакт сохранён локально. Для звонка требуется ответ собеседника.");
   });
 });
-el("cancel").addEventListener("click",() => void run(async () => {
-  if (!active) return;
-  const state = active.call.state;
+// Mark termination before the network request: an in-flight refresh or signed
+// Join must never publish media after the user has requested hangup/cancel.
+async function terminateActiveCall() {
+  if (!active || active.terminating) return;
+  const selected = active;
+  const callId = selected.call.callId;
+  const scope = accountScope;
+  const locator = activeCallLocator();
+  const state = selected.call.state;
   const action = state === "active" || state === "reconnecting" ? "hangup" : "cancel";
-  active.call = await calls.signal(active.call.callId,action);
-  if (active.call.state === "terminated") {
-    forgetActiveCall();
-    if (active.identity === active.call.callerIdentityId) clearRetryKey(active.call);
+  selected.terminating = true;
+  try {
+    const result = await calls.signal(callId,action);
+    if (!result || result.callId !== callId) throw Error("Call termination mismatch");
+    // An old response must not replace a newer Call or mutate another Device.
+    if (accountScope !== scope || !active || active.call.callId !== callId ||
+        activeCallLocator() !== locator) return;
+    active = {...active,call:result,terminating:false};
+    if (result.state === "terminated") {
+      forgetActiveCall(locator);
+      if (active.identity === result.callerIdentityId) clearRetryKey(result);
+    }
+    showActive();
+    message("Завершение вызова подтверждено каноническим сервером.");
+  } finally {
+    // A failed request may be retried; do not keep the media fence forever.
+    if (accountScope === scope && active && active.call.callId === callId &&
+        activeCallLocator() === locator) active.terminating = false;
   }
-  showActive();
-  message("Завершение вызова подтверждено каноническим сервером.");
-}));
+}
+// Hangup must bypass the ordinary UI busy lock: accepting an incoming Call
+// holds that lock while its signed Join is still in flight. A user click must
+// fence that Join immediately rather than being silently discarded.
+el("cancel").addEventListener("click", () => {
+  void terminateActiveCall().catch(error => {
+    message("Действие не подтверждено: " +
+      (error instanceof Error ? error.message : String(error)));
+  });
+});
 
 el("signup").addEventListener("click",()=>void run(async()=>{
   message("Создание Identity и первого защищённого устройства…");
