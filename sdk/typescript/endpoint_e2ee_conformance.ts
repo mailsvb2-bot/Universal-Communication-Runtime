@@ -1122,7 +1122,7 @@ const protectedAdapter = {
   onEnvelope() {},
 };
 const lifecycleCtx: Record<string, any> = {
-  window: {},
+  window: {}, token: "fixture-e2ee-token",
   sessionLifecycleGeneration: 0,
   e2eeActivationGeneration: 0,
   e2eeChannel: lifecycleChannel,
