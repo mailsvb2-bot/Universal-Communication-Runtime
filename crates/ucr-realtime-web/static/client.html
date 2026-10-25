@@ -318,6 +318,28 @@ let heartbeatInFlight=false,heartbeatWatchdog=null;
 // A retiring Join may fence only the unauthenticated replacement preflight.
 // Once the new canonical Device/Trust checks pass, its own startup deadline wins.
 let pendingRenewalHandoff=null;
+// A startup deadline belongs to one signed Join, not to later MLS epoch refreshes.
+let pendingMediaStartupWatchdog=null;
+function cancelMediaStartupWatchdog(generation=null,grantToken=null){
+  const watchdog=pendingMediaStartupWatchdog;
+  if(!watchdog||(generation!==null&&watchdog.generation!==generation)||
+     (grantToken!==null&&watchdog.token!==grantToken))return;
+  pendingMediaStartupWatchdog=null;
+  clearTimeout(watchdog.timer);
+}
+function armMediaStartupWatchdog(generation,grantToken,deadlineMs){
+  cancelMediaStartupWatchdog();
+  const watchdog={generation,token:grantToken,timer:null};
+  pendingMediaStartupWatchdog=watchdog;
+  watchdog.timer=setTimeout(()=>{
+    if(pendingMediaStartupWatchdog!==watchdog)return;
+    pendingMediaStartupWatchdog=null;
+    if(sessionActive&&generation===sessionLifecycleGeneration&&
+       token===grantToken&&!e2eeAdapterReady)
+      void endUnverifiedMedia(generation,
+        "Renewed Join media startup timed out; local capture stopped.");
+  },deadlineMs);
+}
 // This signed session grant is retired after any accepted session leaves.
 // Rejoining must start with a newly issued canonical Call/Session grant.
 let signedGrantRetired=false,activeSessionSequence=0;
@@ -1297,6 +1319,7 @@ function prewarmAuthorizedMediaRuntime(){
 async function activateE2eeAdapter(){
   e2eeAdapterReady=false;
   const generation=e2eeActivationGeneration;
+  const sessionGeneration=sessionLifecycleGeneration,sessionToken=token;
   const channel=e2eeChannel;
   const isCurrent=()=>generation===e2eeActivationGeneration&&channel===e2eeChannel&&channel?.readyState==="open";
   if(!isCurrent())throw new Error("Encrypted media transport no longer active");
@@ -1371,6 +1394,7 @@ async function activateE2eeAdapter(){
   const persisted=await persistEndpointState(adapter);
   if(!isCurrent())return;
   e2eeAdapterReady=true;
+  cancelMediaStartupWatchdog(sessionGeneration,sessionToken);
   ucrMediaFailureCount=0;ucrMediaFailureWindowStart=Date.now();ucrMediaFailureStopped=false;
   ui.state.textContent="Connected"; // only authenticated E2EE media is a connected call
   // A connected ICE transport alone is never evidence of recovered E2EE.
@@ -2086,7 +2110,6 @@ async function join(){
   if(signedGrantRetired||preflightGeneration!==sessionLifecycleGeneration||
      preflightToken!==token)return;
   const generation=++sessionLifecycleGeneration;
-  let mediaStartupWatchdog=null;
   try{
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Confirming independently authorized Device trust…";
     // A pre-existing canonical host may register/restore the Device while the
@@ -2116,12 +2139,7 @@ async function join(){
       const newGrantDeadlineMs=Math.max(0,Math.min(
         HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()));
       if(newGrantDeadlineMs===0)throw new Error("Renewed Join expired before media startup");
-      mediaStartupWatchdog=setTimeout(()=>{
-        if(sessionActive&&generation===sessionLifecycleGeneration&&
-           token===handoff.token&&!e2eeAdapterReady)
-          void endUnverifiedMedia(generation,
-            "Renewed Join media startup timed out; local capture stopped.");
-      },newGrantDeadlineMs);
+      armMediaStartupWatchdog(generation,handoff.token,newGrantDeadlineMs);
       handoff.trusted=true;
     }
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
@@ -2180,7 +2198,7 @@ async function join(){
     // adapter are still pending. Keep the deadline armed across asynchronous
     // WebRTC retries until the endpoint E2EE adapter is actually ready.
     if(!sessionActive||!mediaActive||e2eeAdapterReady)
-      clearTimeout(mediaStartupWatchdog);
+      cancelMediaStartupWatchdog(generation);
     // An already-expired new grant must not keep physical capture when a
     // fast media-startup path cancels its watchdog before the timer fires.
     if(generation===sessionLifecycleGeneration&&sessionActive&&
@@ -2217,6 +2235,7 @@ async function leave(){
   const leavingClaims=wasActive?body():null;
   const leavingSequence=activeSessionSequence;
   const leavingOfferId=startWebRtc.offerId;
+  cancelMediaStartupWatchdog();
   // A late Leave from this grant must never compete with another Join using
   // the same session identity. Only the first-party host can issue a new grant.
   if(wasActive)signedGrantRetired=true;
