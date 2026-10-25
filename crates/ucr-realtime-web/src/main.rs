@@ -3880,7 +3880,9 @@ mod tests {
         assert!(client.contains("renderStallMs:document.hidden?null:"));
         assert!(client.contains("hiddenTotalMs:"));
         assert!(client.contains("visibleDecodeWithoutRenderMs:"));
-        assert!(client.contains("firstVisibleUnrenderedDecodeAt:window.__ucrVideoCounters.firstVisibleUnrenderedDecodeAt"));
+        assert!(client.contains(
+            "firstVisibleUnrenderedDecodeAt:window.__ucrVideoCounters.firstVisibleUnrenderedDecodeAt"
+        ));
         assert!(!client.contains("lastDecodedAt>window.__ucrVideoCounters.lastRenderedAt"));
         assert!(client.contains("ucrDiagnosticReason(e?.message)"));
         assert!(client.contains("MLS_EPOCH_MISMATCH"));
