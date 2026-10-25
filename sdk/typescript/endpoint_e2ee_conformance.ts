@@ -2390,10 +2390,18 @@ try {
     failingRender.stop();
     assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, 0,
       "stopping playback must clear stale render failures");
+    // Keep this recovery draw independent of the dual-layer test's shared
+    // visualCalls array, whose expected counts start before this regression.
+    let recoveredDraws = 0;
+    const recoveredCanvas = {
+      width: 0, height: 0,
+      getContext() {return {drawImage() {recoveredDraws++;}};},
+    };
     const recoveredRender = new UcrBrowserWebCodecsConsumer({
-      videoCanvas: canvas as unknown as HTMLCanvasElement,
+      videoCanvas: recoveredCanvas as unknown as HTMLCanvasElement,
     });
     recoveredRender.play({...failedFrame, streamId: "recovered-canvas"});
+    assert.equal(recoveredDraws, 1, "recovery must draw one decoded frame");
     assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, 0,
       "successful canvas draw clears the unrendered-decode latch");
     recoveredRender.stop();
