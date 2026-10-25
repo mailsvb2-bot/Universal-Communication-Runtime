@@ -3783,15 +3783,17 @@ mod tests {
         assert!(inspection < policy && policy < transfer);
         assert!(join.contains("handoff.generation===generation&&handoff.token===token"));
         assert!(join.contains("HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()"));
-        assert!(join.contains("mediaStartupWatchdog=setTimeout(()=>{"));
-        let compact_join = join.split_whitespace().collect::<String>();
-        assert!(compact_join.contains(
-            "sessionActive&&generation===sessionLifecycleGeneration&&token===handoff.token"
+        assert!(join.contains("armMediaStartupWatchdog(generation,handoff.token,newGrantDeadlineMs);"));
+        assert!(client.contains("cancelMediaStartupWatchdog(sessionGeneration,sessionToken);"));
+        assert!(client.contains("if(pendingMediaStartupWatchdog!==watchdog)return;"));
+        let compact_client = client.split_whitespace().collect::<String>();
+        assert!(compact_client.contains(
+            "sessionActive&&generation===sessionLifecycleGeneration&&token===grantToken"
         ));
         assert!(join.contains("void endUnverifiedMedia(generation,"));
         assert!(join.contains("if(!sessionActive||!mediaActive||e2eeAdapterReady)"));
-        assert!(join.contains("clearTimeout(mediaStartupWatchdog);"));
-        assert!(join.contains("token===handoff.token&&!e2eeAdapterReady"));
+        assert!(join.contains("cancelMediaStartupWatchdog(generation);"));
+        assert!(client.contains("token===grantToken&&!e2eeAdapterReady"));
         // SDP completion alone does not prove the endpoint E2EE adapter is ready.
         assert!(join.contains("Renewed Join expired during media startup; local capture stopped."));
 
