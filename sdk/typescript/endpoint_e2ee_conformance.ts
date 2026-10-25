@@ -1019,7 +1019,7 @@ const acceptedJoinCtx: Record<string, any> = {
     session_sequence: 1})}),
   body: () => ({}),
   applyMediaPolicy: async () => {throw new Error("MLS activation refused");},
-  clearTimeout() {},
+  clearTimeout() {}, cancelMediaStartupWatchdog() {},
   setInterval: () => {acceptedJoinHeartbeats++;return 1;},
   leave: async () => {acceptedJoinCleanup++;acceptedJoinCtx.sessionActive = false;},
   scheduleWaitingRoom() {}, scheduleEntryRetry() {},
@@ -1036,13 +1036,11 @@ assert.equal(acceptedJoinCtx.ui.state.textContent, "Rejected");
 // Device/Trust inspection has completed. Its new grant owns startup expiry.
 const oldHandoffWatchdog = browser.split("handoffWatchdog=setTimeout(()=>{")[1]
   ?.split("},handoffDeadlineMs);")[0];
-const newStartupWatchdog = browser.split("mediaStartupWatchdog=setTimeout(()=>{")[1]
-  ?.split("},newGrantDeadlineMs);")[0];
 assert.ok(oldHandoffWatchdog?.includes("handoffState.trusted"));
-assert.ok(newStartupWatchdog?.includes("token===handoff.token"));
-assert.ok(newStartupWatchdog?.includes("!e2eeAdapterReady"),
+assert.ok(browser.includes("armMediaStartupWatchdog(generation,handoff.token,newGrantDeadlineMs);"));
+assert.ok(browser.includes("token===grantToken&&!e2eeAdapterReady"),
   "startup watchdog must not mistake SDP completion for endpoint E2EE readiness");
-assert.ok(browser.includes("if(!sessionActive||!mediaActive||e2eeAdapterReady)\n      clearTimeout(mediaStartupWatchdog);"),
+assert.ok(browser.includes("if(!sessionActive||!mediaActive||e2eeAdapterReady)\n      cancelMediaStartupWatchdog(generation);"),
   "keep startup deadline armed when WebRTC signaling completes before E2EE adapter activation");
 for (const scenario of [
   {name: "old pending", generation: 10, token: "old", trusted: false, expected: 1},
@@ -1066,23 +1064,8 @@ for (const scenario of [
   assert.equal(leaveCalls, scenario.expected, scenario.name);
   assert.equal(ctx.signedGrantRetired, scenario.expected === 1, scenario.name);
 }
-for (const scenario of [
-  {name: "current startup", generation: 11, token: "new", active: true, ready: false, expected: 1},
-  {name: "E2EE ready", generation: 11, token: "new", active: true, ready: true, expected: 0},
-  {name: "already left", generation: 11, token: "new", active: false, expected: 0},
-  {name: "newer Join", generation: 12, token: "new", active: true, expected: 0},
-  {name: "different token", generation: 11, token: "other", active: true, expected: 0},
-]) {
-  let stopCalls = 0;
-  const ctx: Record<string, any> = {
-    sessionActive: scenario.active, e2eeAdapterReady: scenario.ready ?? false,
-    generation: 11, sessionLifecycleGeneration: scenario.generation,
-    token: scenario.token, handoff: {token: "new"},
-    endUnverifiedMedia: () => {stopCalls++;},
-  };
-  runInNewContext("(()=>{" + newStartupWatchdog + "})()", ctx);
-  assert.equal(stopCalls, scenario.expected, scenario.name);
-}
+// The executable startupGuardSnippet cases above cover stalled startup,
+ // settled E2EE activation, old-generation cleanup and Leave.
 
 // A pending asynchronous authority import must not resurrect a grant after
 // Leave or an old-grant watchdog advances the canonical lifecycle generation.
@@ -1169,6 +1152,7 @@ const lifecycleCtx: Record<string, any> = {
   startAdaptiveMediaMonitoring: () => {protectedLifecycleEvents.push("monitor-starts");},
   syncReceiveSubscriptions: async () => {protectedLifecycleEvents.push("roster-synced");},
   resetReceiveRoster: () => {protectedLifecycleEvents.push("roster-reset");},
+  cancelMediaStartupWatchdog() {},
 };
 runInNewContext(
   closeSnippet + "\n" + activateSnippet +
@@ -1594,7 +1578,7 @@ const admissionCtx: Record<string, any> = {
   endpointMlsState: null, endpointMlsGroupId: null, window: {},
   localStream: makePhysicalStream(), streamAbort: {abort() {}},
   webrtcRetryTimer: 1, streamRetryTimer: 2, reactionTimer: null, chatTimer: null,
-  clearTimeout() {}, clearInterval() {},
+  clearTimeout() {}, clearInterval() {}, cancelMediaStartupWatchdog() {},
   stopAdaptiveMediaMonitoring() {}, stopActiveSpeakerMonitoring() {},
   refreshLocalMediaControls() {}, waitCopy: () => "Waiting for host",
   teardownPeer() { protectedTeardowns++; },
