@@ -3762,6 +3762,91 @@ mod tests {
     }
 
     #[test]
+    fn renewal_handoff_transfers_old_expiry_only_after_canonical_trust() {
+        let client = super::CLIENT_HTML;
+        let join = client
+            .split("async function join(){")
+            .nth(1)
+            .expect("canonical Join")
+            .split("function scheduleEntryRetry(){")
+            .next()
+            .expect("Join body");
+        let inspection = join
+            .find("await prepareCanonicalDeviceAfterJoin(generation);")
+            .expect("post-Join canonical Device/Trust inspection");
+        let policy = join
+            .find("await applyMediaPolicy(data.media_policy);")
+            .expect("canonical media policy");
+        let transfer = join
+            .find("handoff.trusted=true;")
+            .expect("trusted replacement handoff");
+        assert!(inspection < policy && policy < transfer);
+        assert!(join.contains("handoff.generation===generation&&handoff.token===token"));
+        assert!(join.contains("HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()"));
+        assert!(join.contains("mediaStartupWatchdog=setTimeout(()=>{"));
+        let compact_join = join.split_whitespace().collect::<String>();
+        assert!(compact_join.contains(
+            "sessionActive&&generation===sessionLifecycleGeneration&&token===handoff.token"
+        ));
+        assert!(join.contains("void endUnverifiedMedia(generation,"));
+        assert!(join.contains("if(!sessionActive||!mediaActive||e2eeAdapterReady)"));
+        assert!(join.contains("clearTimeout(mediaStartupWatchdog);"));
+        assert!(join.contains("token===handoff.token&&!e2eeAdapterReady"));
+        // SDP completion alone does not prove the endpoint E2EE adapter is ready.
+        assert!(join.contains("Renewed Join expired during media startup; local capture stopped."));
+
+        let renewal = client
+            .split("async function renewLocalRoomGrant(){")
+            .nth(1)
+            .expect("renewal coordinator")
+            .split("function releaseRoomPresence(){")
+            .next()
+            .expect("renewal body");
+        let watchdog = renewal
+            .split("handoffWatchdog=setTimeout(()=>{")
+            .nth(1)
+            .expect("retiring grant watchdog")
+            .split("},handoffDeadlineMs);")
+            .next()
+            .expect("watchdog body");
+        assert!(renewal.contains("handoffState={generation:handoff+1,token:next,trusted:false};"));
+        assert!(
+            watchdog
+                .contains("if(pendingRenewalHandoff!==handoffState||handoffState.trusted)return;")
+        );
+        assert!(
+            renewal.contains("if(pendingRenewalHandoff===handoffState)pendingRenewalHandoff=null;")
+        );
+    }
+
+    #[test]
+    fn join_preflight_cannot_resurrect_a_retired_grant() {
+        let join = super::CLIENT_HTML
+            .split("async function join(){")
+            .nth(1)
+            .expect("canonical Join")
+            .split("function scheduleEntryRetry(){")
+            .next()
+            .expect("Join body");
+        assert!(join.contains(
+            "const preflightGeneration=sessionLifecycleGeneration,preflightToken=token;"
+        ));
+        assert!(
+            join.contains(
+                "if(signedGrantRetired||preflightGeneration!==sessionLifecycleGeneration||"
+            )
+        );
+        assert!(join.contains("preflightToken!==token)return;"));
+        let fence = join
+            .find("if(signedGrantRetired||preflightGeneration!==sessionLifecycleGeneration||")
+            .expect("preflight fence");
+        let admission = join
+            .find("const generation=++sessionLifecycleGeneration;")
+            .expect("Join admission generation");
+        assert!(fence < admission);
+    }
+
+    #[test]
     fn first_party_auth_diagnostics_expose_only_stages_and_http_categories() {
         let page = super::FIRST_PARTY_START_HTML;
         let script = super::FIRST_PARTY_START_JS;
