@@ -31,13 +31,13 @@ const storage={
   removeItem:key=>values.delete(key),
 };
 const hintKey="ucr.first-party.active-call.v1";
-let inspections=0,rendered=0;
+let inspections=0,rendered=0,incomingRendered=0;
 const context={
   accountScope:scope,active:null,sessionStorage:storage,
   idempotency:new Map(),crypto:{randomUUID:()=>"retry-id"},
   restoreSession:async()=>user,message(){},
   refreshing:false,navigating:false,timer:null,knownContacts:[],
-  clearInterval(){},renderContacts(){},renderIncoming(){},
+  clearInterval(){},renderContacts(){},renderIncoming(){incomingRendered++;},
   authTrace:async(_stage,operation)=>operation(),clearRetryKey(){},
   setCallStage(){},location:{origin:"https://localhost",replace(){throw Error("stale Join navigated");}},
   calls:{async inspect(id){inspections++;assert.equal(id,call.callId);return call;},
@@ -192,6 +192,22 @@ await pendingJoin;
 assert.equal(context.navigating,false,"stale accepted Join must not navigate");
 assert.equal(context.active.call.callId,newer.callId);
 assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
+
+// A pending incoming-list response cannot repaint a former Device's Calls.
+context.active=null;
+context.accountScope=scope;
+let releaseIncoming,signalIncoming;
+const incomingStarted=new Promise(resolve=>{signalIncoming=resolve;});
+context.calls.incoming=()=>new Promise(resolve=>{releaseIncoming=resolve;signalIncoming();});
+const previousIncomingCount=incomingRendered;
+const staleIncoming=refresh();
+await incomingStarted;
+context.accountScope="logged-out";
+releaseIncoming([call]);
+await staleIncoming;
+assert.equal(incomingRendered,previousIncomingCount,
+  "late incoming list must not display after logout or Device switch");
+context.accountScope=scope;
 
 assert.match(source,/const call = await calls\.start\(contact\.id,media,requestId\);[\s\S]*?rememberActiveCall\(call,session\.participantId\);/);
 assert.match(source,/const result = await calls\.signal\(call\.callId,"accept"\);[\s\S]*?rememberActiveCall\(result,session\.participantId\);/);
