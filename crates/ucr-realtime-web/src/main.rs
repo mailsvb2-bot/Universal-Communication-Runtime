@@ -3786,7 +3786,9 @@ mod tests {
             "HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()"
         ));
         assert!(join.contains("mediaStartupWatchdog=setTimeout(()=>{"));
-        assert!(join.contains("sessionActive&&generation===sessionLifecycleGeneration&&token===handoff.token"));
+        assert!(join.contains(
+            "sessionActive&&generation===sessionLifecycleGeneration&&token===handoff.token"
+        ));
         assert!(join.contains("void endUnverifiedMedia(generation,"));
         assert!(join.contains("clearTimeout(mediaStartupWatchdog);"));
         assert!(join.contains("Renewed Join expired during media startup; local capture stopped."));
