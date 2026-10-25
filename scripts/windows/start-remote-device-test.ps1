@@ -57,7 +57,21 @@ if ($SelfTest) {
             throw ('Remote preflight private-host regression: ' + $case.Name)
         }
     }
-    Write-Output 'PASS: remote preflight private-host exclusions'
+    # Execute the actual JSON/exit-code path in a fresh local PowerShell process.
+    # A relative URI must never throw before reporting its structured blockers.
+    $powershellExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    foreach ($invalidOrigin in @('example.com', 'http://example.com', 'https://localhost')) {
+        $raw = & $powershellExe -NoProfile -File $PSCommandPath -PublicOrigin $invalidOrigin -Json
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 2) { throw ('Remote preflight invalid-origin exit regression: ' + $invalidOrigin) }
+        try { $report = $raw | Out-String | ConvertFrom-Json }
+        catch { throw ('Remote preflight invalid-origin JSON regression: ' + $invalidOrigin) }
+        $originErrors = @($report.blockers | Where-Object { $_ -like 'PUBLIC_HTTPS_ORIGIN_INVALID:*' })
+        if ($report.ready -ne $false -or $null -ne $report.publicOrigin -or $originErrors.Count -ne 1) {
+            throw ('Remote preflight invalid-origin blocker regression: ' + $invalidOrigin)
+        }
+    }
+    Write-Output 'PASS: remote preflight private-host and invalid-origin JSON exclusions'
     exit 0
 }
 
@@ -73,8 +87,10 @@ if ([string]::IsNullOrWhiteSpace($PublicOrigin)) {
             !$parsedOrigin.IsDefaultPort -or !$parsedOrigin.UserInfo.Equals('') -or
             (Is-PrivateHost $parsedOrigin.Host)) {
             $blockers.Add('PUBLIC_HTTPS_ORIGIN_INVALID: require an external https://hostname origin with no path, credentials, or custom port.')
+            $parsedOrigin = $null
         }
     } catch {
+        $parsedOrigin = $null
         $blockers.Add('PUBLIC_HTTPS_ORIGIN_INVALID: not a valid absolute URI.')
     }
 }
