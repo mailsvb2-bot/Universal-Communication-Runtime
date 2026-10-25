@@ -57,17 +57,23 @@ jobs:
           test -s crates/ucr-reference-messenger/Cargo.lock
           test -s crates/ucr-ai-actor/Cargo.lock
           test -s crates/ucr-chaos-lab/Cargo.lock
+          test -s crates/ucr-endpoint-wasm/Cargo.lock
       - name: Install pinned cargo-audit
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit every current Rust dependency lock
         run: |
           set -euo pipefail
-          cargo audit --file Cargo.lock --deny warnings
-          cargo audit --file fuzz/Cargo.lock --deny warnings
-          cargo audit --file crates/ucr-sdk/Cargo.lock --deny warnings
-          cargo audit --file crates/ucr-reference-messenger/Cargo.lock --deny warnings
-          cargo audit --file crates/ucr-ai-actor/Cargo.lock --deny warnings
-          cargo audit --file crates/ucr-chaos-lab/Cargo.lock --deny warnings
+          # Audit all locks even when one fails, so an unpatched endpoint
+          # cryptography dependency cannot hide behind an earlier failure.
+          audit_failed=0
+          cargo audit --file Cargo.lock --deny warnings || audit_failed=1
+          cargo audit --file fuzz/Cargo.lock --deny warnings || audit_failed=1
+          cargo audit --file crates/ucr-sdk/Cargo.lock --deny warnings || audit_failed=1
+          cargo audit --file crates/ucr-reference-messenger/Cargo.lock --deny warnings || audit_failed=1
+          cargo audit --file crates/ucr-ai-actor/Cargo.lock --deny warnings || audit_failed=1
+          cargo audit --file crates/ucr-chaos-lab/Cargo.lock --deny warnings || audit_failed=1
+          cargo audit --file crates/ucr-endpoint-wasm/Cargo.lock --deny warnings || audit_failed=1
+          exit "$audit_failed"
       - name: Architecture lock
         run: cargo test --locked -p ucr-architecture-tests --test phase44_supply_chain
       - name: Capture locked Cargo metadata
@@ -80,6 +86,7 @@ jobs:
           cargo metadata --manifest-path crates/ucr-reference-messenger/Cargo.toml --format-version 1 --locked > dist/phase44/metadata/reference-messenger.json
           cargo metadata --manifest-path crates/ucr-ai-actor/Cargo.toml --format-version 1 --locked > dist/phase44/metadata/ai-actor.json
           cargo metadata --manifest-path crates/ucr-chaos-lab/Cargo.toml --format-version 1 --locked > dist/phase44/metadata/chaos-lab.json
+          cargo metadata --manifest-path crates/ucr-endpoint-wasm/Cargo.toml --format-version 1 --locked > dist/phase44/metadata/endpoint-wasm.json
       - name: Build exact release candidates
         run: |
           set -euo pipefail
@@ -96,6 +103,7 @@ jobs:
             --metadata dist/phase44/metadata/reference-messenger.json \
             --metadata dist/phase44/metadata/ai-actor.json \
             --metadata dist/phase44/metadata/chaos-lab.json \
+            --metadata dist/phase44/metadata/endpoint-wasm.json \
             --output dist/phase44/ucr.spdx.json \
             --namespace-seed "$GITHUB_SHA"
       - name: Check GitHub CLI attestation support
@@ -182,6 +190,7 @@ jobs:
             --lockfile crates/ucr-reference-messenger/Cargo.lock \
             --lockfile crates/ucr-ai-actor/Cargo.lock \
             --lockfile crates/ucr-chaos-lab/Cargo.lock \
+            --lockfile crates/ucr-endpoint-wasm/Cargo.lock \
             --supply-chain-identity "$GITHUB_REPOSITORY/.github/workflows/phase44-supply-chain.yml" \
             --supply-chain-status "$supply_chain_status" \
             --platform-binary-status not-claimed-phase44
