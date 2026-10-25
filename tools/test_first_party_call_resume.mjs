@@ -293,7 +293,35 @@ context.active={call:acceptedCall,identity:"alice"};
 rememberActiveCall(acceptedCall,"alice");
 context.calls.signal=async()=>{throw Error("HTTP 503: temporary outage");};
 await assert.rejects(terminateActiveCall(),/HTTP 503/);
-assert.equal(context.active.terminating,false,"failed hangup must allow retry");
+assert.equal(context.active.terminating,true,
+  "unknown hangup outcome must keep signed Join and media blocked");
+assert.equal(context.active.terminationInFlight,false,
+  "unknown hangup outcome must allow an explicit retry");
+assert.equal(JSON.parse(values.get(hintKey)).stopRequested,true,
+  "same-tab Call locator must retain stop intent without becoming an authority");
+await beginMedia(acceptedCall.callId);
+assert.equal(context.navigating,false,"failed hangup must not resume signed Join");
+
+// Reload must not erase the user's stop intent after an ambiguous network reply.
+context.active=null;
+context.calls.inspect=async()=>acceptedCall;
+await restoreActiveCall(user);
+assert.equal(context.active.terminating,true,
+  "reload must restore the stop fence only after canonical Call inspection");
+await beginMedia(acceptedCall.callId);
+assert.equal(context.navigating,false,"reloaded Call must not auto-enter E2EE media");
+
+// Even a nonterminal canonical reply cannot override the user's stop intent.
+// The owner may have raced an acceptance or rejected a stale revision.
+context.calls.signal=async()=>({...acceptedCall,state:"active"});
+await terminateActiveCall();
+assert.equal(context.active.terminating,true,
+  "nonterminal hangup reply must preserve fail-closed media fence");
+assert.equal(context.active.terminationInFlight,false,
+  "nonterminal reply must leave Hangup available for retry");
+await beginMedia(acceptedCall.callId);
+assert.equal(context.navigating,false,"nonterminal reply must not navigate to media");
+
 let completeOld;
 context.calls.signal=()=>new Promise(resolve=>{completeOld=resolve;});
 const oldHangup=terminateActiveCall();
