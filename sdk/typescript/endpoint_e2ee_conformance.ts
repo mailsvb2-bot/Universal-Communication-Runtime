@@ -1519,7 +1519,7 @@ const admissionUi: Record<string, any> = {
   expires: {textContent: ""},
 };
 const admissionCtx: Record<string, any> = {
-  ui: admissionUi, claims: {not_before: 0}, sessionActive: true,
+  ui: admissionUi, claims: {not_before: 0}, token: "fixture-signed-join", sessionActive: true,
   mediaActive: true, mediaCaptureGeneration: 0, sessionLifecycleGeneration: 0,
   heartbeatRequestGeneration: 0, heartbeatInFlight: false, heartbeatWatchdog: null,
   signedGrantRetired: false, activeSessionSequence: 1,
