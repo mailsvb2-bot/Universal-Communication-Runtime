@@ -959,6 +959,7 @@ const acceptedJoinCtx: Record<string, any> = {
     session_sequence: 1})}),
   body: () => ({}),
   applyMediaPolicy: async () => {throw new Error("MLS activation refused");},
+  clearTimeout() {},
   setInterval: () => {acceptedJoinHeartbeats++;return 1;},
   leave: async () => {acceptedJoinCleanup++;acceptedJoinCtx.sessionActive = false;},
   scheduleWaitingRoom() {}, scheduleEntryRetry() {},
