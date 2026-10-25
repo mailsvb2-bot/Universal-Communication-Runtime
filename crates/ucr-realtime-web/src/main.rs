@@ -3696,11 +3696,14 @@ mod tests {
             .split("function releaseRoomPresence(){")
             .next()
             .expect("renewal body");
+        assert!(renewal.contains(
+            "const preflightDeadlineMs=Math.max(0,Math.min(HEARTBEAT_AUTH_TIMEOUT_MS,remaining));"
+        ));
         let preflight = renewal
             .split("const preflightWatchdog=setTimeout(()=>{")
             .nth(1)
             .expect("preflight watchdog")
-            .split("},HEARTBEAT_AUTH_TIMEOUT_MS);")
+            .split("},preflightDeadlineMs);")
             .next()
             .expect("preflight watchdog callback");
         assert!(preflight.contains("generation===sessionLifecycleGeneration&&sessionActive"));
