@@ -4018,7 +4018,9 @@ mod tests {
         assert!(js.contains("await calls.signal(call.callId,\"reject\")"));
         assert!(js.contains("await calls.signal(active.call.callId,action)"));
         assert!(
-            js.contains("await authTrace(\"inspect_call\",()=>calls.inspect(inspectedCall.callId))")
+            js.contains(
+                "await authTrace(\"inspect_call\",()=>calls.inspect(inspectedCall.callId))"
+            )
         );
         assert!(js.contains("active !== inspected"));
         assert!(js.contains("activeCallLocator() !== inspectedLocator"));
