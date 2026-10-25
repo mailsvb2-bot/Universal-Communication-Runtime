@@ -297,8 +297,19 @@ assert.equal(context.active.terminating,true,
   "unknown hangup outcome must keep signed Join and media blocked");
 assert.equal(context.active.terminationInFlight,false,
   "unknown hangup outcome must allow an explicit retry");
+assert.equal(JSON.parse(values.get(hintKey)).stopRequested,true,
+  "same-tab Call locator must retain stop intent without becoming an authority");
 await beginMedia(acceptedCall.callId);
 assert.equal(context.navigating,false,"failed hangup must not resume signed Join");
+
+// Reload must not erase the user's stop intent after an ambiguous network reply.
+context.active=null;
+context.calls.inspect=async()=>acceptedCall;
+await restoreActiveCall(user);
+assert.equal(context.active.terminating,true,
+  "reload must restore the stop fence only after canonical Call inspection");
+await beginMedia(acceptedCall.callId);
+assert.equal(context.navigating,false,"reloaded Call must not auto-enter E2EE media");
 
 // Even a nonterminal canonical reply cannot override the user's stop intent.
 // The owner may have raced an acceptance or rejected a stale revision.
