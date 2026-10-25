@@ -315,6 +315,9 @@ let localMediaPromise=null,earlyLocalCapture=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
 let heartbeatInFlight=false,heartbeatWatchdog=null;
+// A retiring Join may fence only the unauthenticated replacement preflight.
+// Once the new canonical Device/Trust checks pass, its own startup deadline wins.
+let pendingRenewalHandoff=null;
 // This signed session grant is retired after any accepted session leaves.
 // Rejoining must start with a newly issued canonical Call/Session grant.
 let signedGrantRetired=false,activeSessionSequence=0;
@@ -2068,14 +2071,22 @@ async function join(){
   // A signed join URL alone does not provision an authorized media signer.
   // Reject before opening a realtime session/heartbeat when the host omitted
   // the canonical Device media authority; the user may retry after setup.
+  const preflightGeneration=sessionLifecycleGeneration,preflightToken=token;
   try{await installFirstPartyDeviceAuthority();requireCanonicalMediaHostReady();prewarmAuthorizedMediaRuntime();}
   catch(error){
+    if(signedGrantRetired||preflightGeneration!==sessionLifecycleGeneration||
+       preflightToken!==token)return;
     ui.state.textContent="Secure media unavailable";
     ui.status.textContent=error.message;
     ui.join.disabled=false;
     return;
   }
+  // Leave or the retiring grant's watchdog may have fired while imports or
+  // first-party authority initialization were pending. Never resurrect it.
+  if(signedGrantRetired||preflightGeneration!==sessionLifecycleGeneration||
+     preflightToken!==token)return;
   const generation=++sessionLifecycleGeneration;
+  let mediaStartupWatchdog=null;
   try{
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Confirming independently authorized Device trust…";
     // A pre-existing canonical host may register/restore the Device while the
@@ -2096,6 +2107,22 @@ async function join(){
     if(generation!==sessionLifecycleGeneration)return;
     await applyMediaPolicy(data.media_policy);
     if(generation!==sessionLifecycleGeneration)return;
+    const handoff=pendingRenewalHandoff;
+    if(handoff&&handoff.generation===generation&&handoff.token===token){
+      // A successful replacement Join is independently authenticated only
+      // after the canonical Device/Trust inspection and media policy checks.
+      // Never let the retiring grant's expiry kill this fresh authorization.
+      // A stalled MLS/WebRTC startup remains bounded by the NEW signed grant.
+      const newGrantDeadlineMs=Math.max(0,Math.min(
+        HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()));
+      if(newGrantDeadlineMs===0)throw new Error("Renewed Join expired before media startup");
+      mediaStartupWatchdog=setTimeout(()=>{
+        if(sessionActive&&generation===sessionLifecycleGeneration&&token===handoff.token)
+          void endUnverifiedMedia(generation,
+            "Renewed Join media startup timed out; local capture stopped.");
+      },newGrantDeadlineMs);
+      handoff.trusted=true;
+    }
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
     heartbeatTimer=setInterval(()=>{
@@ -2147,6 +2174,14 @@ async function join(){
       }
     }
     ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=signedGrantRetired;
+  }finally{
+    clearTimeout(mediaStartupWatchdog);
+    // An already-expired new grant must not keep physical capture when a
+    // fast media-startup path cancels its watchdog before the timer fires.
+    if(generation===sessionLifecycleGeneration&&sessionActive&&
+       claims&&Date.now()>=claims.expires)
+      void endUnverifiedMedia(generation,
+        "Renewed Join expired during media startup; local capture stopped.");
   }
 }
 function scheduleEntryRetry(){
@@ -2741,7 +2776,7 @@ async function renewLocalRoomGrant(){
       void endUnverifiedMedia(generation,
         "Call renewal authorization timed out; local media capture stopped.");
   },preflightDeadlineMs);
-  let handoffWatchdog=null;
+  let handoffWatchdog=null,handoffState=null;
   try{
     let data;
     if(isLocalRoom){
@@ -2809,6 +2844,8 @@ async function renewLocalRoomGrant(){
     heartbeatInFlight=false;++heartbeatRequestGeneration;
     const oldToken=token;
     const oldBody=body();
+    handoffState={generation:handoff+1,token:next,trusted:false};
+    pendingRenewalHandoff=handoffState;
     // A stalled handoff must not retain capture beyond the retiring grant's
     // signed expiry, even when the remaining lifetime is under 12 seconds.
     const handoffDeadlineMs=Math.max(0,Math.min(HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()));
@@ -2819,6 +2856,10 @@ async function renewLocalRoomGrant(){
       if((sessionLifecycleGeneration!==handoff&&
           sessionLifecycleGeneration!==handoff+1)||
          (token!==oldToken&&token!==next))return;
+      // The replacement's own independently authenticated Device/Trust
+      // admission transfers capture responsibility to its NEW grant deadline.
+      // Do not revoke a valid replacement because the OLD grant expired.
+      if(pendingRenewalHandoff!==handoffState||handoffState.trusted)return;
       // leave() revokes in-flight joins and stops all physical tracks before
       // its first asynchronous boundary, even if no new Join was accepted.
       signedGrantRetired=true;
@@ -2867,6 +2908,7 @@ async function renewLocalRoomGrant(){
   }finally{
     clearTimeout(preflightWatchdog);
     clearTimeout(handoffWatchdog);
+    if(pendingRenewalHandoff===handoffState)pendingRenewalHandoff=null;
     // A rejected or invalid renewal can settle before its watchdog runs.
     // Cancelling the timer must never preserve capture on an expired grant.
     if(generation===sessionLifecycleGeneration&&sessionActive&&
