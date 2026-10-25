@@ -4028,7 +4028,7 @@ mod tests {
         assert!(js.contains("activeCallLocator() !== inspectedLocator"));
         assert!(js.contains("if (accountScope !== principalScope(user))"));
         assert!(js.contains("idempotency.clear()"));
-        assert!(js.contains("clearRetryKey(active.call)"));
+        assert!(js.contains("clearRetryKey(result)"));
 
         // Browser media navigation requires a server-issued, recipient-
         // accepted, exact-Call Join. It only enters the URL fragment and
