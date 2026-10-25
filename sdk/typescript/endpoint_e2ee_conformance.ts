@@ -645,6 +645,66 @@ assert.equal(retireCalls, 1);
 await delayedStop.stop();
 
 const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
+// The first successful E2EE activation permanently settles its startup timer.
+// A later MLS refresh can temporarily reset readiness without reviving it.
+const startupGuardSnippet = browser.slice(
+  browser.indexOf("function cancelMediaStartupWatchdog("),
+  browser.indexOf("// This signed session grant is retired"),
+);
+assert.ok(startupGuardSnippet.startsWith("function cancelMediaStartupWatchdog("));
+let startupTimerSequence=0,startupRevocations=0;
+const startupCallbacks = new Map<number, () => void>();
+const startupCtx: Record<string, any> = {
+  sessionActive:true,sessionLifecycleGeneration:7,token:"renewed",
+  e2eeAdapterReady:false,
+  setTimeout(callback: () => void) {
+    const id=++startupTimerSequence;
+    startupCallbacks.set(id,callback);
+    return id;
+  },
+  clearTimeout(id: number) {startupCallbacks.delete(id);},
+  endUnverifiedMedia() {startupRevocations++;},
+};
+runInNewContext(startupGuardSnippet +
+  "\nthis.arm = armMediaStartupWatchdog; this.cancel = cancelMediaStartupWatchdog;",
+  startupCtx);
+startupCtx.arm(7,"renewed",12000);
+const staleStartupCallback=startupCallbacks.get(1);
+assert.ok(staleStartupCallback);
+startupCtx.e2eeAdapterReady=true;
+startupCtx.cancel(7,"renewed");
+startupCtx.e2eeAdapterReady=false; // MLS epoch refresh
+staleStartupCallback();
+assert.equal(startupRevocations,0,
+  "settled startup watchdog must not revoke a refreshed encrypted call");
+assert.equal(startupCallbacks.size,0);
+startupCtx.arm(8,"next",12000);
+const pendingStartupCallback=startupCallbacks.get(2);
+assert.ok(pendingStartupCallback);
+startupCtx.cancel(7,"renewed");
+assert.equal(startupCallbacks.size,1,
+  "old Join cleanup must not cancel the new signed grant's deadline");
+startupCtx.sessionLifecycleGeneration=8;startupCtx.token="next";
+startupCallbacks.delete(2); // the fake timer has fired
+pendingStartupCallback();
+assert.equal(startupRevocations,1,
+  "a genuinely stalled encrypted startup must still fail closed");
+startupCtx.arm(9,"later",12000);
+startupCtx.cancel(); // Leave
+assert.equal(startupCallbacks.size,0,"Leave must disarm its startup watchdog");
+const activationSnippet=browser.slice(
+  browser.indexOf("async function activateE2eeAdapter(){"),
+  browser.indexOf("function attachE2eeDataChannel("),
+);
+assert.match(activationSnippet,
+  /e2eeAdapterReady=true;\s*cancelMediaStartupWatchdog\(sessionGeneration,sessionToken\)/);
+const leaveSnippet=browser.slice(
+  browser.indexOf("async function leave(){"),
+  browser.indexOf("function scheduleWaitingRoom(){"),
+);
+assert.ok(leaveSnippet.includes("cancelMediaStartupWatchdog();"));
+console.log("UCR_E2EE_STARTUP_WATCHDOG_SETTLEMENT_OK");
+
 // Run the browser's *actual* MLS bootstrap and retirement against delayed
 // canonical network responses. A late Welcome or registration reply after
 // leaving the call must not publish a signer or leak an endpoint WASM state.
