@@ -537,31 +537,39 @@ el("new-contact").addEventListener("submit", event => {
 // Mark termination before the network request: an in-flight refresh or signed
 // Join must never publish media after the user has requested hangup/cancel.
 async function terminateActiveCall() {
-  if (!active || active.terminating) return;
+  if (!active || active.terminationInFlight || active.call.state === "terminated") return;
   const selected = active;
   const callId = selected.call.callId;
   const scope = accountScope;
   const locator = activeCallLocator();
   const state = selected.call.state;
   const action = state === "active" || state === "reconnecting" ? "hangup" : "cancel";
+  // A transport failure leaves the server outcome unknown. Preserve the
+  // stop intent across retries and periodic Call inspection; never resume
+  // signed Join or media merely because a network request failed.
   selected.terminating = true;
+  selected.terminationInFlight = true;
   try {
     const result = await calls.signal(callId,action);
     if (!result || result.callId !== callId) throw Error("Call termination mismatch");
     // An old response must not replace a newer Call or mutate another Device.
     if (accountScope !== scope || !active || active.call.callId !== callId ||
         activeCallLocator() !== locator) return;
-    active = {...active,call:result,terminating:false};
+    active = {...active,call:result,
+      terminating:result.state !== "terminated",terminationInFlight:false};
     if (result.state === "terminated") {
       forgetActiveCall(locator);
       if (active.identity === result.callerIdentityId) clearRetryKey(result);
     }
     showActive();
-    message("Завершение вызова подтверждено каноническим сервером.");
+    message(result.state === "terminated"
+      ? "Завершение вызова подтверждено каноническим сервером."
+      : "Завершение ещё не подтверждено. Медиа заблокировано; повторите действие.");
   } finally {
-    // A failed request may be retried; do not keep the media fence forever.
+    // Clear only the in-flight lock. A failed/ambiguous response MUST NOT
+    // clear the user's stop fence; the button remains available for retry.
     if (accountScope === scope && active && active.call.callId === callId &&
-        activeCallLocator() === locator) active.terminating = false;
+        activeCallLocator() === locator) active.terminationInFlight = false;
   }
 }
 // Hangup must bypass the ordinary UI busy lock: accepting an incoming Call
