@@ -3784,7 +3784,8 @@ mod tests {
         assert!(join.contains("handoff.generation===generation&&handoff.token===token"));
         assert!(join.contains("HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()"));
         assert!(join.contains("mediaStartupWatchdog=setTimeout(()=>{"));
-        assert!(join.split_whitespace().collect::<String>().contains(
+        let compact_join = join.split_whitespace().collect::<String>();
+        assert!(compact_join.contains(
             "sessionActive&&generation===sessionLifecycleGeneration&&token===handoff.token"
         ));
         assert!(join.contains("void endUnverifiedMedia(generation,"));
