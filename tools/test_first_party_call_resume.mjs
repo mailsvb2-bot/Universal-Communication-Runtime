@@ -196,7 +196,7 @@ assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
 assert.match(source,/const call = await calls\.start\(contact\.id,media,requestId\);[\s\S]*?rememberActiveCall\(call,session\.participantId\);/);
 assert.match(source,/const result = await calls\.signal\(call\.callId,"accept"\);[\s\S]*?rememberActiveCall\(result,session\.participantId\);/);
 assert.match(source,/if \(!active\) await restoreActiveCall\(user\);/);
-assert.match(source,/if \(fresh\.state === "terminated"\) \{\s*forgetActiveCall\(\);/);
+assert.match(source,/if \(fresh\.state === "terminated"\) \{\s*forgetActiveCall\(inspectedLocator\);/);
 assert.match(source,/await host\.logout\(\);\s*forgetBinding\(\);\s*forgetActiveCall\(\);/);
 assert.doesNotMatch(snippet,/calls\.join\(/,"untrusted locator cannot mint a Join");
 console.log("PASS: canonical Call resume is scope-fenced, inspected, and cleared on terminal/denied state");
