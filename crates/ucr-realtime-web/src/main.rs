@@ -3719,6 +3719,12 @@ mod tests {
             renewal
                 .contains("clearTimeout(preflightWatchdog);\n    clearTimeout(handoffWatchdog);")
         );
+        let settled = renewal
+            .rsplit("}finally{")
+            .next()
+            .expect("renewal settlement guard");
+        assert!(settled.contains("claims&&Date.now()>=claims.expires"));
+        assert!(settled.contains("void endUnverifiedMedia(generation,"));
     }
 
     #[test]
