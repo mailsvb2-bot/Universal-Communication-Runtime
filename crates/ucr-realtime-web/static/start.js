@@ -313,15 +313,17 @@ async function beginMedia(callId) {
   const selected = active;
   if (!selected || selected.call.callId !== callId ||
       selected.call.state !== "active") return;
-  const selectedCall = selected.call;
   const selectedScope = accountScope;
   const selectedLocator = activeCallLocator();
   // This coordinator permits Join ONLY after the recipient has accepted
   // and the canonical owner reports ACTIVE. It never creates trust or keys.
   const grant = await calls.join(callId);
   if (!grant || grant.callId !== callId) throw Error("Call admission mismatch");
-  if (navigating || accountScope !== selectedScope || active !== selected ||
-      active.call !== selectedCall || activeCallLocator() !== selectedLocator) return;
+  // Periodic inspection may replace the object for the SAME active Call.
+  // Fence by canonical Call/Device state, not mutable UI object identity.
+  if (navigating || accountScope !== selectedScope || !active ||
+      active.call.callId !== callId || active.call.state !== "active" ||
+      activeCallLocator() !== selectedLocator) return;
   navigating = true;
   setCallStage(3, active?.call.media === "video" ? "Допуск подтверждён. Открывается защищённый видеоэкран…" : "Допуск подтверждён. Открывается защищённый экран аудиосвязи…");
   clearInterval(timer);
