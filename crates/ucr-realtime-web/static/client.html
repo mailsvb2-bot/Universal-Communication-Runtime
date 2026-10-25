@@ -2809,6 +2809,9 @@ async function renewLocalRoomGrant(){
     heartbeatInFlight=false;++heartbeatRequestGeneration;
     const oldToken=token;
     const oldBody=body();
+    // A stalled handoff must not retain capture beyond the retiring grant's
+    // signed expiry, even when the remaining lifetime is under 12 seconds.
+    const handoffDeadlineMs=Math.max(0,Math.min(HEARTBEAT_AUTH_TIMEOUT_MS,claims.expires-Date.now()));
     // A replacement Join can hang before sessionActive becomes true. Watch
     // both the retiring session and the one replacement generation; never
     // allow a late watchdog to close an unrelated newer call.
@@ -2823,7 +2826,7 @@ async function renewLocalRoomGrant(){
       ui.state.textContent="Access ended";
       ui.status.textContent="Call renewal timed out; local media capture stopped.";
       ucrRecordDiagnostic("Renewal Join watchdog stopped local capture","lifecycle");
-    },HEARTBEAT_AUTH_TIMEOUT_MS);
+    },handoffDeadlineMs);
     await closeServerPeer();
     teardownPeer();
     retireEndpointMlsState();
