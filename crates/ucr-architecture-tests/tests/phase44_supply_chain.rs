@@ -89,16 +89,24 @@ fn phase44_audits_every_git_tracked_cargo_lock_including_endpoint_wasm() {
         .args(["ls-files", "--cached", "--", "Cargo.lock", "**/Cargo.lock"])
         .output()
         .expect("git must be available for committed lock discovery");
-    assert!(output.status.success(), "cannot enumerate tracked Cargo locks");
+    assert!(
+        output.status.success(),
+        "cannot enumerate tracked Cargo locks"
+    );
     let tracked = String::from_utf8(output.stdout).expect("git paths are UTF-8");
     let workflow = read(".github/workflows/phase44-supply-chain.yml");
     let ci = read(".github/workflows/ci.yml");
     assert!(
-        tracked.lines().any(|path| path == "crates/ucr-endpoint-wasm/Cargo.lock"),
+        tracked
+            .lines()
+            .any(|path| path == "crates/ucr-endpoint-wasm/Cargo.lock"),
         "browser endpoint WASM lock must be tracked"
     );
     for lock in tracked.lines() {
-        assert!(workflow.contains(&format!("test -s {lock}")), "lock not required: {lock}");
+        assert!(
+            workflow.contains(&format!("test -s {lock}")),
+            "lock not required: {lock}"
+        );
         assert!(
             workflow.contains(&format!("cargo audit --file {lock} --deny warnings")),
             "lock not security-audited: {lock}"
