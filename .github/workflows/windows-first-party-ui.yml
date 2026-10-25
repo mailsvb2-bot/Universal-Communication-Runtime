@@ -5,6 +5,7 @@ on:
       - 'crates/ucr-realtime-web/static/start.html'
       - 'crates/ucr-realtime-web/static/start.js'
       - 'tools/check_first_party_start_controls.py'
+      - 'tools/test_first_party_call_resume.mjs'
       - 'tools/check_first_party_call_revision_contract.py'
       - 'tools/check_first_party_media_admission_contract.py'
       - 'crates/ucr-realtime-web/static/client.html'
@@ -25,6 +26,9 @@ jobs:
       - name: Check page control bindings
         shell: pwsh
         run: python tools/check_first_party_start_controls.py
+      - name: Exercise canonical Call reload recovery
+        shell: pwsh
+        run: node tools/test_first_party_call_resume.mjs
       - name: Check call creation revision contract
         shell: pwsh
         run: python tools/check_first_party_call_revision_contract.py

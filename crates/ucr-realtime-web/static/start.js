@@ -29,6 +29,7 @@ let knownContacts = [];
 let accountScope = null;
 const idempotency = new Map();
 const HINT_KEY = "ucr.first-party.last-device.v1";
+const ACTIVE_CALL_HINT_KEY = "ucr.first-party.active-call.v1";
 const authDiagnostics=[];
 function authHttpCode(error){
   const match=String(error instanceof Error?error.message:"").match(/HTTP (401|403|404|409|429|500|502|503)/);
@@ -144,6 +145,44 @@ function principalScope(user) {
   return JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]);
 }
 
+// Session storage is only a same-tab locator, never a Call or Identity owner.
+// Every restored Call must be inspected under a fresh canonical Device session.
+function rememberActiveCall(call,identity) {
+  if (!accountScope || ![call.callerIdentityId,call.calleeIdentityId].includes(identity) ||
+      typeof call.callId !== "string" || !/^[A-Za-z0-9_.:@-]{1,128}$/.test(call.callId)) return;
+  try {sessionStorage.setItem(ACTIVE_CALL_HINT_KEY,JSON.stringify({
+    scope:accountScope,callId:call.callId,
+  }));} catch {}
+}
+function forgetActiveCall() {
+  try {sessionStorage.removeItem(ACTIVE_CALL_HINT_KEY);} catch {}
+}
+async function restoreActiveCall(user) {
+  let hint;
+  try {hint=JSON.parse(sessionStorage.getItem(ACTIVE_CALL_HINT_KEY)??"null");}
+  catch {forgetActiveCall();return;}
+  if (hint===null) return;
+  const scope=principalScope(user);
+  if (!hint || typeof hint!=="object" || hint.scope!==scope ||
+      accountScope!==scope || typeof hint.callId!=="string" ||
+      !/^[A-Za-z0-9_.:@-]{1,128}$/.test(hint.callId)) {
+    forgetActiveCall();return;
+  }
+  try {
+    const call=await calls.inspect(hint.callId);
+    // Inspect checks current canonical participant, Device and Call membership.
+    // A delayed response cannot restore a Call after account/Device switch.
+    if (accountScope!==scope) {forgetActiveCall();return;}
+    if (call.state==="terminated") {forgetActiveCall();return;}
+    active={call,identity:user.participantId};
+    showActive();
+  } catch(error) {
+    // A temporary network failure is not proof that the durable Call ended.
+    if ([403,404].includes(authHttpCode(error))) forgetActiveCall();
+    throw error;
+  }
+}
+
 function message(value) { status.textContent = value; }
 function setCallStage(step, guide) {
   for (const [index, name] of ["device","contact","accepted","media"].entries()) {
@@ -177,7 +216,7 @@ async function updateDevices() {
         if(!window.confirm("Отзыв устройства необратим. Подтвердить?"))return;
         const own=record.deviceId===(await host.resumeAuthenticatedDevice()).deviceId;
         await host.revokeDevice(record.deviceId);
-        if(own){forgetBinding();clearInterval(timer);active=null;accountScope=null;
+        if(own){forgetBinding();forgetActiveCall();clearInterval(timer);active=null;accountScope=null;
           renderContacts([]);renderIncoming([]);showActive();message("Это устройство отозвано. Повторный вход с ним невозможен.");
         }else{await updateDevices();}
       },"secondary"));
@@ -283,6 +322,7 @@ async function dial(contact,media) {
   const session = await restoreSession();
   const call = await calls.start(contact.id,media,requestId);
   active = {call,identity:session.participantId};
+  rememberActiveCall(call,session.participantId);
   showActive();
   message("Вызов создан. Ожидается реальное принятие другим участником.");
 }
@@ -305,6 +345,7 @@ function renderIncoming(items) {
         const result = await calls.signal(call.callId,"accept");
         const session = await host.resumeAuthenticatedDevice();
         active = {call:result,identity:session.participantId};
+        rememberActiveCall(result,session.participantId);
         showActive();
         if (result.state === "active") await beginMedia(result.callId);
       }),
@@ -331,6 +372,7 @@ async function refresh() {
       // Fail closed immediately if the user logs out or changes Device in
       // another tab. Never keep the former user's contacts/Call on screen.
       clearInterval(timer);
+      forgetActiveCall();
       accountScope = null;
       active = null;
       knownContacts = [];
@@ -340,6 +382,7 @@ async function refresh() {
       showActive();
       throw Error("учётная запись сменилась — требуется повторная проверка");
     }
+    if (!active) await restoreActiveCall(user);
     const incoming = await authTrace("incoming_calls",()=>calls.incoming());
     renderIncoming(incoming);
     if (active) {
@@ -348,6 +391,7 @@ async function refresh() {
       showActive();
       if (fresh.state === "active") await beginMedia(fresh.callId);
       if (fresh.state === "terminated") {
+        forgetActiveCall();
         if (active.identity === fresh.callerIdentityId) clearRetryKey(fresh);
         message("Вызов завершён сервером. Старая сессия больше не используется.");
       }
@@ -362,6 +406,7 @@ async function initialize() {
   rememberBinding(user);
   const currentScope = principalScope(user);
   if (accountScope !== currentScope) {
+    if (accountScope !== null) forgetActiveCall();
     // Switching user or Device must never reuse another identity's selected
     // Call, cached UI state, or in-flight idempotency keys.
     accountScope = currentScope;
@@ -449,8 +494,9 @@ el("cancel").addEventListener("click",() => void run(async () => {
   const state = active.call.state;
   const action = state === "active" || state === "reconnecting" ? "hangup" : "cancel";
   active.call = await calls.signal(active.call.callId,action);
-  if (active.call.state === "terminated" && active.identity === active.call.callerIdentityId) {
-    clearRetryKey(active.call);
+  if (active.call.state === "terminated") {
+    forgetActiveCall();
+    if (active.identity === active.call.callerIdentityId) clearRetryKey(active.call);
   }
   showActive();
   message("Завершение вызова подтверждено каноническим сервером.");
@@ -491,6 +537,7 @@ el("rotate-recovery").addEventListener("click",()=>void run(async()=>{
 el("logout").addEventListener("click",()=>void run(async()=>{
   await host.logout();
   forgetBinding();
+  forgetActiveCall();
   clearInterval(timer);
   active=null;accountScope=null;knownContacts=[];idempotency.clear();
   renderContacts([]);renderIncoming([]);el("devices").replaceChildren();
