@@ -2733,11 +2733,14 @@ async function renewLocalRoomGrant(){
   const generation=sessionLifecycleGeneration;
   // Renewal can stall before a replacement grant is even issued. The
   // heartbeat's busy guard must not let expired authorization hold capture.
+  // Never grant the pending request extra camera/microphone time after the
+  // current signed grant's own expiry, including after laptop sleep.
+  const preflightDeadlineMs=Math.max(0,Math.min(HEARTBEAT_AUTH_TIMEOUT_MS,remaining));
   const preflightWatchdog=setTimeout(()=>{
     if(generation===sessionLifecycleGeneration&&sessionActive)
       void endUnverifiedMedia(generation,
         "Call renewal authorization timed out; local media capture stopped.");
-  },HEARTBEAT_AUTH_TIMEOUT_MS);
+  },preflightDeadlineMs);
   let handoffWatchdog=null;
   try{
     let data;
