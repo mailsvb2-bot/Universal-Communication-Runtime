@@ -21,6 +21,11 @@ const mediaBegin=source.indexOf("async function beginMedia(callId) {");
 const mediaEnd=source.indexOf("async function dial(contact,media) {",mediaBegin);
 assert.ok(mediaBegin>=0 && mediaEnd>mediaBegin,"first-party accepted-Join implementation missing");
 const mediaSnippet=source.slice(mediaBegin,mediaEnd);
+const terminationBegin=source.indexOf("async function terminateActiveCall() {");
+const terminationEnd=source.indexOf('el("cancel").addEventListener',terminationBegin);
+assert.ok(terminationBegin>=0 && terminationEnd>terminationBegin,
+  "first-party pending hangup guard missing");
+const terminationSnippet=source.slice(terminationBegin,terminationEnd);
 const user={tenantId:"tenant-a",namespaceId:null,participantId:"alice",deviceId:"device-a"};
 const call={callId:"call-123",callerIdentityId:"alice",calleeIdentityId:"bob",state:"ringing"};
 const scope=JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]);
@@ -47,11 +52,11 @@ const context={
 };
 runInNewContext(
   'const ACTIVE_CALL_HINT_KEY="ucr.first-party.active-call.v1";\n'+snippet+
-  "\n"+dialSnippet+"\n"+refreshSnippet+"\n"+mediaSnippet+
-  "\nthis.ops={rememberActiveCall,forgetActiveCall,restoreActiveCall,dial,refresh,beginMedia};",
+  "\n"+dialSnippet+"\n"+refreshSnippet+"\n"+mediaSnippet+"\n"+terminationSnippet+
+  "\nthis.ops={rememberActiveCall,forgetActiveCall,restoreActiveCall,dial,refresh,beginMedia,terminateActiveCall};",
   context,
 );
-const {rememberActiveCall,forgetActiveCall,restoreActiveCall,dial,refresh,beginMedia}=context.ops;
+const {rememberActiveCall,forgetActiveCall,restoreActiveCall,dial,refresh,beginMedia,terminateActiveCall}=context.ops;
 rememberActiveCall(call,"alice");
 assert.equal(JSON.parse(values.get(hintKey)).callId,call.callId);
 context.active=null; // Reload, not a new Call or a new identity owner.
@@ -229,6 +234,63 @@ await staleIncoming;
 assert.equal(incomingRendered,previousIncomingCount,
   "late incoming list must not display after logout or Device switch");
 context.accountScope=scope;
+
+// A user-requested hangup must fence BOTH a fresh Join and a Join already
+// waiting on the canonical server, even when a periodic inspect races.
+const acceptedCall={...call,state:"active"};
+context.accountScope=scope;
+context.active={call:acceptedCall,identity:"alice"};
+forgetActiveCall();
+rememberActiveCall(acceptedCall,"alice");
+context.calls.incoming=async()=>[];
+context.calls.inspect=async()=>acceptedCall;
+let completeHangup;
+context.calls.signal=()=>new Promise(resolve=>{completeHangup=resolve;});
+let joinAttempts=0;
+context.calls.join=async()=>{joinAttempts++;return {callId:call.callId,joinFragment:"#signed"};};
+const pendingHangup=terminateActiveCall();
+assert.equal(context.active.terminating,true,"hangup must fence media synchronously");
+await refresh();
+await beginMedia(acceptedCall.callId);
+assert.equal(joinAttempts,0,"no Join during pending hangup");
+assert.equal(context.navigating,false);
+completeHangup({...acceptedCall,state:"terminated"});
+await pendingHangup;
+assert.equal(context.active.call.state,"terminated");
+assert.equal(values.has(hintKey),false,"confirmed hangup clears only its locator");
+
+// A Join requested BEFORE hangup must be discarded when its response arrives.
+context.active={call:acceptedCall,identity:"alice"};
+rememberActiveCall(acceptedCall,"alice");
+let finishJoin,signalJoinPending;
+const joinPending=new Promise(resolve=>{signalJoinPending=resolve;});
+context.calls.join=()=>new Promise(resolve=>{finishJoin=resolve;signalJoinPending();});
+const inFlightJoin=beginMedia(acceptedCall.callId);
+await joinPending;
+const secondHangup=terminateActiveCall();
+finishJoin({callId:acceptedCall.callId,joinFragment:"#signed"});
+await inFlightJoin;
+assert.equal(context.navigating,false,"late Join must not navigate during hangup");
+assert.equal(navigatedTo,null);
+completeHangup({...acceptedCall,state:"terminated"});
+await secondHangup;
+
+// A failed termination unblocks a deliberate retry; a late response for a
+// replaced Call cannot erase the new Call's locator or UI state.
+context.active={call:acceptedCall,identity:"alice"};
+rememberActiveCall(acceptedCall,"alice");
+context.calls.signal=async()=>{throw Error("HTTP 503: temporary outage");};
+await assert.rejects(terminateActiveCall(),/HTTP 503/);
+assert.equal(context.active.terminating,false,"failed hangup must allow retry");
+let completeOld;
+context.calls.signal=()=>new Promise(resolve=>{completeOld=resolve;});
+const oldHangup=terminateActiveCall();
+context.active={call:newer,identity:"alice"};
+rememberActiveCall(newer,"alice");
+completeOld({...acceptedCall,state:"terminated"});
+await oldHangup;
+assert.equal(context.active.call.callId,newer.callId);
+assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
 
 assert.match(source,/const call = await calls\.start\(contact\.id,media,requestId\);[\s\S]*?rememberActiveCall\(call,session\.participantId\);/);
 assert.match(source,/const result = await calls\.signal\(call\.callId,"accept"\);[\s\S]*?rememberActiveCall\(result,session\.participantId\);/);
