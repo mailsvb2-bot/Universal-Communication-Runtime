@@ -1,0 +1,52 @@
+name: E2EE Endpoint Lock Migration
+
+on:
+  push:
+    branches: [fix/phase44-audit-endpoint-wasm-lock-20261025]
+    paths:
+      - 'crates/ucr-endpoint-wasm/Cargo.toml'
+      - '.github/workflows/e2ee-endpoint-lock-migration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate-endpoint-lock:
+    if: github.repository == 'mailsvb2-bot/Universal-Communication-Runtime' && github.ref == 'refs/heads/fix/phase44-audit-endpoint-wasm-lock-20261025'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: true
+      - name: Install pinned Rust
+        run: rustup show
+      - name: Regenerate lock with Cargo, never text-edit checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo generate-lockfile --manifest-path crates/ucr-endpoint-wasm/Cargo.toml
+          cargo metadata --manifest-path crates/ucr-endpoint-wasm/Cargo.toml --locked --format-version 1 > /dev/null
+          cargo tree --manifest-path crates/ucr-endpoint-wasm/Cargo.toml -i crypto-bigint > crypto-bigint-tree.txt
+          cat crypto-bigint-tree.txt
+      - name: Reject vulnerable or yanked versions through official audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file crates/ucr-endpoint-wasm/Cargo.lock --deny warnings
+      - name: Commit only Cargo-generated endpoint lock after clean audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git add -- crates/ucr-endpoint-wasm/Cargo.lock
+          if git diff --cached --quiet; then
+            echo 'Lock already current'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'build(e2ee): regenerate audited standalone endpoint WASM Cargo.lock'
+          git push origin HEAD:fix/phase44-audit-endpoint-wasm-lock-20261025
