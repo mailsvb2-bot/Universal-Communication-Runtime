@@ -157,6 +157,20 @@ function rememberActiveCall(call,identity) {
 function activeCallLocator() {
   try {return sessionStorage.getItem(ACTIVE_CALL_HINT_KEY);} catch {return null;}
 }
+// This same-tab locator is not a Call authority. Persist only the user's
+// stop intent so a reload after an ambiguous Hangup response cannot silently
+// re-enter media before the canonical Call owner confirms termination.
+function rememberStopIntent(callId) {
+  const locator = activeCallLocator();
+  if (locator === null) return null;
+  try {
+    const hint = JSON.parse(locator);
+    if (hint?.scope !== accountScope || hint?.callId !== callId) return locator;
+    const stopped = JSON.stringify({...hint,stopRequested:true});
+    sessionStorage.setItem(ACTIVE_CALL_HINT_KEY,stopped);
+    return stopped;
+  } catch {return locator;}
+}
 function forgetActiveCall(expectedLocator) {
   try {
     // A stale inspection must not delete a newer Call's locator.
@@ -187,7 +201,7 @@ async function restoreActiveCall(user) {
     // A new Call (or a newer locator) wins over this in-flight inspection.
     if (active || activeCallLocator()!==locator) return;
     if (call.state==="terminated") {forgetActiveCall(locator);return;}
-    active={call,identity:user.participantId};
+    active={call,identity:user.participantId,terminating:hint.stopRequested===true};
     showActive();
   } catch(error) {
     // A stale denial must not delete a newer Call's locator.
@@ -541,13 +555,13 @@ async function terminateActiveCall() {
   const selected = active;
   const callId = selected.call.callId;
   const scope = accountScope;
-  const locator = activeCallLocator();
   const state = selected.call.state;
   const action = state === "active" || state === "reconnecting" ? "hangup" : "cancel";
   // A transport failure leaves the server outcome unknown. Preserve the
   // stop intent across retries and periodic Call inspection; never resume
   // signed Join or media merely because a network request failed.
   selected.terminating = true;
+  const locator = rememberStopIntent(callId);
   selected.terminationInFlight = true;
   try {
     const result = await calls.signal(callId,action);
