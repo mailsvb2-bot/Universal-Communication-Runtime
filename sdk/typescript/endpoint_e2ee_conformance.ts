@@ -919,7 +919,7 @@ const preflightJoinSnippet = browser.slice(
 assert.ok(preflightJoinSnippet.startsWith("async function join(){"));
 let unauthorizedJoinRequests = 0;
 const preflightJoinCtx: Record<string, any> = {
-  claims: {not_before: 0}, sessionLifecycleGeneration: 0,
+  claims: {not_before: 0}, token: "fixture-signed-join", sessionLifecycleGeneration: 0,
   signedGrantRetired: false,
   ui: {state: {textContent: ""}, status: {textContent: ""},
     join: {disabled: false}},
@@ -942,7 +942,7 @@ assert.equal(preflightJoinCtx.ui.join.disabled, false,
 let acceptedJoinCleanup = 0;
 let acceptedJoinHeartbeats = 0;
 const acceptedJoinCtx: Record<string, any> = {
-  claims: {not_before: 0}, sessionLifecycleGeneration: 0,
+  claims: {not_before: 0}, token: "fixture-signed-join", sessionLifecycleGeneration: 0,
   signedGrantRetired: false, activeSessionSequence: 0,
   sessionActive: false, mediaActive: false, heartbeatTimer: null,
   ui: {state: {textContent: ""}, status: {textContent: ""},
