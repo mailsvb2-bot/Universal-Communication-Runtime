@@ -645,6 +645,66 @@ assert.equal(retireCalls, 1);
 await delayedStop.stop();
 
 const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
+// The first successful E2EE activation permanently settles its startup timer.
+// A later MLS refresh can temporarily reset readiness without reviving it.
+const startupGuardSnippet = browser.slice(
+  browser.indexOf("let pendingMediaStartupWatchdog=null;"),
+  browser.indexOf("// This signed session grant is retired"),
+);
+assert.ok(startupGuardSnippet.startsWith("let pendingMediaStartupWatchdog=null;"));
+let startupTimerSequence=0,startupRevocations=0;
+const startupCallbacks = new Map<number, () => void>();
+const startupCtx: Record<string, any> = {
+  sessionActive:true,sessionLifecycleGeneration:7,token:"renewed",
+  e2eeAdapterReady:false,
+  setTimeout(callback: () => void) {
+    const id=++startupTimerSequence;
+    startupCallbacks.set(id,callback);
+    return id;
+  },
+  clearTimeout(id: number) {startupCallbacks.delete(id);},
+  endUnverifiedMedia() {startupRevocations++;},
+};
+runInNewContext(startupGuardSnippet +
+  "\nthis.arm = armMediaStartupWatchdog; this.cancel = cancelMediaStartupWatchdog;",
+  startupCtx);
+startupCtx.arm(7,"renewed",12000);
+const staleStartupCallback=startupCallbacks.get(1);
+assert.ok(staleStartupCallback);
+startupCtx.e2eeAdapterReady=true;
+startupCtx.cancel(7,"renewed");
+startupCtx.e2eeAdapterReady=false; // MLS epoch refresh
+staleStartupCallback();
+assert.equal(startupRevocations,0,
+  "settled startup watchdog must not revoke a refreshed encrypted call");
+assert.equal(startupCallbacks.size,0);
+startupCtx.arm(8,"next",12000);
+const pendingStartupCallback=startupCallbacks.get(2);
+assert.ok(pendingStartupCallback);
+startupCtx.cancel(7,"renewed");
+assert.equal(startupCallbacks.size,1,
+  "old Join cleanup must not cancel the new signed grant's deadline");
+startupCtx.sessionLifecycleGeneration=8;startupCtx.token="next";
+startupCallbacks.delete(2); // the fake timer has fired
+pendingStartupCallback();
+assert.equal(startupRevocations,1,
+  "a genuinely stalled encrypted startup must still fail closed");
+startupCtx.arm(9,"later",12000);
+startupCtx.cancel(); // Leave
+assert.equal(startupCallbacks.size,0,"Leave must disarm its startup watchdog");
+const activationSnippet=browser.slice(
+  browser.indexOf("async function activateE2eeAdapter(){"),
+  browser.indexOf("function attachE2eeDataChannel("),
+);
+assert.match(activationSnippet,
+  /e2eeAdapterReady=true;\s*cancelMediaStartupWatchdog\(sessionGeneration,sessionToken\)/);
+const leaveSnippet=browser.slice(
+  browser.indexOf("async function leave(){"),
+  browser.indexOf("function scheduleWaitingRoom(){"),
+);
+assert.ok(leaveSnippet.includes("cancelMediaStartupWatchdog();"));
+console.log("UCR_E2EE_STARTUP_WATCHDOG_SETTLEMENT_OK");
+
 // Run the browser's *actual* MLS bootstrap and retirement against delayed
 // canonical network responses. A late Welcome or registration reply after
 // leaving the call must not publish a signer or leak an endpoint WASM state.
@@ -959,7 +1019,7 @@ const acceptedJoinCtx: Record<string, any> = {
     session_sequence: 1})}),
   body: () => ({}),
   applyMediaPolicy: async () => {throw new Error("MLS activation refused");},
-  clearTimeout() {},
+  clearTimeout() {}, cancelMediaStartupWatchdog() {},
   setInterval: () => {acceptedJoinHeartbeats++;return 1;},
   leave: async () => {acceptedJoinCleanup++;acceptedJoinCtx.sessionActive = false;},
   scheduleWaitingRoom() {}, scheduleEntryRetry() {},
@@ -976,13 +1036,11 @@ assert.equal(acceptedJoinCtx.ui.state.textContent, "Rejected");
 // Device/Trust inspection has completed. Its new grant owns startup expiry.
 const oldHandoffWatchdog = browser.split("handoffWatchdog=setTimeout(()=>{")[1]
   ?.split("},handoffDeadlineMs);")[0];
-const newStartupWatchdog = browser.split("mediaStartupWatchdog=setTimeout(()=>{")[1]
-  ?.split("},newGrantDeadlineMs);")[0];
 assert.ok(oldHandoffWatchdog?.includes("handoffState.trusted"));
-assert.ok(newStartupWatchdog?.includes("token===handoff.token"));
-assert.ok(newStartupWatchdog?.includes("!e2eeAdapterReady"),
+assert.ok(browser.includes("armMediaStartupWatchdog(generation,handoff.token,newGrantDeadlineMs);"));
+assert.ok(browser.includes("token===grantToken&&!e2eeAdapterReady"),
   "startup watchdog must not mistake SDP completion for endpoint E2EE readiness");
-assert.ok(browser.includes("if(!sessionActive||!mediaActive||e2eeAdapterReady)\n      clearTimeout(mediaStartupWatchdog);"),
+assert.ok(browser.includes("if(!sessionActive||!mediaActive||e2eeAdapterReady)\n      cancelMediaStartupWatchdog(generation);"),
   "keep startup deadline armed when WebRTC signaling completes before E2EE adapter activation");
 for (const scenario of [
   {name: "old pending", generation: 10, token: "old", trusted: false, expected: 1},
@@ -1006,23 +1064,8 @@ for (const scenario of [
   assert.equal(leaveCalls, scenario.expected, scenario.name);
   assert.equal(ctx.signedGrantRetired, scenario.expected === 1, scenario.name);
 }
-for (const scenario of [
-  {name: "current startup", generation: 11, token: "new", active: true, ready: false, expected: 1},
-  {name: "E2EE ready", generation: 11, token: "new", active: true, ready: true, expected: 0},
-  {name: "already left", generation: 11, token: "new", active: false, expected: 0},
-  {name: "newer Join", generation: 12, token: "new", active: true, expected: 0},
-  {name: "different token", generation: 11, token: "other", active: true, expected: 0},
-]) {
-  let stopCalls = 0;
-  const ctx: Record<string, any> = {
-    sessionActive: scenario.active, e2eeAdapterReady: scenario.ready ?? false,
-    generation: 11, sessionLifecycleGeneration: scenario.generation,
-    token: scenario.token, handoff: {token: "new"},
-    endUnverifiedMedia: () => {stopCalls++;},
-  };
-  runInNewContext("(()=>{" + newStartupWatchdog + "})()", ctx);
-  assert.equal(stopCalls, scenario.expected, scenario.name);
-}
+// The executable startupGuardSnippet cases above cover stalled startup,
+ // settled E2EE activation, old-generation cleanup and Leave.
 
 // A pending asynchronous authority import must not resurrect a grant after
 // Leave or an old-grant watchdog advances the canonical lifecycle generation.
@@ -1079,7 +1122,7 @@ const protectedAdapter = {
   onEnvelope() {},
 };
 const lifecycleCtx: Record<string, any> = {
-  window: {},
+  window: {}, token: "fixture-e2ee-token",
   sessionLifecycleGeneration: 0,
   e2eeActivationGeneration: 0,
   e2eeChannel: lifecycleChannel,
@@ -1109,6 +1152,7 @@ const lifecycleCtx: Record<string, any> = {
   startAdaptiveMediaMonitoring: () => {protectedLifecycleEvents.push("monitor-starts");},
   syncReceiveSubscriptions: async () => {protectedLifecycleEvents.push("roster-synced");},
   resetReceiveRoster: () => {protectedLifecycleEvents.push("roster-reset");},
+  cancelMediaStartupWatchdog() {},
 };
 runInNewContext(
   closeSnippet + "\n" + activateSnippet +
@@ -1534,7 +1578,7 @@ const admissionCtx: Record<string, any> = {
   endpointMlsState: null, endpointMlsGroupId: null, window: {},
   localStream: makePhysicalStream(), streamAbort: {abort() {}},
   webrtcRetryTimer: 1, streamRetryTimer: 2, reactionTimer: null, chatTimer: null,
-  clearTimeout() {}, clearInterval() {},
+  clearTimeout() {}, clearInterval() {}, cancelMediaStartupWatchdog() {},
   stopAdaptiveMediaMonitoring() {}, stopActiveSpeakerMonitoring() {},
   refreshLocalMediaControls() {}, waitCopy: () => "Waiting for host",
   teardownPeer() { protectedTeardowns++; },
