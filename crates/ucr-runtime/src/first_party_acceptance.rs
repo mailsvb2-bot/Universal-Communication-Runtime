@@ -695,9 +695,12 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     for binding in [&alice, &bob, &carol] {
         assert_eq!(
             call(
-                &server, binding, "/v1/first-party/call/mls-descriptor",
+                &server,
+                binding,
+                "/v1/first-party/call/mls-descriptor",
                 &json!({"binding": binding, "callId": call_id, "expectedRevision": revision}),
-            ).err(),
+            )
+            .err(),
             Some(StatusCode::FORBIDDEN)
         );
     }
@@ -715,18 +718,31 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     assert_eq!(accepted["state"], "active");
     let revision = accepted["revision"].as_u64().unwrap();
     let descriptor = call(
-        &server, &alice, "/v1/first-party/call/mls-descriptor",
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-descriptor",
         &json!({"binding": alice, "callId": call_id, "expectedRevision": revision}),
-    ).expect("authorized endpoint MLS descriptor");
+    )
+    .expect("authorized endpoint MLS descriptor");
     assert_eq!(descriptor["callId"], call_id);
     assert_eq!(descriptor["creatorPrincipalId"], alice.participant_id);
     assert_eq!(descriptor["peerPrincipalId"], bob.participant_id);
     assert_eq!(descriptor["deviceId"], alice.device);
     assert_eq!(descriptor["requiresEndpointOwnedCommit"], true);
-    assert!(descriptor["groupId"].as_str().unwrap().starts_with("fp-mg-"));
+    assert!(
+        descriptor["groupId"]
+            .as_str()
+            .unwrap()
+            .starts_with("fp-mg-")
+    );
     assert_eq!(
-        call(&server, &carol, "/v1/first-party/call/mls-descriptor",
-            &json!({"binding": carol, "callId": call_id, "expectedRevision": revision})).err(),
+        call(
+            &server,
+            &carol,
+            "/v1/first-party/call/mls-descriptor",
+            &json!({"binding": carol, "callId": call_id, "expectedRevision": revision})
+        )
+        .err(),
         Some(StatusCode::FORBIDDEN)
     );
 
