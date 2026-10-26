@@ -748,12 +748,12 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
 
     // Real browser-equivalent endpoint MLS progression: no server member,
     // no server private signing/HPKE or exported media secret.
-    use ucr_model::GroupId;
     use ucr_group_mls::{
         GroupMlsServerCustodyProbe, MlsDeviceAdmission, MlsTransitionInput,
         browser_memory_provider, create_device_key_package, create_group,
         export_group_media_secret, join_from_welcome, merge_pending, stage_transition,
     };
+    use ucr_model::GroupId;
     let scope = scope(&alice).expect("same canonical tenant scope");
     let group_id = GroupId::from_opaque(opaque(descriptor["groupId"].as_str().unwrap()).unwrap());
     let alice_id = device(&alice).unwrap();
