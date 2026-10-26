@@ -965,6 +965,47 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
     to_call(state, &current)
 }
 
+/// Return a canonical, scope-bound MLS bootstrap descriptor to an ACTIVE Call
+/// participant. This contains NO key material and grants NO media authority.
+/// The caller device must independently create and sign its OpenMLS state.
+fn endpoint_mls_descriptor(
+    state: &State,
+    session: &Session,
+    req: &JoinRequest,
+) -> Result<Value, StatusCode> {
+    let call = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject,
+            &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?),
+            req.expected_revision,
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants = first_party_media::admissible_participants_for_descriptor(
+        &call,
+        &session.subject,
+    )
+    .map_err(|_| StatusCode::FORBIDDEN)?;
+    let ids = first_party_media::media_runtime_ids(&call.scope, &call.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    Ok(json!({
+        "callId": req.call_id,
+        "expectedRevision": call.revision,
+        "mediaCallId": ids.call_id.as_opaque().as_str(),
+        "groupId": ids.group_id.as_opaque().as_str(),
+        "conversationId": ids.conversation_id.as_opaque().as_str(),
+        "creatorPrincipalId": participants[0].principal_id.as_opaque().as_str(),
+        "peerPrincipalId": participants
+            .iter()
+            .find(|principal| **principal != session.subject.principal)
+            .ok_or(StatusCode::FORBIDDEN)?
+            .principal_id.as_opaque().as_str(),
+        "deviceId": session.binding.device,
+        "cryptoCapability": ucr_protocol::GROUP_MLS_CAPABILITY,
+        "requiresEndpointOwnedCommit": true,
+    }))
+}
+
 fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Value, StatusCode> {
     let call = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
         .first_party_call_join_admission(
@@ -1544,6 +1585,11 @@ fn call_route(state: &State, auth: &Session, path: &str, body: &[u8]) -> Result<
             let input: SignalRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             signal_call(state, auth, &input)?
+        }
+        "/v1/first-party/call/mls-descriptor" => {
+            let input: JoinRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            endpoint_mls_descriptor(state, auth, &input)?
         }
         "/v1/first-party/call/join-accepted" => {
             let input: JoinRequest = parse(body)?;
