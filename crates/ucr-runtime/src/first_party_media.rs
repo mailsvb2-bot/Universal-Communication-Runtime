@@ -507,7 +507,7 @@ where
     Ok(())
 }
 
-/// Prepares (idempotently) the media runtime of one ACTIVE direct Call for the
+/// Resolves the endpoint-owned media runtime of one ACTIVE direct Call for the
 /// authenticated `subject` and returns the media Call the Join grant must name.
 ///
 /// # Errors
@@ -529,12 +529,41 @@ where
 {
     let participants = admissible_participants(direct, subject)?;
     let ids = media_runtime_ids(&direct.scope, &direct.call_id)?;
-    let (host, host_device) = ensure_media_host(store, &direct.scope)?;
-    if participants.contains(&host.principal) {
-        return Err(MediaRuntimeError::NotAdmissible);
+    // Endpoint-only confidentiality gate. The old server-held MLS committer
+    // must never be created, admitted or asked to sign a media transition.
+    // Endpoint publication/admission must durably populate this group first;
+    // while that flow is absent, deny media instead of silently downgrading E2EE.
+    let group = store
+        .group(&direct.scope, &ids.group_id)?
+        .ok_or(MediaRuntimeError::Unavailable)?;
+    if group.scope != direct.scope
+        || group.group_id != ids.group_id
+        || group.conversation.conversation_id != ids.conversation_id
+        || group.conversation.kind != ConversationKind::PrivateGroup
+        || group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
+        || group.crypto_state.state_ref.is_none()
+        || group.ownership != GroupOwnership::PersonOwned(participants[0].clone())
+        || group.public_policy.is_some()
+    {
+        return Err(MediaRuntimeError::Conflict);
     }
-    ensure_media_group(store, &ids, &host, &host_device)?;
-    ensure_exact_membership(store, &ids, &host, &host_device, &participants)?;
+    let (legacy_host, _) = media_host(&direct.scope)?;
+    let members = store.group_memberships(&direct.scope, &ids.group_id, 8)?;
+    if members.iter().any(|member| {
+        member.state == GroupMemberState::Active
+            && (member.member == legacy_host.principal
+                || !participants.contains(&member.member))
+    }) {
+        return Err(MediaRuntimeError::Conflict);
+    }
+    if !participants.iter().all(|participant| {
+        members.iter().any(|membership| {
+            membership.state == GroupMemberState::Active
+                && membership.member == *participant
+        })
+    }) {
+        return Err(MediaRuntimeError::Unavailable);
+    }
     let media = ensure_media_call(store, &ids, &direct.scope, &participants)?;
     if media.signalling_state == CallSignallingState::Terminated {
         return Err(MediaRuntimeError::Conflict);
