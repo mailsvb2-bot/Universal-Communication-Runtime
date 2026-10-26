@@ -515,7 +515,7 @@ pub trait EndpointMlsCommitStore {
         actor: &ScopedPrincipal,
         actor_device_id: &DeviceId,
         requested_change: &GroupChange,
-        recipient_device_id: &DeviceId,
+        recipient_device: &MlsDeviceAdmission,
         artifacts: &MlsCommitArtifacts,
         signed_fingerprint: [u8; 32],
     ) -> Result<DurableRecordStatus, GroupMlsStoreError>;
