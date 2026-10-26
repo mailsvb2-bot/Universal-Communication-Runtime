@@ -326,6 +326,9 @@ async function expectLateDeviceResponseRefused(
     fetchImpl: async (url) => {
       const path = new URL(String(url)).pathname;
       if (path === "/v1/first-party/session") return reply(active);
+      if (path === "/v1/first-party/call/mls-descriptor" && path !== route) {
+        return reply(acceptedMlsDescriptor);
+      }
       if (path === route) {
         requested.release(undefined);
         return delayed.promise;
@@ -361,6 +364,23 @@ await expectLateDeviceResponseRefused(
   host => host.issueSignedJoinForAcceptedCall(binding, {
     callId: direct.callId, expectedRevision: 7,
   }),
+);
+
+await expectLateDeviceResponseRefused(
+  "/v1/first-party/call/mls-offers", {
+    callId: direct.callId, groupId: acceptedMlsDescriptor.groupId, offers: [],
+  },
+  host => host.listEndpointMlsOffers(binding, {callId: direct.callId, expectedRevision: 7}),
+);
+await expectLateDeviceResponseRefused(
+  "/v1/first-party/call/mls-bootstrap", {
+    callId: direct.callId, groupId: acceptedMlsDescriptor.groupId,
+    deviceId: binding.deviceId, admissionEventId: "event-42",
+    welcomeBase64Url: encode(new Uint8Array([1])), welcomeEpoch: 1,
+    welcomeStateRef: "state-42", commits: [], cryptoEpoch: 1,
+    cryptoStateRef: "state-42",
+  },
+  host => host.fetchEndpointMlsBootstrap(binding, {callId: direct.callId, expectedRevision: 7}),
 );
 
 console.log("RT0 HTTP: existing Device proof, canonical Call routes, and unscoped Join denial passed");
