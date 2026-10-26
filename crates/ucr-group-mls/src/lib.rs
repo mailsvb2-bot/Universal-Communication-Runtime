@@ -1599,6 +1599,150 @@ mod tests {
         );
     }
 
+    /// Feasibility evidence for a future endpoint-owned committer: after an
+    /// independently authorized endpoint removes the server host and commits
+    /// a fresh MLS epoch, the recipient can decrypt, but the former host
+    /// cannot export that epoch or decrypt the signed SFU wire with old keys.
+    ///
+    /// This does NOT remediate the first-party runtime, which still creates
+    /// and retains a server-held MLS leaf. Keep #328 and #329 release-blocked.
+    #[test]
+    fn endpoint_committer_removing_host_isolates_new_signed_video_epoch() {
+        use ucr_crypto::{
+            SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+        };
+        use ucr_model::{GroupMediaFrameHeader, KeyId, VideoSourceKind};
+
+        let mut fixture = three_member_group();
+        let old_host_secret = export_group_media_secret(
+            &fixture.alice_provider,
+            &fixture.alice_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &fixture.state,
+        )
+        .unwrap();
+
+        // Bob is an endpoint and is the committer. The server-held Alice
+        // leaf is removed BEFORE the media epoch used below is created.
+        let remove_host = stage_remove_member(
+            &fixture.bob_provider,
+            &mut fixture.bob_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &fixture.scope,
+            &device("alice"),
+        )
+        .unwrap();
+        merge_pending(
+            &fixture.bob_provider,
+            &mut fixture.bob_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &remove_host.next_crypto_state,
+        )
+        .unwrap();
+        process_commit(
+            &fixture.charlie_provider,
+            &mut fixture.charlie_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &remove_host.commit,
+            &remove_host.next_crypto_state,
+        )
+        .unwrap();
+        assert!(process_commit(
+            &fixture.alice_provider,
+            &mut fixture.alice_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &remove_host.commit,
+            &remove_host.next_crypto_state,
+        )
+        .is_err());
+
+        let next_state = &remove_host.next_crypto_state;
+        assert!(next_state.epoch > fixture.state.epoch);
+        assert!(export_group_media_secret(
+            &fixture.alice_provider,
+            &fixture.alice_group,
+            &fixture.scope,
+            &fixture.group_id,
+            next_state,
+        )
+        .is_err());
+
+        let media_context = context(&fixture, next_state);
+        let sender_secret = export_group_media_secret(
+            &fixture.bob_provider,
+            &fixture.bob_group,
+            &fixture.scope,
+            &fixture.group_id,
+            next_state,
+        )
+        .unwrap();
+        let receiver_secret = export_group_media_secret(
+            &fixture.charlie_provider,
+            &fixture.charlie_group,
+            &fixture.scope,
+            &fixture.group_id,
+            next_state,
+        )
+        .unwrap();
+        let signer = SigningKeyMaterial::from_seed([19; 32]);
+        let header = GroupMediaFrameHeader {
+            scope: fixture.scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: fixture.group_id.clone(),
+            stream_id: oid("camera"),
+            source: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("bob")),
+                kind: PrincipalKind::Person,
+            },
+            source_device_id: device("bob"),
+            negotiation_ref: media_context.negotiation_ref.clone(),
+            negotiation_generation: media_context.negotiation_generation,
+            crypto_epoch: media_context.crypto_epoch,
+            crypto_state_ref: media_context.crypto_state_ref.clone(),
+            crypto_suite: media_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 1,
+            media_timestamp: 90_000,
+            keyframe: true,
+        };
+        let payload = b"endpoint-only epoch video: no server media decryption";
+        let wire = seal_endpoint_group_media_wire(
+            &sender_secret,
+            &media_context,
+            header,
+            payload,
+            KeyId::from_opaque(oid("bob-trusted-key")),
+            &signer,
+        )
+        .unwrap();
+        assert_eq!(
+            open_endpoint_group_media_wire(
+                &receiver_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .unwrap(),
+            payload
+        );
+        // The server retained its entire old epoch secret, not just public
+        // metadata. Even that key must fail against the endpoint-only epoch.
+        assert!(open_endpoint_group_media_wire(
+            &old_host_secret,
+            &media_context,
+            &wire,
+            signer.verifying_key(),
+        )
+        .is_err());
+    }
+
     #[test]
     fn real_mls_add_and_remove_rotates_exporter_and_isolates_removed_member() {
         let mut fixture = three_member_group();
