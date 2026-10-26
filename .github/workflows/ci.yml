@@ -42,6 +42,13 @@ jobs:
           path: crates/ucr-endpoint-wasm/Cargo.lock
           if-no-files-found: error
           retention-days: 3
+      - name: Emit generated lock as transport-only base64 for connector handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo UCR_GENERATED_LOCK_BEGIN
+          base64 -w 256 crates/ucr-endpoint-wasm/Cargo.lock
+          echo UCR_GENERATED_LOCK_END
 
   rust-quality:
     runs-on: ubuntu-24.04
