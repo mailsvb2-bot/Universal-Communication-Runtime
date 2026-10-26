@@ -282,8 +282,32 @@ fn verify_foreign_key_columns(
     }
 }
 
-/// Persist endpoint-produced OpenMLS bytes without ever staging or merging
-/// the Group in this server's OpenMLS provider.
+fn validate_endpoint_mls_commit_material(
+    actor: &ScopedPrincipal,
+    requested_change: &GroupChange,
+    recipient_device: &MlsDeviceAdmission,
+    artifacts: &MlsCommitArtifacts,
+) -> Result<(), GroupMlsStoreError> {
+    if actor.scope != requested_change.scope
+        || requested_change.next_crypto_state.is_some()
+        || artifacts.commit.is_empty()
+        || artifacts.commit.len() > 2_097_152
+        || artifacts
+            .welcome
+            .as_ref()
+            .is_none_or(|welcome| welcome.is_empty() || welcome.len() > 2_097_152)
+        || recipient_device.key_package.is_empty()
+        || recipient_device.key_package.len() > 2_097_152
+        || artifacts.next_crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
+        || artifacts.next_crypto_state.state_ref.is_none()
+    {
+        return Err(GroupMlsStoreError::InvalidChangeMaterial);
+    }
+    Ok(())
+}
+
+/// Persist endpoint-produced `OpenMLS` bytes without ever staging or merging
+/// the Group in this server's `OpenMLS` provider.
 impl EndpointMlsCommitStore for SqliteLocalStore {
     fn persist_endpoint_mls_commit(
         &self,
@@ -294,21 +318,7 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
         artifacts: &MlsCommitArtifacts,
         signed_fingerprint: [u8; 32],
     ) -> Result<DurableRecordStatus, GroupMlsStoreError> {
-        if actor.scope != requested_change.scope
-            || requested_change.next_crypto_state.is_some()
-            || artifacts.commit.is_empty()
-            || artifacts.commit.len() > 2_097_152
-            || artifacts
-                .welcome
-                .as_ref()
-                .is_none_or(|welcome| welcome.is_empty() || welcome.len() > 2_097_152)
-            || recipient_device.key_package.is_empty()
-            || recipient_device.key_package.len() > 2_097_152
-            || artifacts.next_crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
-            || artifacts.next_crypto_state.state_ref.is_none()
-        {
-            return Err(GroupMlsStoreError::InvalidChangeMaterial);
-        }
+        validate_endpoint_mls_commit_material(actor, requested_change, recipient_device, artifacts)?;
         let GroupChangeKind::AddMember { member, .. } = &requested_change.kind else {
             return Err(GroupMlsStoreError::InvalidChangeMaterial);
         };
