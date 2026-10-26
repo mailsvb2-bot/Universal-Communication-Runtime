@@ -45,6 +45,7 @@ pub struct EndpointMlsState {
     group_id: GroupId,
     device_id: DeviceId,
     key_package: Vec<u8>,
+    signer_public_key: Vec<u8>,
     group: Option<MlsGroupState>,
     state: Option<GroupCryptoState>,
     pending_transition: Option<MlsCommitArtifacts>,
@@ -63,16 +64,16 @@ impl EndpointMlsState {
         let group_id = GroupId::from_opaque(opaque(group_id, "group_id")?);
         let device_id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
         let provider = browser_memory_provider();
-        let key_package = create_device_key_package(&provider, &scope, &device_id)
-            .map_err(debug_error)?
-            .bytes;
+        let created = create_device_key_package(&provider, &scope, &device_id)
+            .map_err(debug_error)?;
 
         Ok(Self {
             provider,
             scope,
             group_id,
             device_id,
-            key_package,
+            key_package: created.bytes,
+            signer_public_key: created.signer_public_key,
             group: None,
             state: None,
             pending_transition: None,
@@ -89,12 +90,12 @@ impl EndpointMlsState {
     /// KeyPackage; OpenMLS rejects a signer absent from local private storage.
     /// Authorization and deterministic initiator selection remain server-side policy
     /// decisions; calling this method never grants permission to join a UCR Call.
-    pub fn create_endpoint_group(&mut self, signer_public_key: &[u8]) -> Result<(), JsValue> {
+    pub fn create_endpoint_group(&mut self) -> Result<(), JsValue> {
         if self.group.is_some() || self.pending_transition.is_some() {
             return Err(js_error("mls_state: group already initialized"));
         }
         let (group, state) = create_group(
-            &self.provider, &self.scope, &self.group_id, &self.device_id, signer_public_key,
+            &self.provider, &self.scope, &self.group_id, &self.device_id, &self.signer_public_key,
         ).map_err(debug_error)?;
         self.group = Some(group);
         self.state = Some(state);
@@ -162,20 +163,6 @@ impl EndpointMlsState {
         Ok(())
     }
 
-    fn stage_endpoint_transition(&mut self, input: MlsTransitionInput) -> Result<Vec<u8>, JsValue> {
-        if self.pending_transition.is_some() {
-            return Err(js_error("mls_state: transition already pending"));
-        }
-        let group = self.group.as_mut()
-            .ok_or_else(|| js_error("mls_state: group not joined"))?;
-        let transition = stage_transition(
-            &self.provider, group, &self.scope, &self.group_id, &input,
-        ).map_err(debug_error)?;
-        let wire = transition.commit.clone();
-        self.pending_transition = Some(transition);
-        Ok(wire)
-    }
-
     /// Encrypts the complete endpoint-local OpenMLS state for durable browser persistence.
     pub fn seal_snapshot(&self, wrapping_key: &[u8]) -> Result<Vec<u8>, JsValue> {
         if self.pending_transition.is_some() {
@@ -238,6 +225,7 @@ impl EndpointMlsState {
             group_id,
             device_id,
             key_package: key_package.to_vec(),
+            signer_public_key: Vec::new(), // Restored snapshots cannot create a new group.
             group: Some(group),
             state: Some(expected),
             pending_transition: None,
@@ -365,6 +353,23 @@ impl EndpointMlsState {
             revoked: Cell::new(false),
         })
     }
+}
+
+impl EndpointMlsState {
+    fn stage_endpoint_transition(&mut self, input: MlsTransitionInput) -> Result<Vec<u8>, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: transition already pending"));
+        }
+        let group = self.group.as_mut()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        let transition = stage_transition(
+            &self.provider, group, &self.scope, &self.group_id, &input,
+        ).map_err(debug_error)?;
+        let wire = transition.commit.clone();
+        self.pending_transition = Some(transition);
+        Ok(wire)
+    }
+
 }
 
 #[wasm_bindgen]
