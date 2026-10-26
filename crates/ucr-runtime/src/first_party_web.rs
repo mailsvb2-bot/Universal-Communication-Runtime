@@ -1373,7 +1373,11 @@ fn verify_endpoint_mls_add_peer_material(
 ) -> Result<VerifiedEndpointMlsAddPeer, StatusCode> {
     let recipient_device = DeviceId::from_opaque(opaque(&req.recipient_device_id)?);
     let recipient_verifier = verify_endpoint_mls_recipient_device(
-        state, req, direct, &participants[1], &recipient_device,
+        state,
+        req,
+        direct,
+        &participants[1],
+        &recipient_device,
     )?;
     let stored_offer = state
         .store
