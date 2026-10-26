@@ -691,6 +691,17 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     let call_id = started["callId"].as_str().unwrap().to_owned();
     let revision = started["revision"].as_u64().unwrap();
 
+    // Endpoint-owned bootstrap is subject to the SAME canonical Join admission.
+    for binding in [&alice, &bob, &carol] {
+        assert_eq!(
+            call(
+                &server, binding, "/v1/first-party/call/mls-descriptor",
+                &json!({"binding": binding, "callId": call_id, "expectedRevision": revision}),
+            ).err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+    }
+
     // Before the callee accepted, nobody gets media authority.
     assert_eq!(
         join_accepted(&server, &alice, &call_id, revision).err(),
@@ -703,6 +714,22 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     let accepted = signal(&server, &bob, &call_id, revision, "accept").expect("callee accepts");
     assert_eq!(accepted["state"], "active");
     let revision = accepted["revision"].as_u64().unwrap();
+    let descriptor = call(
+        &server, &alice, "/v1/first-party/call/mls-descriptor",
+        &json!({"binding": alice, "callId": call_id, "expectedRevision": revision}),
+    ).expect("authorized endpoint MLS descriptor");
+    assert_eq!(descriptor["callId"], call_id);
+    assert_eq!(descriptor["creatorPrincipalId"], alice.participant_id);
+    assert_eq!(descriptor["peerPrincipalId"], bob.participant_id);
+    assert_eq!(descriptor["deviceId"], alice.device);
+    assert_eq!(descriptor["requiresEndpointOwnedCommit"], true);
+    assert!(descriptor["groupId"].as_str().unwrap().starts_with("fp-mg-"));
+    assert_eq!(
+        call(&server, &carol, "/v1/first-party/call/mls-descriptor",
+            &json!({"binding": carol, "callId": call_id, "expectedRevision": revision})).err(),
+        Some(StatusCode::FORBIDDEN)
+    );
+
     // A third person never sees nor joins the Call.
     assert!(join_accepted(&server, &carol, &call_id, revision).is_err());
 
