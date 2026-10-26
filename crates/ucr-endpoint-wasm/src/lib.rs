@@ -13,6 +13,8 @@ use ucr_group_mls::{
     BrowserMlsProvider, MlsGroupState, browser_memory_provider, create_device_key_package,
     current_crypto_state, export_browser_memory_snapshot, export_group_media_secret,
     import_browser_memory_snapshot, join_from_welcome, load_group, own_device_id, process_commit,
+    create_group, merge_pending, stage_transition, MlsCommitArtifacts, MlsDeviceAdmission,
+    MlsTransitionInput,
 };
 use ucr_model::{
     CallId, CryptoSuite, DeviceId, GroupCryptoState, GroupId, GroupMediaE2eeContext,
@@ -45,6 +47,7 @@ pub struct EndpointMlsState {
     key_package: Vec<u8>,
     group: Option<MlsGroupState>,
     state: Option<GroupCryptoState>,
+    pending_transition: Option<MlsCommitArtifacts>,
 }
 
 #[wasm_bindgen]
@@ -72,6 +75,7 @@ impl EndpointMlsState {
             key_package,
             group: None,
             state: None,
+            pending_transition: None,
         })
     }
 
@@ -80,8 +84,103 @@ impl EndpointMlsState {
         self.key_package.clone()
     }
 
+    /// Creates the media MLS group entirely within this endpoint's OpenMLS provider.
+    /// `signer_public_key` must be the public signer generated with this endpoint's
+    /// KeyPackage; OpenMLS rejects a signer absent from local private storage.
+    /// Authorization and deterministic initiator selection remain server-side policy
+    /// decisions; calling this method never grants permission to join a UCR Call.
+    pub fn create_endpoint_group(&mut self, signer_public_key: &[u8]) -> Result<(), JsValue> {
+        if self.group.is_some() || self.pending_transition.is_some() {
+            return Err(js_error("mls_state: group already initialized"));
+        }
+        let (group, state) = create_group(
+            &self.provider, &self.scope, &self.group_id, &self.device_id, signer_public_key,
+        ).map_err(debug_error)?;
+        self.group = Some(group);
+        self.state = Some(state);
+        Ok(())
+    }
+
+    /// Stage a device-bound MLS Add. Caller MUST publish this transition only
+    /// after canonical Call/Device/Trust authorization and peer-key verification.
+    pub fn stage_add_device(&mut self, device_id: String, key_package: &[u8]) -> Result<Vec<u8>, JsValue> {
+        let id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
+        let input = MlsTransitionInput::Add(vec![MlsDeviceAdmission {
+            device_id: id,
+            key_package: key_package.to_vec(),
+        }]);
+        self.stage_endpoint_transition(input)
+    }
+
+    /// Stage MLS removal of the exact device leaf (not merely a UI-level flag).
+    pub fn stage_remove_device(&mut self, device_id: String) -> Result<Vec<u8>, JsValue> {
+        let id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
+        self.stage_endpoint_transition(MlsTransitionInput::Remove(vec![id]))
+    }
+
+    pub fn stage_rekey(&mut self) -> Result<Vec<u8>, JsValue> {
+        self.stage_endpoint_transition(MlsTransitionInput::Rekey)
+    }
+
+    /// The Welcome bytes are public encrypted MLS handoff material, not secrets.
+    /// Delivery MUST be bound to the authorized recipient's current device and Call.
+    pub fn pending_welcome(&self) -> Result<Vec<u8>, JsValue> {
+        let pending = self.pending_transition.as_ref()
+            .ok_or_else(|| js_error("mls_state: no pending transition"))?;
+        Ok(pending.welcome.clone().unwrap_or_default())
+    }
+
+    pub fn pending_epoch(&self) -> Result<u64, JsValue> {
+        let pending = self.pending_transition.as_ref()
+            .ok_or_else(|| js_error("mls_state: no pending transition"))?;
+        Ok(pending.next_crypto_state.epoch)
+    }
+
+    pub fn pending_state_ref(&self) -> Result<String, JsValue> {
+        let pending = self.pending_transition.as_ref()
+            .ok_or_else(|| js_error("mls_state: no pending transition"))?;
+        let state_ref = pending.next_crypto_state.state_ref.as_ref()
+            .ok_or_else(|| js_error("mls_state: no pending state ref"))?;
+        Ok(String::from_utf8_lossy(state_ref.as_wire_bytes()).to_string())
+    }
+
+    /// Commit only after the canonical transition is durably accepted.
+    /// The peer must independently process the corresponding MLS commit before media resumes.
+    pub fn merge_endpoint_transition(&mut self, crypto_epoch: u64, crypto_state_ref: String) -> Result<(), JsValue> {
+        let expected = group_crypto_state(crypto_epoch, crypto_state_ref)?;
+        let pending = self.pending_transition.as_ref()
+            .ok_or_else(|| js_error("mls_state: no pending transition"))?;
+        if pending.next_crypto_state != expected {
+            return Err(js_error("mls_state: pending transition mismatch"));
+        }
+        let group = self.group.as_mut()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        merge_pending(&self.provider, group, &self.scope, &self.group_id, &expected)
+            .map_err(debug_error)?;
+        self.state = Some(expected);
+        self.pending_transition = None;
+        Ok(())
+    }
+
+    fn stage_endpoint_transition(&mut self, input: MlsTransitionInput) -> Result<Vec<u8>, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: transition already pending"));
+        }
+        let group = self.group.as_mut()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        let transition = stage_transition(
+            &self.provider, group, &self.scope, &self.group_id, &input,
+        ).map_err(debug_error)?;
+        let wire = transition.commit.clone();
+        self.pending_transition = Some(transition);
+        Ok(wire)
+    }
+
     /// Encrypts the complete endpoint-local OpenMLS state for durable browser persistence.
     pub fn seal_snapshot(&self, wrapping_key: &[u8]) -> Result<Vec<u8>, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: cannot snapshot pending transition"));
+        }
         let state = self
             .state
             .as_ref()
@@ -141,6 +240,7 @@ impl EndpointMlsState {
             key_package: key_package.to_vec(),
             group: Some(group),
             state: Some(expected),
+            pending_transition: None,
         })
     }
 
@@ -151,7 +251,7 @@ impl EndpointMlsState {
         crypto_epoch: u64,
         crypto_state_ref: String,
     ) -> Result<(), JsValue> {
-        if self.group.is_some() {
+        if self.group.is_some() || self.pending_transition.is_some() {
             return Err(js_error("mls_state: group already joined"));
         }
         let expected = group_crypto_state(crypto_epoch, crypto_state_ref)?;
@@ -175,6 +275,9 @@ impl EndpointMlsState {
         crypto_epoch: u64,
         crypto_state_ref: String,
     ) -> Result<(), JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: pending local transition"));
+        }
         let expected = group_crypto_state(crypto_epoch, crypto_state_ref)?;
         let group = self
             .group
@@ -215,6 +318,9 @@ impl EndpointMlsState {
         signing_key_id: String,
         signing_seed: &[u8],
     ) -> Result<EndpointGroupMediaBridge, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: media blocked during transition"));
+        }
         let state = self
             .state
             .as_ref()
