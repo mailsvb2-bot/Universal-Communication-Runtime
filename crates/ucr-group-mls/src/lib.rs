@@ -1584,8 +1584,8 @@ mod tests {
             .unwrap(),
             payload
         );
-        // P0: the server-held committer can open the SAME authenticated wire.
-        // A green test here demonstrates the confidentiality failure.
+        // Acceptance gate: this must fail with the current server-held media-host.
+        // It may only pass after the server is excluded from the media key schedule.
         assert!(
             open_endpoint_group_media_wire(
                 &server_host_secret,
