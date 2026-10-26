@@ -587,6 +587,13 @@ export function createUcrFirstPartyHttpHost(
 
   const session = async (): Promise<UcrAuthenticatedFirstEntry> =>
     parseBinding(await request("GET", "/v1/first-party/session"));
+  // A response from a previously authenticated Device must not be consumed
+  // after the browser changes account or Device while the request is pending.
+  const requireSameSession = async (auth: UcrAuthenticatedFirstEntry): Promise<void> => {
+    if (!sameBinding(auth, await session())) {
+      throw new Error("first-party account or Device changed during MLS/Join operation");
+    }
+  };
   const inspect = async (binding: UcrDeviceEnrollmentBinding): Promise<UcrCanonicalDeviceTrust> => {
     const context = snapshotBinding(binding);
     const user = await session();
@@ -708,6 +715,7 @@ export function createUcrFirstPartyHttpHost(
           expectedRevision: input.expectedRevision,
         },
       ));
+      await requireSameSession(auth);
       if (descriptor.callId !== input.callId ||
           descriptor.expectedRevision !== input.expectedRevision ||
           descriptor.deviceId !== auth.deviceId ||
@@ -754,6 +762,7 @@ export function createUcrFirstPartyHttpHost(
         expectedRevision: input.expectedRevision, cryptoStateRef,
         signatureBase64Url: encodeBase64Url(signature),
       });
+      await requireSameSession(auth);
       if (!isObject(result) || result.callId !== input.callId ||
           result.groupId !== descriptor.groupId ||
           result.cryptoEpoch !== 0 ||
@@ -816,6 +825,7 @@ export function createUcrFirstPartyHttpHost(
         recipientKeyPackageBase64Url: offer.recipientKeyPackageBase64Url,
         recipientSignatureBase64Url: offer.recipientSignatureBase64Url,
       });
+      await requireSameSession(auth);
       if (!isObject(result) || result.callId !== input.callId ||
           result.groupId !== descriptor.groupId || result.deviceId !== auth.deviceId ||
           result.offerStored !== true) {
@@ -831,6 +841,7 @@ export function createUcrFirstPartyHttpHost(
       const value = await request("POST", "/v1/first-party/call/mls-offers", {
         binding: auth, callId: input.callId, expectedRevision: input.expectedRevision,
       });
+      await requireSameSession(auth);
       if (!isObject(value) || value.callId !== input.callId ||
           value.groupId !== descriptor.groupId || !Array.isArray(value.offers) ||
           value.offers.length > 8) {
@@ -908,6 +919,7 @@ export function createUcrFirstPartyHttpHost(
         welcomeBase64Url: encodeBase64Url(input.welcome),
         signatureBase64Url: encodeBase64Url(signature),
       });
+      await requireSameSession(auth);
       if (!isObject(result) || result.callId !== input.callId ||
           result.groupId !== descriptor.groupId ||
           result.cryptoEpoch !== input.cryptoEpoch ||
@@ -924,6 +936,7 @@ export function createUcrFirstPartyHttpHost(
       const value = await request("POST", "/v1/first-party/call/mls-bootstrap", {
         binding: auth, callId: input.callId, expectedRevision: input.expectedRevision,
       });
+      await requireSameSession(auth);
       if (!isObject(value) || value.callId !== input.callId ||
           value.groupId !== descriptor.groupId || value.deviceId !== auth.deviceId ||
           !Array.isArray(value.commits) || value.commits.length > 128) {
@@ -975,6 +988,7 @@ export function createUcrFirstPartyHttpHost(
           expectedRevision: input.expectedRevision,
         },
       ));
+      await requireSameSession(auth);
       if (!sameBinding(auth,issued) || issued.callId !== input.callId) {
         throw new Error("first-party Join issuer returned a foreign Call/Device");
       }
