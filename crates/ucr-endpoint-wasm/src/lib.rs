@@ -10,11 +10,10 @@ use ucr_crypto::{
     seal_endpoint_group_media_wire, seal_endpoint_state,
 };
 use ucr_group_mls::{
-    BrowserMlsProvider, MlsGroupState, browser_memory_provider, create_device_key_package,
-    current_crypto_state, export_browser_memory_snapshot, export_group_media_secret,
-    import_browser_memory_snapshot, join_from_welcome, load_group, own_device_id, process_commit,
-    create_group, merge_pending, stage_transition, MlsCommitArtifacts, MlsDeviceAdmission,
-    MlsTransitionInput,
+    BrowserMlsProvider, MlsCommitArtifacts, MlsDeviceAdmission, MlsGroupState, MlsTransitionInput,
+    browser_memory_provider, create_device_key_package, create_group, current_crypto_state,
+    export_browser_memory_snapshot, export_group_media_secret, import_browser_memory_snapshot,
+    join_from_welcome, load_group, merge_pending, own_device_id, process_commit, stage_transition,
 };
 use ucr_model::{
     CallId, CryptoSuite, DeviceId, GroupCryptoState, GroupId, GroupMediaE2eeContext,
@@ -64,8 +63,8 @@ impl EndpointMlsState {
         let group_id = GroupId::from_opaque(opaque(group_id, "group_id")?);
         let device_id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
         let provider = browser_memory_provider();
-        let created = create_device_key_package(&provider, &scope, &device_id)
-            .map_err(debug_error)?;
+        let created =
+            create_device_key_package(&provider, &scope, &device_id).map_err(debug_error)?;
 
         Ok(Self {
             provider,
@@ -95,8 +94,13 @@ impl EndpointMlsState {
             return Err(js_error("mls_state: group already initialized"));
         }
         let (group, state) = create_group(
-            &self.provider, &self.scope, &self.group_id, &self.device_id, &self.signer_public_key,
-        ).map_err(debug_error)?;
+            &self.provider,
+            &self.scope,
+            &self.group_id,
+            &self.device_id,
+            &self.signer_public_key,
+        )
+        .map_err(debug_error)?;
         self.group = Some(group);
         self.state = Some(state);
         Ok(())
@@ -104,7 +108,11 @@ impl EndpointMlsState {
 
     /// Stage a device-bound MLS Add. Caller MUST publish this transition only
     /// after canonical Call/Device/Trust authorization and peer-key verification.
-    pub fn stage_add_device(&mut self, device_id: String, key_package: &[u8]) -> Result<Vec<u8>, JsValue> {
+    pub fn stage_add_device(
+        &mut self,
+        device_id: String,
+        key_package: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
         let id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
         let input = MlsTransitionInput::Add(vec![MlsDeviceAdmission {
             device_id: id,
@@ -126,38 +134,61 @@ impl EndpointMlsState {
     /// The Welcome bytes are public encrypted MLS handoff material, not secrets.
     /// Delivery MUST be bound to the authorized recipient's current device and Call.
     pub fn pending_welcome(&self) -> Result<Vec<u8>, JsValue> {
-        let pending = self.pending_transition.as_ref()
+        let pending = self
+            .pending_transition
+            .as_ref()
             .ok_or_else(|| js_error("mls_state: no pending transition"))?;
         Ok(pending.welcome.clone().unwrap_or_default())
     }
 
     pub fn pending_epoch(&self) -> Result<u64, JsValue> {
-        let pending = self.pending_transition.as_ref()
+        let pending = self
+            .pending_transition
+            .as_ref()
             .ok_or_else(|| js_error("mls_state: no pending transition"))?;
         Ok(pending.next_crypto_state.epoch)
     }
 
     pub fn pending_state_ref(&self) -> Result<String, JsValue> {
-        let pending = self.pending_transition.as_ref()
+        let pending = self
+            .pending_transition
+            .as_ref()
             .ok_or_else(|| js_error("mls_state: no pending transition"))?;
-        let state_ref = pending.next_crypto_state.state_ref.as_ref()
+        let state_ref = pending
+            .next_crypto_state
+            .state_ref
+            .as_ref()
             .ok_or_else(|| js_error("mls_state: no pending state ref"))?;
         Ok(String::from_utf8_lossy(state_ref.as_wire_bytes()).to_string())
     }
 
     /// Commit only after the canonical transition is durably accepted.
     /// The peer must independently process the corresponding MLS commit before media resumes.
-    pub fn merge_endpoint_transition(&mut self, crypto_epoch: u64, crypto_state_ref: String) -> Result<(), JsValue> {
+    pub fn merge_endpoint_transition(
+        &mut self,
+        crypto_epoch: u64,
+        crypto_state_ref: String,
+    ) -> Result<(), JsValue> {
         let expected = group_crypto_state(crypto_epoch, crypto_state_ref)?;
-        let pending = self.pending_transition.as_ref()
+        let pending = self
+            .pending_transition
+            .as_ref()
             .ok_or_else(|| js_error("mls_state: no pending transition"))?;
         if pending.next_crypto_state != expected {
             return Err(js_error("mls_state: pending transition mismatch"));
         }
-        let group = self.group.as_mut()
+        let group = self
+            .group
+            .as_mut()
             .ok_or_else(|| js_error("mls_state: group not joined"))?;
-        merge_pending(&self.provider, group, &self.scope, &self.group_id, &expected)
-            .map_err(debug_error)?;
+        merge_pending(
+            &self.provider,
+            group,
+            &self.scope,
+            &self.group_id,
+            &expected,
+        )
+        .map_err(debug_error)?;
         self.state = Some(expected);
         self.pending_transition = None;
         Ok(())
@@ -360,16 +391,17 @@ impl EndpointMlsState {
         if self.pending_transition.is_some() {
             return Err(js_error("mls_state: transition already pending"));
         }
-        let group = self.group.as_mut()
+        let group = self
+            .group
+            .as_mut()
             .ok_or_else(|| js_error("mls_state: group not joined"))?;
-        let transition = stage_transition(
-            &self.provider, group, &self.scope, &self.group_id, &input,
-        ).map_err(debug_error)?;
+        let transition =
+            stage_transition(&self.provider, group, &self.scope, &self.group_id, &input)
+                .map_err(debug_error)?;
         let wire = transition.commit.clone();
         self.pending_transition = Some(transition);
         Ok(wire)
     }
-
 }
 
 #[wasm_bindgen]
