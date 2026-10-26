@@ -8,6 +8,18 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use ucr_core::{IdentityDeviceLookupStore, TrustedSigningKeyStore};
+use ucr_crypto::{
+    SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+};
+use ucr_group_mls::{
+    GroupMlsServerCustodyProbe, MlsDeviceAdmission, MlsTransitionInput,
+    browser_memory_provider, create_device_key_package, create_group,
+    export_group_media_secret, join_from_welcome, merge_pending, stage_transition,
+};
+use ucr_model::{
+    CryptoSuite, GroupId, GroupMediaE2eeContext, GroupMediaFrameHeader, KeyId, MediaKind,
+    VideoSourceKind,
+};
 use ucr_realtime::JoinTokenKey;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(600_000);
@@ -748,12 +760,6 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
 
     // Real browser-equivalent endpoint MLS progression: no server member,
     // no server private signing/HPKE or exported media secret.
-    use ucr_group_mls::{
-        GroupMlsServerCustodyProbe, MlsDeviceAdmission, MlsTransitionInput,
-        browser_memory_provider, create_device_key_package, create_group,
-        export_group_media_secret, join_from_welcome, merge_pending, stage_transition,
-    };
-    use ucr_model::GroupId;
     let scope = scope(&alice).expect("same canonical tenant scope");
     let group_id = GroupId::from_opaque(opaque(descriptor["groupId"].as_str().unwrap()).unwrap());
     let alice_id = device(&alice).unwrap();
@@ -962,13 +968,6 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     // A real authenticated media frame proves that the two endpoint-only
     // OpenMLS exporters interoperate. We intentionally do NOT implement
     // PartialEq on secret key material or leak its bytes into test output.
-    use ucr_crypto::{
-        SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
-    };
-    use ucr_model::{
-        CryptoSuite, GroupMediaE2eeContext, GroupMediaFrameHeader, KeyId, MediaKind,
-        VideoSourceKind,
-    };
     let media_context = GroupMediaE2eeContext {
         scope: scope.clone(),
         call_id: CallId::from_opaque(opaque(&call_id).unwrap()),
