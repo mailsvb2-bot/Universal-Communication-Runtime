@@ -122,6 +122,34 @@ impl SqliteLocalStore {
         tx.commit().map_err(|error| map_sqlite_error(&error))
     }
 
+    /// Bounded candidate Device IDs only. The BFF must authorize the direct Call,
+    /// resolve each ID to the expected peer principal and verify the current key.
+    ///
+    /// # Errors
+    /// Rejects oversized enumeration and unavailable/corrupt storage.
+    pub fn endpoint_mls_offer_device_ids(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<String>, DurableStoreError> {
+        if max_items == 0 || max_items > 16 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let conn = self.lock_connection()?;
+        let ns = namespace_storage_key(scope);
+        let mut stmt = conn.prepare(
+            "SELECT device_id FROM endpoint_mls_key_package_offers
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4
+             ORDER BY device_id LIMIT ?5"
+        ).map_err(|error| map_sqlite_error(&error))?;
+        let rows = stmt.query_map(params![
+            scope.tenant_id.as_opaque().as_str(), ns.present, ns.value,
+            group_id.as_opaque().as_str(), i64::try_from(max_items).unwrap_or(16),
+        ], |row| row.get::<_, String>(0)).map_err(|error| map_sqlite_error(&error))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| map_sqlite_error(&error))
+    }
+
     /// Read a specific Device's signed PUBLIC KeyPackage (not an MLS secret).
     /// HTTP caller MUST independently authorize the same accepted Call and
     /// verify the current trusted Device signer before forwarding the offer.
