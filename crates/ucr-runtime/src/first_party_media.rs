@@ -31,7 +31,8 @@ use ucr_core::{
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRef, DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, OpaqueId,
+    ConversationRef, DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, IdentityId,
+    OpaqueId,
     PermissionGrant, PermissionScope, PrincipalId, PrincipalKind,
     PrincipalRef, ScopedPrincipal, TenantScope,
 };
