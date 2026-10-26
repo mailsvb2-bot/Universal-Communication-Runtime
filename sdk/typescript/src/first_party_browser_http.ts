@@ -20,7 +20,47 @@ import type {
  * No machine Service Principal credentials, private keys, MLS exporter or
  * permanent user/phone registry may be passed through these endpoints.
  */
+/** Metadata for endpoint-owned MLS initialization; NOT a Join grant. */
+export interface UcrEndpointMlsCallDescriptor {
+  readonly callId: string;
+  readonly expectedRevision: number;
+  readonly mediaCallId: string;
+  readonly groupId: string;
+  readonly conversationId: string;
+  readonly creatorPrincipalId: string;
+  readonly peerPrincipalId: string;
+  readonly deviceId: string;
+  readonly cryptoCapability: string;
+  readonly requiresEndpointOwnedCommit: true;
+}
+
+function parseEndpointMlsCallDescriptor(value: unknown): UcrEndpointMlsCallDescriptor {
+  if (!isObject(value)) throw new Error("missing endpoint MLS descriptor");
+  exactKeys(value, [
+    "callId", "expectedRevision", "mediaCallId", "groupId", "conversationId",
+    "creatorPrincipalId", "peerPrincipalId", "deviceId", "cryptoCapability",
+    "requiresEndpointOwnedCommit",
+  ]);
+  if (!Number.isSafeInteger(value.expectedRevision) || Number(value.expectedRevision) < 0 ||
+      value.requiresEndpointOwnedCommit !== true) {
+    throw new Error("invalid or downgraded endpoint MLS descriptor");
+  }
+  return Object.freeze({
+    callId: requiredId(value.callId, "Call"),
+    expectedRevision: Number(value.expectedRevision),
+    mediaCallId: requiredId(value.mediaCallId, "media Call"),
+    groupId: requiredId(value.groupId, "MLS Group"),
+    conversationId: requiredId(value.conversationId, "media Conversation"),
+    creatorPrincipalId: requiredId(value.creatorPrincipalId, "creator"),
+    peerPrincipalId: requiredId(value.peerPrincipalId, "peer"),
+    deviceId: requiredId(value.deviceId, "Device"),
+    cryptoCapability: requiredId(value.cryptoCapability, "crypto capability"),
+    requiresEndpointOwnedCommit: true,
+  });
+}
+
 export interface UcrManagedFirstPartyHost extends UcrDirectCallHost {
+  describeAcceptedCallMls(binding: UcrAuthenticatedFirstEntry, input: {callId: string; expectedRevision: number}): Promise<UcrEndpointMlsCallDescriptor>;
   listDevices(): Promise<readonly {deviceId:string;state:string}[]>;
   revokeDevice(deviceId:string): Promise<void>;
   rotateRecoveryCode(): Promise<string>;
@@ -620,6 +660,28 @@ export function createUcrFirstPartyHttpHost(
         binding: auth, callId: requiredId(input.callId,"Call"),
         expectedRevision: input.expectedRevision, action: input.action,
       }) as Awaited<ReturnType<UcrDirectCallHost["signalDirectCall"]>>;
+    },
+    async describeAcceptedCallMls(binding, input) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) {
+        throw new Error("first-party account changed before endpoint MLS bootstrap");
+      }
+      const descriptor = parseEndpointMlsCallDescriptor(await request(
+        "POST", "/v1/first-party/call/mls-descriptor", {
+          binding: auth, callId: requiredId(input.callId, "Call"),
+          expectedRevision: input.expectedRevision,
+        },
+      ));
+      if (descriptor.callId !== input.callId ||
+          descriptor.expectedRevision !== input.expectedRevision ||
+          descriptor.deviceId !== auth.deviceId ||
+          descriptor.peerPrincipalId === auth.participantId ||
+          !descriptor.mediaCallId.startsWith("fp-m-") ||
+          !descriptor.groupId.startsWith("fp-mg-") ||
+          !descriptor.conversationId.startsWith("fp-mc-")) {
+        throw new Error("endpoint MLS descriptor is not bound to the active Call/Device");
+      }
+      return descriptor;
     },
     async issueSignedJoinForAcceptedCall(binding, input: {
       callId: string; expectedRevision: number
