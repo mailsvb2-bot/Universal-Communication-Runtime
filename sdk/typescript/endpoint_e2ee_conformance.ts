@@ -2362,6 +2362,53 @@ try {
   assert.equal(visualCalls.length, 1, "late callback after downgrade must not render");
   rendering.stop();
 
+  // A decoder that keeps producing frames while canvas drawing fails must
+  // report time since the FIRST unrendered decode, not the latest frame.
+  // This exercises the real WebCodecs consumer callback and its counters.
+  const videoCounters = (globalThis as unknown as {__ucrVideoCounters: {
+    firstVisibleUnrenderedDecodeAt: number; lastDecodedAt: number;
+  }}).__ucrVideoCounters;
+  const actualNow = Date.now;
+  let simulatedNow = actualNow() + 1000;
+  try {
+    Date.now = () => simulatedNow;
+    const failingCanvas = {width: 0, height: 0, getContext() {return null;}};
+    const failingRender = new UcrBrowserWebCodecsConsumer({
+      videoCanvas: failingCanvas as unknown as HTMLCanvasElement,
+    });
+    const failedFrame = {mediaKind: "video" as const,
+      videoSourceKind: "camera" as const, streamId: "failure-canvas",
+      timestamp: 100n, keyframe: true, bytes: new Uint8Array([1, 2])};
+    assert.throws(() => failingRender.play(failedFrame), /video canvas 2D context unavailable/);
+    assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, simulatedNow);
+    simulatedNow += 800;
+    assert.throws(() => failingRender.play({...failedFrame, timestamp: 101n}),
+      /video canvas 2D context unavailable/);
+    assert.equal(videoCounters.lastDecodedAt, simulatedNow);
+    assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, simulatedNow - 800,
+      "later failed decodes must not erase accumulated render stall duration");
+    failingRender.stop();
+    assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, 0,
+      "stopping playback must clear stale render failures");
+    // Keep this recovery draw independent of the dual-layer test's shared
+    // visualCalls array, whose expected counts start before this regression.
+    let recoveredDraws = 0;
+    const recoveredCanvas = {
+      width: 0, height: 0,
+      getContext() {return {drawImage() {recoveredDraws++;}};},
+    };
+    const recoveredRender = new UcrBrowserWebCodecsConsumer({
+      videoCanvas: recoveredCanvas as unknown as HTMLCanvasElement,
+    });
+    recoveredRender.play({...failedFrame, streamId: "recovered-canvas"});
+    assert.equal(recoveredDraws, 1, "recovery must draw one decoded frame");
+    assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, 0,
+      "successful canvas draw clears the unrendered-decode latch");
+    recoveredRender.stop();
+  } finally {
+    Date.now = actualNow;
+  }
+
   // Actual dual-layer receive journey: the wrong encrypted camera layer may
   // arrive first or arrive late, but it must not flicker into the visible canvas.
   const switching = new UcrBrowserWebCodecsConsumer({

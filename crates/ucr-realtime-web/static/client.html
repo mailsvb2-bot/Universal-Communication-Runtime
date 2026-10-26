@@ -272,9 +272,27 @@ function ucrDiagnosticReport(){
       decoded:window.__ucrVideoCounters.decoded,
       rendered:window.__ucrVideoCounters.rendered,
       lastRenderedAt:window.__ucrVideoCounters.lastRenderedAt,
-      renderStallMs:window.__ucrVideoCounters.lastRenderedAt?Date.now()-window.__ucrVideoCounters.lastRenderedAt:null,
+      lastDecodedAt:window.__ucrVideoCounters.lastDecodedAt,
+      firstVisibleUnrenderedDecodeAt:window.__ucrVideoCounters.firstVisibleUnrenderedDecodeAt,
+      hiddenRenderSkips:window.__ucrVideoCounters.hiddenRenderSkips,
+      // A hidden tab intentionally skips canvas drawing: it is not a media stall.
+      renderStallMs:document.hidden?null:window.__ucrVideoCounters.lastRenderedAt?
+        Math.max(0,Date.now()-Math.max(window.__ucrVideoCounters.lastRenderedAt,window.__ucrVideoCounters.visibleSince||0)):null,
       keyframes:window.__ucrVideoCounters.keyframes
     }:null),
+    videoVisibility:{
+      hidden:document.hidden,
+      hiddenSince:window.__ucrVideoCounters?.hiddenSince||null,
+      hiddenTotalMs:(window.__ucrVideoCounters?.hiddenTotalMs||0)+
+        (document.hidden&&window.__ucrVideoCounters?.hiddenSince?
+          Math.max(0,Date.now()-window.__ucrVideoCounters.hiddenSince):0),
+      visibleSince:document.hidden?null:(window.__ucrVideoCounters?.visibleSince||null),
+      // Start at the FIRST decoded frame that has not been drawn, not the
+      // latest decode: a failing canvas must accumulate the full stall time.
+      visibleDecodeWithoutRenderMs:!document.hidden&&window.__ucrVideoCounters?.firstVisibleUnrenderedDecodeAt?
+          Math.max(0,Date.now()-Math.max(window.__ucrVideoCounters.firstVisibleUnrenderedDecodeAt,
+            window.__ucrVideoCounters.visibleSince||0)):null
+    },
     mediaFailure:{category:ucrLastMediaError||null,count:ucrMediaFailureCount,stopped:ucrMediaFailureStopped},
     remoteVideo:{hasStream:!!document.getElementById("remote-video")?.srcObject,
       canvasVisible:!document.getElementById("remote-e2ee-canvas")?.classList.contains("hidden")},

@@ -3875,6 +3875,15 @@ mod tests {
         assert!(client.contains("id=\"ucr-diagnostics-copy\""));
         assert!(client.contains("ucrDiagnosticsEvents.length>80"));
         assert!(client.contains("schema:\"ucr-local-diagnostics-v1\""));
+        assert!(client.contains("hiddenRenderSkips"));
+        assert!(client.contains("videoVisibility:{"));
+        assert!(client.contains("renderStallMs:document.hidden?null:"));
+        assert!(client.contains("hiddenTotalMs:"));
+        assert!(client.contains("visibleDecodeWithoutRenderMs:"));
+        assert!(client.contains(
+            "firstVisibleUnrenderedDecodeAt:window.__ucrVideoCounters.firstVisibleUnrenderedDecodeAt"
+        ));
+        assert!(!client.contains("lastDecodedAt>window.__ucrVideoCounters.lastRenderedAt"));
         assert!(client.contains("ucrDiagnosticReason(e?.message)"));
         assert!(client.contains("MLS_EPOCH_MISMATCH"));
         assert!(client.contains("MEDIA_CODEC_FAILURE"));
