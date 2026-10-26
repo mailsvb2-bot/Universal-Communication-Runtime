@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
+use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
 
@@ -48,6 +49,7 @@ pub struct EndpointMlsState {
     group: Option<MlsGroupState>,
     state: Option<GroupCryptoState>,
     pending_transition: Option<MlsCommitArtifacts>,
+    media_generation: Rc<Cell<u64>>,
 }
 
 #[wasm_bindgen]
@@ -76,6 +78,7 @@ impl EndpointMlsState {
             group: None,
             state: None,
             pending_transition: None,
+            media_generation: Rc::new(Cell::new(0)),
         })
     }
 
@@ -191,6 +194,7 @@ impl EndpointMlsState {
         .map_err(debug_error)?;
         self.state = Some(expected);
         self.pending_transition = None;
+        self.media_generation.set(self.media_generation.get().wrapping_add(1));
         Ok(())
     }
 
@@ -260,6 +264,7 @@ impl EndpointMlsState {
             group: Some(group),
             state: Some(expected),
             pending_transition: None,
+            media_generation: Rc::new(Cell::new(0)),
         })
     }
 
@@ -312,6 +317,7 @@ impl EndpointMlsState {
         )
         .map_err(debug_error)?;
         self.state = Some(expected);
+        self.media_generation.set(self.media_generation.get().wrapping_add(1));
         Ok(())
     }
 
@@ -382,6 +388,8 @@ impl EndpointMlsState {
             source,
             source_device_id: self.device_id.clone(),
             revoked: Cell::new(false),
+            owner_generation: Some(Rc::clone(&self.media_generation)),
+            issued_generation: self.media_generation.get(),
         })
     }
 }
@@ -413,6 +421,8 @@ pub struct EndpointGroupMediaBridge {
     source: PrincipalRef,
     source_device_id: DeviceId,
     revoked: Cell<bool>,
+    owner_generation: Option<Rc<Cell<u64>>>,
+    issued_generation: u64,
 }
 
 #[wasm_bindgen]
@@ -464,6 +474,8 @@ impl EndpointGroupMediaBridge {
             source,
             source_device_id,
             revoked: Cell::new(false),
+            owner_generation: None,
+            issued_generation: 0,
         })
     }
 
@@ -483,8 +495,12 @@ impl EndpointGroupMediaBridge {
         keyframe: bool,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, JsValue> {
-        if self.revoked.get() {
-            return Err(js_error("endpoint media bridge revoked"));
+        if self.revoked.get()
+            || self.owner_generation.as_ref().is_some_and(|generation| {
+                generation.get() != self.issued_generation
+            })
+        {
+            return Err(js_error("endpoint media bridge revoked or stale MLS epoch"));
         }
         let media_kind = media_kind_from_code(media_kind)?;
         let video_source_kind = video_source_kind_from_code(media_kind, video_source_kind)?;
@@ -519,8 +535,12 @@ impl EndpointGroupMediaBridge {
     }
 
     pub fn open_wire(&self, wire: &[u8], source_verifying_key: &[u8]) -> Result<Vec<u8>, JsValue> {
-        if self.revoked.get() {
-            return Err(js_error("endpoint media bridge revoked"));
+        if self.revoked.get()
+            || self.owner_generation.as_ref().is_some_and(|generation| {
+                generation.get() != self.issued_generation
+            })
+        {
+            return Err(js_error("endpoint media bridge revoked or stale MLS epoch"));
         }
         let source_verifying_key = fixed_32(source_verifying_key, "source_verifying_key")?;
         open_endpoint_group_media_wire(
