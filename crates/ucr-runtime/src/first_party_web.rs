@@ -28,14 +28,15 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, DeviceLifecycleStore, IdentityDeviceLookupStore, IdentityStore,
+    AuthorizedDurableRuntime, DeviceLifecycleStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, TrustedSigningKeyStore,
     generate_opaque_id,
 };
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRecord, ConversationRef, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventId,
+    ConversationRecord, ConversationRef, DeliveryPolicy, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventId,
+    GroupCryptoState, GroupHistoryPolicy, GroupMediaState, GroupOwnership, GroupRecord,
     IdentityId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor,
     ScopedPrincipal, TenantId, TenantScope,
 };
@@ -119,6 +120,16 @@ struct AccountFinish {
     public_key_base64_url: String,
     signature_base64_url: String,
     recovery_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EndpointMlsCreateRequest {
+    binding: Binding,
+    call_id: String,
+    expected_revision: u64,
+    crypto_state_ref: String,
+    signature_base64_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1004,6 +1015,93 @@ fn endpoint_mls_descriptor(
     }))
 }
 
+/// Accepts ONLY a signed endpoint-produced public MLS epoch-0 descriptor.
+/// A server-hosted OpenMLS key, KeyPackage or exporter is never generated.
+fn publish_endpoint_mls_group(
+    state: &State,
+    session: &Session,
+    req: &EndpointMlsCreateRequest,
+) -> Result<Value, StatusCode> {
+    let direct = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject,
+            &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?),
+            req.expected_revision,
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants = first_party_media::admissible_participants_for_descriptor(
+        &direct, &session.subject
+    ).map_err(|_| StatusCode::FORBIDDEN)?;
+    if participants[0] != session.subject.principal {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let state_ref = opaque(&req.crypto_state_ref)?;
+    let proof = encoded_proof(
+        "ucr-first-party-endpoint-mls-create.v1",
+        &json!([
+            session.binding.tenant_id,
+            session.binding.namespace_id,
+            session.binding.participant_id,
+            session.binding.device,
+            session.signer_key_id,
+            req.call_id,
+            req.expected_revision,
+            ids.group_id.as_opaque().as_str(),
+            0,
+            req.crypto_state_ref,
+        ]),
+    )?;
+    verify_ed25519(
+        session.signer_public_key, &proof, &req.signature_base64_url
+    )?;
+    // Canonical Group creation is transactionally idempotent and assigns
+    // initial membership only to the authenticated initiating principal.
+    let conversation = ConversationRecord {
+        scope: direct.scope.clone(),
+        conversation: ConversationRef {
+            conversation_id: ids.conversation_id.clone(),
+            kind: ConversationKind::PrivateGroup,
+        },
+        parent_conversation_id: None,
+    };
+    let group = GroupRecord {
+        scope: direct.scope.clone(),
+        group_id: ids.group_id.clone(),
+        conversation: conversation.conversation.clone(),
+        ownership: GroupOwnership::PersonOwned(participants[0].clone()),
+        history_policy: GroupHistoryPolicy::NoHistory,
+        delivery_policy: DeliveryPolicy::NoExternalBridge,
+        crypto_state: GroupCryptoState {
+            capability_id: Some(ucr_protocol::GROUP_MLS_CAPABILITY.to_owned()),
+            epoch: 0,
+            state_ref: Some(state_ref),
+        },
+        public_policy: None,
+        media_state: GroupMediaState::Idle,
+        bridge_mappings: Vec::new(),
+        replication_generation: 0,
+        revision: 0,
+    };
+    // Do not silently reuse an earlier server-hosted media MLS group.
+    if ucr_group_mls::GroupMlsServerCustodyProbe::server_possesses_mls_group(
+        state.store.as_ref(), &direct.scope, &ids.group_id
+    ).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)? {
+        return Err(StatusCode::CONFLICT);
+    }
+    state.store.create_group(&conversation, &group, &session.subject)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    Ok(json!({
+        "callId": req.call_id,
+        "groupId": ids.group_id.as_opaque().as_str(),
+        "cryptoEpoch": 0,
+        "cryptoStateRef": req.crypto_state_ref,
+        "requiresEndpointOwnedCommit": true,
+    }))
+}
+
 fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Value, StatusCode> {
     let call = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
         .first_party_call_join_admission(
@@ -1583,6 +1681,11 @@ fn call_route(state: &State, auth: &Session, path: &str, body: &[u8]) -> Result<
             let input: SignalRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             signal_call(state, auth, &input)?
+        }
+        "/v1/first-party/call/mls-create" => {
+            let input: EndpointMlsCreateRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            publish_endpoint_mls_group(state, auth, &input)?
         }
         "/v1/first-party/call/mls-descriptor" => {
             let input: JoinRequest = parse(body)?;
