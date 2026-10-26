@@ -748,6 +748,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
 
     // Real browser-equivalent endpoint MLS progression: no server member,
     // no server private signing/HPKE or exported media secret.
+    use ucr_model::GroupId;
     use ucr_group_mls::{
         GroupMlsServerCustodyProbe, MlsDeviceAdmission, MlsTransitionInput,
         browser_memory_provider, create_device_key_package, create_group,
@@ -958,9 +959,63 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         &artifacts.next_crypto_state,
     )
     .unwrap();
+    // A real authenticated media frame proves that the two endpoint-only
+    // OpenMLS exporters interoperate. We intentionally do NOT implement
+    // PartialEq on secret key material or leak its bytes into test output.
+    use ucr_crypto::{
+        SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+    };
+    use ucr_model::{
+        CryptoSuite, GroupMediaE2eeContext, GroupMediaFrameHeader, KeyId, MediaKind,
+        VideoSourceKind,
+    };
+    let media_context = GroupMediaE2eeContext {
+        scope: scope.clone(),
+        call_id: CallId::from_opaque(opaque(&call_id).unwrap()),
+        group_id: group_id.clone(),
+        negotiation_ref: opaque("endpoint-mls-test-negotiation").unwrap(),
+        negotiation_generation: 1,
+        crypto_epoch: artifacts.next_crypto_state.epoch,
+        crypto_state_ref: artifacts.next_crypto_state.state_ref.clone().unwrap(),
+        crypto_suite: CryptoSuite::UcrV1,
+    };
+    let signing_key = SigningKeyMaterial::from_seed([71; 32]);
+    let wire = seal_endpoint_group_media_wire(
+        &alice_secret,
+        &media_context,
+        GroupMediaFrameHeader {
+            scope: scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: group_id.clone(),
+            stream_id: opaque("endpoint-mls-test-video").unwrap(),
+            source: alice_session.subject.principal.clone(),
+            source_device_id: alice_id.clone(),
+            negotiation_ref: media_context.negotiation_ref.clone(),
+            negotiation_generation: media_context.negotiation_generation,
+            crypto_epoch: media_context.crypto_epoch,
+            crypto_state_ref: media_context.crypto_state_ref.clone(),
+            crypto_suite: media_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 1,
+            media_timestamp: 90_000,
+            keyframe: true,
+        },
+        b"only recipient OpenMLS endpoints can decrypt this video",
+        KeyId::from_opaque(opaque("endpoint-mls-test-signature").unwrap()),
+        &signing_key,
+    )
+    .expect("endpoint encrypts authenticated video");
     assert_eq!(
-        alice_secret, bob_secret,
-        "only endpoint peers share the exporter"
+        open_endpoint_group_media_wire(
+            &bob_secret,
+            &media_context,
+            &wire,
+            signing_key.verifying_key(),
+        )
+        .expect("peer decrypts the same video with a distinct local MLS provider"),
+        b"only recipient OpenMLS endpoints can decrypt this video",
     );
     assert!(
         !server
