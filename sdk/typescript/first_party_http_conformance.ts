@@ -310,4 +310,57 @@ for (const route of [
 }
 
 assert.ok(!authenticatedRoutes.includes("/v1/first-party/call/join"));
+// A signed Join or MLS descriptor issued to the previous Device is stale when
+// the browser switches Identity/Device before the HTTP response completes.
+// A matching binding inside the delayed response alone is not sufficient.
+async function expectLateDeviceResponseRefused(
+  route: string,
+  payload: unknown,
+  invoke: (host: ReturnType<typeof createUcrFirstPartyHttpHost>) => Promise<unknown>,
+): Promise<void> {
+  let active = binding;
+  const requested = deferred<void>();
+  const delayed = deferred<Response>();
+  const host = createUcrFirstPartyHttpHost(first.vault, {
+    origin,
+    fetchImpl: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/v1/first-party/session") return reply(active);
+      if (path === route) {
+        requested.release(undefined);
+        return delayed.promise;
+      }
+      throw new Error("unexpected first-party route: " + path);
+    },
+  });
+  const pending = invoke(host);
+  await requested.promise;
+  active = second;
+  delayed.release(reply(payload));
+  await assert.rejects(pending, /account or Device changed during MLS\\/Join operation/);
+}
+
+const acceptedMlsDescriptor = {
+  callId: direct.callId, expectedRevision: 7,
+  mediaCallId: "fp-m-call-42", groupId: "fp-mg-group-42",
+  conversationId: "fp-mc-conversation-42",
+  creatorPrincipalId: binding.participantId, peerPrincipalId: "peer-other",
+  deviceId: binding.deviceId, cryptoCapability: "ucr.group-mls.v1",
+  requiresEndpointOwnedCommit: true,
+};
+await expectLateDeviceResponseRefused(
+  "/v1/first-party/call/mls-descriptor", acceptedMlsDescriptor,
+  host => host.describeAcceptedCallMls(binding, {callId: direct.callId, expectedRevision: 7}),
+);
+await expectLateDeviceResponseRefused(
+  "/v1/first-party/call/join-accepted", {
+    ...binding, callId: direct.callId, sessionId: "session-42",
+    joinFragment: "#ucr_join=" + encode(new TextEncoder().encode("fake-claims")) +
+      "." + encode(new TextEncoder().encode("fake-signature")),
+  },
+  host => host.issueSignedJoinForAcceptedCall(binding, {
+    callId: direct.callId, expectedRevision: 7,
+  }),
+);
+
 console.log("RT0 HTTP: existing Device proof, canonical Call routes, and unscoped Join denial passed");
