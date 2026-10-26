@@ -69,6 +69,7 @@ fn phase44_has_committed_lock_state_for_every_current_rust_surface() {
         "crates/ucr-reference-messenger/Cargo.lock",
         "crates/ucr-ai-actor/Cargo.lock",
         "crates/ucr-chaos-lab/Cargo.lock",
+        "crates/ucr-endpoint-wasm/Cargo.lock",
     ] {
         let full = workspace().join(path);
         assert!(full.is_file(), "missing committed lockfile: {path}");
@@ -77,6 +78,59 @@ fn phase44_has_committed_lock_state_for_every_current_rust_surface() {
             "empty committed lockfile: {path}"
         );
     }
+}
+
+#[test]
+fn phase44_audits_every_git_tracked_cargo_lock_including_endpoint_wasm() {
+    // The endpoint WASM bridge is a separate Cargo workspace. Its lock must
+    // not silently disappear from audits, SPDX metadata or release evidence.
+    let output = std::process::Command::new("git")
+        .current_dir(workspace())
+        .args(["ls-files", "--cached", "--", "Cargo.lock", "**/Cargo.lock"])
+        .output()
+        .expect("git must be available for committed lock discovery");
+    assert!(
+        output.status.success(),
+        "cannot enumerate tracked Cargo locks"
+    );
+    let tracked = String::from_utf8(output.stdout).expect("git paths are UTF-8");
+    let workflow = read(".github/workflows/phase44-supply-chain.yml");
+    let ci = read(".github/workflows/ci.yml");
+    assert!(
+        tracked
+            .lines()
+            .any(|path| path == "crates/ucr-endpoint-wasm/Cargo.lock"),
+        "browser endpoint WASM lock must be tracked"
+    );
+    for lock in tracked.lines() {
+        assert!(
+            workflow.contains(&format!("test -s {lock}")),
+            "lock not required: {lock}"
+        );
+        assert!(
+            workflow.contains(&format!("cargo audit --file {lock} --deny warnings")),
+            "lock not security-audited: {lock}"
+        );
+        assert!(
+            workflow.contains(&format!("--lockfile {lock}")),
+            "lock omitted from signed build evidence: {lock}"
+        );
+        if lock != "Cargo.lock" {
+            let manifest = lock.replace("Cargo.lock", "Cargo.toml");
+            assert!(
+                workflow.contains(&format!("cargo metadata --manifest-path {manifest}")),
+                "workspace omitted from SPDX metadata: {manifest}"
+            );
+        }
+    }
+    assert!(
+        workflow.contains("--metadata dist/phase44/metadata/endpoint-wasm.json"),
+        "endpoint WASM dependencies missing from SPDX SBOM"
+    );
+    assert!(
+        ci.contains("cargo audit --file crates/ucr-endpoint-wasm/Cargo.lock --deny warnings"),
+        "root CI must also audit browser endpoint WASM dependencies"
+    );
 }
 
 #[test]
