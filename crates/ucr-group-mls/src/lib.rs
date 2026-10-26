@@ -1502,6 +1502,103 @@ mod tests {
         );
     }
 
+    /// P0 confidentiality reproducer for first_party_media's server-held committer.
+    /// In this real OpenMLS topology Alice models the server-held group creator,
+    /// Bob the sending endpoint, and Charlie the receiving endpoint. This is
+    /// evidence of a defect, NOT a passing server-blind E2EE acceptance test.
+    /// Replace it with a negative host-isolation test after endpoint-only rekeying.
+    #[test]
+    fn server_held_mls_committer_can_decrypt_signed_endpoint_video_wire() {
+        use ucr_crypto::{
+            SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+        };
+        use ucr_model::{GroupMediaFrameHeader, KeyId, VideoSourceKind};
+
+        let fixture = three_member_group();
+        let media_context = context(&fixture, &fixture.state);
+        let sender_secret = export_group_media_secret(
+            &fixture.bob_provider,
+            &fixture.bob_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &fixture.state,
+        )
+        .unwrap();
+        let receiver_secret = export_group_media_secret(
+            &fixture.charlie_provider,
+            &fixture.charlie_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &fixture.state,
+        )
+        .unwrap();
+        // This provider represents the durable server-owned committer MLS leaf.
+        let server_host_secret = export_group_media_secret(
+            &fixture.alice_provider,
+            &fixture.alice_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &fixture.state,
+        )
+        .unwrap();
+        let signer = SigningKeyMaterial::from_seed([19; 32]);
+        let header = GroupMediaFrameHeader {
+            scope: fixture.scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: fixture.group_id.clone(),
+            stream_id: oid("camera"),
+            source: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("bob")),
+                kind: PrincipalKind::Person,
+            },
+            source_device_id: device("bob"),
+            negotiation_ref: media_context.negotiation_ref.clone(),
+            negotiation_generation: media_context.negotiation_generation,
+            crypto_epoch: media_context.crypto_epoch,
+            crypto_state_ref: media_context.crypto_state_ref.clone(),
+            crypto_suite: media_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 1,
+            media_timestamp: 90_000,
+            keyframe: true,
+        };
+        let payload = b"endpoint video payload: no plaintext SFU fallback";
+        let wire = seal_endpoint_group_media_wire(
+            &sender_secret,
+            &media_context,
+            header,
+            payload,
+            KeyId::from_opaque(oid("bob-trusted-key")),
+            &signer,
+        )
+        .unwrap();
+        assert_ne!(wire.as_slice(), payload);
+        assert_eq!(
+            open_endpoint_group_media_wire(
+                &receiver_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .unwrap(),
+            payload
+        );
+        // P0: the server-held committer can open the SAME authenticated wire.
+        // A green test here demonstrates the confidentiality failure.
+        assert_eq!(
+            open_endpoint_group_media_wire(
+                &server_host_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .unwrap(),
+            payload
+        );
+    }
+
     #[test]
     fn real_mls_add_and_remove_rotates_exporter_and_isolates_removed_member() {
         let mut fixture = three_member_group();
