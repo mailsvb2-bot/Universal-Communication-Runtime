@@ -194,7 +194,8 @@ impl EndpointMlsState {
         .map_err(debug_error)?;
         self.state = Some(expected);
         self.pending_transition = None;
-        self.media_generation.set(self.media_generation.get().wrapping_add(1));
+        self.media_generation
+            .set(self.media_generation.get().wrapping_add(1));
         Ok(())
     }
 
@@ -317,7 +318,8 @@ impl EndpointMlsState {
         )
         .map_err(debug_error)?;
         self.state = Some(expected);
-        self.media_generation.set(self.media_generation.get().wrapping_add(1));
+        self.media_generation
+            .set(self.media_generation.get().wrapping_add(1));
         Ok(())
     }
 
@@ -496,9 +498,10 @@ impl EndpointGroupMediaBridge {
         plaintext: &[u8],
     ) -> Result<Vec<u8>, JsValue> {
         if self.revoked.get()
-            || self.owner_generation.as_ref().is_some_and(|generation| {
-                generation.get() != self.issued_generation
-            })
+            || self
+                .owner_generation
+                .as_ref()
+                .is_some_and(|generation| generation.get() != self.issued_generation)
         {
             return Err(js_error("endpoint media bridge revoked or stale MLS epoch"));
         }
@@ -536,9 +539,10 @@ impl EndpointGroupMediaBridge {
 
     pub fn open_wire(&self, wire: &[u8], source_verifying_key: &[u8]) -> Result<Vec<u8>, JsValue> {
         if self.revoked.get()
-            || self.owner_generation.as_ref().is_some_and(|generation| {
-                generation.get() != self.issued_generation
-            })
+            || self
+                .owner_generation
+                .as_ref()
+                .is_some_and(|generation| generation.get() != self.issued_generation)
         {
             return Err(js_error("endpoint media bridge revoked or stale MLS epoch"));
         }
