@@ -2,11 +2,12 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use ucr_core::{DurableRecordStatus, DurableStoreError};
 use ucr_group_mls::{
     AtomicMlsGroupChangeResult, DeviceKeyPackage, GroupMlsAtomicStore, GroupMlsBootstrapStore,
-    GroupMlsServerCustodyProbe, GroupMlsStoreError, MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS, MlsBootstrapCommit,
-    MlsCommitArtifacts, MlsDeviceAdmission, MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput,
-    create_device_key_package, create_group, current_crypto_state, decode_key_package, load_group,
-    member_device_ids, mls_change_request_fingerprint, mls_device_admission_fingerprint,
-    own_device_id, sqlite_provider, stage_transition,
+    GroupMlsServerCustodyProbe, GroupMlsStoreError, MAX_MLS_BOOTSTRAP_BYTES,
+    MAX_MLS_BOOTSTRAP_COMMITS, MlsBootstrapCommit, MlsCommitArtifacts, MlsDeviceAdmission,
+    MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput, create_device_key_package, create_group,
+    current_crypto_state, decode_key_package, load_group, member_device_ids,
+    mls_change_request_fingerprint, mls_device_admission_fingerprint, own_device_id,
+    sqlite_provider, stage_transition,
 };
 use ucr_model::{
     ConversationRecord, DeviceId, EventId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
@@ -287,12 +288,14 @@ impl GroupMlsServerCustodyProbe for SqliteLocalStore {
         scope: &TenantScope,
         group_id: &GroupId,
     ) -> Result<bool, GroupMlsStoreError> {
-        let connection = self.lock_connection().map_err(GroupMlsStoreError::Durable)?;
+        let connection = self
+            .lock_connection()
+            .map_err(GroupMlsStoreError::Durable)?;
         let provider = sqlite_provider(&connection);
         // The actual server-side OpenMLS storage is checked, not a Group
         // membership projection or a caller-supplied endpoint-only flag.
-        let server_group = load_group(&provider, scope, group_id)
-            .map_err(GroupMlsStoreError::Mls)?;
+        let server_group =
+            load_group(&provider, scope, group_id).map_err(GroupMlsStoreError::Mls)?;
         Ok(server_group.is_some())
     }
 }
