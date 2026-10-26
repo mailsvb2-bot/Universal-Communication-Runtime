@@ -2988,7 +2988,10 @@ mod tests {
             let store = SqliteLocalStore::open(db.path()).expect("create fresh v53 store");
             assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
             let connection = store.lock_connection().expect("lock fresh store");
-            assert_eq!(super::endpoint_mls_offer_store::verify_v53_objects(&connection), Ok(()));
+            assert_eq!(
+                super::endpoint_mls_offer_store::verify_v53_objects(&connection),
+                Ok(())
+            );
         }
         let reopened = SqliteLocalStore::open(db.path()).expect("reopen fresh v53 store");
         assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
@@ -3013,7 +3016,10 @@ mod tests {
             let migrated = SqliteLocalStore::open(db.path()).expect("migrate v52 to v53");
             assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
             let connection = migrated.lock_connection().expect("lock migrated store");
-            assert_eq!(super::endpoint_mls_offer_store::verify_v53_objects(&connection), Ok(()));
+            assert_eq!(
+                super::endpoint_mls_offer_store::verify_v53_objects(&connection),
+                Ok(())
+            );
         }
         let reopened = SqliteLocalStore::open(db.path()).expect("reopen migrated v53 store");
         assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
