@@ -981,11 +981,9 @@ fn endpoint_mls_descriptor(
             req.expected_revision,
         )
         .map_err(|_| StatusCode::FORBIDDEN)?;
-    let participants = first_party_media::admissible_participants_for_descriptor(
-        &call,
-        &session.subject,
-    )
-    .map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants =
+        first_party_media::admissible_participants_for_descriptor(&call, &session.subject)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
     let ids = first_party_media::media_runtime_ids(&call.scope, &call.call_id)
         .map_err(|_| StatusCode::CONFLICT)?;
     Ok(json!({
