@@ -409,6 +409,11 @@ impl EndpointMlsState {
             stage_transition(&self.provider, group, &self.scope, &self.group_id, &input)
                 .map_err(debug_error)?;
         let wire = transition.commit.clone();
+        // The pending commit may rotate or revoke media authority. Invalidate every
+        // bridge issued under the old epoch BEFORE returning the commit to JS.
+        // A delayed transport send must not reuse an old key while MLS is pending.
+        self.media_generation
+            .set(self.media_generation.get().wrapping_add(1));
         self.pending_transition = Some(transition);
         Ok(wire)
     }
