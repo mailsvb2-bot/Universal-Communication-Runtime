@@ -318,7 +318,12 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
         artifacts: &MlsCommitArtifacts,
         signed_fingerprint: [u8; 32],
     ) -> Result<DurableRecordStatus, GroupMlsStoreError> {
-        validate_endpoint_mls_commit_material(actor, requested_change, recipient_device, artifacts)?;
+        validate_endpoint_mls_commit_material(
+            actor,
+            requested_change,
+            recipient_device,
+            artifacts,
+        )?;
         let GroupChangeKind::AddMember { member, .. } = &requested_change.kind else {
             return Err(GroupMlsStoreError::InvalidChangeMaterial);
         };
