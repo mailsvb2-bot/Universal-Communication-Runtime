@@ -499,6 +499,28 @@ pub trait GroupMlsBootstrapStore {
 /// Proof-of-custody guard for endpoint-only media. A server that can load
 /// an OpenMLS Group from its own provider may derive the group's exporter.
 /// Canonical participant metadata alone cannot prove server-blind E2EE.
+/// Atomically persists an endpoint-produced MLS Commit/Welcome alongside the
+/// canonical Group membership CAS. The server receives only signed opaque
+/// MLS delivery bytes and MUST NOT stage or merge an OpenMLS transition.
+pub trait EndpointMlsCommitStore {
+    /// The caller MUST cryptographically authenticate `artifacts` and bind them
+    /// to the exact enrolled signing Device and authorized Call before invoking.
+    /// Storage checks active Device identity, Group authorization, epoch
+    /// monotonicity, recipient identity, durable idempotency and replay.
+    ///
+    /// # Errors
+    /// Rejects stale, invalid, replayed, unauthorized or corrupt transitions.
+    fn persist_endpoint_mls_commit(
+        &self,
+        actor: &ScopedPrincipal,
+        actor_device_id: &DeviceId,
+        requested_change: &GroupChange,
+        recipient_device_id: &DeviceId,
+        artifacts: &MlsCommitArtifacts,
+        signed_fingerprint: [u8; 32],
+    ) -> Result<DurableRecordStatus, GroupMlsStoreError>;
+}
+
 pub trait GroupMlsServerCustodyProbe {
     /// Returns true if the server OpenMLS provider possesses the exact Group.
     /// Errors MUST fail closed; they must never be interpreted as no custody.
