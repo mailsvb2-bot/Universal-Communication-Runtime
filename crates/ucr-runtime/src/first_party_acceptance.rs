@@ -749,22 +749,25 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     // Real browser-equivalent endpoint MLS progression: no server member,
     // no server private signing/HPKE or exported media secret.
     use ucr_group_mls::{
-        MlsDeviceAdmission, MlsTransitionInput, browser_memory_provider,
-        create_device_key_package, create_group, export_group_media_secret,
-        join_from_welcome, merge_pending, stage_transition, GroupMlsServerCustodyProbe,
+        GroupMlsServerCustodyProbe, MlsDeviceAdmission, MlsTransitionInput,
+        browser_memory_provider, create_device_key_package, create_group,
+        export_group_media_secret, join_from_welcome, merge_pending, stage_transition,
     };
     let scope = scope(&alice).expect("same canonical tenant scope");
-    let group_id = GroupId::from_opaque(
-        opaque(descriptor["groupId"].as_str().unwrap()).unwrap(),
-    );
+    let group_id = GroupId::from_opaque(opaque(descriptor["groupId"].as_str().unwrap()).unwrap());
     let alice_id = device(&alice).unwrap();
     let bob_id = device(&bob).unwrap();
     let alice_provider = browser_memory_provider();
     let bob_provider = browser_memory_provider();
     let alice_pkg = create_device_key_package(&alice_provider, &scope, &alice_id).unwrap();
     let (mut alice_mls, first_state) = create_group(
-        &alice_provider, &scope, &group_id, &alice_id, &alice_pkg.signer_public_key,
-    ).unwrap();
+        &alice_provider,
+        &scope,
+        &group_id,
+        &alice_id,
+        &alice_pkg.signer_public_key,
+    )
+    .unwrap();
     let first_ref = first_state.state_ref.as_ref().unwrap().as_str();
     let alice_session = session_of(&server, &alice);
     let bob_session = session_of(&server, &bob);
@@ -772,18 +775,38 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         encoded_proof(
             "ucr-first-party-endpoint-mls-create.v1",
             &json!([
-                alice.tenant_id, alice.namespace_id, alice.participant_id,
-                alice.device, alice_session.signer_key_id, call_id, revision,
-                descriptor["groupId"].as_str().unwrap(), 0, first_ref,
+                alice.tenant_id,
+                alice.namespace_id,
+                alice.participant_id,
+                alice.device,
+                alice_session.signer_key_id,
+                call_id,
+                revision,
+                descriptor["groupId"].as_str().unwrap(),
+                0,
+                first_ref,
             ]),
-        ).unwrap().as_bytes(),
+        )
+        .unwrap()
+        .as_bytes(),
     );
-    call(&server, &alice, "/v1/first-party/call/mls-create", &json!({
-        "binding": alice, "callId": call_id, "expectedRevision": revision,
-        "cryptoStateRef": first_ref,
-        "signatureBase64Url": URL_SAFE_NO_PAD.encode(create_signature.to_bytes()),
-    })).expect("creator publishes signed endpoint-only MLS epoch zero");
-    assert!(!server.store.server_possesses_mls_group(&scope, &group_id).unwrap());
+    call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-create",
+        &json!({
+            "binding": alice, "callId": call_id, "expectedRevision": revision,
+            "cryptoStateRef": first_ref,
+            "signatureBase64Url": URL_SAFE_NO_PAD.encode(create_signature.to_bytes()),
+        }),
+    )
+    .expect("creator publishes signed endpoint-only MLS epoch zero");
+    assert!(
+        !server
+            .store
+            .server_possesses_mls_group(&scope, &group_id)
+            .unwrap()
+    );
 
     let bob_package = create_device_key_package(&bob_provider, &scope, &bob_id).unwrap();
     let package_digest = sha256_b64(&bob_package.bytes);
@@ -791,84 +814,160 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         encoded_proof(
             "ucr-first-party-endpoint-mls-key-package.v1",
             &json!([
-                bob.tenant_id, bob.namespace_id, bob.participant_id, bob.device,
-                bob_session.signer_key_id, call_id,
-                descriptor["groupId"].as_str().unwrap(), package_digest,
+                bob.tenant_id,
+                bob.namespace_id,
+                bob.participant_id,
+                bob.device,
+                bob_session.signer_key_id,
+                call_id,
+                descriptor["groupId"].as_str().unwrap(),
+                package_digest,
             ]),
-        ).unwrap().as_bytes(),
+        )
+        .unwrap()
+        .as_bytes(),
     );
-    call(&server, &bob, "/v1/first-party/call/mls-offer", &json!({
-        "binding": bob, "callId": call_id, "expectedRevision": revision,
-        "recipientSignerKeyId": bob_session.signer_key_id,
-        "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&bob_package.bytes),
-        "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(recipient_signature.to_bytes()),
-    })).expect("Bob's trusted Device publishes public MLS package");
-    let offers = call(&server, &alice, "/v1/first-party/call/mls-offers", &json!({
-        "binding": alice, "callId": call_id, "expectedRevision": revision,
-    })).expect("Alice may read only active Call's recipient offers");
+    call(
+        &server,
+        &bob,
+        "/v1/first-party/call/mls-offer",
+        &json!({
+            "binding": bob, "callId": call_id, "expectedRevision": revision,
+            "recipientSignerKeyId": bob_session.signer_key_id,
+            "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&bob_package.bytes),
+            "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(recipient_signature.to_bytes()),
+        }),
+    )
+    .expect("Bob's trusted Device publishes public MLS package");
+    let offers = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-offers",
+        &json!({
+            "binding": alice, "callId": call_id, "expectedRevision": revision,
+        }),
+    )
+    .expect("Alice may read only active Call's recipient offers");
     assert_eq!(offers["offers"].as_array().unwrap().len(), 1);
     assert_eq!(offers["offers"][0]["recipientDeviceId"], bob.device);
 
     let artifacts = stage_transition(
-        &alice_provider, &mut alice_mls, &scope, &group_id,
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
         &MlsTransitionInput::Add(vec![MlsDeviceAdmission {
             device_id: bob_id.clone(),
             key_package: bob_package.bytes.clone(),
         }]),
-    ).expect("local OpenMLS Add and Welcome");
+    )
+    .expect("local OpenMLS Add and Welcome");
     let event_id = "fp-endpoint-mls-acceptance-add-1";
-    let next_ref = artifacts.next_crypto_state.state_ref.as_ref().unwrap().as_str();
+    let next_ref = artifacts
+        .next_crypto_state
+        .state_ref
+        .as_ref()
+        .unwrap()
+        .as_str();
     let welcome = artifacts.welcome.as_ref().expect("recipient Welcome");
     let sender_proof = encoded_proof(
         "ucr-first-party-endpoint-mls-add-peer.v1",
         &json!([
-            alice.tenant_id, alice.namespace_id, alice.participant_id, alice.device,
-            alice_session.signer_key_id, call_id, revision,
-            descriptor["groupId"].as_str().unwrap(), 0, event_id,
-            artifacts.next_crypto_state.epoch, next_ref, bob.device,
-            bob_session.signer_key_id, package_digest,
-            sha256_b64(&artifacts.commit), sha256_b64(welcome),
+            alice.tenant_id,
+            alice.namespace_id,
+            alice.participant_id,
+            alice.device,
+            alice_session.signer_key_id,
+            call_id,
+            revision,
+            descriptor["groupId"].as_str().unwrap(),
+            0,
+            event_id,
+            artifacts.next_crypto_state.epoch,
+            next_ref,
+            bob.device,
+            bob_session.signer_key_id,
+            package_digest,
+            sha256_b64(&artifacts.commit),
+            sha256_b64(welcome),
         ]),
-    ).unwrap();
+    )
+    .unwrap();
     let sender_signature = alice_signer.sign(sender_proof.as_bytes());
-    call(&server, &alice, "/v1/first-party/call/mls-add-peer", &json!({
-        "binding": alice, "callId": call_id, "expectedRevision": revision,
-        "groupRevision": 0, "eventId": event_id,
-        "cryptoEpoch": artifacts.next_crypto_state.epoch,
-        "cryptoStateRef": next_ref, "recipientDeviceId": bob.device,
-        "recipientSignerKeyId": bob_session.signer_key_id,
-        "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&bob_package.bytes),
-        "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(recipient_signature.to_bytes()),
-        "commitBase64Url": URL_SAFE_NO_PAD.encode(&artifacts.commit),
-        "welcomeBase64Url": URL_SAFE_NO_PAD.encode(welcome),
-        "signatureBase64Url": URL_SAFE_NO_PAD.encode(sender_signature.to_bytes()),
-    })).expect("server atomically records signed Commit/Welcome without opening MLS");
+    call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-add-peer",
+        &json!({
+            "binding": alice, "callId": call_id, "expectedRevision": revision,
+            "groupRevision": 0, "eventId": event_id,
+            "cryptoEpoch": artifacts.next_crypto_state.epoch,
+            "cryptoStateRef": next_ref, "recipientDeviceId": bob.device,
+            "recipientSignerKeyId": bob_session.signer_key_id,
+            "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&bob_package.bytes),
+            "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(recipient_signature.to_bytes()),
+            "commitBase64Url": URL_SAFE_NO_PAD.encode(&artifacts.commit),
+            "welcomeBase64Url": URL_SAFE_NO_PAD.encode(welcome),
+            "signatureBase64Url": URL_SAFE_NO_PAD.encode(sender_signature.to_bytes()),
+        }),
+    )
+    .expect("server atomically records signed Commit/Welcome without opening MLS");
 
     merge_pending(
-        &alice_provider, &mut alice_mls, &scope, &group_id,
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
         &artifacts.next_crypto_state,
-    ).expect("sender merges locally after durable acceptance");
-    let handoff = call(&server, &bob, "/v1/first-party/call/mls-bootstrap", &json!({
-        "binding": bob, "callId": call_id, "expectedRevision": revision,
-    })).expect("only Bob receives encrypted Welcome");
+    )
+    .expect("sender merges locally after durable acceptance");
+    let handoff = call(
+        &server,
+        &bob,
+        "/v1/first-party/call/mls-bootstrap",
+        &json!({
+            "binding": bob, "callId": call_id, "expectedRevision": revision,
+        }),
+    )
+    .expect("only Bob receives encrypted Welcome");
     assert_eq!(handoff["deviceId"], bob.device);
-    let delivered_welcome = URL_SAFE_NO_PAD.decode(
-        handoff["welcomeBase64Url"].as_str().unwrap(),
-    ).unwrap();
+    let delivered_welcome = URL_SAFE_NO_PAD
+        .decode(handoff["welcomeBase64Url"].as_str().unwrap())
+        .unwrap();
     let bob_mls = join_from_welcome(
-        &bob_provider, &scope, &group_id, &delivered_welcome,
+        &bob_provider,
+        &scope,
+        &group_id,
+        &delivered_welcome,
         &artifacts.next_crypto_state,
-    ).expect("recipient decrypts Welcome using his own MLS private key");
+    )
+    .expect("recipient decrypts Welcome using his own MLS private key");
     let alice_secret = export_group_media_secret(
-        &alice_provider, &alice_mls, &scope, &group_id,
+        &alice_provider,
+        &alice_mls,
+        &scope,
+        &group_id,
         &artifacts.next_crypto_state,
-    ).unwrap();
+    )
+    .unwrap();
     let bob_secret = export_group_media_secret(
-        &bob_provider, &bob_mls, &scope, &group_id,
+        &bob_provider,
+        &bob_mls,
+        &scope,
+        &group_id,
         &artifacts.next_crypto_state,
-    ).unwrap();
-    assert_eq!(alice_secret, bob_secret, "only endpoint peers share the exporter");
-    assert!(!server.store.server_possesses_mls_group(&scope, &group_id).unwrap());
+    )
+    .unwrap();
+    assert_eq!(
+        alice_secret, bob_secret,
+        "only endpoint peers share the exporter"
+    );
+    assert!(
+        !server
+            .store
+            .server_possesses_mls_group(&scope, &group_id)
+            .unwrap()
+    );
 
     // A third person never sees nor joins the Call.
     assert!(join_accepted(&server, &carol, &call_id, revision).is_err());
