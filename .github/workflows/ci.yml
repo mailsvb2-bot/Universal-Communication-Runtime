@@ -145,6 +145,8 @@ jobs:
         run: cargo audit --deny warnings
       - name: Audit fuzz Cargo.lock
         run: cargo audit --file fuzz/Cargo.lock --deny warnings
+      - name: Audit endpoint WASM Cargo.lock
+        run: cargo audit --file crates/ucr-endpoint-wasm/Cargo.lock --deny warnings
       - name: Resolve Prepared Public SDK lock
         run: cargo generate-lockfile --manifest-path crates/ucr-sdk/Cargo.toml
       - name: Audit Prepared Public SDK lock
