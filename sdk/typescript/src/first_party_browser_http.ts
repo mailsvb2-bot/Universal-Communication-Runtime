@@ -61,6 +61,7 @@ function parseEndpointMlsCallDescriptor(value: unknown): UcrEndpointMlsCallDescr
 
 export interface UcrManagedFirstPartyHost extends UcrDirectCallHost {
   describeAcceptedCallMls(binding: UcrAuthenticatedFirstEntry, input: {callId: string; expectedRevision: number}): Promise<UcrEndpointMlsCallDescriptor>;
+  publishEndpointMlsGroup(binding: UcrAuthenticatedFirstEntry, input: {callId: string; expectedRevision: number; cryptoStateRef: string}): Promise<void>;
   listDevices(): Promise<readonly {deviceId:string;state:string}[]>;
   revokeDevice(deviceId:string): Promise<void>;
   rotateRecoveryCode(): Promise<string>;
@@ -682,6 +683,49 @@ export function createUcrFirstPartyHttpHost(
         throw new Error("endpoint MLS descriptor is not bound to the active Call/Device");
       }
       return descriptor;
+    },
+    async publishEndpointMlsGroup(binding, input) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) {
+        throw new Error("first-party account changed before signed MLS creation");
+      }
+      const descriptor = await this.describeAcceptedCallMls(auth, input);
+      if (descriptor.creatorPrincipalId !== auth.participantId) {
+        throw new Error("only the authorized Call initiator may create endpoint MLS");
+      }
+      const scope: UcrDeviceVaultScope = {
+        tenantId: auth.tenantId, namespaceId: auth.namespaceId, deviceId: auth.deviceId,
+      };
+      const signer = await vault.load(scope);
+      if (!signer || typeof signer.keyId !== "string" ||
+          !(signer.publicKey instanceof Uint8Array) || signer.publicKey.length !== 32) {
+        throw new Error("canonical protected Device signing key unavailable");
+      }
+      const cryptoStateRef = requiredId(input.cryptoStateRef, "endpoint MLS state");
+      const proof = new TextEncoder().encode(
+        "ucr-first-party-endpoint-mls-create.v1\u0000" + JSON.stringify([
+          auth.tenantId, auth.namespaceId, auth.participantId, auth.deviceId,
+          signer.keyId, input.callId, input.expectedRevision, descriptor.groupId,
+          0, cryptoStateRef,
+        ])
+      );
+      const signature = await vault.signChallenge(scope, proof);
+      if (!(signature instanceof Uint8Array) || signature.length !== 64 ||
+          !sameBinding(auth, await session())) {
+        throw new Error("endpoint MLS group creator signing failed");
+      }
+      const result = await request("POST", "/v1/first-party/call/mls-create", {
+        binding: auth, callId: input.callId,
+        expectedRevision: input.expectedRevision, cryptoStateRef,
+        signatureBase64Url: encodeBase64Url(signature),
+      });
+      if (!isObject(result) || result.callId !== input.callId ||
+          result.groupId !== descriptor.groupId ||
+          result.cryptoEpoch !== 0 ||
+          result.cryptoStateRef !== cryptoStateRef ||
+          result.requiresEndpointOwnedCommit !== true) {
+        throw new Error("server did not persist authorized endpoint MLS epoch zero");
+      }
     },
     async issueSignedJoinForAcceptedCall(binding, input: {
       callId: string; expectedRevision: number
