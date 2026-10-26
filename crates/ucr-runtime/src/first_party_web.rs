@@ -43,7 +43,7 @@ use ucr_model::{
 };
 use ucr_group_mls::{EndpointMlsCommitStore, GroupMlsBootstrapStore, MlsCommitArtifacts, MlsDeviceAdmission};
 use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
-use ucr_storage_sqlite::SqliteLocalStore;
+use ucr_storage_sqlite::{EndpointMlsKeyPackageOffer, SqliteLocalStore};
 
 use crate::first_party_media;
 
@@ -122,6 +122,17 @@ struct AccountFinish {
     public_key_base64_url: String,
     signature_base64_url: String,
     recovery_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EndpointMlsOfferRequest {
+    binding: Binding,
+    call_id: String,
+    expected_revision: u64,
+    recipient_signer_key_id: String,
+    recipient_key_package_base64_url: String,
+    recipient_signature_base64_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1138,6 +1149,131 @@ fn sha256_b64(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(bytes))
 }
 
+fn publish_endpoint_mls_offer(
+    state: &State,
+    session: &Session,
+    req: &EndpointMlsOfferRequest,
+) -> Result<Value, StatusCode> {
+    let direct = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject, &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?), req.expected_revision,
+        ).map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants = first_party_media::admissible_participants_for_descriptor(
+        &direct, &session.subject
+    ).map_err(|_| StatusCode::FORBIDDEN)?;
+    if participants[1] != session.subject.principal
+        || req.recipient_signer_key_id != session.signer_key_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let package = decode_mls_public_wire(&req.recipient_key_package_base64_url)?;
+    let proof = encoded_proof(
+        "ucr-first-party-endpoint-mls-key-package.v1",
+        &json!([
+            session.binding.tenant_id, session.binding.namespace_id,
+            session.binding.participant_id, session.binding.device,
+            session.signer_key_id, req.call_id,
+            ids.group_id.as_opaque().as_str(), sha256_b64(&package),
+        ]),
+    )?;
+    verify_ed25519(session.signer_public_key, &proof, &req.recipient_signature_base64_url)?;
+    let signature = URL_SAFE_NO_PAD.decode(&req.recipient_signature_base64_url)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    state.store.put_endpoint_mls_offer(
+        &direct.scope, &ids.group_id, &device(&session.binding)?,
+        &EndpointMlsKeyPackageOffer {
+            signer_key_id: req.recipient_signer_key_id.clone(),
+            package,
+            signature,
+        },
+    ).map_err(|_| StatusCode::CONFLICT)?;
+    Ok(json!({
+        "callId": req.call_id,
+        "groupId": ids.group_id.as_opaque().as_str(),
+        "deviceId": session.binding.device,
+        "offerStored": true,
+    }))
+}
+
+fn load_endpoint_mls_offers(
+    state: &State,
+    session: &Session,
+    req: &JoinRequest,
+) -> Result<Value, StatusCode> {
+    let direct = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject, &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?), req.expected_revision,
+        ).map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants = first_party_media::admissible_participants_for_descriptor(
+        &direct, &session.subject
+    ).map_err(|_| StatusCode::FORBIDDEN)?;
+    if participants[0] != session.subject.principal {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let peer_binding = state.store.principal_identity_binding(
+        &direct.scope, &participants[1]
+    ).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    let candidate_ids = state.store.endpoint_mls_offer_device_ids(
+        &direct.scope, &ids.group_id, 8
+    ).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut offers = Vec::new();
+    for candidate in candidate_ids {
+        let target_device = DeviceId::from_opaque(opaque(&candidate)?);
+        let Some(descriptor) = state.store.device(&direct.scope, &target_device)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)? else {
+            return Err(StatusCode::CONFLICT);
+        };
+        if descriptor.identity_id != peer_binding.identity_id
+            || !ucr_protocol::device_allows_protected_access(&descriptor) {
+            continue;
+        }
+        let Some(current_signer) = state.store.active_trusted_signing_key(
+            &direct.scope, &target_device
+        ).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)? else {
+            continue;
+        };
+        let Some(offer) = state.store.endpoint_mls_offer(
+            &direct.scope, &ids.group_id, &target_device
+        ).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)? else {
+            return Err(StatusCode::CONFLICT);
+        };
+        if offer.signer_key_id != current_signer.key_id.as_opaque().as_str() {
+            continue;
+        }
+        let key: [u8; 32] = current_signer.public_key.try_into()
+            .map_err(|_| StatusCode::CONFLICT)?;
+        let proof = encoded_proof(
+            "ucr-first-party-endpoint-mls-key-package.v1",
+            &json!([
+                session.binding.tenant_id, session.binding.namespace_id,
+                participants[1].principal_id.as_opaque().as_str(),
+                candidate, offer.signer_key_id, req.call_id,
+                ids.group_id.as_opaque().as_str(), sha256_b64(&offer.package),
+            ]),
+        )?;
+        verify_ed25519(
+            key, &proof, &URL_SAFE_NO_PAD.encode(&offer.signature)
+        )?;
+        offers.push(json!({
+            "recipientDeviceId": candidate,
+            "recipientSignerKeyId": offer.signer_key_id,
+            "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&offer.package),
+            "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(&offer.signature),
+        }));
+    }
+    Ok(json!({
+        "callId": req.call_id,
+        "groupId": ids.group_id.as_opaque().as_str(),
+        "offers": offers,
+    }))
+}
+
 /// A device-owner-signed endpoint Commit, cross-signed by the specific
 /// intended recipient over its PUBLIC KeyPackage. No server OpenMLS keys.
 fn publish_endpoint_mls_add_peer(
@@ -1169,6 +1305,15 @@ fn publish_endpoint_mls_add_peer(
     }
     let recipient_verifier: [u8; 32] = recipient_key.public_key
         .try_into().map_err(|_| StatusCode::FORBIDDEN)?;
+    let stored_offer = state.store.endpoint_mls_offer(
+        &direct.scope, &ids.group_id, &recipient_device
+    ).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if stored_offer.signer_key_id != req.recipient_signer_key_id
+        || URL_SAFE_NO_PAD.encode(&stored_offer.signature) != req.recipient_signature_base64_url
+        || URL_SAFE_NO_PAD.encode(&stored_offer.package) != req.recipient_key_package_base64_url {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let package = decode_mls_public_wire(&req.recipient_key_package_base64_url)?;
     let commit = decode_mls_public_wire(&req.commit_base64_url)?;
     let welcome = decode_mls_public_wire(&req.welcome_base64_url)?;
@@ -1874,6 +2019,16 @@ fn call_route(state: &State, auth: &Session, path: &str, body: &[u8]) -> Result<
             let input: SignalRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             signal_call(state, auth, &input)?
+        }
+        "/v1/first-party/call/mls-offer" => {
+            let input: EndpointMlsOfferRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            publish_endpoint_mls_offer(state, auth, &input)?
+        }
+        "/v1/first-party/call/mls-offers" => {
+            let input: JoinRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            load_endpoint_mls_offers(state, auth, &input)?
         }
         "/v1/first-party/call/mls-add-peer" => {
             let input: EndpointMlsAddPeerRequest = parse(body)?;
