@@ -26,17 +26,18 @@
 
 use sha2::{Digest, Sha256};
 use ucr_core::{
-    CallStore, DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, GroupStore,
-    IdentityStore, PermissionGrantStore, PrincipalIdentityBindingStore,
+    CallStore, DurableRecordStatus, DurableStoreError, GroupStore, PermissionGrantStore,
 };
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRef, DeviceId, GroupId, GroupMemberState, GroupOwnership, OpaqueId,
+    ConversationRef, DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, OpaqueId,
     PermissionGrant, PermissionScope, PrincipalId, PrincipalKind,
     PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::GROUP_MLS_CAPABILITY;
+
+const MAX_CAS_ATTEMPTS: usize = 6;
 
 /// Reserved legacy host identity. Recognized only to reject it from endpoint-owned media.
 pub(crate) const MEDIA_HOST_IDENTITY: &str = "fp-media-host";
@@ -124,6 +125,21 @@ pub(crate) fn media_runtime_ids(
         ))?),
         digest,
     })
+}
+
+fn derived_event(
+    ids: &MediaRuntimeIds,
+    label: &str,
+    principal: &PrincipalRef,
+) -> Result<EventId, MediaRuntimeError> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ucr-first-party-direct-call-media-event.v1\0");
+    length_prefixed(&mut hasher, ids.digest.as_bytes());
+    length_prefixed(&mut hasher, label.as_bytes());
+    length_prefixed(&mut hasher, principal.principal_id.as_opaque().as_wire_bytes());
+    Ok(EventId::from_opaque(opaque(format!(
+        "fp-me-{}", hex(&hasher.finalize())
+    ))?))
 }
 
 pub(crate) fn media_host(
