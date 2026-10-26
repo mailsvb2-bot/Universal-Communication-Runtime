@@ -35,6 +35,7 @@ use ucr_model::{
     PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
     TenantScope,
 };
+use ucr_group_mls::GroupMlsServerCustodyProbe;
 use ucr_protocol::GROUP_MLS_CAPABILITY;
 
 const MAX_CAS_ATTEMPTS: usize = 6;
@@ -324,7 +325,7 @@ pub(crate) fn prepare_direct_call_media<S>(
     subject: &ScopedPrincipal,
 ) -> Result<CallSession, MediaRuntimeError>
 where
-    S: CallStore + GroupStore + PermissionGrantStore,
+    S: CallStore + GroupStore + GroupMlsServerCustodyProbe + PermissionGrantStore,
 {
     let participants = admissible_participants(direct, subject)?;
     let ids = media_runtime_ids(&direct.scope, &direct.call_id)?;
@@ -343,6 +344,14 @@ where
         || group.crypto_state.state_ref.is_none()
         || group.ownership != GroupOwnership::PersonOwned(participants[0].clone())
         || group.public_policy.is_some()
+    {
+        return Err(MediaRuntimeError::Conflict);
+    }
+    // A canonical Group can look endpoint-owned while the server still has
+    // the OpenMLS private state. Do not authorize media for such a group.
+    if store
+        .server_possesses_mls_group(&direct.scope, &ids.group_id)
+        .map_err(|_| MediaRuntimeError::Unavailable)?
     {
         return Err(MediaRuntimeError::Conflict);
     }
