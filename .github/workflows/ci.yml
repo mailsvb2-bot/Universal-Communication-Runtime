@@ -14,42 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Temporary read-only Cargo lock regeneration evidence for #326.
-  endpoint-lock-migration-evidence:
-    if: github.event_name == 'pull_request' && github.event.pull_request.number == 326
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      - name: Install pinned Rust toolchain
-        run: rustup show
-      - name: Generate endpoint lock from pinned upstream core models
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo generate-lockfile --manifest-path crates/ucr-endpoint-wasm/Cargo.toml
-          cargo metadata --manifest-path crates/ucr-endpoint-wasm/Cargo.toml --locked --format-version 1 --no-deps >/dev/null
-          if grep -q 'name = "proc-macro-error2"' crates/ucr-endpoint-wasm/Cargo.lock; then
-            echo "obsolete hax proc macro remains in regenerated lock" >&2
-            exit 1
-          fi
-      - name: Upload Cargo-generated endpoint lock
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: ucr-endpoint-cargo-lock-${{ github.sha }}
-          path: crates/ucr-endpoint-wasm/Cargo.lock
-          if-no-files-found: error
-          retention-days: 3
-      - name: Emit generated lock as transport-only base64 for connector handoff
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo UCR_GENERATED_LOCK_BEGIN
-          base64 -w 256 crates/ucr-endpoint-wasm/Cargo.lock
-          echo UCR_GENERATED_LOCK_END
-
   rust-quality:
     runs-on: ubuntu-24.04
     # This job intentionally runs the full workspace, public SDK, reference app, and fuzz checks.
