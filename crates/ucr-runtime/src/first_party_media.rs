@@ -551,15 +551,13 @@ where
     let members = store.group_memberships(&direct.scope, &ids.group_id, 8)?;
     if members.iter().any(|member| {
         member.state == GroupMemberState::Active
-            && (member.member == legacy_host.principal
-                || !participants.contains(&member.member))
+            && (member.member == legacy_host.principal || !participants.contains(&member.member))
     }) {
         return Err(MediaRuntimeError::Conflict);
     }
     if !participants.iter().all(|participant| {
         members.iter().any(|membership| {
-            membership.state == GroupMemberState::Active
-                && membership.member == *participant
+            membership.state == GroupMemberState::Active && membership.member == *participant
         })
     }) {
         return Err(MediaRuntimeError::Unavailable);
