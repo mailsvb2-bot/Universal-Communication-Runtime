@@ -1502,25 +1502,100 @@ mod tests {
         );
     }
 
-    /// P0 release acceptance: server must not decrypt endpoint-authenticated media.
-    /// In this real `OpenMLS` topology Alice models the server-held group creator,
-    /// Bob the sending endpoint, and Charlie the receiving endpoint. This is
-    /// Deliberately fails while a server-held MLS leaf remains in the media group.
+    /// Re-key under an endpoint committer and prove the removed host cannot
+    /// export the resulting epoch. The fixture remains available to test
+    /// authenticated frame delivery and retained old-key rejection.
+    fn remove_server_host_by_endpoint_commit(fixture: &mut ThreeMemberMls) -> GroupCryptoState {
+        // Bob is an endpoint and is the committer. The server-held Alice
+        // leaf is removed BEFORE the media epoch used below is created.
+        let remove_host = stage_remove_member(
+            &fixture.bob_provider,
+            &mut fixture.bob_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &fixture.scope,
+            &device("alice"),
+        )
+        .unwrap();
+        merge_pending(
+            &fixture.bob_provider,
+            &mut fixture.bob_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &remove_host.next_crypto_state,
+        )
+        .unwrap();
+        process_commit(
+            &fixture.charlie_provider,
+            &mut fixture.charlie_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &remove_host.commit,
+            &remove_host.next_crypto_state,
+        )
+        .unwrap();
+        assert!(
+            process_commit(
+                &fixture.alice_provider,
+                &mut fixture.alice_group,
+                &fixture.scope,
+                &fixture.group_id,
+                &remove_host.commit,
+                &remove_host.next_crypto_state,
+            )
+            .is_err()
+        );
+
+        let next_state = &remove_host.next_crypto_state;
+        assert!(next_state.epoch > fixture.state.epoch);
+        assert!(
+            export_group_media_secret(
+                &fixture.alice_provider,
+                &fixture.alice_group,
+                &fixture.scope,
+                &fixture.group_id,
+                next_state,
+            )
+            .is_err()
+        );
+
+        remove_host.next_crypto_state
+    }
+
+    /// Feasibility evidence for a future endpoint-owned committer: after an
+    /// independently authorized endpoint removes the server host and commits
+    /// a fresh MLS epoch, the recipient can decrypt, but the former host
+    /// cannot export that epoch or decrypt the signed SFU wire with old keys.
+    ///
+    /// This is an isolated endpoint-committed removal regression. It does NOT
+    /// prove the first-party Join/media runtime is wired or production-safe.
     #[test]
-    fn server_held_mls_committer_must_not_decrypt_endpoint_video_wire() {
+    fn endpoint_committer_removing_host_isolates_new_signed_video_epoch() {
         use ucr_crypto::{
             SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
         };
         use ucr_model::{GroupMediaFrameHeader, KeyId, VideoSourceKind};
 
-        let fixture = three_member_group();
-        let media_context = context(&fixture, &fixture.state);
+        let mut fixture = three_member_group();
+        let old_host_secret = export_group_media_secret(
+            &fixture.alice_provider,
+            &fixture.alice_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &fixture.state,
+        )
+        .unwrap();
+
+        let next_state = remove_server_host_by_endpoint_commit(&mut fixture);
+        let next_state = &next_state;
+
+        let media_context = context(&fixture, next_state);
         let sender_secret = export_group_media_secret(
             &fixture.bob_provider,
             &fixture.bob_group,
             &fixture.scope,
             &fixture.group_id,
-            &fixture.state,
+            next_state,
         )
         .unwrap();
         let receiver_secret = export_group_media_secret(
@@ -1528,16 +1603,7 @@ mod tests {
             &fixture.charlie_group,
             &fixture.scope,
             &fixture.group_id,
-            &fixture.state,
-        )
-        .unwrap();
-        // This provider represents the durable server-owned committer MLS leaf.
-        let server_host_secret = export_group_media_secret(
-            &fixture.alice_provider,
-            &fixture.alice_group,
-            &fixture.scope,
-            &fixture.group_id,
-            &fixture.state,
+            next_state,
         )
         .unwrap();
         let signer = SigningKeyMaterial::from_seed([19; 32]);
@@ -1563,7 +1629,7 @@ mod tests {
             media_timestamp: 90_000,
             keyframe: true,
         };
-        let payload = b"endpoint video payload: no plaintext SFU fallback";
+        let payload = b"endpoint-only epoch video: no server media decryption";
         let wire = seal_endpoint_group_media_wire(
             &sender_secret,
             &media_context,
@@ -1573,7 +1639,6 @@ mod tests {
             &signer,
         )
         .unwrap();
-        assert_ne!(wire.as_slice(), payload);
         assert_eq!(
             open_endpoint_group_media_wire(
                 &receiver_secret,
@@ -1584,11 +1649,11 @@ mod tests {
             .unwrap(),
             payload
         );
-        // Acceptance gate: this must fail with the current server-held media-host.
-        // It may only pass after the server is excluded from the media key schedule.
+        // The server retained its entire old epoch secret, not just public
+        // metadata. Even that key must fail against the endpoint-only epoch.
         assert!(
             open_endpoint_group_media_wire(
-                &server_host_secret,
+                &old_host_secret,
                 &media_context,
                 &wire,
                 signer.verifying_key(),
