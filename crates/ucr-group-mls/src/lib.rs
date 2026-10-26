@@ -1599,30 +1599,10 @@ mod tests {
         );
     }
 
-    /// Feasibility evidence for a future endpoint-owned committer: after an
-    /// independently authorized endpoint removes the server host and commits
-    /// a fresh MLS epoch, the recipient can decrypt, but the former host
-    /// cannot export that epoch or decrypt the signed SFU wire with old keys.
-    ///
-    /// This does NOT remediate the first-party runtime, which still creates
-    /// and retains a server-held MLS leaf. Keep #328 and #329 release-blocked.
-    #[test]
-    fn endpoint_committer_removing_host_isolates_new_signed_video_epoch() {
-        use ucr_crypto::{
-            SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
-        };
-        use ucr_model::{GroupMediaFrameHeader, KeyId, VideoSourceKind};
-
-        let mut fixture = three_member_group();
-        let old_host_secret = export_group_media_secret(
-            &fixture.alice_provider,
-            &fixture.alice_group,
-            &fixture.scope,
-            &fixture.group_id,
-            &fixture.state,
-        )
-        .unwrap();
-
+    /// Re-key under an endpoint committer and prove the removed host cannot
+    /// export the resulting epoch. The fixture remains available to test
+    /// authenticated frame delivery and retained old-key rejection.
+    fn remove_server_host_by_endpoint_commit(fixture: &mut ThreeMemberMls) -> GroupCryptoState {
         // Bob is an endpoint and is the committer. The server-held Alice
         // leaf is removed BEFORE the media epoch used below is created.
         let remove_host = stage_remove_member(
@@ -1675,6 +1655,36 @@ mod tests {
             )
             .is_err()
         );
+
+        remove_host.next_crypto_state
+    }
+
+    /// Feasibility evidence for a future endpoint-owned committer: after an
+    /// independently authorized endpoint removes the server host and commits
+    /// a fresh MLS epoch, the recipient can decrypt, but the former host
+    /// cannot export that epoch or decrypt the signed SFU wire with old keys.
+    ///
+    /// This does NOT remediate the first-party runtime, which still creates
+    /// and retains a server-held MLS leaf. Keep #328 and #329 release-blocked.
+    #[test]
+    fn endpoint_committer_removing_host_isolates_new_signed_video_epoch() {
+        use ucr_crypto::{
+            SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+        };
+        use ucr_model::{GroupMediaFrameHeader, KeyId, VideoSourceKind};
+
+        let mut fixture = three_member_group();
+        let old_host_secret = export_group_media_secret(
+            &fixture.alice_provider,
+            &fixture.alice_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &fixture.state,
+        )
+        .unwrap();
+
+        let next_state = remove_server_host_by_endpoint_commit(&mut fixture);
+        let next_state = &next_state;
 
         let media_context = context(&fixture, next_state);
         let sender_secret = export_group_media_secret(
