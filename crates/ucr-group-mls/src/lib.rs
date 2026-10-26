@@ -1651,26 +1651,30 @@ mod tests {
             &remove_host.next_crypto_state,
         )
         .unwrap();
-        assert!(process_commit(
-            &fixture.alice_provider,
-            &mut fixture.alice_group,
-            &fixture.scope,
-            &fixture.group_id,
-            &remove_host.commit,
-            &remove_host.next_crypto_state,
-        )
-        .is_err());
+        assert!(
+            process_commit(
+                &fixture.alice_provider,
+                &mut fixture.alice_group,
+                &fixture.scope,
+                &fixture.group_id,
+                &remove_host.commit,
+                &remove_host.next_crypto_state,
+            )
+            .is_err()
+        );
 
         let next_state = &remove_host.next_crypto_state;
         assert!(next_state.epoch > fixture.state.epoch);
-        assert!(export_group_media_secret(
-            &fixture.alice_provider,
-            &fixture.alice_group,
-            &fixture.scope,
-            &fixture.group_id,
-            next_state,
-        )
-        .is_err());
+        assert!(
+            export_group_media_secret(
+                &fixture.alice_provider,
+                &fixture.alice_group,
+                &fixture.scope,
+                &fixture.group_id,
+                next_state,
+            )
+            .is_err()
+        );
 
         let media_context = context(&fixture, next_state);
         let sender_secret = export_group_media_secret(
@@ -1734,13 +1738,15 @@ mod tests {
         );
         // The server retained its entire old epoch secret, not just public
         // metadata. Even that key must fail against the endpoint-only epoch.
-        assert!(open_endpoint_group_media_wire(
-            &old_host_secret,
-            &media_context,
-            &wire,
-            signer.verifying_key(),
-        )
-        .is_err());
+        assert!(
+            open_endpoint_group_media_wire(
+                &old_host_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
