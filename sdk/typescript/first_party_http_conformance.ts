@@ -337,7 +337,7 @@ async function expectLateDeviceResponseRefused(
   await requested.promise;
   active = second;
   delayed.release(reply(payload));
-  await assert.rejects(pending, /account or Device changed during MLS\\/Join operation/);
+  await assert.rejects(pending, new RegExp("account or Device changed during MLS/Join operation"));
 }
 
 const acceptedMlsDescriptor = {
