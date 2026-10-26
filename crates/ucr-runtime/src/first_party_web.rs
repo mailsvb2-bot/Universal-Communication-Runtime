@@ -1325,24 +1325,22 @@ struct VerifiedEndpointMlsAddPeer {
     fingerprint: [u8; 32],
 }
 
-fn verify_endpoint_mls_add_peer_material(
+fn verify_endpoint_mls_recipient_device(
     state: &State,
-    session: &Session,
     req: &EndpointMlsAddPeerRequest,
     direct: &CallSession,
-    participants: &[ucr_model::PrincipalRef; 2],
-    ids: &first_party_media::MediaRuntimeIds,
-) -> Result<VerifiedEndpointMlsAddPeer, StatusCode> {
-    let recipient_device = DeviceId::from_opaque(opaque(&req.recipient_device_id)?);
+    recipient: &ucr_model::PrincipalRef,
+    recipient_device: &DeviceId,
+) -> Result<[u8; 32], StatusCode> {
     // Verify the offered Device still belongs to the accepted recipient Identity.
     let peer_binding = state
         .store
-        .principal_identity_binding(&direct.scope, &participants[1])
+        .principal_identity_binding(&direct.scope, recipient)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::FORBIDDEN)?;
     let recipient_descriptor = state
         .store
-        .device(&direct.scope, &recipient_device)
+        .device(&direct.scope, recipient_device)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::FORBIDDEN)?;
     if recipient_descriptor.identity_id != peer_binding.identity_id
@@ -1352,7 +1350,7 @@ fn verify_endpoint_mls_add_peer_material(
     }
     let recipient_key = state
         .store
-        .active_trusted_signing_key(&direct.scope, &recipient_device)
+        .active_trusted_signing_key(&direct.scope, recipient_device)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::FORBIDDEN)?;
     if recipient_key.key_id.as_opaque().as_str() != req.recipient_signer_key_id {
@@ -1362,6 +1360,21 @@ fn verify_endpoint_mls_add_peer_material(
         .public_key
         .try_into()
         .map_err(|_| StatusCode::FORBIDDEN)?;
+    Ok(recipient_verifier)
+}
+
+fn verify_endpoint_mls_add_peer_material(
+    state: &State,
+    session: &Session,
+    req: &EndpointMlsAddPeerRequest,
+    direct: &CallSession,
+    participants: &[ucr_model::PrincipalRef; 2],
+    ids: &first_party_media::MediaRuntimeIds,
+) -> Result<VerifiedEndpointMlsAddPeer, StatusCode> {
+    let recipient_device = DeviceId::from_opaque(opaque(&req.recipient_device_id)?);
+    let recipient_verifier = verify_endpoint_mls_recipient_device(
+        state, req, direct, &participants[1], &recipient_device,
+    )?;
     let stored_offer = state
         .store
         .endpoint_mls_offer(&direct.scope, &ids.group_id, &recipient_device)
