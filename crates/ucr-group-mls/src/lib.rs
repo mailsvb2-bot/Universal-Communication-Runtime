@@ -496,6 +496,22 @@ pub trait GroupMlsBootstrapStore {
     ) -> Result<Option<MlsDeviceBootstrap>, GroupMlsStoreError>;
 }
 
+/// Proof-of-custody guard for endpoint-only media. A server that can load
+/// an OpenMLS Group from its own provider may derive the group's exporter.
+/// Canonical participant metadata alone cannot prove server-blind E2EE.
+pub trait GroupMlsServerCustodyProbe {
+    /// Returns true if the server OpenMLS provider possesses the exact Group.
+    /// Errors MUST fail closed; they must never be interpreted as no custody.
+    ///
+    /// # Errors
+    /// Returns a durable/provider failure when custody cannot be established.
+    fn server_possesses_mls_group(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<bool, GroupMlsStoreError>;
+}
+
 pub trait GroupMlsAtomicStore {
     /// Creates endpoint-local public `KeyPackage` material for one already Active canonical Device.
     /// Private MLS signing/HPKE material remains in the implementation-owned protected store.
