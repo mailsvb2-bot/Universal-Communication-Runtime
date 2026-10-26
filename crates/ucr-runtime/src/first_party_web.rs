@@ -1012,7 +1012,7 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
 
 /// Return a canonical, scope-bound MLS bootstrap descriptor to an ACTIVE Call
 /// participant. This contains NO key material and grants NO media authority.
-/// The caller device must independently create and sign its OpenMLS state.
+/// The caller device must independently create and sign its `OpenMLS` state.
 fn endpoint_mls_descriptor(
     state: &State,
     session: &Session,
@@ -1050,7 +1050,7 @@ fn endpoint_mls_descriptor(
 }
 
 /// Accepts ONLY a signed endpoint-produced public MLS epoch-0 descriptor.
-/// A server-hosted OpenMLS key, KeyPackage or exporter is never generated.
+/// A server-hosted `OpenMLS` key, `KeyPackage` or exporter is never generated.
 fn publish_endpoint_mls_group(
     state: &State,
     session: &Session,
@@ -1317,30 +1317,39 @@ fn load_endpoint_mls_offers(
     }))
 }
 
-/// A device-owner-signed endpoint Commit, cross-signed by the specific
-/// intended recipient over its PUBLIC KeyPackage. No server OpenMLS keys.
-fn publish_endpoint_mls_add_peer(
+struct VerifiedEndpointMlsAddPeer {
+    recipient_device: DeviceId,
+    package: Vec<u8>,
+    commit: Vec<u8>,
+    welcome: Vec<u8>,
+    fingerprint: [u8; 32],
+}
+
+fn verify_endpoint_mls_add_peer_material(
     state: &State,
     session: &Session,
     req: &EndpointMlsAddPeerRequest,
-) -> Result<Value, StatusCode> {
-    let direct = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
-        .first_party_call_join_admission(
-            &session.subject,
-            &device(&session.binding)?,
-            &CallId::from_opaque(opaque(&req.call_id)?),
-            req.expected_revision,
-        )
-        .map_err(|_| StatusCode::FORBIDDEN)?;
-    let participants =
-        first_party_media::admissible_participants_for_descriptor(&direct, &session.subject)
-            .map_err(|_| StatusCode::FORBIDDEN)?;
-    if participants[0] != session.subject.principal {
+    direct: &CallSession,
+    participants: &[ucr_model::PrincipalRef; 2],
+    ids: &first_party_media::MediaRuntimeIds,
+) -> Result<VerifiedEndpointMlsAddPeer, StatusCode> {
+    let recipient_device = DeviceId::from_opaque(opaque(&req.recipient_device_id)?);
+    // Verify the offered Device still belongs to the accepted recipient Identity.
+    let peer_binding = state
+        .store
+        .principal_identity_binding(&direct.scope, &participants[1])
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    let recipient_descriptor = state
+        .store
+        .device(&direct.scope, &recipient_device)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if recipient_descriptor.identity_id != peer_binding.identity_id
+        || !ucr_protocol::device_allows_protected_access(&recipient_descriptor)
+    {
         return Err(StatusCode::FORBIDDEN);
     }
-    let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
-        .map_err(|_| StatusCode::CONFLICT)?;
-    let recipient_device = DeviceId::from_opaque(opaque(&req.recipient_device_id)?);
     let recipient_key = state
         .store
         .active_trusted_signing_key(&direct.scope, &recipient_device)
@@ -1415,6 +1424,41 @@ fn publish_endpoint_mls_add_peer(
         &initiator_proof,
         &req.signature_base64_url,
     )?;
+    let fingerprint: [u8; 32] = Sha256::digest(initiator_proof.as_bytes()).into();
+    Ok(VerifiedEndpointMlsAddPeer {
+        recipient_device,
+        package,
+        commit,
+        welcome,
+        fingerprint,
+    })
+}
+
+/// A device-owner-signed endpoint Commit, cross-signed by the specific
+/// intended recipient over its PUBLIC `KeyPackage`. No server `OpenMLS` keys.
+fn publish_endpoint_mls_add_peer(
+    state: &State,
+    session: &Session,
+    req: &EndpointMlsAddPeerRequest,
+) -> Result<Value, StatusCode> {
+    let direct = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject,
+            &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?),
+            req.expected_revision,
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants =
+        first_party_media::admissible_participants_for_descriptor(&direct, &session.subject)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+    if participants[0] != session.subject.principal {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let verified =
+        verify_endpoint_mls_add_peer_material(state, session, req, &direct, &participants, &ids)?;
     let group = state
         .store
         .group(&direct.scope, &ids.group_id)
@@ -1438,8 +1482,8 @@ fn publish_endpoint_mls_add_peer(
         next_crypto_state: None,
     };
     let artifacts = MlsCommitArtifacts {
-        commit,
-        welcome: Some(welcome),
+        commit: verified.commit,
+        welcome: Some(verified.welcome),
         next_crypto_state: GroupCryptoState {
             capability_id: Some(ucr_protocol::GROUP_MLS_CAPABILITY.to_owned()),
             epoch: req.crypto_epoch,
@@ -1447,10 +1491,9 @@ fn publish_endpoint_mls_add_peer(
         },
     };
     let admitted = MlsDeviceAdmission {
-        device_id: recipient_device,
-        key_package: package,
+        device_id: verified.recipient_device,
+        key_package: verified.package,
     };
-    let fingerprint: [u8; 32] = Sha256::digest(initiator_proof.as_bytes()).into();
     state
         .store
         .persist_endpoint_mls_commit(
@@ -1459,7 +1502,7 @@ fn publish_endpoint_mls_add_peer(
             &changed,
             &admitted,
             &artifacts,
-            fingerprint,
+            verified.fingerprint,
         )
         .map_err(|_| StatusCode::CONFLICT)?;
     Ok(json!({
@@ -1473,7 +1516,7 @@ fn publish_endpoint_mls_add_peer(
 }
 
 /// Existing durable device-bound MLS bootstrap projection. Welcome is encrypted
-/// to the admitted Device by OpenMLS; it is never a plaintext exporter secret.
+/// to the admitted Device by `OpenMLS`; it is never a plaintext exporter secret.
 fn endpoint_mls_bootstrap(
     state: &State,
     session: &Session,
