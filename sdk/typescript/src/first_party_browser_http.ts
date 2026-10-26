@@ -168,8 +168,13 @@ function snapshotBinding(binding: UcrDeviceEnrollmentBinding): UcrDeviceEnrollme
   });
 }
 
-function decodeBase64Url(value: unknown, length: number | null): Uint8Array {
-  if (typeof value !== "string" || value.length > 1024 ||
+function decodeBase64Url(
+  value: unknown, length: number | null, maxBytes = 768,
+): Uint8Array {
+  // The default remains deliberately small for Device signatures and keys.
+  // MLS public wires require an explicit, bounded larger allowance.
+  const maxEncodedLength = Math.ceil(maxBytes / 3) * 4;
+  if (typeof value !== "string" || value.length > maxEncodedLength ||
       !/^[A-Za-z0-9_-]+$/.test(value) || value.length % 4 === 1) {
     throw new Error("malformed first-party binary descriptor");
   }
@@ -841,7 +846,7 @@ export function createUcrFirstPartyHttpHost(
         const recipientSignerKeyId = requiredId(offer.recipientSignerKeyId, "recipient signer");
         const recipientKeyPackageBase64Url = String(offer.recipientKeyPackageBase64Url);
         const recipientSignatureBase64Url = String(offer.recipientSignatureBase64Url);
-        decodeBase64Url(recipientKeyPackageBase64Url);
+        decodeBase64Url(recipientKeyPackageBase64Url, null, 8192);
         if (decodeBase64Url(recipientSignatureBase64Url).length !== 64) {
           throw new Error("invalid recipient MLS offer signature");
         }
@@ -873,7 +878,7 @@ export function createUcrFirstPartyHttpHost(
           "SHA-256", bytes as Uint8Array<ArrayBuffer>,
         )));
       };
-      const recipientPackage = decodeBase64Url(input.recipientKeyPackageBase64Url);
+      const recipientPackage = decodeBase64Url(input.recipientKeyPackageBase64Url, null, 8192);
       const packageHash = await digest(recipientPackage);
       const commitHash = await digest(input.commit);
       const welcomeHash = await digest(input.welcome);
@@ -933,7 +938,7 @@ export function createUcrFirstPartyHttpHost(
       const commits = value.commits.map(item => {
         if (!isObject(item)) throw new Error("invalid MLS commit");
         return {
-          commit: decodeBase64Url(String(item.commitBase64Url)),
+          commit: decodeBase64Url(String(item.commitBase64Url), null, 8192),
           cryptoEpoch: epoch(item.cryptoEpoch),
           cryptoStateRef: requiredId(item.cryptoStateRef, "MLS state ref"),
         };
@@ -949,7 +954,7 @@ export function createUcrFirstPartyHttpHost(
       return {
         groupId: descriptor.groupId,
         admissionEventId: requiredId(value.admissionEventId, "MLS admission"),
-        welcome: decodeBase64Url(String(value.welcomeBase64Url)),
+        welcome: decodeBase64Url(String(value.welcomeBase64Url), null, 8192),
         welcomeEpoch,
         welcomeStateRef: requiredId(value.welcomeStateRef, "MLS state ref"),
         commits,
