@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{DurableRecordStatus, DurableStoreError};
 use ucr_group_mls::{
-    AtomicMlsGroupChangeResult, DeviceKeyPackage, GroupMlsAtomicStore, GroupMlsBootstrapStore,
+    AtomicMlsGroupChangeResult, DeviceKeyPackage, EndpointMlsCommitStore, GroupMlsAtomicStore, GroupMlsBootstrapStore,
     GroupMlsServerCustodyProbe, GroupMlsStoreError, MAX_MLS_BOOTSTRAP_BYTES,
     MAX_MLS_BOOTSTRAP_COMMITS, MlsBootstrapCommit, MlsCommitArtifacts, MlsDeviceAdmission,
     MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput, create_device_key_package, create_group,
@@ -279,6 +279,99 @@ fn verify_foreign_key_columns(
         Ok(())
     } else {
         Err(DurableStoreError::Corrupt)
+    }
+}
+
+/// Persist endpoint-produced OpenMLS bytes without ever staging or merging
+/// the Group in this server's OpenMLS provider.
+impl EndpointMlsCommitStore for SqliteLocalStore {
+    fn persist_endpoint_mls_commit(
+        &self,
+        actor: &ScopedPrincipal,
+        actor_device_id: &DeviceId,
+        requested_change: &GroupChange,
+        recipient_device: &MlsDeviceAdmission,
+        artifacts: &MlsCommitArtifacts,
+        signed_fingerprint: [u8; 32],
+    ) -> Result<DurableRecordStatus, GroupMlsStoreError> {
+        if actor.scope != requested_change.scope
+            || requested_change.next_crypto_state.is_some()
+            || artifacts.commit.is_empty()
+            || artifacts.commit.len() > 2_097_152
+            || artifacts.welcome.as_ref().is_none_or(|welcome| welcome.is_empty() || welcome.len() > 2_097_152)
+            || recipient_device.key_package.is_empty()
+            || recipient_device.key_package.len() > 2_097_152
+            || artifacts.next_crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
+            || artifacts.next_crypto_state.state_ref.is_none()
+        {
+            return Err(GroupMlsStoreError::InvalidChangeMaterial);
+        }
+        let GroupChangeKind::AddMember { member, .. } = &requested_change.kind else {
+            return Err(GroupMlsStoreError::InvalidChangeMaterial);
+        };
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        require_device_for_principal(
+            &transaction, &actor.scope, &actor.principal, actor_device_id, true
+        )?;
+        require_device_for_principal(
+            &transaction, &actor.scope, member, &recipient_device.device_id, true
+        )?;
+        let current = group_store::load_group_from(
+            &transaction, &actor.scope, &requested_change.group_id
+        )?.ok_or(GroupMlsStoreError::InvalidBootstrap)?;
+        // This transport is endpoint-owned. If the SQLite OpenMLS provider can
+        // load this Group it is NOT server blind, even if Group metadata says so.
+        {
+            let provider = sqlite_provider(&transaction);
+            if load_group(&provider, &actor.scope, &requested_change.group_id)?.is_some() {
+                return Err(GroupMlsStoreError::InvalidChangeMaterial);
+            }
+            decode_key_package(
+                &provider,
+                &actor.scope,
+                &recipient_device.device_id,
+                &recipient_device.key_package,
+            )?;
+        }
+        if current.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
+            || current.crypto_state.state_ref.is_none()
+            || artifacts.next_crypto_state.epoch != current.crypto_state.epoch.checked_add(1)
+                .ok_or(GroupMlsStoreError::InvalidChangeMaterial)?
+            || artifacts.next_crypto_state.state_ref == current.crypto_state.state_ref
+        {
+            return Err(GroupMlsStoreError::InvalidChangeMaterial);
+        }
+        if let Some(outcome) = existing_transition_outcome(
+            &transaction, actor, actor_device_id, requested_change, &signed_fingerprint
+        )? {
+            transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+            return Ok(outcome.status);
+        }
+        let mut applied_change = requested_change.clone();
+        applied_change.next_crypto_state = Some(artifacts.next_crypto_state.clone());
+        let status = group_store::apply_group_change_in_transaction(
+            &transaction, actor, &applied_change, true
+        )?;
+        if status != DurableRecordStatus::Persisted {
+            return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
+        }
+        insert_transition(
+            &transaction,
+            &TransitionInsert {
+                scope: &actor.scope,
+                group_id: &requested_change.group_id,
+                event_id: &requested_change.event_id,
+                actor_device_id,
+                request_fingerprint: &signed_fingerprint,
+                artifacts,
+                added_devices: std::slice::from_ref(recipient_device),
+            },
+        )?;
+        transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+        Ok(status)
     }
 }
 
