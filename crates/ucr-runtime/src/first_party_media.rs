@@ -169,6 +169,15 @@ pub(crate) fn is_media_host_identity(identity: &IdentityId) -> bool {
 
 /// The direct Call is admissible for media iff it is ACTIVE, two-person,
 /// both participants Accepted and the subject is one of them.
+/// Reuse the exact Call/Join eligibility boundary for endpoint MLS bootstrap.
+/// This is read-only: no server-held MLS key is created or admitted.
+pub(crate) fn admissible_participants_for_descriptor(
+    direct: &CallSession,
+    subject: &ScopedPrincipal,
+) -> Result<[PrincipalRef; 2], MediaRuntimeError> {
+    admissible_participants(direct, subject)
+}
+
 fn admissible_participants(
     direct: &CallSession,
     subject: &ScopedPrincipal,
