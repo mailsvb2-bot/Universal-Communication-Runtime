@@ -1502,8 +1502,8 @@ mod tests {
         );
     }
 
-    /// P0 confidentiality reproducer for first_party_media's server-held committer.
-    /// In this real OpenMLS topology Alice models the server-held group creator,
+    /// P0 confidentiality reproducer for `first_party_media`'s server-held committer.
+    /// In this real `OpenMLS` topology Alice models the server-held group creator,
     /// Bob the sending endpoint, and Charlie the receiving endpoint. This is
     /// evidence of a defect, NOT a passing server-blind E2EE acceptance test.
     /// Replace it with a negative host-isolation test after endpoint-only rekeying.
