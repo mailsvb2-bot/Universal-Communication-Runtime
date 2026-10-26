@@ -1,4 +1,4 @@
-//! Durable PUBLIC endpoint MLS KeyPackage offers, scoped to the existing
+//! Durable PUBLIC endpoint MLS `KeyPackage` offers, scoped to the existing
 //! canonical Group. Never contains MLS private keys or exporter secrets.
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::DurableStoreError;
@@ -50,7 +50,7 @@ pub(super) fn verify_v53_objects(conn: &Connection) -> Result<(), DurableStoreEr
     )
 }
 
-/// Strictly public signed MLS KeyPackage material, addressed to the exact
+/// Strictly public signed MLS `KeyPackage` material, addressed to the exact
 /// authenticated Device and canonical Group. No bearer grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointMlsKeyPackageOffer {
@@ -179,7 +179,7 @@ impl SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))
     }
 
-    /// Read a specific Device's signed PUBLIC KeyPackage (not an MLS secret).
+    /// Read a specific Device's signed PUBLIC `KeyPackage` (not an MLS secret).
     /// HTTP caller MUST independently authorize the same accepted Call and
     /// verify the current trusted Device signer before forwarding the offer.
     ///
