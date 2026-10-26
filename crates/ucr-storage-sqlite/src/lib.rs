@@ -7,8 +7,8 @@ mod call_store;
 mod command_store;
 mod conference_join_grant_store;
 mod delivery_store;
-mod endpoint_mls_offer_store;
 mod device_store;
+mod endpoint_mls_offer_store;
 mod event_journal;
 mod event_subscription_store;
 mod federation_store;
@@ -752,7 +752,7 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V49 => migrate_v49_to_v50(connection)?,
             SQLITE_SCHEMA_V50 => migrate_v50_to_v51(connection)?,
             SQLITE_SCHEMA_V51 => migrate_v51_to_v52(connection)?,
-            SQLITE_SCHEMA_V52 => migrate_v52_to_v53(connection)?, 
+            SQLITE_SCHEMA_V52 => migrate_v52_to_v53(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
@@ -762,12 +762,16 @@ fn migrate_known_schema_to_current(
 
 fn migrate_v52_to_v53(connection: &mut Connection) -> Result<(), DurableStoreError> {
     verify_schema_v52(connection)?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
     endpoint_mls_offer_store::create_v53_objects(&transaction)?;
-    transaction.pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
         .map_err(|error| map_sqlite_error(&error))?;
-    transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v53(connection)
 }
 

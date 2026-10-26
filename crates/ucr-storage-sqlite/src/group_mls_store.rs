@@ -1,13 +1,13 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{DurableRecordStatus, DurableStoreError};
 use ucr_group_mls::{
-    AtomicMlsGroupChangeResult, DeviceKeyPackage, EndpointMlsCommitStore, GroupMlsAtomicStore, GroupMlsBootstrapStore,
-    GroupMlsServerCustodyProbe, GroupMlsStoreError, MAX_MLS_BOOTSTRAP_BYTES,
-    MAX_MLS_BOOTSTRAP_COMMITS, MlsBootstrapCommit, MlsCommitArtifacts, MlsDeviceAdmission,
-    MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput, create_device_key_package, create_group,
-    current_crypto_state, decode_key_package, load_group, member_device_ids,
-    mls_change_request_fingerprint, mls_device_admission_fingerprint, own_device_id,
-    sqlite_provider, stage_transition,
+    AtomicMlsGroupChangeResult, DeviceKeyPackage, EndpointMlsCommitStore, GroupMlsAtomicStore,
+    GroupMlsBootstrapStore, GroupMlsServerCustodyProbe, GroupMlsStoreError,
+    MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS, MlsBootstrapCommit, MlsCommitArtifacts,
+    MlsDeviceAdmission, MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput,
+    create_device_key_package, create_group, current_crypto_state, decode_key_package, load_group,
+    member_device_ids, mls_change_request_fingerprint, mls_device_admission_fingerprint,
+    own_device_id, sqlite_provider, stage_transition,
 };
 use ucr_model::{
     ConversationRecord, DeviceId, EventId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
@@ -298,7 +298,10 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
             || requested_change.next_crypto_state.is_some()
             || artifacts.commit.is_empty()
             || artifacts.commit.len() > 2_097_152
-            || artifacts.welcome.as_ref().is_none_or(|welcome| welcome.is_empty() || welcome.len() > 2_097_152)
+            || artifacts
+                .welcome
+                .as_ref()
+                .is_none_or(|welcome| welcome.is_empty() || welcome.len() > 2_097_152)
             || recipient_device.key_package.is_empty()
             || recipient_device.key_package.len() > 2_097_152
             || artifacts.next_crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
@@ -314,14 +317,22 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
         require_device_for_principal(
-            &transaction, &actor.scope, &actor.principal, actor_device_id, true
+            &transaction,
+            &actor.scope,
+            &actor.principal,
+            actor_device_id,
+            true,
         )?;
         require_device_for_principal(
-            &transaction, &actor.scope, member, &recipient_device.device_id, true
+            &transaction,
+            &actor.scope,
+            member,
+            &recipient_device.device_id,
+            true,
         )?;
-        let current = group_store::load_group_from(
-            &transaction, &actor.scope, &requested_change.group_id
-        )?.ok_or(GroupMlsStoreError::InvalidBootstrap)?;
+        let current =
+            group_store::load_group_from(&transaction, &actor.scope, &requested_change.group_id)?
+                .ok_or(GroupMlsStoreError::InvalidBootstrap)?;
         // This transport is endpoint-owned. If the SQLite OpenMLS provider can
         // load this Group it is NOT server blind, even if Group metadata says so.
         {
@@ -340,15 +351,25 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
         // precondition, because a successful original Commit already advanced
         // the canonical Group epoch. The fingerprint binds the exact proof.
         if let Some(outcome) = existing_transition_outcome(
-            &transaction, actor, actor_device_id, requested_change, &signed_fingerprint
+            &transaction,
+            actor,
+            actor_device_id,
+            requested_change,
+            &signed_fingerprint,
         )? {
-            transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+            transaction
+                .commit()
+                .map_err(|error| map_sqlite_error(&error))?;
             return Ok(outcome.status);
         }
         if current.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
             || current.crypto_state.state_ref.is_none()
-            || artifacts.next_crypto_state.epoch != current.crypto_state.epoch.checked_add(1)
-                .ok_or(GroupMlsStoreError::InvalidChangeMaterial)?
+            || artifacts.next_crypto_state.epoch
+                != current
+                    .crypto_state
+                    .epoch
+                    .checked_add(1)
+                    .ok_or(GroupMlsStoreError::InvalidChangeMaterial)?
             || artifacts.next_crypto_state.state_ref == current.crypto_state.state_ref
         {
             return Err(GroupMlsStoreError::InvalidChangeMaterial);
@@ -356,7 +377,10 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
         let mut applied_change = requested_change.clone();
         applied_change.next_crypto_state = Some(artifacts.next_crypto_state.clone());
         let status = group_store::apply_group_change_in_transaction(
-            &transaction, actor, &applied_change, true
+            &transaction,
+            actor,
+            &applied_change,
+            true,
         )?;
         if status != DurableRecordStatus::Persisted {
             return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
@@ -373,7 +397,9 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
                 added_devices: std::slice::from_ref(recipient_device),
             },
         )?;
-        transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
         Ok(status)
     }
 }

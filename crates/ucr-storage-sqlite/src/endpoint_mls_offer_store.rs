@@ -34,16 +34,20 @@ pub(super) fn create_v53_objects(tx: &Transaction<'_>) -> Result<(), DurableStor
 }
 
 pub(super) fn verify_v53_objects(conn: &Connection) -> Result<(), DurableStoreError> {
-    verify_table_columns(conn, "endpoint_mls_key_package_offers", &[
-        ("tenant_id", "TEXT", 1, 1),
-        ("namespace_present", "INTEGER", 1, 2),
-        ("namespace_id", "TEXT", 1, 3),
-        ("group_id", "TEXT", 1, 4),
-        ("device_id", "TEXT", 1, 5),
-        ("signer_key_id", "TEXT", 1, 0),
-        ("package", "BLOB", 1, 0),
-        ("signature", "BLOB", 1, 0),
-    ])
+    verify_table_columns(
+        conn,
+        "endpoint_mls_key_package_offers",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("group_id", "TEXT", 1, 4),
+            ("device_id", "TEXT", 1, 5),
+            ("signer_key_id", "TEXT", 1, 0),
+            ("package", "BLOB", 1, 0),
+            ("signature", "BLOB", 1, 0),
+        ],
+    )
 }
 
 /// Strictly public signed MLS KeyPackage material, addressed to the exact
@@ -69,39 +73,47 @@ impl SqliteLocalStore {
         device_id: &DeviceId,
         offer: &EndpointMlsKeyPackageOffer,
     ) -> Result<(), DurableStoreError> {
-        if offer.signer_key_id.is_empty() || offer.signer_key_id.len() > 128
-            || offer.package.is_empty() || offer.package.len() > 8192
+        if offer.signer_key_id.is_empty()
+            || offer.signer_key_id.len() > 128
+            || offer.package.is_empty()
+            || offer.package.len() > 8192
             || offer.signature.len() != 64
         {
             return Err(DurableStoreError::InvalidRecord);
         }
         let mut conn = self.lock_connection()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
         if group_store::load_group_from(&tx, scope, group_id)?.is_none() {
             return Err(DurableStoreError::InvalidRecord);
         }
         let active = super::device_store::load_device(&tx, scope, device_id)?
-            .is_some_and(|device| {
-                ucr_protocol::device_allows_protected_access(&device)
-            });
+            .is_some_and(|device| ucr_protocol::device_allows_protected_access(&device));
         if !active {
             return Err(DurableStoreError::PermissionDenied);
         }
         let ns = namespace_storage_key(scope);
-        let existing: Option<(String, Vec<u8>, Vec<u8>)> = tx.query_row(
-            "SELECT signer_key_id, package, signature
+        let existing: Option<(String, Vec<u8>, Vec<u8>)> = tx
+            .query_row(
+                "SELECT signer_key_id, package, signature
              FROM endpoint_mls_key_package_offers
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
                AND group_id=?4 AND device_id=?5",
-            params![
-                scope.tenant_id.as_opaque().as_str(), ns.present, ns.value,
-                group_id.as_opaque().as_str(), device_id.as_opaque().as_str(),
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional().map_err(|error| map_sqlite_error(&error))?;
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    ns.present,
+                    ns.value,
+                    group_id.as_opaque().as_str(),
+                    device_id.as_opaque().as_str(),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&error))?;
         if let Some((key, package, signature)) = existing {
-            if key != offer.signer_key_id || package != offer.package
+            if key != offer.signer_key_id
+                || package != offer.package
                 || signature != offer.signature
             {
                 return Err(DurableStoreError::Conflict);
@@ -113,11 +125,17 @@ impl SqliteLocalStore {
                   signer_key_id,package,signature
                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
-                    scope.tenant_id.as_opaque().as_str(), ns.present, ns.value,
-                    group_id.as_opaque().as_str(), device_id.as_opaque().as_str(),
-                    &offer.signer_key_id, &offer.package, &offer.signature,
+                    scope.tenant_id.as_opaque().as_str(),
+                    ns.present,
+                    ns.value,
+                    group_id.as_opaque().as_str(),
+                    device_id.as_opaque().as_str(),
+                    &offer.signer_key_id,
+                    &offer.package,
+                    &offer.signature,
                 ],
-            ).map_err(|error| map_sqlite_error(&error))?;
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
         }
         tx.commit().map_err(|error| map_sqlite_error(&error))
     }
@@ -138,16 +156,27 @@ impl SqliteLocalStore {
         }
         let conn = self.lock_connection()?;
         let ns = namespace_storage_key(scope);
-        let mut stmt = conn.prepare(
-            "SELECT device_id FROM endpoint_mls_key_package_offers
+        let mut stmt = conn
+            .prepare(
+                "SELECT device_id FROM endpoint_mls_key_package_offers
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4
-             ORDER BY device_id LIMIT ?5"
-        ).map_err(|error| map_sqlite_error(&error))?;
-        let rows = stmt.query_map(params![
-            scope.tenant_id.as_opaque().as_str(), ns.present, ns.value,
-            group_id.as_opaque().as_str(), i64::try_from(max_items).unwrap_or(16),
-        ], |row| row.get::<_, String>(0)).map_err(|error| map_sqlite_error(&error))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|error| map_sqlite_error(&error))
+             ORDER BY device_id LIMIT ?5",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = stmt
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    ns.present,
+                    ns.value,
+                    group_id.as_opaque().as_str(),
+                    i64::try_from(max_items).unwrap_or(16),
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_sqlite_error(&error))
     }
 
     /// Read a specific Device's signed PUBLIC KeyPackage (not an MLS secret).
@@ -170,8 +199,11 @@ impl SqliteLocalStore {
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
                AND group_id=?4 AND device_id=?5",
             params![
-                scope.tenant_id.as_opaque().as_str(), ns.present, ns.value,
-                group_id.as_opaque().as_str(), device_id.as_opaque().as_str(),
+                scope.tenant_id.as_opaque().as_str(),
+                ns.present,
+                ns.value,
+                group_id.as_opaque().as_str(),
+                device_id.as_opaque().as_str(),
             ],
             |row| {
                 Ok(EndpointMlsKeyPackageOffer {
@@ -180,6 +212,8 @@ impl SqliteLocalStore {
                     signature: row.get(2)?,
                 })
             },
-        ).optional().map_err(|error| map_sqlite_error(&error))
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))
     }
 }
