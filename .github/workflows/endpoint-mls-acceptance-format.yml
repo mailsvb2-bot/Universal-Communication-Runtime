@@ -1,0 +1,26 @@
+name: Rustfmt endpoint MLS acceptance
+on:
+  push:
+    branches: [fix/endpoint-mls-owned-transitions-20261026]
+    paths: [.github/workflows/endpoint-mls-acceptance-format.yml]
+permissions:
+  contents: write
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format real endpoint MLS acceptance source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 crates/ucr-runtime/src/first_party_acceptance.rs
+          if git diff --quiet -- crates/ucr-runtime/src/first_party_acceptance.rs; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- crates/ucr-runtime/src/first_party_acceptance.rs
+          git commit -m "style(e2ee): format real endpoint-owned Call/Join MLS acceptance"
+          git push origin HEAD:fix/endpoint-mls-owned-transitions-20261026
