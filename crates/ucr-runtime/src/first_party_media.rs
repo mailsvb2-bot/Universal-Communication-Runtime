@@ -30,11 +30,10 @@ use ucr_core::{
 };
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
-    CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRef, DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, IdentityId,
-    OpaqueId,
-    PermissionGrant, PermissionScope, PrincipalId, PrincipalKind,
-    PrincipalRef, ScopedPrincipal, TenantScope,
+    CallSignallingState, CallTerminationReason, ConversationId, ConversationKind, ConversationRef,
+    DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, IdentityId, OpaqueId,
+    PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+    TenantScope,
 };
 use ucr_protocol::GROUP_MLS_CAPABILITY;
 
@@ -137,9 +136,13 @@ fn derived_event(
     hasher.update(b"ucr-first-party-direct-call-media-event.v1\0");
     length_prefixed(&mut hasher, ids.digest.as_bytes());
     length_prefixed(&mut hasher, label.as_bytes());
-    length_prefixed(&mut hasher, principal.principal_id.as_opaque().as_wire_bytes());
+    length_prefixed(
+        &mut hasher,
+        principal.principal_id.as_opaque().as_wire_bytes(),
+    );
     Ok(EventId::from_opaque(opaque(format!(
-        "fp-me-{}", hex(&hasher.finalize())
+        "fp-me-{}",
+        hex(&hasher.finalize())
     ))?))
 }
 
