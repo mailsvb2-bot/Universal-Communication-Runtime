@@ -336,6 +336,15 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
                 &recipient_device.key_package,
             )?;
         }
+        // Idempotent retry must be evaluated before the epoch advancement
+        // precondition, because a successful original Commit already advanced
+        // the canonical Group epoch. The fingerprint binds the exact proof.
+        if let Some(outcome) = existing_transition_outcome(
+            &transaction, actor, actor_device_id, requested_change, &signed_fingerprint
+        )? {
+            transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+            return Ok(outcome.status);
+        }
         if current.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
             || current.crypto_state.state_ref.is_none()
             || artifacts.next_crypto_state.epoch != current.crypto_state.epoch.checked_add(1)
@@ -343,12 +352,6 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
             || artifacts.next_crypto_state.state_ref == current.crypto_state.state_ref
         {
             return Err(GroupMlsStoreError::InvalidChangeMaterial);
-        }
-        if let Some(outcome) = existing_transition_outcome(
-            &transaction, actor, actor_device_id, requested_change, &signed_fingerprint
-        )? {
-            transaction.commit().map_err(|error| map_sqlite_error(&error))?;
-            return Ok(outcome.status);
         }
         let mut applied_change = requested_change.clone();
         applied_change.next_crypto_state = Some(artifacts.next_crypto_state.clone());
