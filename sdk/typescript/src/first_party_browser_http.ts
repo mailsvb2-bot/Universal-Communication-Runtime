@@ -62,6 +62,15 @@ function parseEndpointMlsCallDescriptor(value: unknown): UcrEndpointMlsCallDescr
 export interface UcrManagedFirstPartyHost extends UcrDirectCallHost {
   describeAcceptedCallMls(binding: UcrAuthenticatedFirstEntry, input: {callId: string; expectedRevision: number}): Promise<UcrEndpointMlsCallDescriptor>;
   publishEndpointMlsGroup(binding: UcrAuthenticatedFirstEntry, input: {callId: string; expectedRevision: number; cryptoStateRef: string}): Promise<void>;
+  publishEndpointMlsOffer(binding: UcrAuthenticatedFirstEntry, input: {
+    callId: string; expectedRevision: number; keyPackage: Uint8Array;
+  }): Promise<void>;
+  listEndpointMlsOffers(binding: UcrAuthenticatedFirstEntry, input: {
+    callId: string; expectedRevision: number;
+  }): Promise<readonly {
+    recipientDeviceId: string; recipientSignerKeyId: string;
+    recipientKeyPackageBase64Url: string; recipientSignatureBase64Url: string;
+  }[]>;
   prepareEndpointMlsKeyPackage(binding: UcrAuthenticatedFirstEntry, input: {callId: string; expectedRevision: number; keyPackage: Uint8Array}): Promise<{
     recipientDeviceId: string;
     recipientSignerKeyId: string;
@@ -755,8 +764,7 @@ export function createUcrFirstPartyHttpHost(
         throw new Error("first-party session changed before MLS KeyPackage proof");
       }
       const descriptor = await this.describeAcceptedCallMls(auth, input);
-      if (descriptor.peerPrincipalId !== descriptor.creatorPrincipalId &&
-          descriptor.creatorPrincipalId === auth.participantId) {
+      if (descriptor.creatorPrincipalId === auth.participantId) {
         throw new Error("MLS recipient KeyPackage must be signed by its own Device");
       }
       const scope: UcrDeviceVaultScope = {
@@ -789,6 +797,59 @@ export function createUcrFirstPartyHttpHost(
         recipientKeyPackageBase64Url: encodeBase64Url(input.keyPackage),
         recipientSignatureBase64Url: encodeBase64Url(signature),
       };
+    },
+    async publishEndpointMlsOffer(binding, input) {
+      const auth = snapshotBinding(binding);
+      const descriptor = await this.describeAcceptedCallMls(auth, input);
+      if (descriptor.creatorPrincipalId === auth.participantId) {
+        throw new Error("initiator cannot publish peer MLS offer");
+      }
+      const offer = await this.prepareEndpointMlsKeyPackage(auth, input);
+      const result = await request("POST", "/v1/first-party/call/mls-offer", {
+        binding: auth, callId: input.callId, expectedRevision: input.expectedRevision,
+        recipientSignerKeyId: offer.recipientSignerKeyId,
+        recipientKeyPackageBase64Url: offer.recipientKeyPackageBase64Url,
+        recipientSignatureBase64Url: offer.recipientSignatureBase64Url,
+      });
+      if (!isObject(result) || result.callId !== input.callId ||
+          result.groupId !== descriptor.groupId || result.deviceId !== auth.deviceId ||
+          result.offerStored !== true) {
+        throw new Error("recipient MLS KeyPackage was not durably published");
+      }
+    },
+    async listEndpointMlsOffers(binding, input) {
+      const auth = snapshotBinding(binding);
+      const descriptor = await this.describeAcceptedCallMls(auth, input);
+      if (descriptor.creatorPrincipalId !== auth.participantId) {
+        throw new Error("only Call initiator can read recipient MLS offers");
+      }
+      const value = await request("POST", "/v1/first-party/call/mls-offers", {
+        binding: auth, callId: input.callId, expectedRevision: input.expectedRevision,
+      });
+      if (!isObject(value) || value.callId !== input.callId ||
+          value.groupId !== descriptor.groupId || !Array.isArray(value.offers) ||
+          value.offers.length > 8) {
+        throw new Error("untrusted endpoint MLS KeyPackage offer list");
+      }
+      return value.offers.map(offer => {
+        if (!isObject(offer)) throw new Error("invalid MLS offer");
+        exactKeys(offer, [
+          "recipientDeviceId", "recipientSignerKeyId",
+          "recipientKeyPackageBase64Url", "recipientSignatureBase64Url",
+        ]);
+        const recipientDeviceId = requiredId(offer.recipientDeviceId, "recipient Device");
+        const recipientSignerKeyId = requiredId(offer.recipientSignerKeyId, "recipient signer");
+        const recipientKeyPackageBase64Url = String(offer.recipientKeyPackageBase64Url);
+        const recipientSignatureBase64Url = String(offer.recipientSignatureBase64Url);
+        decodeBase64Url(recipientKeyPackageBase64Url);
+        if (decodeBase64Url(recipientSignatureBase64Url).length !== 64) {
+          throw new Error("invalid recipient MLS offer signature");
+        }
+        return Object.freeze({
+          recipientDeviceId, recipientSignerKeyId,
+          recipientKeyPackageBase64Url, recipientSignatureBase64Url,
+        });
+      });
     },
     async addEndpointMlsPeer(binding, input) {
       const auth = snapshotBinding(binding);
