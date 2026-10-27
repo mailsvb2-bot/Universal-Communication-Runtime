@@ -5,6 +5,15 @@ import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
 
 const source=readFileSync("crates/ucr-realtime-web/static/start.js","utf8");
+const mediaPage=readFileSync("crates/ucr-realtime-web/static/client.html","utf8");
+assert.match(source,/ucr-e2ee-state:fp-v1:/,"pre-Join MLS must use a scoped sealed snapshot");
+assert.match(mediaPage,/ucr-e2ee-state:fp-v1:/,"media page must restore the SAME scoped MLS snapshot");
+assert.match(source,/navigator\.locks\.request\("ucr-first-party-mls:"\+key/,
+  "pre-Join cross-tab OpenMLS state must be serialized");
+assert.match(mediaPage,/navigator\.locks\.request\("ucr-first-party-mls:"\+key/,
+  "post-Join state must share the same cross-tab lock");
+assert.match(source,/state\.authorize_direct_call_roster\(committed\.expectedPeerDeviceId\)/,
+  "signed Join must require the exact locally verified two-Device MLS roster");
 const begin=source.indexOf("function principalScope(user) {");
 const end=source.indexOf("function message(value) {",begin);
 assert.ok(begin>=0 && end>begin,"first-party Call resume implementation missing");
