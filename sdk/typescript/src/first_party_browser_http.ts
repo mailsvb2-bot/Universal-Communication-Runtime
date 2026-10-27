@@ -26,6 +26,8 @@ export interface UcrEndpointMlsCallDescriptor {
   readonly expectedRevision: number;
   /** Null until the canonical Group is created; never guess a CAS revision. */
   readonly groupRevision: number | null;
+  /** Verified against the committed two-Device MLS transition and live Trust. */
+  readonly expectedPeerDeviceId: string | null;
   readonly cryptoEpoch: number | null;
   readonly cryptoStateRef: string | null;
   readonly mediaCallId: string;
@@ -41,7 +43,7 @@ export interface UcrEndpointMlsCallDescriptor {
 function parseEndpointMlsCallDescriptor(value: unknown): UcrEndpointMlsCallDescriptor {
   if (!isObject(value)) throw new Error("missing endpoint MLS descriptor");
   exactKeys(value, [
-    "callId", "expectedRevision", "groupRevision", "cryptoEpoch",
+    "callId", "expectedRevision", "groupRevision", "expectedPeerDeviceId", "cryptoEpoch",
     "cryptoStateRef", "mediaCallId", "groupId", "conversationId",
     "creatorPrincipalId", "peerPrincipalId", "deviceId", "cryptoCapability",
     "requiresEndpointOwnedCommit",
@@ -59,10 +61,18 @@ function parseEndpointMlsCallDescriptor(value: unknown): UcrEndpointMlsCallDescr
   if (!absent && !created) {
     throw new Error("inconsistent canonical MLS Group revision or crypto epoch");
   }
+  const peer = value.expectedPeerDeviceId;
+  const peerRequired = created && Number(value.cryptoEpoch) > 0;
+  if ((peerRequired && (typeof peer !== "string" || peer === value.deviceId)) ||
+      (!peerRequired && peer !== null) ||
+      (typeof peer === "string" && !/^[A-Za-z0-9_.:@-]{1,128}$/.test(peer))) {
+    throw new Error("missing or untrusted committed MLS peer Device");
+  }
   return Object.freeze({
     callId: requiredId(value.callId, "Call"),
     expectedRevision: Number(value.expectedRevision),
     groupRevision: absent ? null : Number(value.groupRevision),
+    expectedPeerDeviceId: typeof peer === "string" ? peer : null,
     cryptoEpoch: absent ? null : Number(value.cryptoEpoch),
     cryptoStateRef: absent ? null : requiredId(value.cryptoStateRef, "MLS state ref"),
     mediaCallId: requiredId(value.mediaCallId, "media Call"),
