@@ -910,10 +910,12 @@ preflightCtx.window.ucrInstallAuthorizedMediaEndpoint = () => ({});
 assert.doesNotThrow(() => preflightCtx.preflight(),
   "custom canonical host installer is permitted only under later strict E2EE checks");
 delete preflightCtx.window.ucrInstallAuthorizedMediaEndpoint;
-let unexpectedCapture = 0, unexpectedSignalling = 0;
+let unexpectedCapture = 0, unexpectedSignalling = 0, unexpectedGrantReads = 0;
 const earlyBlockedCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, navigator: {onLine: true},
   claims: {expires: Date.now() + 5000},
+  token: "untrusted-join-fragment",
+  body: () => {unexpectedGrantReads++;throw new Error("grant inspected before canonical trust");},
   ui: {privacyMode: {value: "secure"}},
   mediaCaptureGeneration: 1,
   installFirstPartyDeviceAuthority: async () => {},
@@ -929,6 +931,7 @@ assert.ok(preflightStartCode.startsWith("async function startWebRtc("));
 runInNewContext(preflightStartCode + "\nthis.start = startWebRtc;", earlyBlockedCtx);
 await assert.rejects(earlyBlockedCtx.start(),
   /Canonical Device signing\/trust integration is unavailable/);
+assert.equal(unexpectedGrantReads, 0, "no grant inspection before canonical trust preflight");
 assert.equal(unexpectedCapture, 0, "no microphone/camera prompt without trusted signer");
 assert.equal(unexpectedSignalling, 0, "no network offer without trusted signer");
 
