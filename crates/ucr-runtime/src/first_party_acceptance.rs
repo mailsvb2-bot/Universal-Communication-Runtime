@@ -947,8 +947,9 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     )
     .expect("identical signed Commit retries after canonical epoch advance");
     assert_eq!(retried, persisted);
-    // A different event ID with the old signature is NOT a retry and must
-    // never be allowed to advance or mutate the accepted MLS Group.
+    // A different event ID with the old signature is NOT a retry. The
+    // canonical Ed25519 verifier rejects the changed proof as UNAUTHORIZED,
+    // before durable Group CAS or any other storage side effect.
     let mut forged = add_peer_request.clone();
     forged["eventId"] = json!("fp-endpoint-mls-forged-replay");
     assert_eq!(
@@ -958,8 +959,17 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             "/v1/first-party/call/mls-add-peer",
             &forged
         ),
-        Err(StatusCode::FORBIDDEN)
+        Err(StatusCode::UNAUTHORIZED)
     );
+    let after_forgery = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-descriptor",
+        &json!({"binding": alice, "callId": call_id, "expectedRevision": revision}),
+    )
+    .expect("forged signed event cannot mutate canonical Group");
+    assert_eq!(after_forgery["groupRevision"], 1);
+    assert_eq!(after_forgery["cryptoStateRef"], next_ref);
     // Even a newly and correctly signed DIFFERENT event cannot reuse the
     // consumed Group revision. The durable CAS, not the HTTP precheck,
     // distinguishes exact idempotency from an unauthorized second Add.
