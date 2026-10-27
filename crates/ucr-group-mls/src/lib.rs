@@ -1805,14 +1805,9 @@ mod tests {
             &relay.signer_public_key,
         )
         .unwrap();
-        let relay_secret = export_group_media_secret(
-            &relay_provider,
-            &relay_group,
-            scope,
-            group_id,
-            &relay_state,
-        )
-        .unwrap();
+        let relay_secret =
+            export_group_media_secret(&relay_provider, &relay_group, scope, group_id, &relay_state)
+                .unwrap();
         assert!(
             process_commit(
                 &relay_provider,
