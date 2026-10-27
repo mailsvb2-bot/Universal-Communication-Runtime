@@ -192,6 +192,9 @@ created by this browser path.
 The pre-Join and media pages intentionally use one scoped encrypted snapshot
 key, `ucr-e2ee-state:fp-v1:[tenant,namespace,mediaCall,participant,device]`,
 and the same IndexedDB stores, AES-GCM wrapping AAD and nonextractable KEK.
+Any optional opaque media-adapter transport snapshot is stored under a distinct
+`:media-adapter-v1` record key so it cannot overwrite the private OpenMLS
+provider snapshot; this is not a second identity or crypto authority.
 Cross-tab writes require the browser's Web Locks API; an unsupported browser
 fails closed. A pending public offer is retried with the **same** sealed
 KeyPackage, never silently replaced. Hangup, Device change and stale Call
