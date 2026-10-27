@@ -201,21 +201,31 @@ KeyPackage, never silently replaced. Hangup, Device change and stale Call
 inspection fence the final Join, including a delayed MLS preflight.
 
 **Not yet proven by a physical call:** this is a first implementation of the
-browser coordinator, not production evidence. There is still a crash window
-after the server durably accepts a Commit but before the initiator seals its
-merged local OpenMLS state; this state fails closed and requires an explicit
-recovery design. Epoch-zero creator publication now uses a separate, authenticated
-prepublication snapshot domain. After an uncertain create response or reload,
-the browser restores the **same** creator Group, retries only the signed public
-descriptor, and promotes the sealed state to the admitted epoch-zero domain
-only after matching the canonical authenticator. A forged or mismatched
-descriptor cannot promote it. The remaining **P0 crash window** is after a
-server-accepted Add Commit and before the creator's merged epoch-one state is
-durably sealed; this still fails closed and needs a separately persisted
-pending-commit recovery protocol. No successful two-physical-device A/V call,
-real TURN/NAT traversal, simultaneous capture revocation or measured
-quality/latency has been demonstrated by this change.
-Browser/CI conformance cannot substitute for those gates.
+browser coordinator, not production evidence. Epoch-zero creator publication
+uses a separate, authenticated prepublication snapshot domain. After an
+uncertain create response or reload, the browser restores the **same** creator
+Group and promotes the sealed state only after checking the canonical
+authenticator. A forged or mismatched descriptor cannot promote it.
+
+The initial endpoint-owned Add now also has a write-ahead recovery record in
+the existing encrypted IndexedDB state store. Before sending the signed
+Commit/Welcome, the creator seals its locally merged next-epoch OpenMLS
+snapshot and persists the exact public Commit, Welcome, event ID, recipient
+Device and expected canonical revision. After a lost acknowledgement or crash,
+the creator checks the independently authenticated canonical epoch/state
+reference: it retries the exact signed event only if the server still reports
+the original epoch, or promotes the sealed snapshot only after confirming the
+matching committed epoch and recipient Device. A conflicting epoch fails
+closed; it never mints a replacement Commit or MLS identity. The first-party
+BFF delegates replay decisions to the canonical SQLite transaction, which
+permits the **identical** previously accepted signed event while refusing
+stale, altered or unauthorized transitions. This is tested with an actual
+SQLite-backed BFF acceptance test and a separate mock-backed browser restart
+test. Neither proves power-loss durability on a physical device.
+
+Still open: real A/B media transport, simultaneous capture revocation and
+measured quality/latency across two physical devices and NAT/TURN. Browser
+and CI conformance cannot substitute for those release gates.
 
 ### Durable recipient KeyPackage before Welcome (PR #330)
 
@@ -239,10 +249,11 @@ uncertain create responses using a distinct authenticated snapshot domain.
 The `/client.html` first-party restoration path checks the independently
 authenticated BFF Group descriptor and the exact committed epoch/state
 reference. It refuses to mint a replacement KeyPackage or use server-owned
-MLS after signed Join. Still missing: durable creator **pending Add Commit**
-recovery across a server-accepted CAS and a local crash, plus physical A/B
-WebRTC/TURN/NAT media and measured revoke/stop. Browser-local cryptography
-and a mock-backed coordinator are not evidence of a live one-click call.
+MLS after signed Join. The creator's initial Add Commit now has a sealed write-ahead
+recovery record and exact signed-event replay; this remains browser-local
+recovery, not a measured physical-device power-loss test. Physical A/B
+WebRTC/TURN/NAT media and measured revoke/stop are still missing. Browser-local
+cryptography and a mock-backed coordinator are not evidence of a live one-click call.
 
 ### Authenticated endpoint MLS Group revision/epoch contract (PR #330)
 
