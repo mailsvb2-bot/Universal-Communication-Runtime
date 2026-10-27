@@ -8,6 +8,10 @@ const source=readFileSync("crates/ucr-realtime-web/static/start.js","utf8");
 const mediaPage=readFileSync("crates/ucr-realtime-web/static/client.html","utf8");
 assert.match(source,/ucr-e2ee-state:fp-v1:/,"pre-Join MLS must use a scoped sealed snapshot");
 assert.match(mediaPage,/ucr-e2ee-state:fp-v1:/,"media page must restore the SAME scoped MLS snapshot");
+assert.match(mediaPage,/function endpointAdapterPersistenceStorageKey\(/,
+  "media transport state must have an independent record name, not an independent authority");
+assert.match(mediaPage,/key\+":media-adapter-v1"/,
+  "opaque media adapter persistence must never overwrite the OpenMLS provider");
 assert.match(source,/navigator\.locks\.request\("ucr-first-party-mls:"\+key/,
   "pre-Join cross-tab OpenMLS state must be serialized");
 assert.match(mediaPage,/navigator\.locks\.request\("ucr-first-party-mls:"\+key/,
