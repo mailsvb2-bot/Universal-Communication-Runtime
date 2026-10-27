@@ -746,6 +746,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     assert!(descriptor["groupRevision"].is_null());
     assert!(descriptor["cryptoEpoch"].is_null());
     assert!(descriptor["cryptoStateRef"].is_null());
+    assert!(descriptor["expectedPeerDeviceId"].is_null());
     assert!(
         descriptor["groupId"]
             .as_str()
@@ -823,6 +824,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     assert_eq!(created_descriptor["groupRevision"], 0);
     assert_eq!(created_descriptor["cryptoEpoch"], 0);
     assert_eq!(created_descriptor["cryptoStateRef"], first_ref);
+    assert!(created_descriptor["expectedPeerDeviceId"].is_null());
     assert!(
         !server
             .store
@@ -947,6 +949,23 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         artifacts.next_crypto_state.epoch
     );
     assert_eq!(admitted_descriptor["cryptoStateRef"], next_ref);
+    assert_eq!(admitted_descriptor["expectedPeerDeviceId"], bob.device);
+    assert_eq!(
+        server
+            .store
+            .endpoint_mls_direct_call_device_pair(&scope, &group_id)
+            .unwrap(),
+        Some((alice.device.clone(), bob.device.clone()))
+    );
+    let recipient_descriptor = call(
+        &server,
+        &bob,
+        "/v1/first-party/call/mls-descriptor",
+        &json!({"binding": bob, "callId": call_id, "expectedRevision": revision}),
+    )
+    .expect("recipient independently reads exact committed creator Device");
+    assert_eq!(recipient_descriptor["expectedPeerDeviceId"], alice.device);
+
 
     merge_pending(
         &alice_provider,
