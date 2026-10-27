@@ -336,6 +336,34 @@ impl EndpointMlsState {
             .ok_or_else(|| js_error("mls_state: group not joined"))
     }
 
+    /// Public, epoch-bound digest of the locally verified MLS authenticator.
+    /// This is NOT an exporter or a private key. A newly created endpoint Group
+    /// needs this value to publish its signed epoch-zero canonical descriptor.
+    ///
+    /// # Errors
+    /// Refuses an unjoined, transitioning or inconsistent local MLS state.
+    pub fn crypto_state_ref(&self) -> Result<String, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: transition is not committed"));
+        }
+        let group = self
+            .group
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        if current_crypto_state(&self.scope, &self.group_id, group).map_err(debug_error)? != *state {
+            return Err(js_error("mls_state: local epoch authenticator mismatch"));
+        }
+        state
+            .state_ref
+            .as_ref()
+            .map(|reference| reference.as_str().to_owned())
+            .ok_or_else(|| js_error("mls_state: local state reference missing"))
+    }
+
     /// Authorizes exactly the two canonical Device leaves of a first-party
     /// direct Call from this endpoint's locally verified MLS ratchet tree.
     /// The peer Device must come from an independently authenticated canonical
