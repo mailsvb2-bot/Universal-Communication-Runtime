@@ -1980,13 +1980,20 @@ async function startWebRtcOnce(forceMedia=false){
   let remoteDescriptionAccepted=false;
   const pendingCandidates=[];
   const sendCandidate=async candidate=>{
-    if(!sessionActive||peer!==pc)return;
-    await api("/v1/realtime/webrtc/ice",{...body(),offer_id:offer.offer_id,candidate:candidate.candidate,sdp_mid:candidate.sdpMid,sdp_mline_index:candidate.sdpMLineIndex});
+    // ICE belongs to the grant and offer that allocated this peer, never to
+    // a replacement session that happened to become current while awaiting SDP.
+    if(!sessionActive||!mediaActive||peer!==pc||
+       generation!==mediaCaptureGeneration)return;
+    await api("/v1/realtime/webrtc/ice",
+      {...startingClaims,offer_id:offer.offer_id,candidate:candidate.candidate,
+       sdp_mid:candidate.sdpMid,sdp_mline_index:candidate.sdpMLineIndex},
+      undefined,false,startingToken);
   };
   pc.ondatachannel=event=>attachE2eeDataChannel(event.channel);
   pc.ontrack=event=>{event.track.stop();if(typeof e2eeAdapterReady==="undefined"||!e2eeAdapterReady)ui.status.textContent="Unexpected RTP track rejected; conference media must use endpoint E2EE transport.";};
   pc.onicecandidate=event=>{
-    if(!event.candidate||!sessionActive)return;
+    if(!event.candidate||!sessionActive||!mediaActive||peer!==pc||
+       generation!==mediaCaptureGeneration)return;
     if(!remoteDescriptionAccepted){pendingCandidates.push(event.candidate);return;}
     sendCandidate(event.candidate).catch(e=>{ui.status.textContent="ICE candidate rejected: "+e.message;});
   };
@@ -2000,20 +2007,40 @@ async function startWebRtcOnce(forceMedia=false){
     }
     if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
   };
-  await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
-  ensureOwnedPeer();
-  const answer=await pc.createAnswer();
-  ensureOwnedPeer();
-  await pc.setLocalDescription(answer);
-  ensureOwnedPeer();
-  await api("/v1/realtime/webrtc/remote-description",{...body(),offer_id:startWebRtc.offerId,sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
-  ensureOwnedPeer();
-  remoteDescriptionAccepted=true;
-  for(const candidate of pendingCandidates.splice(0)){ensureOwnedPeer();await sendCandidate(candidate);}
-  ensureOwnedPeer();
-  // SDP signalling completion must not overwrite a later ICE/DTLS state.
-  // Render the peer's actual current state, not a stale assumption.
-  ui.webrtcState.textContent=pc.connectionState||"Connecting";
+  try{
+    await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
+    ensureOwnedPeer();
+    const answer=await pc.createAnswer();
+    ensureOwnedPeer();
+    await pc.setLocalDescription(answer);
+    ensureOwnedPeer();
+    await api("/v1/realtime/webrtc/remote-description",
+      {...startingClaims,offer_id:offer.offer_id,
+       sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp},
+      undefined,false,startingToken);
+    ensureOwnedPeer();
+    remoteDescriptionAccepted=true;
+    for(const candidate of pendingCandidates.splice(0)){
+      ensureOwnedPeer();
+      await sendCandidate(candidate);
+    }
+    ensureOwnedPeer();
+    // SDP completion must not overwrite a later ICE/DTLS state.
+    ui.webrtcState.textContent=pc.connectionState||"Connecting";
+  }catch(error){
+    // Any failed SDP/ICE stage must release the exact server-side offer,
+    // including after Leave or grant replacement. Never tear down a newer peer.
+    try{
+      if(peer===pc)teardownPeer();
+      else pc.close();
+    }catch(cleanupError){
+      ucrRecordDiagnostic("WebRTC local negotiation cleanup failed: "+
+        ucrDiagnosticReason(String(cleanupError?.message||cleanupError)),"webrtc");
+    }finally{
+      await closeServerPeer(false,offer.offer_id,startingClaims,startingToken);
+    }
+    throw error;
+  }
 }
 async function restartIce(){
   if(restarting||!sessionActive||!mediaActive||!navigator.onLine||!peer)return false;
