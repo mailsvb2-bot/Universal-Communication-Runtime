@@ -966,7 +966,6 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     .expect("recipient independently reads exact committed creator Device");
     assert_eq!(recipient_descriptor["expectedPeerDeviceId"], alice.device);
 
-
     merge_pending(
         &alice_provider,
         &mut alice_mls,
