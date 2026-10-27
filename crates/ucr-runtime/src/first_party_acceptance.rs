@@ -952,7 +952,12 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     let mut forged = add_peer_request.clone();
     forged["eventId"] = json!("fp-endpoint-mls-forged-replay");
     assert_eq!(
-        call(&server, &alice, "/v1/first-party/call/mls-add-peer", &forged),
+        call(
+            &server,
+            &alice,
+            "/v1/first-party/call/mls-add-peer",
+            &forged
+        ),
         Err(StatusCode::FORBIDDEN)
     );
     // Even a newly and correctly signed DIFFERENT event cannot reuse the
