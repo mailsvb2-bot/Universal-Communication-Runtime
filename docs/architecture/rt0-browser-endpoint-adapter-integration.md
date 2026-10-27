@@ -167,6 +167,32 @@ Until a host supplies this canonical authority, the bundled installer emits
 `Canonical device media signing/trust authority is not wired` and the DataChannel
 is closed. That is deliberate and secure, **not a passing two-device test**.
 
+### Durable recipient KeyPackage before Welcome (PR #330)
+
+The browser WASM endpoint now provides `seal_unjoined_key_package` and
+`restore_unjoined_key_package` for the **recipient's existing private OpenMLS
+provider**, before a Welcome has arrived. The sealed snapshot uses the same
+endpoint-only state encryption as active epochs, but a separate authenticated
+AAD domain bound to canonical Tenant/Namespace/Group/Device. An active Group
+snapshot cannot be restored as a pending offer, nor can an offer be restored
+for a different Device or under a different wrapping key. The public
+KeyPackage bytes remain identical across reload; publishing a replacement
+KeyPackage after a transient delay must not silently orphan the accepted
+Welcome. Browser Compatibility exercises a real endpoint-created OpenMLS
+Add/Welcome with the recovered KeyPackage and negative cross-Device/key/domain
+checks, not a simulated crypto handshake.
+
+**Still missing for first-call completion:** the `/start` coordinator must
+persist this encrypted pending offer in the existing
+`ucr-endpoint-state-v1` store **before** publishing it to the canonical BFF,
+then use the same stored state when consuming the recipient-bound Welcome.
+The creator must similarly durably save epoch zero before publishing its
+Group, reconcile uncertain Commit acknowledgements, and merge only a
+canonical-accepted transition. `/client.html` must restore these exact
+same endpoint-owned states after signed Join; it may not mint a fresh
+KeyPackage or fall back to server-owned MLS. This primitive and its browser
+test are not evidence of a working one-click A/B call.
+
 ### Authenticated endpoint MLS Group revision/epoch contract (PR #330)
 
 The same first-party `POST /v1/first-party/call/mls-descriptor` now returns
