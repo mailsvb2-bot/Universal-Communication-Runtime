@@ -574,17 +574,43 @@ function openEndpointStateDb(){
     };
   });
 }
-async function saveEndpointState(key,value){
+async function saveEndpointState(key,value,expectedExisting=undefined){
   key=endpointStateKey(key);const bytes=endpointStateBytes(value);
+  // For the canonical first-party MLS state, the snapshot observed before
+  // Welcome/epoch restore is a CAS precondition. A second tab (or /start.js)
+  // may have advanced it while this tab was waiting on authenticated BFF.
+  // Never overwrite that newer private OpenMLS epoch with a stale snapshot.
+  const expected=expectedExisting===undefined?undefined:
+    expectedExisting===null?null:endpointStateBytes(expectedExisting).slice();
   const persist=async()=>{
     const db=await openEndpointStateDb();
     try{
       await new Promise((resolve,reject)=>{
         const tx=db.transaction(ENDPOINT_STATE_OBJECT_STORE,"readwrite");
-        tx.objectStore(ENDPOINT_STATE_OBJECT_STORE).put(Array.from(bytes),key);
+        const store=tx.objectStore(ENDPOINT_STATE_OBJECT_STORE);
+        let stale=false;
+        if(expected===undefined){
+          store.put(Array.from(bytes),key);
+        }else{
+          const read=store.get(key);
+          read.onsuccess=()=>{
+            try{
+              const stored=read.result;
+              const previous=stored===undefined?null:
+                endpointStateBytes(Array.isArray(stored)?new Uint8Array(stored):stored);
+              const same=previous===null?expected===null:
+                expected!==null&&previous.length===expected.length&&
+                previous.every((byte,index)=>byte===expected[index]);
+              if(!same){stale=true;tx.abort();return;}
+              store.put(Array.from(bytes),key);
+            }catch(_){stale=true;tx.abort();}
+          };
+        }
         tx.oncomplete=()=>resolve();
         tx.onerror=()=>reject(tx.error||new Error("IndexedDB write failed"));
-        tx.onabort=()=>reject(tx.error||new Error("IndexedDB write aborted"));
+        tx.onabort=()=>reject(stale?
+          new Error("Endpoint MLS snapshot changed during restore; retry canonical admission"):
+          tx.error||new Error("IndexedDB write aborted"));
       });
     }finally{db.close();}
   };
@@ -848,12 +874,12 @@ async function restoreEndpointMlsSnapshot(module,groupId,snapshot,bootstrap){
     wrappingKey.fill(0);
   }
 }
-async function sealEndpointMlsSnapshot(state){
+async function sealEndpointMlsSnapshot(state,expectedExisting=undefined){
   const key=endpointPersistenceStorageKey();
   if(!key)throw new Error("Endpoint MLS persistence requires a Device-bound identity");
   const wrappingKey=await getEndpointWrappingKey(key);
   try{
-    await saveEndpointState(key,state.seal_snapshot(wrappingKey));
+    await saveEndpointState(key,state.seal_snapshot(wrappingKey),expectedExisting);
   }finally{
     wrappingKey.fill(0);
   }
@@ -1059,7 +1085,10 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
     if(BigInt(state.crypto_epoch())!==BigInt(bootstrap.current_crypto_state.crypto_epoch)){
       throw new Error("Endpoint MLS epoch does not match canonical current state");
     }
-    await sealEndpointMlsSnapshot(state);
+    // A first-party Call must not roll back a newer endpoint MLS snapshot
+    // saved by /start.js or another active tab during asynchronous restoration.
+    await sealEndpointMlsSnapshot(state,
+      identity.call_id.startsWith("fp-m-")?sealed:undefined);
     requireCurrent();
     endpointMlsState=state;
     endpointMlsGroupId=context.group_id;
