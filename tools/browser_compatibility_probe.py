@@ -1156,6 +1156,9 @@ injected.remove();
   const previousApi = api;
   const previousSetTimeout = window.setTimeout;
   const previousClaims = claims;
+  const previousToken = token;
+  const previousOfferId = startWebRtc.offerId;
+  const previousOfferOwner = startWebRtc.offerOwner;
   const previousSignedGrantRetired = signedGrantRetired;
   const previousActiveSessionSequence = activeSessionSequence;
   const previousE2eeEndpoint = window.ucrE2eeEndpoint;
@@ -1179,6 +1182,7 @@ injected.remove();
   try {
     claims = {tenant_id:"test-tenant",namespace_id:"test-namespace",
       call_id:"test-call",session_id:"test-session",not_before:0};
+    token = "fixture-old-grant";
     window.setTimeout = function(fn, delay, ...args) {
       if (delay === HEARTBEAT_AUTH_TIMEOUT_MS) {
         watchdog = {fire: () => fn(...args), delay};
@@ -1208,6 +1212,10 @@ injected.remove();
     sessionActive = true;mediaActive = true;
     heartbeatInFlight = false;
     startWebRtc.offerId = "A".repeat(43);
+    startWebRtc.offerOwner = Object.freeze({
+      offerId: startWebRtc.offerId,
+      claims: Object.freeze({...claims}), token,
+    });
     ui.join.disabled = true;
     capture("watchdog");
     const pendingHeartbeat = heartbeat();
@@ -1227,18 +1235,25 @@ injected.remove();
     }
     check(events.includes("peer:watchdog"), "watchdog left WebRTC peer open");
     check(closeOffer === "A".repeat(43), "old owned WebRTC offer not closed");
+    check(startWebRtc.offerOwner?.token === "fixture-old-grant",
+      "old close must retain original grant while HTTP is pending");
     check(oldLeaveSequence === 1, "retired Leave missing original server generation");
 
     // Emulate a separate, independently issued signed grant with a new
     // canonical session identity, not reuse of the retired grant.
     signedGrantRetired = false;
     claims = {...claims,session_id:"fresh-server-issued-session"};
+    token = "fixture-new-grant";
     activeSessionSequence = 2;
     // The old Leave and close requests remain pending during new admission.
     // They must not erase the new peer's identity or overwrite its UI.
     sessionLifecycleGeneration++;
     sessionActive = true;mediaActive = true;
     startWebRtc.offerId = "B".repeat(43);
+    startWebRtc.offerOwner = Object.freeze({
+      offerId: startWebRtc.offerId,
+      claims: Object.freeze({...claims}), token,
+    });
     ui.state.textContent = "New joined";
     ui.status.textContent = "New session active";
     ui.join.disabled = true;
@@ -1250,6 +1265,8 @@ injected.remove();
     await pendingHeartbeat;
     for (let i = 0; i < 6; i++) await Promise.resolve();
     check(startWebRtc.offerId === "B".repeat(43), "old close erased new offer");
+    check(startWebRtc.offerOwner?.token === "fixture-new-grant",
+      "old close erased replacement offer authority");
     check(sessionActive && mediaActive, "stale heartbeat revoked new session");
     check(ui.state.textContent === "New joined" &&
       ui.status.textContent === "New session active" && ui.join.disabled,
@@ -1277,6 +1294,8 @@ injected.remove();
       check(events.includes("stop:offline:" + name), "offline kept " + name + " capturing");
     }
     check(events.includes("peer:offline"), "offline left WebRTC peer open");
+    check(closeOffer === "B".repeat(43),
+      "offline must close the replacement session's own WebRTC offer");
     window.dispatchEvent(new Event("online"));
     check(!sessionActive, "online silently reauthorized revoked session");
     check(signedGrantRetired && ui.join.disabled,
@@ -1316,13 +1335,15 @@ injected.remove();
     api = previousApi;
     window.setTimeout = previousSetTimeout;
     claims = previousClaims;
+    token = previousToken;
     signedGrantRetired = previousSignedGrantRetired;
     activeSessionSequence = previousActiveSessionSequence;
     if (previousE2eeEndpoint === undefined) delete window.ucrE2eeEndpoint;
     else window.ucrE2eeEndpoint = previousE2eeEndpoint;
     screenShareBusy = false;
     sessionActive = false;mediaActive = false;
-    startWebRtc.offerId = null;
+    startWebRtc.offerId = previousOfferId;
+    startWebRtc.offerOwner = previousOfferOwner;
   }
 })().then(result => {
   document.getElementById("__ucr_regression_result").setAttribute(
