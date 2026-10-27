@@ -404,7 +404,7 @@ async function mlsWrappingKey(key,{requireExisting=false}={}){
         await mlsRecord(MLS_WRAPPING,key,true,{
           version:1,kek,iv:Array.from(iv),wrapped:Array.from(wrapped)
         },true);
-        return candidate;
+        return candidate.slice();
       }catch(error){
         if(error?.name!=="ConstraintError")throw error;
       }
@@ -425,9 +425,11 @@ async function mlsWasm(){
     const module=await import("/endpoint-wasm/ucr_endpoint_wasm.js");
     if(typeof module.default!=="function"||
        typeof module.EndpointMlsState!=="function"||
-       module.endpoint_wasm_contract_version()!=="ucr.endpoint-wasm.v1")
-      throw Error("Endpoint-owned OpenMLS WASM contract unavailable");
+       typeof module.endpoint_wasm_contract_version!=="function")
+      throw Error("Endpoint-owned OpenMLS WASM package unavailable");
     await module.default();
+    if(module.endpoint_wasm_contract_version()!=="ucr.endpoint-wasm.v1")
+      throw Error("Endpoint-owned OpenMLS WASM contract unavailable");
     return module;
   })().catch(error=>{mlsModulePromise=null;throw error;});
   return mlsModulePromise;
@@ -563,10 +565,7 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
          committed.cryptoEpoch!==Number(state.crypto_epoch())||
          committed.cryptoStateRef!==state.crypto_state_ref())
         return false;
-      state.authorize_direct_call_roster(
-        user.deviceId,committed.expectedPeerDeviceId,
-        BigInt(committed.cryptoEpoch),committed.cryptoStateRef
-      );
+      state.authorize_direct_call_roster(committed.expectedPeerDeviceId);
       return true;
     }finally{
       if(wrapping)wrapping.fill(0);
