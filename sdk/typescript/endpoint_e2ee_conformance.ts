@@ -1540,10 +1540,20 @@ const observedFencedCloses: string[] = [];
 const fencedCtx: Record<string, any> = {
   token: "fixture-signed-join",
   sessionActive: true,
-  startWebRtc: Object.assign(() => {}, {offerId: "A".repeat(43)}),
-  body: () => ({session_id: "session"}),
-  api: async (_route: string, payload: any) => {
-    observedFencedCloses.push(payload.offer_id);
+  startWebRtc: Object.assign(() => {}, {
+    offerId: "A".repeat(43),
+    offerOwner: Object.freeze({
+      offerId: "A".repeat(43), claims: Object.freeze({session_id: "session-a"}),
+      token: "grant-a",
+    }),
+  }),
+  // No mutable global grant is an acceptable fallback for an offer owner.
+  ucrRecordDiagnostic() {},
+  api: async (_route: string, payload: any, _signal: unknown,
+              _keepalive: boolean, bearerToken: string) => {
+    observedFencedCloses.push(JSON.stringify({
+      offerId: payload.offer_id, sessionId: payload.session_id, bearerToken,
+    }));
     if(observedFencedCloses.length===1){enteredFencedClose();await fencedCloseGate;}
   },
 };
@@ -1551,14 +1561,28 @@ runInNewContext(browserCloseCode + "\nthis.closeOffer = closeServerPeer;", fence
 const oldCloseInFlight = fencedCtx.closeOffer();
 await fencedCloseEntered;
 fencedCtx.startWebRtc.offerId = "B".repeat(43);
+fencedCtx.startWebRtc.offerOwner = Object.freeze({
+  offerId: "B".repeat(43), claims: Object.freeze({session_id: "session-b"}),
+  token: "grant-b",
+});
 releaseFencedClose();
 await oldCloseInFlight;
 assert.equal(fencedCtx.startWebRtc.offerId, "B".repeat(43), "stale response must preserve new offer");
 await fencedCtx.closeOffer();
-assert.deepEqual(observedFencedCloses, ["A".repeat(43), "B".repeat(43)]);
+assert.deepEqual(observedFencedCloses, [
+  JSON.stringify({offerId: "A".repeat(43), sessionId: "session-a", bearerToken: "grant-a"}),
+  JSON.stringify({offerId: "B".repeat(43), sessionId: "session-b", bearerToken: "grant-b"}),
+], "each close must retain the original offer's session and bearer");
 assert.equal(fencedCtx.startWebRtc.offerId, null, "owner clears only after its own close");
+assert.equal(fencedCtx.startWebRtc.offerOwner, null, "completed close retires its owner");
 await fencedCtx.closeOffer();
 assert.equal(observedFencedCloses.length, 2, "no unfenced session-wide close");
+// Missing original authority must fail closed even if a newer global grant exists.
+fencedCtx.startWebRtc.offerId = "C".repeat(43);
+fencedCtx.startWebRtc.offerOwner = null;
+await fencedCtx.closeOffer();
+assert.equal(observedFencedCloses.length, 2, "missing owner must never borrow global bearer");
+assert.equal(fencedCtx.startWebRtc.offerId, "C".repeat(43), "refused close preserves unowned offer");
 
 // Real browser conference admission withdrawal must turn OFF physical
 // camera/microphone capture, not only close the encrypted DataChannel.
