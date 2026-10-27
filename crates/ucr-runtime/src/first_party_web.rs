@@ -1589,10 +1589,13 @@ fn publish_endpoint_mls_add_peer(
         .group(&direct.scope, &ids.group_id)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::CONFLICT)?;
-    if group.ownership != GroupOwnership::PersonOwned(participants[0].clone())
-        || group.revision != req.group_revision
-        || group.crypto_state.epoch.checked_add(1) != Some(req.crypto_epoch)
-    {
+    // Do not reject an exact signed retry after the original Commit advanced
+    // the Group revision. The transactional EndpointMlsCommitStore checks the
+    // current epoch/revision for NEW events and authenticates an existing
+    // event's full signed fingerprint before returning Duplicate. Performing
+    // the mutable revision check here would strand an accepted Commit when
+    // its HTTP acknowledgement is lost.
+    if group.ownership != GroupOwnership::PersonOwned(participants[0].clone()) {
         return Err(StatusCode::CONFLICT);
     }
     let changed = GroupChange {
