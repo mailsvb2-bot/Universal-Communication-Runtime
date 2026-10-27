@@ -1864,14 +1864,29 @@ async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims
   // issue a session-wide close that could erase a new peer in another tab.
   const offerId=retiredOfferId||startWebRtc.offerId;
   if((!sessionActive&&!retiredOfferId)||!offerId)return;
+  // The original offer owner, not a later session's mutable global token,
+  // authorizes cleanup after Leave, renewal, or a competing Join.
+  const owner=startWebRtc.offerOwner?.offerId===offerId?startWebRtc.offerOwner:null;
+  const closeClaims=retiredClaims||owner?.claims;
+  const closeToken=retiredToken??owner?.token;
+  if(!closeClaims||!closeToken){
+    ucrRecordDiagnostic("WebRTC close refused: original offer authority missing","webrtc");
+    return;
+  }
   try{
-    await api("/v1/realtime/webrtc/close",{...(retiredClaims||body()),offer_id:offerId},undefined,keepalive,retiredToken??token);
-    if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
+    await api("/v1/realtime/webrtc/close",{...closeClaims,offer_id:offerId},undefined,keepalive,closeToken);
+    if(startWebRtc.offerId===offerId){
+      startWebRtc.offerId=null;
+      if(startWebRtc.offerOwner===owner)startWebRtc.offerOwner=null;
+    }
   }catch(error){
     const message=String(error?.message||error);
     if(/\b404\b|not_found|offer_not_found/i.test(message)){
       ucrRecordDiagnostic("WebRTC offer already retired on close","webrtc");
-      if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
+      if(startWebRtc.offerId===offerId){
+        startWebRtc.offerId=null;
+        if(startWebRtc.offerOwner===owner)startWebRtc.offerOwner=null;
+      }
     }else{
       ucrRecordDiagnostic("WebRTC close failed: "+ucrDiagnosticReason(message),"webrtc");
     }
@@ -1948,6 +1963,9 @@ async function startWebRtcOnce(forceMedia=false){
     // response. Do not install its offer as the current peer owner.
     ensureCurrent();
     startWebRtc.offerId=offer.offer_id;
+    startWebRtc.offerOwner=Object.freeze({
+      offerId:offer.offer_id,claims:Object.freeze({...startingClaims}),token:startingToken
+    });
     rtcConfig=rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value);
     await ensureLocalMedia(forceMedia);
     ensureCurrent();
@@ -2044,10 +2062,15 @@ async function startWebRtcOnce(forceMedia=false){
 }
 async function restartIce(){
   if(restarting||!sessionActive||!mediaActive||!navigator.onLine||!peer)return false;
-  const generation=mediaCaptureGeneration,pc=peer;
+  const generation=mediaCaptureGeneration,pc=peer,owner=startWebRtc.offerOwner;
+  // An ICE restart is not a new Call or Join. It must retain the exact
+  // authenticated owner of the original server-side WebRTC offer.
+  if(!owner||owner.offerId!==startWebRtc.offerId)
+    throw new Error("ICE restart requires the original WebRTC offer authority");
   const ensureCurrent=()=>{
     if(!sessionActive||!mediaActive||!navigator.onLine||
-       generation!==mediaCaptureGeneration||peer!==pc||pc.connectionState==="closed"){
+       generation!==mediaCaptureGeneration||peer!==pc||pc.connectionState==="closed"||
+       startWebRtc.offerOwner!==owner||startWebRtc.offerId!==owner.offerId){
       throw new Error("ICE restart cancelled by conference media teardown");
     }
   };
@@ -2055,12 +2078,13 @@ async function restartIce(){
   try{
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     ui.webrtcState.textContent="ICE restart";
-    const response=await api("/v1/realtime/webrtc/restart",body());
+    const response=await api("/v1/realtime/webrtc/restart",
+      owner.claims,undefined,false,owner.token);
     const offer=await response.json();
     ensureCurrent();
     // ICE restart changes SDP, not ownership of the original WebRTC attempt.
     // A mismatched fence must not be installed as a new network configuration.
-    if(!offer||offer.offer_id!==startWebRtc.offerId){
+    if(!offer||offer.offer_id!==owner.offerId){
       throw new Error("ICE restart changed immutable WebRTC transport offer identity");
     }
     pc.setConfiguration(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
@@ -2070,7 +2094,10 @@ async function restartIce(){
     ensureCurrent();
     await pc.setLocalDescription(answer);
     ensureCurrent();
-    await api("/v1/realtime/webrtc/remote-description",{...body(),offer_id:startWebRtc.offerId,sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
+    await api("/v1/realtime/webrtc/remote-description",
+      {...owner.claims,offer_id:owner.offerId,
+       sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp},
+      undefined,false,owner.token);
     ensureCurrent();
     ui.webrtcState.textContent="Reconnecting";
     ui.status.textContent="Network path changed. ICE restart is reconnecting media without recreating the conference session.";
