@@ -345,7 +345,7 @@ async function expectLateDeviceResponseRefused(
 
 const acceptedMlsDescriptor = {
   callId: direct.callId, expectedRevision: 7,
-  groupRevision: null, cryptoEpoch: null, cryptoStateRef: null,
+  groupRevision: null, expectedPeerDeviceId: null, cryptoEpoch: null, cryptoStateRef: null,
   mediaCallId: "fp-m-call-42", groupId: "fp-mg-group-42",
   conversationId: "fp-mc-conversation-42",
   creatorPrincipalId: binding.participantId, peerPrincipalId: "peer-other",
@@ -374,9 +374,17 @@ assert.equal(initialGroup.groupRevision, 0);
 assert.equal(initialGroup.cryptoEpoch, 0);
 assert.equal(initialGroup.cryptoStateRef, "local-epoch-zero");
 groupDescriptor = {...acceptedMlsDescriptor, groupRevision: 1, cryptoEpoch: 1,
-  cryptoStateRef: "endpoint-committed-epoch-one"};
-assert.equal((await descriptorHost.describeAcceptedCallMls(binding, descriptorRequest)).groupRevision, 1);
+  cryptoStateRef: "endpoint-committed-epoch-one", expectedPeerDeviceId: "peer-device"};
+const admittedGroup = await descriptorHost.describeAcceptedCallMls(binding, descriptorRequest);
+assert.equal(admittedGroup.groupRevision, 1);
+assert.equal(admittedGroup.expectedPeerDeviceId, "peer-device");
 for (const invalid of [
+  {...acceptedMlsDescriptor, groupRevision: 1, cryptoEpoch: 1,
+    cryptoStateRef: "state", expectedPeerDeviceId: null},
+  {...acceptedMlsDescriptor, groupRevision: 1, cryptoEpoch: 1,
+    cryptoStateRef: "state", expectedPeerDeviceId: binding.deviceId},
+  {...acceptedMlsDescriptor, groupRevision: 1, cryptoEpoch: 1,
+    cryptoStateRef: "state", expectedPeerDeviceId: "peer device"},
   {...acceptedMlsDescriptor, groupRevision: 0},
   {...acceptedMlsDescriptor, groupRevision: 0, cryptoEpoch: 0, cryptoStateRef: null},
   {...acceptedMlsDescriptor, groupRevision: -1, cryptoEpoch: 0, cryptoStateRef: "state"},
