@@ -39,10 +39,10 @@ use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
     ConversationRecord, ConversationRef, DeliveryPolicy, DeviceDescriptor, DeviceId,
-    DeviceLifecycleState, EventId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
-    GroupHistoryPolicy, GroupMediaState, GroupOwnership, GroupRecord, GroupRole, IdentityId, KeyId,
-    KeyPurpose, NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor, ScopedPrincipal,
-    TenantId, TenantScope,
+    DeviceLifecycleState, EventId, GroupChange, GroupChangeKind, GroupCryptoState,
+    GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord, GroupRole,
+    IdentityId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor,
+    ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
 use ucr_storage_sqlite::{EndpointMlsKeyPackageOffer, SqliteLocalStore};
@@ -1010,9 +1010,6 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
     to_call(state, &current)
 }
 
-/// Return a canonical, scope-bound MLS bootstrap descriptor to an ACTIVE Call
-/// participant. This contains NO key material and grants NO media authority.
-/// The caller device must independently create and sign its `OpenMLS` state.
 /// Resolve the *committed* endpoint MLS Device pair under current canonical
 /// Identity/Device/Trust, not from an offer, browser hint or SFU frame.
 fn authenticated_endpoint_mls_devices(
@@ -1056,6 +1053,9 @@ fn authenticated_endpoint_mls_devices(
     Ok(pair)
 }
 
+/// Return a canonical, scope-bound MLS bootstrap descriptor to an ACTIVE Call
+/// participant. This contains NO key material and grants NO media authority.
+/// The caller device must independently create and sign its `OpenMLS` state.
 fn endpoint_mls_descriptor(
     state: &State,
     session: &Session,
@@ -1114,9 +1114,7 @@ fn endpoint_mls_descriptor(
     } else {
         (None, None, None)
     };
-    let committed = authenticated_endpoint_mls_devices(
-        state, &call, &participants, &ids.group_id,
-    )?;
+    let committed = authenticated_endpoint_mls_devices(state, &call, &participants, &ids.group_id)?;
     let expected_peer_device_id = match committed {
         Some((creator, recipient)) if crypto_epoch.is_some_and(|epoch| epoch > 0) => {
             if session.subject.principal == participants[0] {
@@ -1709,16 +1707,14 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
             })?;
     // A Call principal can own multiple Devices. Only the exact two Devices
     // admitted by the signed endpoint MLS Commit may receive media Joins.
-    let participants = first_party_media::admissible_participants_for_descriptor(
-        &call, &session.subject,
-    )
-    .map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants =
+        first_party_media::admissible_participants_for_descriptor(&call, &session.subject)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
     let ids = first_party_media::media_runtime_ids(&call.scope, &call.call_id)
         .map_err(|_| StatusCode::CONFLICT)?;
-    let (creator, recipient) = authenticated_endpoint_mls_devices(
-        state, &call, &participants, &ids.group_id,
-    )?
-    .ok_or(StatusCode::CONFLICT)?;
+    let (creator, recipient) =
+        authenticated_endpoint_mls_devices(state, &call, &participants, &ids.group_id)?
+            .ok_or(StatusCode::CONFLICT)?;
     let own_device = if session.subject.principal == participants[0] {
         creator
     } else {
