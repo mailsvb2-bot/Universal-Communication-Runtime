@@ -71,6 +71,7 @@ const module={EndpointMlsState:MockEndpointMlsState};
 function createEndpoint(user){
   const scope=JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]);
   const context={
+    atob:globalThis.atob,
     accountScope:scope,navigating:false,
     active:{call:{...directCall},terminating:false},
     activeCallLocator:()=>"call-hint",
