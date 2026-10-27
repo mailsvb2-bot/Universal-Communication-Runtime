@@ -7,6 +7,7 @@ on:
       - 'tools/check_first_party_start_controls.py'
       - 'tools/test_first_party_call_resume.mjs'
       - 'tools/test_first_party_mls_coordinator.mjs'
+      - 'tools/test_webrtc_late_start_cleanup.mjs'
       - 'tools/check_first_party_call_revision_contract.py'
       - 'tools/check_first_party_media_admission_contract.py'
       - 'crates/ucr-realtime-web/static/client.html'
@@ -34,6 +35,9 @@ jobs:
       - name: Exercise authenticated pre-Join A/B MLS coordination
         shell: pwsh
         run: node tools/test_first_party_mls_coordinator.mjs
+      - name: Exercise offer-scoped cleanup after late WebRTC start
+        shell: pwsh
+        run: node tools/test_webrtc_late_start_cleanup.mjs
       - name: Check call creation revision contract
         shell: pwsh
         run: python tools/check_first_party_call_revision_contract.py
