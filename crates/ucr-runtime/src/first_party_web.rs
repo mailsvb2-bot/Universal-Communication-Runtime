@@ -1693,18 +1693,6 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
             req.expected_revision,
         )
         .map_err(|_| StatusCode::FORBIDDEN)?;
-    // Realtime media is owned by the Conference/SFU + Group-MLS stack, which
-    // admits only Group Calls. Bind this ACTIVE direct Call to its derived
-    // two-member media Group Call and name THAT Call in the Join grant.
-    let media =
-        first_party_media::prepare_direct_call_media(state.store.as_ref(), &call, &session.subject)
-            .map_err(|error| match error {
-                first_party_media::MediaRuntimeError::NotAdmissible => StatusCode::FORBIDDEN,
-                first_party_media::MediaRuntimeError::Conflict => StatusCode::CONFLICT,
-                first_party_media::MediaRuntimeError::Unavailable => {
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
-            })?;
     // A Call principal can own multiple Devices. Only the exact two Devices
     // admitted by the signed endpoint MLS Commit may receive media Joins.
     let participants =
@@ -1723,6 +1711,18 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
     if session.binding.device != own_device {
         return Err(StatusCode::FORBIDDEN);
     }
+    // Realtime media is owned by the Conference/SFU + Group-MLS stack, which
+    // admits only Group Calls. Bind this ACTIVE direct Call to its derived
+    // two-member media Group Call and name THAT Call in the Join grant.
+    let media =
+        first_party_media::prepare_direct_call_media(state.store.as_ref(), &call, &session.subject)
+            .map_err(|error| match error {
+                first_party_media::MediaRuntimeError::NotAdmissible => StatusCode::FORBIDDEN,
+                first_party_media::MediaRuntimeError::Conflict => StatusCode::CONFLICT,
+                first_party_media::MediaRuntimeError::Unavailable => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            })?;
     // This is the SAME issuer instance used for gRPC Realtime admission.
     let grant = state
         .issuer
