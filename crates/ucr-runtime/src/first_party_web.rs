@@ -1013,6 +1013,49 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
 /// Return a canonical, scope-bound MLS bootstrap descriptor to an ACTIVE Call
 /// participant. This contains NO key material and grants NO media authority.
 /// The caller device must independently create and sign its `OpenMLS` state.
+/// Resolve the *committed* endpoint MLS Device pair under current canonical
+/// Identity/Device/Trust, not from an offer, browser hint or SFU frame.
+fn authenticated_endpoint_mls_devices(
+    state: &State,
+    call: &CallSession,
+    participants: &[ucr_model::PrincipalRef; 2],
+    group_id: &GroupId,
+) -> Result<Option<(String, String)>, StatusCode> {
+    let pair = state
+        .store
+        .endpoint_mls_direct_call_device_pair(&call.scope, group_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    if let Some((creator, recipient)) = &pair {
+        for (principal, device_id) in participants.iter().zip([creator, recipient]) {
+            let identity = state
+                .store
+                .principal_identity_binding(&call.scope, principal)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .ok_or(StatusCode::FORBIDDEN)?;
+            let device_id = DeviceId::from_opaque(opaque(device_id)?);
+            let record = state
+                .store
+                .device(&call.scope, &device_id)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .ok_or(StatusCode::FORBIDDEN)?;
+            if record.identity_id != identity.identity_id
+                || !ucr_protocol::device_allows_protected_access(&record)
+            {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            let trusted = state
+                .store
+                .active_trusted_signing_key(&call.scope, &device_id)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .ok_or(StatusCode::FORBIDDEN)?;
+            if trusted.public_key.len() != 32 {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+    }
+    Ok(pair)
+}
+
 fn endpoint_mls_descriptor(
     state: &State,
     session: &Session,
@@ -1071,9 +1114,33 @@ fn endpoint_mls_descriptor(
     } else {
         (None, None, None)
     };
+    let committed = authenticated_endpoint_mls_devices(
+        state, &call, &participants, &ids.group_id,
+    )?;
+    let expected_peer_device_id = match committed {
+        Some((creator, recipient)) if crypto_epoch.is_some_and(|epoch| epoch > 0) => {
+            if session.subject.principal == participants[0] {
+                if session.binding.device != creator {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+                Some(recipient)
+            } else {
+                if session.binding.device != recipient {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+                Some(creator)
+            }
+        }
+        Some(_) => return Err(StatusCode::CONFLICT),
+        None if crypto_epoch.is_some_and(|epoch| epoch > 0) => {
+            return Err(StatusCode::CONFLICT);
+        }
+        None => None,
+    };
     Ok(json!({
         "callId": req.call_id,
         "expectedRevision": call.revision,
+        "expectedPeerDeviceId": expected_peer_device_id,
         "groupRevision": group_revision,
         "cryptoEpoch": crypto_epoch,
         "cryptoStateRef": crypto_state_ref,
@@ -1640,6 +1707,26 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
                     StatusCode::SERVICE_UNAVAILABLE
                 }
             })?;
+    // A Call principal can own multiple Devices. Only the exact two Devices
+    // admitted by the signed endpoint MLS Commit may receive media Joins.
+    let participants = first_party_media::admissible_participants_for_descriptor(
+        &call, &session.subject,
+    )
+    .map_err(|_| StatusCode::FORBIDDEN)?;
+    let ids = first_party_media::media_runtime_ids(&call.scope, &call.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let (creator, recipient) = authenticated_endpoint_mls_devices(
+        state, &call, &participants, &ids.group_id,
+    )?
+    .ok_or(StatusCode::CONFLICT)?;
+    let own_device = if session.subject.principal == participants[0] {
+        creator
+    } else {
+        recipient
+    };
+    if session.binding.device != own_device {
+        return Err(StatusCode::FORBIDDEN);
+    }
     // This is the SAME issuer instance used for gRPC Realtime admission.
     let grant = state
         .issuer
