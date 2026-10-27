@@ -24,6 +24,10 @@ import type {
 export interface UcrEndpointMlsCallDescriptor {
   readonly callId: string;
   readonly expectedRevision: number;
+  /** Null until the canonical Group is created; never guess a CAS revision. */
+  readonly groupRevision: number | null;
+  readonly cryptoEpoch: number | null;
+  readonly cryptoStateRef: string | null;
   readonly mediaCallId: string;
   readonly groupId: string;
   readonly conversationId: string;
@@ -37,7 +41,8 @@ export interface UcrEndpointMlsCallDescriptor {
 function parseEndpointMlsCallDescriptor(value: unknown): UcrEndpointMlsCallDescriptor {
   if (!isObject(value)) throw new Error("missing endpoint MLS descriptor");
   exactKeys(value, [
-    "callId", "expectedRevision", "mediaCallId", "groupId", "conversationId",
+    "callId", "expectedRevision", "groupRevision", "cryptoEpoch",
+    "cryptoStateRef", "mediaCallId", "groupId", "conversationId",
     "creatorPrincipalId", "peerPrincipalId", "deviceId", "cryptoCapability",
     "requiresEndpointOwnedCommit",
   ]);
@@ -45,9 +50,21 @@ function parseEndpointMlsCallDescriptor(value: unknown): UcrEndpointMlsCallDescr
       value.requiresEndpointOwnedCommit !== true) {
     throw new Error("invalid or downgraded endpoint MLS descriptor");
   }
+  const absent = value.groupRevision === null && value.cryptoEpoch === null &&
+    value.cryptoStateRef === null;
+  const created = Number.isSafeInteger(value.groupRevision) &&
+    Number(value.groupRevision) >= 0 && Number.isSafeInteger(value.cryptoEpoch) &&
+    Number(value.cryptoEpoch) >= 0 && typeof value.cryptoStateRef === "string" &&
+    value.cryptoStateRef.length > 0 && value.cryptoStateRef.length <= 128;
+  if (!absent && !created) {
+    throw new Error("inconsistent canonical MLS Group revision or crypto epoch");
+  }
   return Object.freeze({
     callId: requiredId(value.callId, "Call"),
     expectedRevision: Number(value.expectedRevision),
+    groupRevision: absent ? null : Number(value.groupRevision),
+    cryptoEpoch: absent ? null : Number(value.cryptoEpoch),
+    cryptoStateRef: absent ? null : requiredId(value.cryptoStateRef, "MLS state ref"),
     mediaCallId: requiredId(value.mediaCallId, "media Call"),
     groupId: requiredId(value.groupId, "MLS Group"),
     conversationId: requiredId(value.conversationId, "media Conversation"),
@@ -872,7 +889,10 @@ export function createUcrFirstPartyHttpHost(
       if (!sameBinding(auth, await session())) throw new Error("first-party account changed");
       const descriptor = await this.describeAcceptedCallMls(auth, input);
       if (descriptor.creatorPrincipalId !== auth.participantId ||
-          !Number.isSafeInteger(input.groupRevision) ||
+          descriptor.groupRevision === null ||
+          input.groupRevision !== descriptor.groupRevision ||
+          descriptor.cryptoEpoch === null ||
+          input.cryptoEpoch !== descriptor.cryptoEpoch + 1 ||
           !Number.isSafeInteger(input.cryptoEpoch) || input.cryptoEpoch < 1) {
         throw new Error("invalid or unauthorized endpoint-owned MLS Commit");
       }
