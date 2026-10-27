@@ -1103,8 +1103,17 @@ function endpointPersistenceStorageKey(identity=claims){
   );
   return key.length>0&&key.length<=ENDPOINT_STATE_KEY_MAX?key:null;
 }
+// The media adapter may persist its own opaque transport state, but it MUST
+// never overwrite the canonical OpenMLS provider snapshot in the same DB.
+function endpointAdapterPersistenceStorageKey(identity=claims){
+  const key=endpointPersistenceStorageKey(identity);
+  if(!key)return null;
+  if(!identity?.call_id?.startsWith("fp-m-"))return key;
+  const separate=key+":media-adapter-v1";
+  return separate.length<=ENDPOINT_STATE_KEY_MAX?separate:null;
+}
 async function restoreEndpointPersistedState(adapter,identity=claims){
-  const persistence=endpointPersistence(adapter),key=endpointPersistenceStorageKey(identity);
+  const persistence=endpointPersistence(adapter),key=endpointAdapterPersistenceStorageKey(identity);
   if(!persistence||!key)return "unavailable";
   const snapshot=await loadEndpointState(key);
   if(snapshot===null)return "empty";
@@ -1116,7 +1125,7 @@ async function restoreEndpointPersistedState(adapter,identity=claims){
   return "restored";
 }
 async function persistEndpointState(adapter,identity=claims){
-  const persistence=endpointPersistence(adapter),key=endpointPersistenceStorageKey(identity);
+  const persistence=endpointPersistence(adapter),key=endpointAdapterPersistenceStorageKey(identity);
   if(!persistence||!key)return false;
   const snapshot=await persistence.sealState();
   if(snapshot===null||snapshot===undefined)return false;
