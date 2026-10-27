@@ -1005,7 +1005,7 @@ function requireCompatibleE2eeAdapter(adapter){
 // First-party calls use the SAME authenticated Device/Trust owner as /start.
 // Never use the local-room authority for a first-party Call, and never infer
 // trust from a Join URL or a browser-side key alone.
-let firstPartyDeviceAuthorityPromise=null;
+let firstPartyDeviceAuthorityPromise=null,firstPartyCanonicalHttpHost=null;
 async function installFirstPartyDeviceAuthority(){
   if(!claims||typeof claims.call_id!=="string"||!claims.call_id.startsWith("fp-")||
      sessionStorage.getItem("ucrLocalRoom")==="1")return;
@@ -1042,6 +1042,7 @@ async function installFirstPartyDeviceAuthority(){
        signer.publicKey.some((byte,index)=>byte!==trust.activeKey.publicKey[index])){
       throw new Error("Authenticated Device signer is not currently trusted");
     }
+    firstPartyCanonicalHttpHost=host;
     window.ucrProtectedDeviceKeyVault=vault;
     window.ucrCanonicalDeviceAuthority=host;
     window.ucrFirstPartyAuthenticatedBinding=user;
@@ -3023,6 +3024,46 @@ function installLocalRoomMediaHost(){
 }
 // ONE admission resolver for the local room and first-party Calls: trust comes
 // from the canonical mls-context trusted_device_keys of the media Group Call.
+// For a first-party direct Call, the expected MLS peer is NOT inferred from
+// SFU frames, Welcome or a join URL. The independently authenticated BFF
+// resolves the two committed Device IDs against live canonical Identity/Trust.
+async function verifiedFirstPartyPeerDevice(bootstrap,context){
+  if(!bootstrap.claims.callId.startsWith("fp-m-"))return null;
+  const callId=sessionStorage.getItem("ucrFirstPartyDirectCall");
+  const host=firstPartyCanonicalHttpHost;
+  if(!host||!callId||!/^[A-Za-z0-9_.:@-]{1,128}$/.test(callId)){
+    throw new Error("First-party accepted Call authority unavailable");
+  }
+  const user=await host.resumeAuthenticatedDevice();
+  if(!sessionActive||!claims||claims.session_id!==bootstrap.claims.sessionId||
+     user.tenantId!==bootstrap.claims.tenantId||
+     user.namespaceId!==bootstrap.claims.namespaceId||
+     user.participantId!==bootstrap.claims.participantId||
+     user.deviceId!==bootstrap.claims.deviceId){
+    throw new Error("First-party Device changed during MLS admission");
+  }
+  const call=await host.getDirectCall(user,callId);
+  if(call.state!=="active"||!Number.isSafeInteger(call.revision)){
+    throw new Error("Canonical direct Call is no longer active");
+  }
+  const descriptor=await host.describeAcceptedCallMls(user,{
+    callId,expectedRevision:call.revision
+  });
+  const peer=descriptor.expectedPeerDeviceId;
+  if(!sessionActive||!claims||claims.session_id!==bootstrap.claims.sessionId||
+     descriptor.mediaCallId!==bootstrap.claims.callId||
+     descriptor.groupId!==bootstrap.groupId||
+     descriptor.deviceId!==bootstrap.claims.deviceId||
+     descriptor.cryptoEpoch!==Number(bootstrap.state.crypto_epoch())||
+     !peer||peer===bootstrap.claims.deviceId){
+    throw new Error("Committed canonical MLS peer Device does not match this Call");
+  }
+  const keys=Array.isArray(context.trusted_device_keys)?context.trusted_device_keys:[];
+  if(keys.filter(key=>key.device_id===peer).length!==1){
+    throw new Error("Expected MLS peer has no unique current trusted signing key");
+  }
+  return peer;
+}
 function createEndpointAdmissionResolver(){
   return async bootstrap=>{
     const context=await fetchEndpointMlsContext();
@@ -3034,6 +3075,7 @@ function createEndpointAdmissionResolver(){
       throw new Error("Endpoint MLS epoch differs from the canonical conference epoch");
     }
     const keys=Array.isArray(context.trusted_device_keys)?context.trusted_device_keys:[];
+    const expectedPeerDeviceId=await verifiedFirstPartyPeerDevice(bootstrap,context);
     const local=keys.find(key=>key.device_id===bootstrap.claims.deviceId);
     if(!local)throw new Error("This device has no active trusted signing key");
     if(!window.ucrProtectedDeviceKeyVault){
@@ -3076,6 +3118,7 @@ function createEndpointAdmissionResolver(){
       signingKeyId:local.key_id,
       signingSeed:seed,
       trustedLocalVerifyingKey:endpointBase64ToBytes(local.public_key_base64),
+      ...(expectedPeerDeviceId?{expectedPeerDeviceId}:{}),
       trustedKeys:{
         resolve(_header,keyId){
           const key=keyById.get(keyId);
