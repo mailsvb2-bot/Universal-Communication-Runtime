@@ -15,6 +15,7 @@ const canonical={epoch:null,revision:null,ref:null,offers:[],peerDevice:null};
 const snapshots=new Map();
 const order=[];
 let rejectFirstOffer=true,recipientPackage=null,recipientGenerations=0;
+let rejectGroupBeforeCommit=true,rejectGroupAfterCommit=true,creatorGenerations=0;
 
 function encode(value){return new TextEncoder().encode(JSON.stringify(value));}
 function decode(value){return JSON.parse(new TextDecoder().decode(value));}
@@ -32,6 +33,14 @@ class MockEndpointMlsState {
     Object.assign(state,{device,epoch:value.epoch,ref:value.ref,peer:value.peer});
     return state;
   }
+  static restore_unpublished_group(_t,_n,_g,device,_key,snapshot){
+    const value=decode(snapshot);
+    if(value.kind!=="unpublished"||value.device!==device||value.epoch!==0)
+      throw Error("not a matching unpublished creator snapshot");
+    const state=Object.create(this.prototype);
+    Object.assign(state,{device,epoch:value.epoch,ref:value.ref,peer:null});
+    return state;
+  }
   static restore_unjoined_key_package(_t,_n,_g,device,_key,snapshot){
     const value=decode(snapshot);
     if(value.kind!=="unjoined"||value.device!==device)
@@ -41,10 +50,14 @@ class MockEndpointMlsState {
     return state;
   }
   key_package(){return Uint8Array.of(this.device==="device-b"?2:1);}
-  create_endpoint_group(){this.epoch=0;this.ref="ref-0";}
+  create_endpoint_group(){creatorGenerations++;this.epoch=0;this.ref="ref-0";}
   crypto_state_ref(){return this.ref;}
   crypto_epoch(){return BigInt(this.epoch);}
   seal_snapshot(){return encode({kind:"joined",device:this.device,epoch:this.epoch,ref:this.ref,peer:this.peer});}
+  seal_unpublished_group(){
+    if(this.epoch!==0||this.peer)throw Error("not an unpublished Group");
+    return encode({kind:"unpublished",device:this.device,epoch:this.epoch,ref:this.ref});
+  }
   seal_unjoined_key_package(){return encode({kind:"unjoined",device:this.device});}
   stage_add_device(peer,bytes){
     assert.equal(peer,"device-b");assert.equal(bytes[0],2);
@@ -108,8 +121,14 @@ function createEndpoint(user){
         assert.equal(user.participantId,"alice");
         assert.equal(input.cryptoStateRef,"ref-0");
         assert.equal(canonical.epoch,null);
+        if(rejectGroupBeforeCommit){
+          rejectGroupBeforeCommit=false;throw Error("HTTP 503: create not committed");
+        }
         canonical.epoch=0;canonical.revision=0;canonical.ref="ref-0";
         order.push("create");
+        if(rejectGroupAfterCommit){
+          rejectGroupAfterCommit=false;throw Error("HTTP 503: committed create reply lost");
+        }
       },
       publishEndpointMlsOffer:async(_binding,input)=>{
         assert.equal(user.participantId,"bob");
@@ -151,7 +170,13 @@ const alice=createEndpoint({tenantId:"tenant",namespaceId:null,participantId:"al
 const bob=createEndpoint({tenantId:"tenant",namespaceId:null,participantId:"bob",deviceId:"device-b"});
 assert.equal(await bob.prepare(),false,"recipient must not offer before Group creation");
 assert.equal(canonical.offers.length,0);
-assert.equal(await alice.prepare(),false,"initiator must not Join on epoch zero");
+await assert.rejects(alice.prepare(),/create not committed/);
+assert.equal(decode(snapshots.get("fp-mg-1:device-a")).kind,"unpublished");
+await assert.rejects(alice.prepare(),/committed create reply lost/);
+assert.equal(decode(snapshots.get("fp-mg-1:device-a")).kind,"unpublished");
+assert.equal(await alice.prepare(),false,"accepted creator snapshot must promote without new Group");
+assert.equal(creatorGenerations,1,"uncertain HTTP create must not generate a second MLS Group");
+assert.equal(decode(snapshots.get("fp-mg-1:device-a")).kind,"joined");
 await assert.rejects(bob.prepare(),/HTTP 503/,"lost offer response must fail closed");
 assert.equal(await bob.prepare(),false,"same sealed recipient KeyPackage must be retried");
 assert.equal(recipientGenerations,1,"retry must not generate a second recipient KeyPackage");
@@ -162,4 +187,4 @@ assert.equal(decode(snapshots.get("fp-mg-1:device-a")).epoch,1);
 assert.equal(decode(snapshots.get("fp-mg-1:device-b")).epoch,1);
 bob.context.active.terminating=true;
 await assert.rejects(bob.prepare(),/Call withdrawal/);
-console.log("PASS: first-party pre-Join MLS coordinator: canonical Group -> same sealed KeyPackage retry -> signed Commit -> recipient Welcome -> two-device roster -> revoke fence (MOCK, NOT live media)");
+console.log("PASS: first-party pre-Join MLS coordinator: recover uncertain epoch-zero Group publication -> same sealed KeyPackage retry -> signed Commit -> recipient Welcome -> two-device roster -> revoke fence (MOCK, NOT live media)");
