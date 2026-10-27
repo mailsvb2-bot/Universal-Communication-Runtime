@@ -903,10 +903,21 @@ const done = arguments[arguments.length - 1];
   const record = await readEndpointWrappingKeyRecord(key);
   const persisted = await window.ucrEndpointWrappingKeyVault.getWrappingKey(key);
   const restored = persisted.every((value, index) => value === first[index]);
+  // A missing KEK during restore must fail without silently minting another
+  // key that could never decrypt the old sealed MLS state.
+  const missingKey = "ucr-mls-missing-kek:" + crypto.randomUUID();
+  let missingRejected = false;
+  try {
+    await window.ucrEndpointWrappingKeyVault.getWrappingKey(
+      missingKey, {requireExisting:true});
+  } catch (_) { missingRejected = true; }
+  const missingWasNotCreated = (await readEndpointWrappingKeyRecord(missingKey)) === null;
   for (const bytes of candidates) bytes.fill(0);
   persisted.fill(0);
-  return {ok:same && restored && !!record && record.kek.extractable === false,
-    contenders:16, same, restored, nonExtractable:record?.kek.extractable === false};
+  return {ok:same && restored && !!record && record.kek.extractable === false &&
+      missingRejected && missingWasNotCreated,
+    contenders:16, same, restored, missingRejected, missingWasNotCreated,
+    nonExtractable:record?.kek.extractable === false};
 })().then(done).catch(error => done({ok:false,error:String(error)}));
 """,
         )
