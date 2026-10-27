@@ -961,7 +961,7 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
         state=await restoreEndpointMlsSnapshot(module,context.group_id,sealed,bootstrap);
         requireCurrent();
       }else{
-      if(sealed!==null)throw new Error("Unexpected sealed endpoint MLS state exists before canonical admission");
+        if(sealed!==null)throw new Error("Unexpected sealed endpoint MLS state exists before canonical admission");
       state=new module.EndpointMlsState(
         identity.tenant_id,identity.namespace_id??undefined,context.group_id,identity.device_id
       );
@@ -3124,6 +3124,7 @@ async function verifiedFirstPartyPeerDevice(bootstrap,context){
      descriptor.groupId!==bootstrap.groupId||
      descriptor.deviceId!==bootstrap.claims.deviceId||
      descriptor.cryptoEpoch!==Number(bootstrap.state.crypto_epoch())||
+     descriptor.cryptoStateRef!==bootstrap.state.crypto_state_ref()||
      !peer||peer===bootstrap.claims.deviceId){
     throw new Error("Committed canonical MLS peer Device does not match this Call");
   }
