@@ -739,6 +739,19 @@ pub fn stage_add_members<P: OpenMlsProvider>(
     if key_packages.is_empty() {
         return Err(GroupMlsError::MemberNotFound);
     }
+    // OpenMLS verifies cryptographic KeyPackages, but UCR additionally requires
+    // one canonical Device credential per leaf. Different MLS signing keys must
+    // never let a second leaf impersonate an already admitted Device.
+    let mut devices = member_device_ids(group, scope)?;
+    for package in key_packages {
+        let credential = BasicCredential::try_from(package.leaf_node().credential().clone())
+            .map_err(|_| GroupMlsError::DeviceIdentityMismatch)?;
+        let device = parse_device_identity(scope, credential.identity())?;
+        if devices.contains(&device) {
+            return Err(GroupMlsError::DeviceIdentityMismatch);
+        }
+        devices.push(device);
+    }
     let signer = current_group_signer(provider, group)?;
     let (commit, welcome, _) = group
         .add_members(provider, &signer, key_packages)
@@ -970,6 +983,9 @@ pub fn export_group_media_secret<P: OpenMlsProvider>(
     if crypto_state_for_group(scope, group_id, group)? != *expected {
         return Err(GroupMlsError::GroupStateMismatch);
     }
+    // The MLS exporter is never available to an endpoint whose ratchet tree
+    // contains malformed, cross-scope or duplicate canonical Device leaves.
+    member_device_ids(group, scope)?;
     let context = state_ref_bytes(expected)?;
     let secret = group
         .export_secret(provider.crypto(), GROUP_MEDIA_EXPORT_LABEL, &context, 32)
@@ -1129,10 +1145,15 @@ pub fn member_device_ids(
     group: &MlsGroup,
     scope: &TenantScope,
 ) -> Result<Vec<DeviceId>, GroupMlsError> {
-    group
-        .members()
-        .map(|member| parse_device_identity(scope, member.credential.serialized_content()))
-        .collect()
+    let mut devices = Vec::new();
+    for member in group.members() {
+        let device = parse_device_identity(scope, member.credential.serialized_content())?;
+        if devices.contains(&device) {
+            return Err(GroupMlsError::DeviceIdentityMismatch);
+        }
+        devices.push(device);
+    }
+    Ok(devices)
 }
 
 /// Returns the exact canonical UCR Device represented by this endpoint's own MLS leaf.
@@ -1697,6 +1718,63 @@ mod tests {
                 signer.verifying_key(),
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn canonical_mls_roster_rejects_duplicate_device_admissions_before_commit() {
+        let mut fixture = three_member_group();
+        assert_eq!(
+            member_device_ids(&fixture.alice_group, &fixture.scope).unwrap(),
+            vec![device("alice"), device("bob"), device("charlie")]
+        );
+        let original = current_crypto_state(
+            &fixture.scope, &fixture.group_id, &fixture.alice_group,
+        ).unwrap();
+
+        // A new valid MLS KeyPackage with a fresh signature key still cannot
+        // add another leaf under Bob's already-admitted canonical Device ID.
+        let duplicate_provider = OpenMlsRustCrypto::default();
+        let duplicate = create_device_key_package(
+            &duplicate_provider, &fixture.scope, &device("bob"),
+        ).unwrap();
+        let validated = decode_key_package(
+            &fixture.alice_provider, &fixture.scope, &device("bob"), &duplicate.bytes,
+        ).unwrap();
+        assert_eq!(
+            stage_add_member(
+                &fixture.alice_provider, &mut fixture.alice_group,
+                &fixture.scope, &fixture.group_id, &validated,
+            ).unwrap_err(),
+            GroupMlsError::DeviceIdentityMismatch
+        );
+
+        // The public endpoint transition entry point must reject duplicates
+        // even when both packages are otherwise individually valid.
+        let dave = create_device_key_package(
+            &duplicate_provider, &fixture.scope, &device("dave"),
+        ).unwrap();
+        assert_eq!(
+            stage_transition(
+                &fixture.alice_provider, &mut fixture.alice_group,
+                &fixture.scope, &fixture.group_id,
+                &MlsTransitionInput::Add(vec![
+                    MlsDeviceAdmission {
+                        device_id: device("dave"), key_package: dave.bytes.clone(),
+                    },
+                    MlsDeviceAdmission {
+                        device_id: device("dave"), key_package: dave.bytes,
+                    },
+                ]),
+            ).unwrap_err(),
+            GroupMlsError::DeviceIdentityMismatch
+        );
+        assert!(fixture.alice_group.pending_commit().is_none());
+        assert_eq!(
+            current_crypto_state(
+                &fixture.scope, &fixture.group_id, &fixture.alice_group,
+            ).unwrap(),
+            original
         );
     }
 
