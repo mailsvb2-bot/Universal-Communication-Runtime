@@ -1923,6 +1923,9 @@ async function startWebRtcOnce(forceMedia=false){
     retireEndpointMlsState();
   }
   if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
+  // Reject missing canonical trust before reading a grant or allocating an offer.
+  // The preflight must remain earlier than body() even in isolated SDK tests.
+  requireCanonicalMediaHostReady();
   const generation=mediaCaptureGeneration;
   // Bind cleanup to the exact grant that allocated this WebRTC offer. A late
   // start response after Leave must not inherit a replacement grant/token.
@@ -1932,7 +1935,6 @@ async function startWebRtcOnce(forceMedia=false){
       throw new Error("WebRTC start cancelled by conference media teardown");
     }
   };
-  requireCanonicalMediaHostReady();
   // Network/privacy validation precedes browser device permissions.
   let offer,rtcConfig,serverPeerOpened=false;
   try{
