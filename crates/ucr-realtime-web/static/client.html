@@ -905,6 +905,89 @@ async function ensureEndpointMlsReady(){
     if(endpointMlsBootstrapAbort===controller)endpointMlsBootstrapAbort=null;
   }
 }
+// The first-party accepted Call has its OWN authenticated MLS descriptor and
+// recipient-bound Welcome. Never fetch a legacy realtime registration package
+// or create a new KeyPackage after the signed Join has been issued.
+async function restoreAuthenticatedFirstPartyMls(module,context,identity,sealed,signal,requireCurrent){
+  const host=firstPartyCanonicalHttpHost;
+  const callId=sessionStorage.getItem("ucrFirstPartyDirectCall");
+  if(!host||!callId||!identity.call_id.startsWith("fp-m-")||signal.aborted){
+    throw new Error("Authenticated first-party MLS handoff unavailable");
+  }
+  const user=await host.resumeAuthenticatedDevice();
+  requireCurrent();
+  if(user.tenantId!==identity.tenant_id||
+     user.namespaceId!==(identity.namespace_id??null)||
+     user.participantId!==identity.participant_id||
+     user.deviceId!==identity.device_id){
+    throw new Error("First-party Device changed before MLS restoration");
+  }
+  const call=await host.getDirectCall(user,callId);
+  requireCurrent();
+  if(call.state!=="active")throw new Error("Canonical direct Call ended before MLS restoration");
+  const descriptor=await host.describeAcceptedCallMls(user,{
+    callId,expectedRevision:call.revision
+  });
+  requireCurrent();
+  if(descriptor.mediaCallId!==identity.call_id||
+     descriptor.groupId!==context.group_id||
+     descriptor.deviceId!==identity.device_id||
+     descriptor.cryptoEpoch===null||!descriptor.cryptoStateRef||
+     Number(context.group_crypto_epoch)!==descriptor.cryptoEpoch){
+    throw new Error("First-party MLS Group/epoch is not canonically committed");
+  }
+  const key=endpointPersistenceStorageKey(identity);
+  if(!key||sealed===null)throw new Error("First-party private MLS state was not saved before Join");
+  const wrappingKey=await getEndpointWrappingKey(key);
+  let restored=null;
+  try{
+    requireCurrent();
+    try{
+      restored=module.EndpointMlsState.restore(
+        identity.tenant_id,identity.namespace_id??undefined,context.group_id,
+        identity.device_id,wrappingKey,sealed,
+        BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef
+      );
+    }catch(_){
+      if(descriptor.creatorPrincipalId===user.participantId){
+        throw new Error("Initiator MLS state is missing after canonical Commit");
+      }
+      // Only the independently authenticated recipient may use the durable
+      // Welcome for the exact KeyPackage previously published by this Device.
+      const handoff=await host.fetchEndpointMlsBootstrap(user,{
+        callId,expectedRevision:call.revision
+      });
+      requireCurrent();
+      if(handoff.groupId!==descriptor.groupId||
+         handoff.cryptoEpoch!==descriptor.cryptoEpoch||
+         handoff.cryptoStateRef!==descriptor.cryptoStateRef){
+        throw new Error("Recipient MLS Welcome differs from canonical Group");
+      }
+      restored=module.EndpointMlsState.restore_unjoined_key_package(
+        identity.tenant_id,identity.namespace_id??undefined,context.group_id,
+        identity.device_id,wrappingKey,sealed
+      );
+      restored.join_from_welcome(handoff.welcome,BigInt(handoff.welcomeEpoch),
+        handoff.welcomeStateRef);
+      for(const item of handoff.commits){
+        restored.process_commit(item.commit,BigInt(item.cryptoEpoch),item.cryptoStateRef);
+      }
+    }
+    requireCurrent();
+    if(BigInt(restored.crypto_epoch())!==BigInt(descriptor.cryptoEpoch)||
+       restored.crypto_state_ref()!==descriptor.cryptoStateRef){
+      throw new Error("Restored first-party MLS state does not match canonical epoch");
+    }
+    const state=restored;
+    restored=null;
+    return {state,bootstrap:{current_crypto_state:{
+      crypto_epoch:descriptor.cryptoEpoch,crypto_state_ref:descriptor.cryptoStateRef
+    }}};
+  }finally{
+    wrappingKey.fill(0);
+    if(restored&&typeof restored.free==="function")restored.free();
+  }
+}
 async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
   const sessionGeneration=sessionLifecycleGeneration;
   const identity=claims;
@@ -922,6 +1005,9 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
     const context=await fetchEndpointMlsContext(signal);
     requireCurrent();
     if(context.endpoint_state_mode==="legacy_server_owned"){
+      if(identity.call_id.startsWith("fp-m-")){
+        throw new Error("Server-owned MLS is forbidden for first-party E2EE Calls");
+      }
       endpointMlsGroupId=context.group_id;
       window.ucrEndpointMlsSession=Object.freeze({
         contractVersion:ENDPOINT_WASM_CONTRACT_VERSION,
@@ -938,7 +1024,13 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
     const sealed=await loadEndpointState(persistenceKey);
     requireCurrent();
     let bootstrap;
-    if(context.endpoint_state_mode==="restore"){
+    if(identity.call_id.startsWith("fp-m-")){
+      const restored=await restoreAuthenticatedFirstPartyMls(
+        module,context,identity,sealed,signal,requireCurrent
+      );
+      state=restored.state;
+      bootstrap=restored.bootstrap;
+    }else if(context.endpoint_state_mode==="restore"){
       if(sealed===null)throw new Error("Endpoint-owned MLS state is already admitted but its sealed local snapshot is missing");
       bootstrap=await fetchEndpointMlsBootstrap(signal);
       requireCurrent();
@@ -946,22 +1038,7 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
       state=await restoreEndpointMlsSnapshot(module,context.group_id,sealed,bootstrap);
       requireCurrent();
     }else if(context.endpoint_state_mode==="register"){
-      if(identity.call_id.startsWith("fp-m-")){
-        // The independently authenticated /start coordinator must finish
-        // Group/KeyPackage/Commit/Welcome before it can request signed Join.
-        // No fallback to the realtime legacy registration authority.
-        if(sealed===null){
-          throw new Error("First-party endpoint MLS state missing before signed Join");
-        }
-        bootstrap=await fetchEndpointMlsBootstrap(signal);
-        requireCurrent();
-        if(bootstrap.group_id!==context.group_id){
-          throw new Error("First-party MLS bootstrap Group does not match accepted Call");
-        }
-        state=await restoreEndpointMlsSnapshot(module,context.group_id,sealed,bootstrap);
-        requireCurrent();
-      }else{
-        if(sealed!==null)throw new Error("Unexpected sealed endpoint MLS state exists before canonical admission");
+      if(sealed!==null)throw new Error("Unexpected sealed endpoint MLS state exists before canonical admission");
       state=new module.EndpointMlsState(
         identity.tenant_id,identity.namespace_id??undefined,context.group_id,identity.device_id
       );
@@ -985,7 +1062,6 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
         bootstrap.welcome_crypto_state.crypto_state_ref
       );
       endpointApplyBootstrapCommits(state,bootstrap,0);
-      }
     }else{
       throw new Error("Unsupported MLS endpoint state mode");
     }
