@@ -508,8 +508,8 @@ function readGrant(raw){
   return {tenant_id,namespace_id,call_id,participant_kind,participant_id,device_id,session_id,issued,not_before,expires};
 }
 function body(){return {tenant_id:claims.tenant_id,namespace_id:claims.namespace_id,call_id:claims.call_id,session_id:claims.session_id};}
-async function api(path,payload,signal,keepalive=false){
-  const r=await fetch(path,{method:"POST",headers:{"Authorization":"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify(payload),signal,keepalive});
+async function api(path,payload,signal,keepalive=false,bearerToken=token){
+  const r=await fetch(path,{method:"POST",headers:{"Authorization":"Bearer "+bearerToken,"Content-Type":"application/json"},body:JSON.stringify(payload),signal,keepalive});
   if(!r.ok){
     if(ucrDiagnosticAllowedPaths.has(path))ucrRecordDiagnostic(path+" HTTP "+r.status,"http");
     let detail=null;try{detail=await r.clone().json();}catch(_){}
@@ -1859,13 +1859,13 @@ function teardownPeer(){
   if(peer){peer.onicecandidate=null;peer.ontrack=null;peer.ondatachannel=null;peer.onconnectionstatechange=null;peer.close();peer=null;}
   remoteStream=null;ui.remoteVideo.srcObject=null;ui.webrtcState.textContent="Idle";
 }
-async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims=null){
+async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims=null,retiredToken=null){
   // Only an offer's owner can retire that attempt. An absent token must not
   // issue a session-wide close that could erase a new peer in another tab.
   const offerId=retiredOfferId||startWebRtc.offerId;
   if((!sessionActive&&!retiredOfferId)||!offerId)return;
   try{
-    await api("/v1/realtime/webrtc/close",{...(retiredClaims||body()),offer_id:offerId},undefined,keepalive);
+    await api("/v1/realtime/webrtc/close",{...(retiredClaims||body()),offer_id:offerId},undefined,keepalive,retiredToken??token);
     if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
   }catch(error){
     const message=String(error?.message||error);
@@ -1924,6 +1924,9 @@ async function startWebRtcOnce(forceMedia=false){
   }
   if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
   const generation=mediaCaptureGeneration;
+  // Bind cleanup to the exact grant that allocated this WebRTC offer. A late
+  // start response after Leave must not inherit a replacement grant/token.
+  const startingClaims=body(),startingToken=token;
   const ensureCurrent=()=>{
     if(generation!==mediaCaptureGeneration||!sessionActive||!mediaActive||!navigator.onLine){
       throw new Error("WebRTC start cancelled by conference media teardown");
@@ -1933,14 +1936,16 @@ async function startWebRtcOnce(forceMedia=false){
   // Network/privacy validation precedes browser device permissions.
   let offer,rtcConfig,serverPeerOpened=false;
   try{
-    const response=await api("/v1/realtime/webrtc/start",body());
+    const response=await api("/v1/realtime/webrtc/start",startingClaims,undefined,false,startingToken);
     serverPeerOpened=true;
     offer=await response.json();
     if(!offer||typeof offer.offer_id!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(offer.offer_id)){
       throw new Error("Canonical WebRTC offer is missing its transport attempt identity");
     }
-    startWebRtc.offerId=offer.offer_id;
+    // A revoked or replaced grant may receive a successful, delayed start
+    // response. Do not install its offer as the current peer owner.
     ensureCurrent();
+    startWebRtc.offerId=offer.offer_id;
     rtcConfig=rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value);
     await ensureLocalMedia(forceMedia);
     ensureCurrent();
@@ -1948,8 +1953,11 @@ async function startWebRtcOnce(forceMedia=false){
     // Admission withdrawal invalidates physical capture, not the authenticated
     // realtime session. Close the server peer even if mediaActive was revoked.
     // Never send a stale close after a different client peer has taken ownership.
-    if(serverPeerOpened&&sessionActive&&!peer){
-      await closeServerPeer();
+    if(serverPeerOpened&&offer&&typeof offer.offer_id==="string"&&
+       /^[A-Za-z0-9_-]{43}$/.test(offer.offer_id)){
+      // Offer-scoped close is safe even after Leave or a replacement Join.
+      // Without it, a late /start response can orphan the remote provider.
+      await closeServerPeer(false,offer.offer_id,startingClaims,startingToken);
     }
     throw error;
   }
@@ -1959,7 +1967,7 @@ async function startWebRtcOnce(forceMedia=false){
   }catch(error){
     // The server allocated an offer, but the browser rejected peer creation.
     // No local peer owns that offer; release the server session for retry.
-    if(sessionActive&&!peer)await closeServerPeer();
+    await closeServerPeer(false,offer.offer_id,startingClaims,startingToken);
     throw error;
   }
   peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
