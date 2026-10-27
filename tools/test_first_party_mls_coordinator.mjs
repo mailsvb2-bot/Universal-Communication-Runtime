@@ -9,14 +9,19 @@ const source=readFileSync("crates/ucr-realtime-web/static/start.js","utf8");
 const begin=source.indexOf("async function prepareFirstPartyEndpointMls(");
 const end=source.indexOf("async function beginMedia(",begin);
 assert.ok(begin>=0&&end>begin,"real pre-Join MLS coordinator is missing");
-const implementation=source.slice(begin,end);
+const guardStart=source.indexOf("function checkedMlsTransition(");
+const guardEnd=source.indexOf("function mlsWrappingRecord(",guardStart);
+assert.ok(guardStart>=0&&guardEnd>guardStart,"durable MLS transition validator missing");
+const implementation=source.slice(guardStart,guardEnd)+source.slice(begin,end);
 const directCall={callId:"call-1",revision:2,state:"active"};
 const canonical={epoch:null,revision:null,ref:null,offers:[],peerDevice:null};
 const snapshots=new Map();
+const transitions=new Map();
 const order=[];
 let rejectFirstOffer=true,recipientPackage=null,recipientGenerations=0;
 let rejectGroupBeforeCommit=true,rejectGroupAfterCommit=true,creatorGenerations=0;
 let wrongCanonicalCreatorRef=false;
+let loseCommitAcknowledgement=true;
 
 function encode(value){return new TextEncoder().encode(JSON.stringify(value));}
 function decode(value){return JSON.parse(new TextDecoder().decode(value));}
@@ -95,6 +100,12 @@ function createEndpoint(user){
     mlsStateKey:(_user,descriptor)=>descriptor.groupId+":"+user.deviceId,
     mlsWasm:async()=>module,
     mlsSnapshot:async key=>snapshots.get(key)??null,
+    MLS_MAX_SNAPSHOT:4*1024*1024,
+    mlsTransition:async(key,record)=>{
+      if(record===undefined)return transitions.get(key)??null;
+      if(record===null){transitions.delete(key);return;}
+      transitions.set(key,structuredClone(record));
+    },
     mlsSave:async(key,value,first=false)=>{
       if(first&&snapshots.has(key))throw Error("duplicate initial snapshot");
       snapshots.set(key,new Uint8Array(value));
@@ -154,6 +165,10 @@ function createEndpoint(user){
         assert.equal(input.commit[0],7);assert.equal(input.welcome[0],8);
         canonical.epoch=1;canonical.revision=1;canonical.ref="ref-1";
         canonical.peerDevice="device-b";order.push("commit");
+        if(loseCommitAcknowledgement){
+          loseCommitAcknowledgement=false;
+          throw Error("HTTP 503: canonical Commit accepted but acknowledgement lost");
+        }
       },
       fetchEndpointMlsBootstrap:async()=>{
         assert.equal(user.participantId,"bob");
@@ -187,7 +202,12 @@ assert.equal(decode(snapshots.get("fp-mg-1:device-a")).kind,"joined");
 await assert.rejects(bob.prepare(),/HTTP 503/,"lost offer response must fail closed");
 assert.equal(await bob.prepare(),false,"same sealed recipient KeyPackage must be retried");
 assert.equal(recipientGenerations,1,"retry must not generate a second recipient KeyPackage");
-assert.equal(await alice.prepare(),true,"initiator must merge and seal canonical Commit");
+await assert.rejects(alice.prepare(),/acknowledgement lost/);
+assert.equal(transitions.size,1,"Commit journal must survive uncertain acknowledgement");
+assert.equal(decode(snapshots.get("fp-mg-1:device-a")).epoch,0,
+  "unconfirmed transition must not overwrite the last committed MLS snapshot");
+assert.equal(await alice.prepare(),true,"restart must reconcile exact canonical epoch and promote sealed Commit");
+assert.equal(transitions.size,0,"confirmed Commit journal must clear after promotion");
 assert.equal(await bob.prepare(),true,"recipient must consume durable Welcome before Join");
 assert.deepEqual(order,["create","offer","commit","welcome"]);
 assert.equal(decode(snapshots.get("fp-mg-1:device-a")).epoch,1);
