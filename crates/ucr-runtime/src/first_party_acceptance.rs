@@ -741,6 +741,11 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     assert_eq!(descriptor["peerPrincipalId"], bob.participant_id);
     assert_eq!(descriptor["deviceId"], alice.device);
     assert_eq!(descriptor["requiresEndpointOwnedCommit"], true);
+    // Before the creator publishes an endpoint-owned Group, there is no
+    // canonical Group CAS revision. Zero is a real revision, not absence.
+    assert!(descriptor["groupRevision"].is_null());
+    assert!(descriptor["cryptoEpoch"].is_null());
+    assert!(descriptor["cryptoStateRef"].is_null());
     assert!(
         descriptor["groupId"]
             .as_str()
@@ -808,6 +813,16 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         }),
     )
     .expect("creator publishes signed endpoint-only MLS epoch zero");
+    let created_descriptor = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-descriptor",
+        &json!({"binding": alice, "callId": call_id, "expectedRevision": revision}),
+    )
+    .expect("read canonical MLS revision after creator publication");
+    assert_eq!(created_descriptor["groupRevision"], 0);
+    assert_eq!(created_descriptor["cryptoEpoch"], 0);
+    assert_eq!(created_descriptor["cryptoStateRef"], first_ref);
     assert!(
         !server
             .store
@@ -919,6 +934,16 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         }),
     )
     .expect("server atomically records signed Commit/Welcome without opening MLS");
+    let admitted_descriptor = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-descriptor",
+        &json!({"binding": alice, "callId": call_id, "expectedRevision": revision}),
+    )
+    .expect("read canonical MLS revision after endpoint Add");
+    assert_eq!(admitted_descriptor["groupRevision"], 1);
+    assert_eq!(admitted_descriptor["cryptoEpoch"], artifacts.next_crypto_state.epoch);
+    assert_eq!(admitted_descriptor["cryptoStateRef"], next_ref);
 
     merge_pending(
         &alice_provider,
