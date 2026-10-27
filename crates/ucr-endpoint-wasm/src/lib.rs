@@ -92,6 +92,67 @@ impl EndpointMlsState {
         self.key_package.clone()
     }
 
+    /// Seal a recipient's not-yet-admitted KeyPackage and private OpenMLS
+    /// provider state before publishing the signed offer. The recipient must
+    /// restore these exact bytes to process the eventual Welcome after reload.
+    /// This is endpoint-only encrypted persistence, never server custody.
+    pub fn seal_unjoined_key_package(&self, wrapping_key: &[u8]) -> Result<Vec<u8>, JsValue> {
+        if self.group.is_some() || self.state.is_some() || self.pending_transition.is_some() {
+            return Err(js_error("mls_state: cannot seal an already joined KeyPackage"));
+        }
+        let key = EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
+            .map_err(debug_error)?;
+        let storage = export_browser_memory_snapshot(&self.provider).map_err(debug_error)?;
+        let plaintext = encode_snapshot_plaintext(&self.key_package, &storage)?;
+        let aad = unjoined_key_package_aad(&self.scope, &self.group_id, &self.device_id)?;
+        let sealed = seal_endpoint_state(&key, &aad, &plaintext).map_err(debug_error)?;
+        encode_sealed_snapshot(&sealed)
+    }
+
+    /// Recover the same private KeyPackage provider after page reload.
+    /// The domain-separated AAD binds tenant, namespace, Group and Device;
+    /// an active epoch snapshot cannot be mistaken for a pending offer.
+    #[wasm_bindgen(js_name = restore_unjoined_key_package)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_unjoined_key_package(
+        tenant_id: String,
+        namespace_id: Option<String>,
+        group_id: String,
+        device_id: String,
+        wrapping_key: &[u8],
+        snapshot: &[u8],
+    ) -> Result<EndpointMlsState, JsValue> {
+        let scope = tenant_scope(tenant_id, namespace_id)?;
+        let group_id = GroupId::from_opaque(opaque(group_id, "group_id")?);
+        let device_id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
+        let key = EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
+            .map_err(debug_error)?;
+        let sealed = decode_sealed_snapshot(snapshot)?;
+        let aad = unjoined_key_package_aad(&scope, &group_id, &device_id)?;
+        let plaintext = open_endpoint_state(&key, &aad, &sealed).map_err(debug_error)?;
+        let (key_package, storage_snapshot) = decode_snapshot_plaintext(plaintext.as_slice())?;
+        let provider = import_browser_memory_snapshot(storage_snapshot).map_err(debug_error)?;
+        if load_group(&provider, &scope, &group_id)
+            .map_err(debug_error)?
+            .is_some()
+        {
+            return Err(js_error("mls_state: pending KeyPackage snapshot contains joined group"));
+        }
+        Ok(Self {
+            provider,
+            scope,
+            group_id,
+            device_id,
+            key_package: key_package.to_vec(),
+            signer_public_key: Vec::new(),
+            group: None,
+            state: None,
+            pending_transition: None,
+            media_generation: Rc::new(Cell::new(0)),
+            direct_roster_generation: Cell::new(None),
+        })
+    }
+
     /// Creates the media MLS group entirely within this endpoint's OpenMLS provider.
     /// `signer_public_key` must be the public signer generated with this endpoint's
     /// KeyPackage; OpenMLS rejects a signer absent from local private storage.
@@ -670,6 +731,19 @@ fn endpoint_snapshot_aad(
         .as_ref()
         .ok_or_else(|| js_error("mls_state: missing crypto state reference"))?;
     push_snapshot_bytes(&mut aad, state_ref.as_wire_bytes())?;
+    Ok(aad)
+}
+
+/// The pending-offer snapshot must not be decryptable as an active MLS epoch
+/// snapshot, even for the same canonical Device and Group.
+fn unjoined_key_package_aad(
+    scope: &TenantScope,
+    group_id: &GroupId,
+    device_id: &DeviceId,
+) -> Result<Vec<u8>, JsValue> {
+    let marker = group_crypto_state(0, "ucr-unjoined-key-package-v1".to_owned())?;
+    let mut aad = endpoint_snapshot_aad(scope, group_id, device_id, &marker)?;
+    aad.extend_from_slice(b"\0pending-key-package-only");
     Ok(aad)
 }
 
