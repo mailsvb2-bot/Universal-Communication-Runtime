@@ -306,6 +306,58 @@ fn validate_endpoint_mls_commit_material(
     Ok(())
 }
 
+impl SqliteLocalStore {
+    /// Read the exact creator/recipient Device pair from the canonical,
+    /// committed endpoint MLS Add. Never infer a peer Device from a Call
+    /// participant, unverified offer, Join fragment or SFU key map.
+    ///
+    /// # Errors
+    /// Rejects ambiguous membership, corrupt storage and unavailable SQLite.
+    pub fn endpoint_mls_direct_call_device_pair(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<Option<(String, String)>, DurableStoreError> {
+        let connection = self.lock_connection()?;
+        let ns = namespace_storage_key(scope);
+        let mut statement = connection
+            .prepare(
+                "SELECT t.actor_device_id, a.device_id
+                 FROM group_mls_transitions t
+                 JOIN group_mls_transition_admissions a
+                   ON a.tenant_id=t.tenant_id
+                  AND a.namespace_present=t.namespace_present
+                  AND a.namespace_id=t.namespace_id
+                  AND a.event_id=t.event_id
+                 WHERE t.tenant_id=?1 AND t.namespace_present=?2
+                   AND t.namespace_id=?3 AND t.group_id=?4
+                 ORDER BY t.event_id LIMIT 2",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    ns.present,
+                    ns.value,
+                    group_id.as_opaque().as_str(),
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let pairs = rows
+            .collect::<Result<Vec<(String, String)>, _>>()
+            .map_err(|error| map_sqlite_error(&error))?;
+        match pairs.as_slice() {
+            [] => Ok(None),
+            [(creator, recipient)] if creator != recipient => {
+                Ok(Some((creator.clone(), recipient.clone())))
+            }
+            _ => Err(DurableStoreError::Conflict),
+        }
+    }
+}
+
 /// Persist endpoint-produced `OpenMLS` bytes without ever staging or merging
 /// the Group in this server's `OpenMLS` provider.
 impl EndpointMlsCommitStore for SqliteLocalStore {
