@@ -14,7 +14,8 @@ use ucr_group_mls::{
     BrowserMlsProvider, MlsCommitArtifacts, MlsDeviceAdmission, MlsGroupState, MlsTransitionInput,
     browser_memory_provider, create_device_key_package, create_group, current_crypto_state,
     export_browser_memory_snapshot, export_group_media_secret, import_browser_memory_snapshot,
-    join_from_welcome, load_group, merge_pending, own_device_id, process_commit, stage_transition,
+    join_from_welcome, load_group, member_device_ids, merge_pending, own_device_id, process_commit,
+    stage_transition,
 };
 use ucr_model::{
     CallId, CryptoSuite, DeviceId, GroupCryptoState, GroupId, GroupMediaE2eeContext,
@@ -50,6 +51,9 @@ pub struct EndpointMlsState {
     state: Option<GroupCryptoState>,
     pending_transition: Option<MlsCommitArtifacts>,
     media_generation: Rc<Cell<u64>>,
+    // A direct Call must revalidate its exact endpoint-only MLS roster after
+    // every rekey/Welcome/restore before any media exporter can be used.
+    direct_roster_generation: Cell<Option<u64>>,
 }
 
 #[wasm_bindgen]
@@ -79,6 +83,7 @@ impl EndpointMlsState {
             state: None,
             pending_transition: None,
             media_generation: Rc::new(Cell::new(0)),
+            direct_roster_generation: Cell::new(None),
         })
     }
 
@@ -266,6 +271,7 @@ impl EndpointMlsState {
             state: Some(expected),
             pending_transition: None,
             media_generation: Rc::new(Cell::new(0)),
+            direct_roster_generation: Cell::new(None),
         })
     }
 
@@ -330,6 +336,53 @@ impl EndpointMlsState {
             .ok_or_else(|| js_error("mls_state: group not joined"))
     }
 
+    /// Authorizes exactly the two canonical Device leaves of a first-party
+    /// direct Call from this endpoint's locally verified MLS ratchet tree.
+    /// The peer Device must come from an independently authenticated canonical
+    /// Call/Device/Trust admission, never from the Welcome or an SFU frame.
+    ///
+    /// # Errors
+    /// Rejects extra, missing, duplicate or cross-scope MLS leaves, stale
+    /// crypto-state references, pending transitions and non-direct groups.
+    pub fn authorize_direct_call_roster(
+        &self,
+        peer_device_id: String,
+    ) -> Result<(), JsValue> {
+        if !self.group_id.as_opaque().as_str().starts_with("fp-mg-")
+            || self.pending_transition.is_some()
+        {
+            return Err(js_error("mls_state: direct Call roster unavailable"));
+        }
+        let peer = DeviceId::from_opaque(opaque(peer_device_id, "peer_device_id")?);
+        if peer == self.device_id {
+            return Err(js_error("mls_state: direct Call peer is own Device"));
+        }
+        let group = self
+            .group
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        if current_crypto_state(&self.scope, &self.group_id, group)
+            .map_err(debug_error)? != *state
+            || own_device_id(group, &self.scope).map_err(debug_error)? != self.device_id
+        {
+            return Err(js_error("mls_state: direct Call owner or epoch mismatch"));
+        }
+        let devices = member_device_ids(group, &self.scope).map_err(debug_error)?;
+        if devices.len() != 2
+            || !devices.contains(&self.device_id)
+            || !devices.contains(&peer)
+        {
+            return Err(js_error("mls_state: direct Call MLS roster mismatch"));
+        }
+        self.direct_roster_generation
+            .set(Some(self.media_generation.get()));
+        Ok(())
+    }
+
     /// Build a media bridge from the endpoint-local MLS exporter secret.
     ///
     /// The media signing seed remains endpoint-owned input for now; the MLS exporter secret is
@@ -347,6 +400,11 @@ impl EndpointMlsState {
     ) -> Result<EndpointGroupMediaBridge, JsValue> {
         if self.pending_transition.is_some() {
             return Err(js_error("mls_state: media blocked during transition"));
+        }
+        if self.group_id.as_opaque().as_str().starts_with("fp-mg-")
+            && self.direct_roster_generation.get() != Some(self.media_generation.get())
+        {
+            return Err(js_error("mls_state: canonical direct Call MLS roster not authorized"));
         }
         let state = self
             .state
