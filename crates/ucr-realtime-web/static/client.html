@@ -1076,14 +1076,20 @@ function endpointPersistence(adapter){
 }
 function endpointPersistenceStorageKey(identity=claims){
   if(!identity||!identity.device_id)return null;
-  const key="ucr-e2ee-state:"+JSON.stringify([
-    identity.tenant_id,
-    identity.namespace_id,
-    identity.call_id,
-    identity.participant_kind,
-    identity.participant_id,
-    identity.device_id
-  ]);
+  // /start.js and client.html MUST refer to the same sealed, endpoint-owned
+  // MLS state before and after signed Join. The direct-call key derives only
+  // from the independently authenticated canonical Device/Call binding, not
+  // from a fragment's session ID or a second identity/key registry.
+  const direct=identity.call_id?.startsWith("fp-m-");
+  const key=(direct?"ucr-e2ee-state:fp-v1:":"ucr-e2ee-state:")+JSON.stringify(
+    direct?[
+      identity.tenant_id,identity.namespace_id,identity.call_id,
+      identity.participant_id,identity.device_id
+    ]:[
+      identity.tenant_id,identity.namespace_id,identity.call_id,
+      identity.participant_kind,identity.participant_id,identity.device_id
+    ]
+  );
   return key.length>0&&key.length<=ENDPOINT_STATE_KEY_MAX?key:null;
 }
 async function restoreEndpointPersistedState(adapter,identity=claims){
