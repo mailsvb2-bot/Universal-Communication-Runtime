@@ -609,6 +609,11 @@ async function beginMedia(callId) {
   try{mlsReady=await preparation;}
   finally{if(mlsPreparation===preparation)mlsPreparation=null;}
   if(!mlsReady)return;
+  // A slow MLS preflight can outlive Hangup or a Device switch. Revalidate
+  // immediately before the irreversible signed Join request.
+  if(navigating||accountScope!==selectedScope||!active||
+     active.terminating||active.call.callId!==callId||
+     active.call.state!=="active"||activeCallLocator()!==selectedLocator)return;
   const grant = await calls.join(callId);
   if (!grant || grant.callId !== callId) throw Error("Call admission mismatch");
   // Periodic inspection may replace the object for the SAME active Call.
