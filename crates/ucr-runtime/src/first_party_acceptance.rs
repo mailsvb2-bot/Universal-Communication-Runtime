@@ -919,17 +919,17 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     .unwrap();
     let sender_signature = alice_signer.sign(sender_proof.as_bytes());
     let add_peer_request = json!({
-            "binding": alice, "callId": call_id, "expectedRevision": revision,
-            "groupRevision": 0, "eventId": event_id,
-            "cryptoEpoch": artifacts.next_crypto_state.epoch,
-            "cryptoStateRef": next_ref, "recipientDeviceId": bob.device,
-            "recipientSignerKeyId": bob_session.signer_key_id,
-            "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&bob_package.bytes),
-            "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(recipient_signature.to_bytes()),
-            "commitBase64Url": URL_SAFE_NO_PAD.encode(&artifacts.commit),
-            "welcomeBase64Url": URL_SAFE_NO_PAD.encode(welcome),
-            "signatureBase64Url": URL_SAFE_NO_PAD.encode(sender_signature.to_bytes()),
-        });
+        "binding": alice, "callId": call_id, "expectedRevision": revision,
+        "groupRevision": 0, "eventId": event_id,
+        "cryptoEpoch": artifacts.next_crypto_state.epoch,
+        "cryptoStateRef": next_ref, "recipientDeviceId": bob.device,
+        "recipientSignerKeyId": bob_session.signer_key_id,
+        "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&bob_package.bytes),
+        "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(recipient_signature.to_bytes()),
+        "commitBase64Url": URL_SAFE_NO_PAD.encode(&artifacts.commit),
+        "welcomeBase64Url": URL_SAFE_NO_PAD.encode(welcome),
+        "signatureBase64Url": URL_SAFE_NO_PAD.encode(sender_signature.to_bytes()),
+    });
     let persisted = call(
         &server,
         &alice,
