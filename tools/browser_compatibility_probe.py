@@ -982,6 +982,69 @@ const done = arguments[arguments.length - 1];
         if not isinstance(wrapping_key_race, dict) or wrapping_key_race.get("ok") is not True:
             raise RuntimeError(f"concurrent MLS wrapping-key creation failed: {wrapping_key_race!r}")
 
+        # Real IndexedDB CAS: two independently restored first-party MLS tabs
+        # must not overwrite each other's encrypted next-epoch snapshots.
+        # Also race a direct IndexedDB writer (the /start.js owner), which does
+        # not rely on client.html's Web Locks for the atomic transaction fence.
+        snapshot_cas_browser = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+(async () => {
+  if (!navigator.locks?.request)
+    return {ok:true,supported:false,reason:"Web Locks unavailable; first-party Join fails closed"};
+  const key = "ucr-e2ee-state:fp-v1:" + JSON.stringify([
+    "cas-tenant",null,"fp-m-cas","alice","device-a",crypto.randomUUID()
+  ]);
+  const initial = Uint8Array.of(10,11,12);
+  const winnerA = Uint8Array.of(20,21,22);
+  const winnerB = Uint8Array.of(30,31,32);
+  const fromStart = Uint8Array.of(40,41,42);
+  const equals = (a,b) => !!a && a.length===b.length &&
+    a.every((value,index)=>value===b[index]);
+  try {
+    await saveEndpointState(key,initial);
+    const observed = await loadEndpointState(key);
+    const competing = await Promise.allSettled([
+      saveEndpointState(key,winnerA,observed),
+      saveEndpointState(key,winnerB,observed)
+    ]);
+    const successes = competing.filter(result=>result.status==="fulfilled").length;
+    const rejections = competing.filter(result=>
+      result.status==="rejected" &&
+      String(result.reason).includes("snapshot changed during restore")).length;
+    const persisted = await loadEndpointState(key);
+    const singleWinner = (equals(persisted,winnerA)||equals(persisted,winnerB)) &&
+      successes===1 && rejections===1;
+    const stale = await loadEndpointState(key);
+    // Simulate a /start.js snapshot write after client.html read but before
+    // its conditional promotion. The IndexedDB CAS must still reject it.
+    const db = await openEndpointStateDb();
+    try {
+      await new Promise((resolve,reject)=>{
+        const tx=db.transaction("sealed-snapshots","readwrite");
+        tx.objectStore("sealed-snapshots").put(Array.from(fromStart),key);
+        tx.oncomplete=resolve;
+        tx.onerror=()=>reject(tx.error||Error("start writer failed"));
+        tx.onabort=()=>reject(tx.error||Error("start writer aborted"));
+      });
+    } finally { db.close(); }
+    let rollbackRejected = false;
+    try { await saveEndpointState(key,initial,stale); }
+    catch(error) {
+      rollbackRejected=String(error).includes("snapshot changed during restore");
+    }
+    const newest = await loadEndpointState(key);
+    const preserved = equals(newest,fromStart);
+    return {ok:singleWinner&&rollbackRejected&&preserved,supported:true,
+      successes,rejections,singleWinner,rollbackRejected,preserved};
+  } finally { await removeEndpointState(key); }
+})().then(done).catch(error=>done({ok:false,error:String(error)}));
+""",
+        )
+        if not isinstance(snapshot_cas_browser, dict) or snapshot_cas_browser.get("ok") is not True:
+            raise RuntimeError(f"first-party MLS snapshot CAS failed: {snapshot_cas_browser!r}")
+
         # Real browser codec execution, not a capability-name checkbox. This synthetic
         # local frame probe is intentionally NOT evidence of WAN/TURN or two-device QoE.
         full_hd_codec_probe = execute_async(
@@ -1454,6 +1517,7 @@ const done = arguments[arguments.length - 1];
             "heartbeat_revocation_browser": heartbeat_revocation_browser,
             "indexeddb_blocked_upgrade_browser": blocked_upgrade_browser,
             "endpoint_wrapping_key_concurrency": wrapping_key_race,
+            "endpoint_mls_snapshot_cas_browser": snapshot_cas_browser,
             "browser_requested": args.browser,
             "browser_name": reported.get("browserName"),
             "browser_version": reported.get("browserVersion"),
