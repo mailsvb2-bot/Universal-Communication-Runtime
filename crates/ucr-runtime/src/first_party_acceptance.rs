@@ -918,11 +918,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     )
     .unwrap();
     let sender_signature = alice_signer.sign(sender_proof.as_bytes());
-    call(
-        &server,
-        &alice,
-        "/v1/first-party/call/mls-add-peer",
-        &json!({
+    let add_peer_request = json!({
             "binding": alice, "callId": call_id, "expectedRevision": revision,
             "groupRevision": 0, "eventId": event_id,
             "cryptoEpoch": artifacts.next_crypto_state.epoch,
@@ -933,9 +929,32 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             "commitBase64Url": URL_SAFE_NO_PAD.encode(&artifacts.commit),
             "welcomeBase64Url": URL_SAFE_NO_PAD.encode(welcome),
             "signatureBase64Url": URL_SAFE_NO_PAD.encode(sender_signature.to_bytes()),
-        }),
+        });
+    let persisted = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-add-peer",
+        &add_peer_request,
     )
     .expect("server atomically records signed Commit/Welcome without opening MLS");
+    // Simulate an HTTP acknowledgement lost AFTER SQLite committed. The
+    // identical Device-signed event must be a durable duplicate, not 409.
+    let retried = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-add-peer",
+        &add_peer_request,
+    )
+    .expect("identical signed Commit retries after canonical epoch advance");
+    assert_eq!(retried, persisted);
+    // A different event ID with the old signature is NOT a retry and must
+    // never be allowed to advance or mutate the accepted MLS Group.
+    let mut forged = add_peer_request.clone();
+    forged["eventId"] = json!("fp-endpoint-mls-forged-replay");
+    assert_eq!(
+        call(&server, &alice, "/v1/first-party/call/mls-add-peer", &forged),
+        Err(StatusCode::FORBIDDEN)
+    );
     let admitted_descriptor = call(
         &server,
         &alice,
