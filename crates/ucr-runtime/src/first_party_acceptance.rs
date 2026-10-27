@@ -942,7 +942,10 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     )
     .expect("read canonical MLS revision after endpoint Add");
     assert_eq!(admitted_descriptor["groupRevision"], 1);
-    assert_eq!(admitted_descriptor["cryptoEpoch"], artifacts.next_crypto_state.epoch);
+    assert_eq!(
+        admitted_descriptor["cryptoEpoch"],
+        artifacts.next_crypto_state.epoch
+    );
     assert_eq!(admitted_descriptor["cryptoStateRef"], next_ref);
 
     merge_pending(
