@@ -395,6 +395,7 @@ function checkedMlsTransition(journal,descriptor){
      !Number.isSafeInteger(journal.epoch)||journal.epoch!==1||
      !Number.isSafeInteger(journal.groupRevision)||journal.groupRevision!==0||
      typeof journal.ref!=="string"||!journal.ref||
+     typeof journal.baseRef!=="string"||!journal.baseRef||
      typeof journal.eventId!=="string"||!journal.eventId||
      typeof journal.recipientDeviceId!=="string"||
      typeof journal.recipientSignerKeyId!=="string"||
@@ -508,7 +509,8 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
         if(rawJournal!==null){
           const journal=checkedMlsTransition(rawJournal,descriptor);
           if(descriptor.cryptoEpoch===0 &&
-             descriptor.cryptoStateRef!==null){
+             descriptor.groupRevision===journal.groupRevision &&
+             descriptor.cryptoStateRef===journal.baseRef){
             await check();
             await host.addEndpointMlsPeer(user,{
               ...request,groupRevision:journal.groupRevision,
@@ -609,7 +611,7 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
           state.merge_endpoint_transition(BigInt(epoch),stateRef);
           const journal=checkedMlsTransition({
             version:1,groupId:descriptor.groupId,groupRevision:descriptor.groupRevision,
-            eventId:crypto.randomUUID(),epoch,ref:stateRef,
+            baseRef:descriptor.cryptoStateRef,eventId:crypto.randomUUID(),epoch,ref:stateRef,
             recipientDeviceId:offer.recipientDeviceId,
             recipientSignerKeyId:offer.recipientSignerKeyId,
             recipientKeyPackageBase64Url:offer.recipientKeyPackageBase64Url,
