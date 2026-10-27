@@ -14,7 +14,8 @@ function section(begin,end){
 const functions=[
   section("async function api(","function endpointStateKey("),
   section("async function closeServerPeer(","function scheduleWebRtcRetry("),
-  section("async function startWebRtcOnce(","async function restartIce(")
+  section("async function startWebRtcOnce(","async function restartIce("),
+  section("async function restartIce(","async function recoverWebRtc(")
 ].join("\n");
 
 async function exercise({withdraw=false,replace=false,permissionDenied=false,peerConstructorDenied=false}={}){
@@ -202,3 +203,96 @@ await exerciseNegotiation({replace:true});
 await exerciseNegotiation({rotateToken:true});
 console.log("PASS: SDP/ICE failure retires exact original offer, closes old peer, preserves replacement, and never borrows renewed grant (MOCK HTTP, NOT live media)");
 
+
+// ICE restart and ordinary Leave cleanup must never borrow a newer bearer
+// grant for the old offer. This executes the actual browser functions with
+// delayed restart responses and independently mutable Call/Join state.
+async function exerciseIceOwnership({replace=false,mismatchedOffer=false}={}){
+  const oldOffer="e".repeat(43),newOffer="f".repeat(43);
+  const oldClaims={tenant_id:"t",namespace_id:null,call_id:"call-old",session_id:"session-old"};
+  const newClaims={tenant_id:"t",namespace_id:null,call_id:"call-new",session_id:"session-new"};
+  const oldOwner=Object.freeze({offerId:oldOffer,claims:oldClaims,token:"old-grant"});
+  const newOwner=Object.freeze({offerId:newOffer,claims:newClaims,token:"new-grant"});
+  let resolveRestart,configured=0,remoteDescriptions=0;
+  const pendingRestart=new Promise(resolve=>{resolveRestart=resolve;});
+  const calls=[];
+  const pc={
+    connectionState:"connected",localDescription:null,
+    setConfiguration(){configured++;},
+    async setRemoteDescription(){remoteDescriptions++;},
+    async createAnswer(){return {type:"answer",sdp:"answer"};},
+    async setLocalDescription(value){this.localDescription=value;}
+  };
+  const context={
+    sessionActive:true,mediaActive:true,restarting:false,
+    navigator:{onLine:true},mediaCaptureGeneration:7,peer:pc,
+    startWebRtc:{offerId:oldOffer,offerOwner:oldOwner},
+    token:"old-grant",webrtcRetryTimer:null,
+    ui:{webrtcState:{textContent:""},status:{textContent:""},privacyMode:{value:"secure"}},
+    body:()=>context.token==="old-grant"?oldClaims:newClaims,
+    rtcNetworkConfiguration:()=>({}),
+    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{},
+    fetch:async(path,options)=>{
+      calls.push({path,auth:options.headers.Authorization,payload:JSON.parse(options.body)});
+      if(path==="/v1/realtime/webrtc/restart")return pendingRestart;
+      if(path==="/v1/realtime/webrtc/remote-description"||
+         path==="/v1/realtime/webrtc/close")return {ok:true};
+      throw Error("Unexpected HTTP route: "+path);
+    }
+  };
+  runInNewContext(functions+
+    "\nglobalThis.runIce=restartIce;globalThis.runClose=closeServerPeer;",context);
+  const restarted=context.runIce();
+  await Promise.resolve();
+  assert.equal(calls.length,1);
+  // Change the mutable global grant while the network response is delayed.
+  context.token="new-grant";
+  if(replace){
+    context.startWebRtc.offerOwner=newOwner;
+    context.startWebRtc.offerId=newOffer;
+  }
+  resolveRestart({ok:true,json:async()=>({
+    offer_id:mismatchedOffer?newOffer:oldOffer,
+    ice_servers:[],sdp_type:"offer",sdp:"offer"
+  })});
+  if(replace||mismatchedOffer){
+    await assert.rejects(restarted,
+      replace?/ICE restart cancelled/:/immutable WebRTC transport offer identity/);
+    assert.equal(configured,0,"Stale or substituted ICE offer must not reconfigure the peer");
+    assert.equal(remoteDescriptions,0,"Stale ICE response must not reach SDP");
+  }else{
+    assert.equal(await restarted,true);
+    assert.equal(configured,1);
+    assert.equal(remoteDescriptions,1);
+  }
+  const signals=calls.filter(item=>item.path.endsWith("/restart")||
+    item.path.endsWith("/remote-description"));
+  for(const item of signals){
+    assert.equal(item.auth,"Bearer old-grant",
+      "ICE restart must use the original offer's grant after global token renewal");
+    assert.equal(item.payload.call_id,oldClaims.call_id);
+    assert.equal(item.payload.session_id,oldClaims.session_id);
+    if(item.path.endsWith("/remote-description"))
+      assert.equal(item.payload.offer_id,oldOffer);
+  }
+  if(!replace){
+    // The same original authority is required when Leave closes this offer.
+    await context.runClose();
+    const close=calls.find(item=>item.path.endsWith("/close"));
+    assert.ok(close,"Server-side WebRTC close must be attempted");
+    assert.equal(close.auth,"Bearer old-grant");
+    assert.equal(close.payload.call_id,oldClaims.call_id);
+    assert.equal(close.payload.offer_id,oldOffer);
+    assert.equal(context.startWebRtc.offerId,null);
+    assert.equal(context.startWebRtc.offerOwner,null);
+  }else{
+    // Explicit stale-offer cleanup cannot clear a replacement's authority.
+    await context.runClose(false,oldOffer,oldClaims,"old-grant");
+    assert.equal(context.startWebRtc.offerId,newOffer);
+    assert.equal(context.startWebRtc.offerOwner,newOwner);
+  }
+}
+await exerciseIceOwnership();
+await exerciseIceOwnership({replace:true});
+await exerciseIceOwnership({mismatchedOffer:true});
+console.log("PASS: ICE restart and Leave close bind to original offer owner despite token rotation, replacement and substituted SDP (MOCK HTTP, NOT live media)");
