@@ -385,6 +385,14 @@ for (const invalid of [
     cryptoStateRef: "state", expectedPeerDeviceId: binding.deviceId},
   {...acceptedMlsDescriptor, groupRevision: 1, cryptoEpoch: 1,
     cryptoStateRef: "state", expectedPeerDeviceId: "peer device"},
+]) {
+  groupDescriptor = invalid;
+  await assert.rejects(
+    descriptorHost.describeAcceptedCallMls(binding, descriptorRequest),
+    /missing or untrusted committed MLS peer Device/,
+  );
+}
+for (const invalid of [
   {...acceptedMlsDescriptor, groupRevision: 0},
   {...acceptedMlsDescriptor, groupRevision: 0, cryptoEpoch: 0, cryptoStateRef: null},
   {...acceptedMlsDescriptor, groupRevision: -1, cryptoEpoch: 0, cryptoStateRef: "state"},
