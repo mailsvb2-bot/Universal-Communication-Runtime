@@ -167,6 +167,46 @@ Until a host supplies this canonical authority, the bundled installer emits
 `Canonical device media signing/trust authority is not wired` and the DataChannel
 is closed. That is deliberate and secure, **not a passing two-device test**.
 
+### First-party pre-Join OpenMLS orchestration (draft PR #330)
+
+The `/start.js` contact journey now drives the endpoint-owned OpenMLS
+lifecycle **before** requesting a signed media Join. Both browser identities
+must already have independently authenticated, active canonical Device/Trust
+sessions and an accepted direct Call. The BFF remains the only Call, Group,
+Device, Trust, epoch and recipient-admission authority.
+
+The initiator creates the private OpenMLS group locally, seals its epoch-zero
+provider in the existing `ucr-endpoint-state-v1` IndexedDB, and publishes only
+a Device-signed public state reference. After this canonical Group exists, the
+recipient seals its original private KeyPackage provider, publishes its
+Device-signed public KeyPackage and waits. The initiator reads the independently
+verified single-device offer, stages a real OpenMLS Add, submits its signed
+Commit/Welcome to the canonical Group CAS, merges only after server acceptance,
+and seals the new epoch. The recipient restores its **original** private
+KeyPackage, processes the recipient-bound Welcome/commits, verifies the exact
+epoch/state reference, and seals the joined state. Both endpoints verify the
+two-device local OpenMLS roster against the authenticated BFF's committed peer
+Device before `join-accepted`. No server MLS host leaf or private seed is
+created by this browser path.
+
+The pre-Join and media pages intentionally use one scoped encrypted snapshot
+key, `ucr-e2ee-state:fp-v1:[tenant,namespace,mediaCall,participant,device]`,
+and the same IndexedDB stores, AES-GCM wrapping AAD and nonextractable KEK.
+Cross-tab writes require the browser's Web Locks API; an unsupported browser
+fails closed. A pending public offer is retried with the **same** sealed
+KeyPackage, never silently replaced. Hangup, Device change and stale Call
+inspection fence the final Join, including a delayed MLS preflight.
+
+**Not yet proven by a physical call:** this is a first implementation of the
+browser coordinator, not production evidence. There is still a crash window
+after the server durably accepts a Commit but before the initiator seals its
+merged local OpenMLS state; this state fails closed and requires an explicit
+recovery design. The first epoch-zero snapshot saved before its public
+publication also fails closed if publication never commits. No successful
+two-physical-device A/V call, real TURN/NAT traversal, simultaneous capture
+revocation or measured quality/latency has been demonstrated by this change.
+Browser/CI conformance cannot substitute for those gates.
+
 ### Durable recipient KeyPackage before Welcome (PR #330)
 
 The browser WASM endpoint now provides `seal_unjoined_key_package` and
