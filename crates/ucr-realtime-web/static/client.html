@@ -663,15 +663,19 @@ async function addEndpointWrappingKeyRecord(key,record){
       const tx=db.transaction(ENDPOINT_WRAPPING_KEY_OBJECT_STORE,"readwrite");
       // add(), not put(): two tabs must never replace an existing KEK and
       // make an already sealed endpoint MLS snapshot permanently unreadable.
-      tx.objectStore(ENDPOINT_WRAPPING_KEY_OBJECT_STORE).add({
+      const insertion=tx.objectStore(ENDPOINT_WRAPPING_KEY_OBJECT_STORE).add({
         version:record.version,
         kek:record.kek,
         iv:Array.from(record.iv),
         wrapped:Array.from(record.wrapped)
       },key);
       tx.oncomplete=()=>resolve();
-      tx.onerror=()=>reject(tx.error||new Error("IndexedDB wrapping-key write failed"));
-      tx.onabort=()=>reject(tx.error||new Error("IndexedDB wrapping-key write aborted"));
+      // The request has the exact ConstraintError; tx.error may still be
+      // null while the request error bubbles, so preserve the losing-race
+      // classification for the canonical winner recovery path.
+      insertion.onerror=()=>reject(insertion.error||new Error("IndexedDB wrapping-key insert failed"));
+      tx.onerror=()=>reject(insertion.error||tx.error||new Error("IndexedDB wrapping-key write failed"));
+      tx.onabort=()=>reject(insertion.error||tx.error||new Error("IndexedDB wrapping-key write aborted"));
     });
   }finally{db.close();}
 }
