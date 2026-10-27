@@ -316,6 +316,56 @@ Promise.resolve()
       const initialRef = state.crypto_state_ref();
       const verifiedEpochZero = initialEpoch === 0n &&
         typeof initialRef === "string" && /^[0-9a-f]{64}$/.test(initialRef);
+      // Crash-safe prepublication snapshot: the creator must recover its
+      // EXACT same epoch-zero OpenMLS group after a lost HTTP acknowledgement.
+      // A different Device, wrapping key or snapshot domain must fail closed.
+      let creatorRecoveryVerified = false;
+      let creatorWrongDeviceRejected = false;
+      let creatorWrongKeyRejected = false;
+      let creatorDomainRejected = false;
+      const creatorWrapping = new Uint8Array(32).fill(31);
+      const unpublished = state.seal_unpublished_group(creatorWrapping);
+      let recoveredCreator = null;
+      try {
+        recoveredCreator = module.EndpointMlsState.restore_unpublished_group(
+          "wasm-probe-tenant", "wasm-probe-namespace",
+          "wasm-probe-group", "wasm-probe-device-" + browser,
+          creatorWrapping, unpublished
+        );
+        const canonicalSnapshot = recoveredCreator.seal_snapshot(creatorWrapping);
+        const admittedCreator = module.EndpointMlsState.restore(
+          "wasm-probe-tenant", "wasm-probe-namespace",
+          "wasm-probe-group", "wasm-probe-device-" + browser,
+          creatorWrapping, canonicalSnapshot, 0n, initialRef
+        );
+        creatorRecoveryVerified = recoveredCreator.crypto_epoch() === 0n &&
+          recoveredCreator.crypto_state_ref() === initialRef &&
+          admittedCreator.crypto_state_ref() === initialRef;
+        admittedCreator.free();
+        try {
+          module.EndpointMlsState.restore_unpublished_group(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", "wrong-device", creatorWrapping, unpublished
+          );
+        } catch (_) { creatorWrongDeviceRejected = true; }
+        try {
+          module.EndpointMlsState.restore_unpublished_group(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", "wasm-probe-device-" + browser,
+            new Uint8Array(32).fill(32), unpublished
+          );
+        } catch (_) { creatorWrongKeyRejected = true; }
+        try {
+          module.EndpointMlsState.restore_unjoined_key_package(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", "wasm-probe-device-" + browser,
+            creatorWrapping, unpublished
+          );
+        } catch (_) { creatorDomainRejected = true; }
+      } finally {
+        creatorWrapping.fill(0);
+        if (recoveredCreator) recoveredCreator.free();
+      }
       // Actual browser OpenMLS KeyPackage -> encrypted unjoined snapshot ->
       // reload/restore -> endpoint-owned Add/Welcome. No server-held seed.
       const recipientDevice = "wasm-probe-recipient-" + browser;
@@ -381,6 +431,10 @@ Promise.resolve()
           preJoinEpochRejected &&
           preJoinRefRejected &&
           verifiedEpochZero &&
+          creatorRecoveryVerified &&
+          creatorWrongDeviceRejected &&
+          creatorWrongKeyRejected &&
+          creatorDomainRejected &&
           persistedRecipientWelcome &&
           wrongDeviceRejected &&
           wrongKeyRejected &&
@@ -390,6 +444,10 @@ Promise.resolve()
         preJoinEpochRejected,
         preJoinRefRejected,
         verifiedEpochZero,
+        creatorRecoveryVerified,
+        creatorWrongDeviceRejected,
+        creatorWrongKeyRejected,
+        creatorDomainRejected,
         persistedRecipientWelcome,
         wrongDeviceRejected,
         wrongKeyRejected,
