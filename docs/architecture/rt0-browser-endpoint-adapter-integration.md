@@ -188,10 +188,14 @@ persist this encrypted pending offer in the existing
 then use the same stored state when consuming the recipient-bound Welcome.
 The creator must similarly durably save epoch zero before publishing its
 Group, reconcile uncertain Commit acknowledgements, and merge only a
-canonical-accepted transition. `/client.html` must restore these exact
-same endpoint-owned states after signed Join; it may not mint a fresh
-KeyPackage or fall back to server-owned MLS. This primitive and its browser
-test are not evidence of a working one-click A/B call.
+canonical-accepted transition. The `/client.html` first-party restoration
+path now reads the independently authenticated BFF Group descriptor and
+recipient-bound Welcome, restores the existing sealed endpoint state, and
+checks the exact committed epoch/state reference. It refuses to mint a fresh
+KeyPackage or use server-owned MLS after signed Join. This restoration path
+is not yet exercised by a real first-party browser A/B journey, and the
+`/start` publication coordinator remains missing. The primitive and
+browser-local cryptographic test are not evidence of a one-click A/B call.
 
 ### Authenticated endpoint MLS Group revision/epoch contract (PR #330)
 
