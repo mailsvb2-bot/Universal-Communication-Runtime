@@ -1538,6 +1538,7 @@ const fencedCloseGate = new Promise<void>(resolve => {releaseFencedClose = resol
 const fencedCloseEntered = new Promise<void>(resolve => {enteredFencedClose = resolve;});
 const observedFencedCloses: string[] = [];
 const fencedCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true,
   startWebRtc: Object.assign(() => {}, {offerId: "A".repeat(43)}),
   body: () => ({session_id: "session"}),
@@ -1732,6 +1733,7 @@ class NegotiationPeer {
   async setLocalDescription() {}
 }
 const negotiationCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 2,
   navigator: {onLine: true}, peer: null, remoteStream: null,
   ui: {privacyMode: {value: "secure"}, remoteVideo: {srcObject: null},
