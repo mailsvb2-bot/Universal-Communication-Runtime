@@ -167,6 +167,29 @@ Until a host supplies this canonical authority, the bundled installer emits
 `Canonical device media signing/trust authority is not wired` and the DataChannel
 is closed. That is deliberate and secure, **not a passing two-device test**.
 
+### Authenticated endpoint MLS Group revision/epoch contract (PR #330)
+
+The same first-party `POST /v1/first-party/call/mls-descriptor` now returns
+`groupRevision`, `cryptoEpoch` and `cryptoStateRef` **from the existing
+canonical Group owner**. All three are JSON `null` before the Group exists;
+after endpoint-only creation they are `0`, `0` and the public MLS epoch
+authenticator digest, respectively. A committed Add/Remove/Rekey advances the
+canonical Group CAS revision independently of the accepted direct Call revision.
+The browser rejects mixed null/non-null fields, malformed epochs and unsafe
+revisions; the signed Add request must match the freshly inspected Group
+revision and propose exactly the next epoch. A stale concurrent writer still
+fails the server's atomic Group CAS. A Group with contradictory ownership,
+scope, capability or retained server-held OpenMLS private state is refused.
+
+The WASM `EndpointMlsState.crypto_state_ref()` returns only the locally
+verified public hash of the current MLS epoch authenticator. It refuses
+unjoined, pending or inconsistent states and does **not** expose the MLS
+exporter, private signer or HPKE secrets. This is the required initial
+`mls-create` signing input, not independent proof of the two-device roster.
+The browser must still orchestrate the full authenticated KeyPackage,
+Commit/Welcome, sealed state persistence, roster validation, media admission
+and stop/revoke journey; these contract additions alone are **not** a live call.
+
 ### Endpoint-owned direct-Call MLS roster gate (PR #330)
 
 For a first-party direct media Group (the deterministic `fp-mg-` prefix),
