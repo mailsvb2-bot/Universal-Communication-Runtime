@@ -345,12 +345,53 @@ async function expectLateDeviceResponseRefused(
 
 const acceptedMlsDescriptor = {
   callId: direct.callId, expectedRevision: 7,
+  groupRevision: null, cryptoEpoch: null, cryptoStateRef: null,
   mediaCallId: "fp-m-call-42", groupId: "fp-mg-group-42",
   conversationId: "fp-mc-conversation-42",
   creatorPrincipalId: binding.participantId, peerPrincipalId: "peer-other",
   deviceId: binding.deviceId, cryptoCapability: "ucr.group-mls.v1",
   requiresEndpointOwnedCommit: true,
 };
+// The Group's CAS revision is independent of the direct Call revision.
+// The descriptor must distinguish absence from the real initial revision 0,
+// and reject a partially initialized or downgraded crypto-state projection.
+let groupDescriptor: unknown = acceptedMlsDescriptor;
+const descriptorHost = createUcrFirstPartyHttpHost(first.vault, {
+  origin,
+  fetchImpl: async url => {
+    const path = new URL(String(url)).pathname;
+    if (path === "/v1/first-party/session") return reply(binding);
+    if (path === "/v1/first-party/call/mls-descriptor") return reply(groupDescriptor);
+    throw new Error("unexpected descriptor route: " + path);
+  },
+});
+const descriptorRequest = {callId: direct.callId, expectedRevision: 7};
+assert.equal((await descriptorHost.describeAcceptedCallMls(binding, descriptorRequest)).groupRevision, null);
+groupDescriptor = {...acceptedMlsDescriptor, groupRevision: 0, cryptoEpoch: 0,
+  cryptoStateRef: "local-epoch-zero"};
+const initialGroup = await descriptorHost.describeAcceptedCallMls(binding, descriptorRequest);
+assert.equal(initialGroup.groupRevision, 0);
+assert.equal(initialGroup.cryptoEpoch, 0);
+assert.equal(initialGroup.cryptoStateRef, "local-epoch-zero");
+groupDescriptor = {...acceptedMlsDescriptor, groupRevision: 1, cryptoEpoch: 1,
+  cryptoStateRef: "endpoint-committed-epoch-one"};
+assert.equal((await descriptorHost.describeAcceptedCallMls(binding, descriptorRequest)).groupRevision, 1);
+for (const invalid of [
+  {...acceptedMlsDescriptor, groupRevision: 0},
+  {...acceptedMlsDescriptor, groupRevision: 0, cryptoEpoch: 0, cryptoStateRef: null},
+  {...acceptedMlsDescriptor, groupRevision: -1, cryptoEpoch: 0, cryptoStateRef: "state"},
+  {...acceptedMlsDescriptor, groupRevision: 0, cryptoEpoch: -1, cryptoStateRef: "state"},
+  {...acceptedMlsDescriptor, groupRevision: 0, cryptoEpoch: 0, cryptoStateRef: ""},
+  {...acceptedMlsDescriptor, groupRevision: Number.MAX_SAFE_INTEGER + 1,
+    cryptoEpoch: 0, cryptoStateRef: "state"},
+]) {
+  groupDescriptor = invalid;
+  await assert.rejects(
+    descriptorHost.describeAcceptedCallMls(binding, descriptorRequest),
+    /inconsistent canonical MLS Group revision or crypto epoch/,
+  );
+}
+
 await expectLateDeviceResponseRefused(
   "/v1/first-party/call/mls-descriptor", acceptedMlsDescriptor,
   host => host.describeAcceptedCallMls(binding, {callId: direct.callId, expectedRevision: 7}),
