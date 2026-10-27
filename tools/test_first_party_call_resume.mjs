@@ -46,6 +46,8 @@ const context={
   idempotency:new Map(),crypto:{randomUUID:()=>"retry-id"},
   restoreSession:async()=>user,message(){},
   refreshing:false,navigating:false,timer:null,knownContacts:[],
+  mlsPreparation:null,
+  prepareFirstPartyEndpointMls:async()=>true,
   clearInterval(){},renderContacts(){},renderIncoming(){incomingRendered++;},
   authTrace:async(_stage,operation)=>operation(),clearRetryKey(){},
   setCallStage(){},URL,location:{origin:"https://localhost",replace(url){navigatedTo=url;}},
@@ -191,6 +193,29 @@ await oldRefresh;
 assert.equal(context.active.call.callId,newer.callId,"stale refresh must not replace newer Call");
 assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId,
   "stale terminal refresh must not delete newer Call locator");
+
+// MLS is a mandatory pre-Join gate, not an optional optimization.
+const acceptedForMls={...call,state:"active"};
+context.active={call:acceptedForMls,identity:"alice"};
+forgetActiveCall();
+rememberActiveCall(acceptedForMls,"alice");
+let preflightJoinAttempts=0;
+context.calls.join=async()=>{preflightJoinAttempts++;return {callId:call.callId,joinFragment:"#signed"};};
+context.prepareFirstPartyEndpointMls=async()=>false;
+await beginMedia(call.callId);
+assert.equal(preflightJoinAttempts,0,"no Join before the independently admitted MLS pair");
+assert.equal(context.navigating,false);
+let finishMls,signalMls;
+const mlsStarted=new Promise(resolve=>{signalMls=resolve;});
+context.prepareFirstPartyEndpointMls=()=>new Promise(resolve=>{finishMls=resolve;signalMls();});
+const pendingMls=beginMedia(call.callId);
+await mlsStarted;
+context.active.terminating=true; // Hangup while KeyPackage/Welcome is still pending.
+finishMls(true);
+await pendingMls;
+assert.equal(preflightJoinAttempts,0,"a late successful MLS preflight cannot bypass Hangup");
+context.active.terminating=false;
+context.prepareFirstPartyEndpointMls=async()=>true;
 
 // A delayed accepted-Call Join cannot navigate to an ended/replaced Call.
 const accepted={...call,state:"active"};
