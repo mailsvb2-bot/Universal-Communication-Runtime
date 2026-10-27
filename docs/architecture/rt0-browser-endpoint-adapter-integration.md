@@ -419,3 +419,33 @@ vault consistency only. The BFF independently verifies that public key
 against the signature, exact session binding and consumed challenge before
 publishing it to the canonical TrustedSigningKeyStore. A replayed challenge,
 retired session or mismatched Device must fail closed.
+
+## Committed two-Device direct-call admission fence (PR #330)
+
+For a first-party direct Call, the canonical SQLite Group MLS transition is
+the source of the **exact creator/recipient Device pair**. The authenticated
+BFF reads the committed transition and its Device admissions, checks that
+each Device still belongs to the correct accepted Identity and retains an
+active canonical trusted signing key, and refuses ambiguous or revoked pairs.
+A signed Join for the media Call is now restricted to one of those exact
+Devices, not any other Device owned by the same participant.
+
+The `/v1/first-party/call/mls-descriptor` response includes
+`expectedPeerDeviceId`, which is `null` before the endpoint-owned Add is
+durably committed. The browser HTTP adapter rejects missing, malformed,
+self-referential or pre-commit peer IDs. The reference media resolver fetches
+this value through the independently authenticated same-origin first-party
+session, checks its Call, Group, Device and MLS epoch against the signed media
+Join and endpoint-local OpenMLS state, and requires one matching current
+trusted peer signing descriptor. It never selects the peer from a Welcome,
+SFU frame or join fragment. The Rust/WASM exact two-leaf roster check is a
+separate, mandatory cryptographic enforcement layer.
+
+**Remaining release blockers:** This device-pair fence does **not** orchestrate
+the initial endpoint-owned group creation, recipient KeyPackage publication,
+Commit/Welcome delivery and sealed cross-page state handoff from
+`start.js`. The reference `client.html` still uses the legacy realtime
+bootstrap flow for that stage. No two physical Devices, NAT/TURN, real A/V
+media, revocation measurement or production-readiness evidence is established
+by this change. Both PR #329 (host-decrypt reproducer) and PR #330 remain
+draft; the endpoint-only path must be integrated end-to-end before merge.
