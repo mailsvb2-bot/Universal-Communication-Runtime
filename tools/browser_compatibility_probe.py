@@ -316,18 +316,84 @@ Promise.resolve()
       const initialRef = state.crypto_state_ref();
       const verifiedEpochZero = initialEpoch === 0n &&
         typeof initialRef === "string" && /^[0-9a-f]{64}$/.test(initialRef);
+      // Actual browser OpenMLS KeyPackage -> encrypted unjoined snapshot ->
+      // reload/restore -> endpoint-owned Add/Welcome. No server-held seed.
+      const recipientDevice = "wasm-probe-recipient-" + browser;
+      const recipient = new module.EndpointMlsState(
+        "wasm-probe-tenant", "wasm-probe-namespace",
+        "wasm-probe-group", recipientDevice
+      );
+      let recovered = null;
+      let persistedRecipientWelcome = false;
+      let wrongDeviceRejected = false;
+      let wrongKeyRejected = false;
+      let activeAsUnjoinedRejected = false;
+      try {
+        const wrappingKey = new Uint8Array(32).fill(17);
+        const originalOffer = recipient.key_package();
+        const sealedOffer = recipient.seal_unjoined_key_package(wrappingKey);
+        recovered = module.EndpointMlsState.restore_unjoined_key_package(
+          "wasm-probe-tenant", "wasm-probe-namespace",
+          "wasm-probe-group", recipientDevice, wrappingKey, sealedOffer
+        );
+        try {
+          module.EndpointMlsState.restore_unjoined_key_package(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", "other-device", wrappingKey, sealedOffer
+          );
+        } catch (_) { wrongDeviceRejected = true; }
+        try {
+          module.EndpointMlsState.restore_unjoined_key_package(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", recipientDevice,
+            new Uint8Array(32).fill(18), sealedOffer
+          );
+        } catch (_) { wrongKeyRejected = true; }
+        const recoveredOffer = recovered.key_package();
+        const sameOffer = originalOffer.length === recoveredOffer.length &&
+          originalOffer.every((byte, index) => byte === recoveredOffer[index]);
+        const commit = state.stage_add_device(recipientDevice, recoveredOffer);
+        const welcome = state.pending_welcome();
+        const nextEpoch = state.pending_epoch();
+        const nextRef = state.pending_state_ref();
+        state.merge_endpoint_transition(nextEpoch, nextRef);
+        recovered.join_from_welcome(welcome, nextEpoch, nextRef);
+        persistedRecipientWelcome = sameOffer && commit.length > 0 &&
+          welcome.length > 0 && nextEpoch === 1n &&
+          recovered.crypto_epoch() === nextEpoch &&
+          recovered.crypto_state_ref() === nextRef;
+        const joinedSnapshot = recovered.seal_snapshot(wrappingKey);
+        try {
+          module.EndpointMlsState.restore_unjoined_key_package(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", recipientDevice, wrappingKey, joinedSnapshot
+          );
+        } catch (_) { activeAsUnjoinedRejected = true; }
+        wrappingKey.fill(0);
+      } finally {
+        if (recovered && typeof recovered.free === "function") recovered.free();
+        if (typeof recipient.free === "function") recipient.free();
+      }
       done({
         ok: contract === "ucr.endpoint-wasm.v1" &&
           isBytes &&
           keyPackage.length > 0 &&
           preJoinEpochRejected &&
           preJoinRefRejected &&
-          verifiedEpochZero,
+          verifiedEpochZero &&
+          persistedRecipientWelcome &&
+          wrongDeviceRejected &&
+          wrongKeyRejected &&
+          activeAsUnjoinedRejected,
         contract,
         keyPackageBytes: isBytes ? keyPackage.length : null,
         preJoinEpochRejected,
         preJoinRefRejected,
         verifiedEpochZero,
+        persistedRecipientWelcome,
+        wrongDeviceRejected,
+        wrongKeyRejected,
+        activeAsUnjoinedRejected,
         endpointMlsStateConstructor: typeof module.EndpointMlsState === "function"
       });
     } finally {
