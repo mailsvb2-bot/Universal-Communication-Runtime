@@ -1156,6 +1156,30 @@ pub fn member_device_ids(
     Ok(devices)
 }
 
+/// Verifies the *actual cryptographic MLS roster* of a two-device direct Call.
+/// A server-maintained membership projection or a signed state-ref alone is
+/// insufficient: every live MLS leaf must map to exactly one expected Device.
+///
+/// # Errors
+/// Rejects a foreign own leaf, a missing/extra/duplicate Device, or a
+/// cross-scope credential. Canonical Call/Device/Trust ownership of the peer
+/// must still be checked independently by the caller.
+pub fn validate_direct_call_roster(
+    group: &MlsGroup,
+    scope: &TenantScope,
+    own_device: &DeviceId,
+    peer_device: &DeviceId,
+) -> Result<(), GroupMlsError> {
+    if own_device == peer_device || own_device_id(group, scope)? != *own_device {
+        return Err(GroupMlsError::DeviceIdentityMismatch);
+    }
+    let devices = member_device_ids(group, scope)?;
+    if devices.len() != 2 || !devices.contains(own_device) || !devices.contains(peer_device) {
+        return Err(GroupMlsError::DeviceIdentityMismatch);
+    }
+    Ok(())
+}
+
 /// Returns the exact canonical UCR Device represented by this endpoint's own MLS leaf.
 ///
 /// # Errors
@@ -1718,6 +1742,58 @@ mod tests {
                 signer.verifying_key(),
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn direct_call_roster_uses_real_openmls_leaves_and_rejects_third_devices() {
+        let scope = scope();
+        let group_id = GroupId::from_opaque(oid("fp-mg-test-direct"));
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let alice = create_device_key_package(
+            &alice_provider, &scope, &device("alice"),
+        ).unwrap();
+        let bob = create_device_key_package(
+            &bob_provider, &scope, &device("bob"),
+        ).unwrap();
+        let (mut group, _) = create_group(
+            &alice_provider, &scope, &group_id,
+            &device("alice"), &alice.signer_public_key,
+        ).unwrap();
+        assert_eq!(
+            validate_direct_call_roster(&group, &scope, &device("alice"), &device("bob")),
+            Err(GroupMlsError::DeviceIdentityMismatch)
+        );
+        let package = decode_key_package(
+            &alice_provider, &scope, &device("bob"), &bob.bytes,
+        ).unwrap();
+        let added = stage_add_member(
+            &alice_provider, &mut group, &scope, &group_id, &package,
+        ).unwrap();
+        merge_pending(
+            &alice_provider, &mut group, &scope, &group_id,
+            &added.next_crypto_state,
+        ).unwrap();
+        assert_eq!(
+            validate_direct_call_roster(&group, &scope, &device("alice"), &device("bob")),
+            Ok(())
+        );
+        assert_eq!(
+            validate_direct_call_roster(&group, &scope, &device("bob"), &device("alice")),
+            Err(GroupMlsError::DeviceIdentityMismatch)
+        );
+        assert_eq!(
+            validate_direct_call_roster(&group, &scope, &device("alice"), &device("charlie")),
+            Err(GroupMlsError::DeviceIdentityMismatch)
+        );
+        let fixture = three_member_group();
+        assert_eq!(
+            validate_direct_call_roster(
+                &fixture.alice_group, &fixture.scope,
+                &device("alice"), &device("bob"),
+            ),
+            Err(GroupMlsError::DeviceIdentityMismatch)
         );
     }
 
