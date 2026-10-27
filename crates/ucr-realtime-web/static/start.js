@@ -381,6 +381,40 @@ async function mlsSnapshot(key){
 async function mlsSave(key,bytes,first=false){
   await mlsRecord(MLS_SNAPSHOTS,key,true,Array.from(mlsBytes(bytes)),first);
 }
+// A write-ahead transition record uses the existing sealed-snapshots store.
+// No private MLS key is stored in plaintext: the next-epoch snapshot is sealed
+// by the same Device-held wrapping key and never sent to the BFF.
+async function mlsTransition(key,record){
+  const journalKey=key+":pending-commit-v1";
+  if(record===undefined)return mlsRecord(MLS_SNAPSHOTS,journalKey,false);
+  if(record===null)return mlsRecord(MLS_SNAPSHOTS,journalKey,true,null);
+  return mlsRecord(MLS_SNAPSHOTS,journalKey,true,record);
+}
+function checkedMlsTransition(journal,descriptor){
+  if(!journal||journal.version!==1||journal.groupId!==descriptor.groupId||
+     !Number.isSafeInteger(journal.epoch)||journal.epoch!==1||
+     !Number.isSafeInteger(journal.groupRevision)||journal.groupRevision!==0||
+     typeof journal.ref!=="string"||!journal.ref||
+     typeof journal.eventId!=="string"||!journal.eventId||
+     typeof journal.recipientDeviceId!=="string"||
+     typeof journal.recipientSignerKeyId!=="string"||
+     typeof journal.recipientKeyPackageBase64Url!=="string"||
+     typeof journal.recipientSignatureBase64Url!=="string"||
+     !Array.isArray(journal.commit)||!Array.isArray(journal.welcome)||
+     !Array.isArray(journal.sealed))
+    throw Error("Corrupt pending MLS Commit journal");
+  const bounded=(value,max)=>{
+    if(value.length===0||value.length>max||
+       value.some(byte=>!Number.isInteger(byte)||byte<0||byte>255))
+      throw Error("Invalid pending MLS Commit journal bytes");
+    return new Uint8Array(value);
+  };
+  return {
+    ...journal,commit:bounded(journal.commit,8192),
+    welcome:bounded(journal.welcome,8192),
+    sealed:bounded(journal.sealed,MLS_MAX_SNAPSHOT)
+  };
+}
 function mlsWrappingRecord(record){
   if(!record||record.version!==1||record.kek?.type!=="secret"||
      record.kek.extractable!==false||record.kek.algorithm?.name!=="AES-GCM")
@@ -468,6 +502,45 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
       wrapping=await mlsWrappingKey(key,{requireExisting:sealed!==null});
       await check();
       if(creator){
+        // Recover the exact already-staged wire after uncertain server ACK,
+        // crash, or failed local promotion. Never stage a second random Commit.
+        const rawJournal=await mlsTransition(key);
+        if(rawJournal!==null){
+          const journal=checkedMlsTransition(rawJournal,descriptor);
+          if(descriptor.cryptoEpoch===0 &&
+             descriptor.cryptoStateRef!==null){
+            await check();
+            await host.addEndpointMlsPeer(user,{
+              ...request,groupRevision:journal.groupRevision,
+              eventId:journal.eventId,cryptoEpoch:journal.epoch,
+              cryptoStateRef:journal.ref,
+              recipientDeviceId:journal.recipientDeviceId,
+              recipientSignerKeyId:journal.recipientSignerKeyId,
+              recipientKeyPackageBase64Url:journal.recipientKeyPackageBase64Url,
+              recipientSignatureBase64Url:journal.recipientSignatureBase64Url,
+              commit:journal.commit,welcome:journal.welcome
+            });
+            await check();
+          }else if(descriptor.cryptoEpoch!==journal.epoch ||
+                   descriptor.cryptoStateRef!==journal.ref){
+            throw Error("Canonical MLS epoch conflicts with pending Commit; media fenced");
+          }
+          const canonical=await host.describeAcceptedCallMls(user,request);
+          await check();
+          if(canonical.cryptoEpoch!==journal.epoch||
+             canonical.cryptoStateRef!==journal.ref||
+             canonical.expectedPeerDeviceId!==journal.recipientDeviceId)
+            throw Error("Pending MLS Commit not canonically confirmed; media fenced");
+          // Validate sealed new epoch locally before replacing the old snapshot.
+          state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
+            descriptor.groupId,user.deviceId,wrapping,journal.sealed,
+            BigInt(journal.epoch),journal.ref);
+          state.authorize_direct_call_roster(journal.recipientDeviceId);
+          await mlsSave(key,journal.sealed);
+          await mlsTransition(key,null);
+          sealed=journal.sealed;
+          return true;
+        }
         if(descriptor.cryptoEpoch===null){
           if(sealed===null){
             state=new module.EndpointMlsState(user.tenantId,user.namespaceId??undefined,
@@ -531,20 +604,40 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
           const commit=state.stage_add_device(offer.recipientDeviceId,packageBytes);
           const epoch=Number(state.pending_epoch()),stateRef=state.pending_state_ref();
           const welcome=state.pending_welcome();
-          await check();
-          await host.addEndpointMlsPeer(user,{
-            ...request,groupRevision:descriptor.groupRevision,
-            eventId:crypto.randomUUID(),cryptoEpoch:epoch,cryptoStateRef:stateRef,
+          // Merge locally only to prepare a sealed next-epoch checkpoint.
+          // Media remains fenced until the canonical server CAS is verified.
+          state.merge_endpoint_transition(BigInt(epoch),stateRef);
+          const journal=checkedMlsTransition({
+            version:1,groupId:descriptor.groupId,groupRevision:descriptor.groupRevision,
+            eventId:crypto.randomUUID(),epoch,ref:stateRef,
             recipientDeviceId:offer.recipientDeviceId,
             recipientSignerKeyId:offer.recipientSignerKeyId,
             recipientKeyPackageBase64Url:offer.recipientKeyPackageBase64Url,
             recipientSignatureBase64Url:offer.recipientSignatureBase64Url,
-            commit:new Uint8Array(commit),welcome:new Uint8Array(welcome)
+            commit:Array.from(commit),welcome:Array.from(welcome),
+            sealed:Array.from(state.seal_snapshot(wrapping))
+          },descriptor);
+          // Durable journal FIRST. If this fails, nothing is sent to server.
+          await mlsTransition(key,{...journal,
+            commit:Array.from(journal.commit),welcome:Array.from(journal.welcome),
+            sealed:Array.from(journal.sealed)});
+          await check();
+          await host.addEndpointMlsPeer(user,{
+            ...request,groupRevision:journal.groupRevision,
+            eventId:journal.eventId,cryptoEpoch:journal.epoch,cryptoStateRef:journal.ref,
+            recipientDeviceId:journal.recipientDeviceId,
+            recipientSignerKeyId:journal.recipientSignerKeyId,
+            recipientKeyPackageBase64Url:journal.recipientKeyPackageBase64Url,
+            recipientSignatureBase64Url:journal.recipientSignatureBase64Url,
+            commit:journal.commit,welcome:journal.welcome
           });
-          // The server CAS committed the public epoch; never merge an
-          // unaccepted local transition or request a Join before persistence.
-          state.merge_endpoint_transition(BigInt(epoch),stateRef);
-          await mlsSave(key,state.seal_snapshot(wrapping));
+          const canonical=await host.describeAcceptedCallMls(user,request);
+          await check();
+          if(canonical.cryptoEpoch!==epoch||canonical.cryptoStateRef!==stateRef||
+             canonical.expectedPeerDeviceId!==offer.recipientDeviceId)
+            throw Error("Server did not confirm the staged MLS Commit");
+          await mlsSave(key,journal.sealed);
+          await mlsTransition(key,null);
           await check();
         }
       }else{
