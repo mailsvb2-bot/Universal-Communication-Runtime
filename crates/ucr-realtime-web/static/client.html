@@ -700,10 +700,13 @@ async function createEndpointWrappingKeyRecord(key){
     throw error;
   }
 }
-async function getEndpointWrappingKey(key){
+async function getEndpointWrappingKey(key,{requireExisting=false}={}){
   key=endpointStateKey(key);
   let record=await readEndpointWrappingKeyRecord(key);
   if(record===null){
+    // Never create a replacement KEK while restoring an existing sealed MLS
+    // snapshot. That would permanently orphan its original encryption key.
+    if(requireExisting)throw new Error("Sealed endpoint MLS wrapping key is missing");
     try{
       const created=await createEndpointWrappingKeyRecord(key);
       return endpointWrappingKeyBytes(created.wrappingKey);
@@ -806,7 +809,7 @@ function endpointApplyBootstrapCommits(state,bootstrap,startCommitIndex=0){
 async function restoreEndpointMlsSnapshot(module,groupId,snapshot,bootstrap){
   const key=endpointPersistenceStorageKey();
   if(!key)throw new Error("Endpoint MLS persistence requires a Device-bound identity");
-  const wrappingKey=await getEndpointWrappingKey(key);
+  const wrappingKey=await getEndpointWrappingKey(key,{requireExisting:true});
   try{
     const states=endpointBootstrapStates(bootstrap);
     for(let index=states.length-1;index>=0;index--){
@@ -914,7 +917,7 @@ async function restoreAuthenticatedFirstPartyMls(module,context,identity,sealed,
   }
   const key=endpointPersistenceStorageKey(identity);
   if(!key||sealed===null)throw new Error("First-party private MLS state was not saved before Join");
-  const wrappingKey=await getEndpointWrappingKey(key);
+  const wrappingKey=await getEndpointWrappingKey(key,{requireExisting:true});
   let restored=null;
   try{
     requireCurrent();
