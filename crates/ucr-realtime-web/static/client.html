@@ -829,30 +829,6 @@ async function restoreEndpointMlsSnapshot(module,groupId,snapshot,bootstrap){
         if(restored&&typeof restored.free==="function")restored.free();
       }
     }
-    // A first-party recipient can arrive here with the *unjoined* private
-    // KeyPackage it published before Join. Restore that same provider and
-    // consume only the independently authorized Welcome; never mint a new
-    // KeyPackage after the canonical peer has already committed its Add.
-    if(claims?.call_id?.startsWith("fp-m-")&&
-       typeof module.EndpointMlsState.restore_unjoined_key_package==="function"){
-      let pending=null;
-      try{
-        pending=module.EndpointMlsState.restore_unjoined_key_package(
-          claims.tenant_id,claims.namespace_id??undefined,groupId,
-          claims.device_id,wrappingKey,snapshot
-        );
-        pending.join_from_welcome(
-          endpointBase64ToBytes(bootstrap.welcome_base64),
-          BigInt(bootstrap.welcome_crypto_state.crypto_epoch),
-          bootstrap.welcome_crypto_state.crypto_state_ref
-        );
-        endpointApplyBootstrapCommits(pending,bootstrap,0);
-        return pending;
-      }catch(error){
-        if(pending&&typeof pending.free==="function")pending.free();
-        throw new Error("Recipient's sealed KeyPackage cannot process canonical Welcome");
-      }
-    }
     throw new Error("Sealed endpoint MLS state does not match the canonical bootstrap chain");
   }finally{
     wrappingKey.fill(0);
