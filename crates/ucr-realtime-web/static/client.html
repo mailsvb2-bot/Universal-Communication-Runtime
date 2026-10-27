@@ -575,16 +575,27 @@ function openEndpointStateDb(){
   });
 }
 async function saveEndpointState(key,value){
-  key=endpointStateKey(key);const bytes=endpointStateBytes(value);const db=await openEndpointStateDb();
-  try{
-    await new Promise((resolve,reject)=>{
-      const tx=db.transaction(ENDPOINT_STATE_OBJECT_STORE,"readwrite");
-      tx.objectStore(ENDPOINT_STATE_OBJECT_STORE).put(Array.from(bytes),key);
-      tx.oncomplete=()=>resolve();
-      tx.onerror=()=>reject(tx.error||new Error("IndexedDB write failed"));
-      tx.onabort=()=>reject(tx.error||new Error("IndexedDB write aborted"));
-    });
-  }finally{db.close();}
+  key=endpointStateKey(key);const bytes=endpointStateBytes(value);
+  const persist=async()=>{
+    const db=await openEndpointStateDb();
+    try{
+      await new Promise((resolve,reject)=>{
+        const tx=db.transaction(ENDPOINT_STATE_OBJECT_STORE,"readwrite");
+        tx.objectStore(ENDPOINT_STATE_OBJECT_STORE).put(Array.from(bytes),key);
+        tx.oncomplete=()=>resolve();
+        tx.onerror=()=>reject(tx.error||new Error("IndexedDB write failed"));
+        tx.onabort=()=>reject(tx.error||new Error("IndexedDB write aborted"));
+      });
+    }finally{db.close();}
+  };
+  // A second tab must not overwrite the pre-Join creator/recipient state
+  // while the canonical Commit is being accepted and locally merged.
+  if(key.startsWith("ucr-e2ee-state:fp-v1:")){
+    if(!navigator.locks?.request)
+      throw new Error("Cross-tab MLS persistence lock unavailable");
+    return navigator.locks.request("ucr-first-party-mls:"+key,{mode:"exclusive"},persist);
+  }
+  return persist();
 }
 async function loadEndpointState(key){
   key=endpointStateKey(key);const db=await openEndpointStateDb();
