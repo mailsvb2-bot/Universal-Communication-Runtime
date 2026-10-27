@@ -16,6 +16,7 @@ const snapshots=new Map();
 const order=[];
 let rejectFirstOffer=true,recipientPackage=null,recipientGenerations=0;
 let rejectGroupBeforeCommit=true,rejectGroupAfterCommit=true,creatorGenerations=0;
+let wrongCanonicalCreatorRef=false;
 
 function encode(value){return new TextEncoder().encode(JSON.stringify(value));}
 function decode(value){return JSON.parse(new TextDecoder().decode(value));}
@@ -111,7 +112,8 @@ function createEndpoint(user){
           deviceId:user.deviceId,groupId:"fp-mg-1",mediaCallId:"fp-m-1",
           creatorPrincipalId:"alice",peerPrincipalId:user.participantId==="alice"?"bob":"alice",
           groupRevision:canonical.revision,cryptoEpoch:canonical.epoch,
-          cryptoStateRef:canonical.ref,
+          cryptoStateRef:wrongCanonicalCreatorRef&&user.deviceId==="device-a"
+            ?"wrong-epoch-zero-ref":canonical.ref,
           expectedPeerDeviceId:canonical.epoch===1
             ?(user.deviceId==="device-a"?canonical.peerDevice:"device-a"):null,
           requiresEndpointOwnedCommit:true
@@ -174,6 +176,11 @@ await assert.rejects(alice.prepare(),/create not committed/);
 assert.equal(decode(snapshots.get("fp-mg-1:device-a")).kind,"unpublished");
 await assert.rejects(alice.prepare(),/committed create reply lost/);
 assert.equal(decode(snapshots.get("fp-mg-1:device-a")).kind,"unpublished");
+wrongCanonicalCreatorRef=true;
+await assert.rejects(alice.prepare(),/digest differs from local Group/);
+assert.equal(decode(snapshots.get("fp-mg-1:device-a")).kind,"unpublished",
+  "mismatched canonical descriptor must not promote or overwrite private state");
+wrongCanonicalCreatorRef=false;
 assert.equal(await alice.prepare(),false,"accepted creator snapshot must promote without new Group");
 assert.equal(creatorGenerations,1,"uncertain HTTP create must not generate a second MLS Group");
 assert.equal(decode(snapshots.get("fp-mg-1:device-a")).kind,"joined");
