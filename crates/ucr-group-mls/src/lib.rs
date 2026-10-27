@@ -1762,34 +1762,54 @@ mod tests {
         let relay_provider = OpenMlsRustCrypto::default();
         let alice = create_device_key_package(&alice_provider, &scope, &device("alice")).unwrap();
         let bob = create_device_key_package(&bob_provider, &scope, &device("bob")).unwrap();
-        assert!(load_group(&relay_provider, &scope, &group_id).unwrap().is_none());
+        assert!(
+            load_group(&relay_provider, &scope, &group_id)
+                .unwrap()
+                .is_none()
+        );
         let (mut alice_group, _) = create_group(
-            &alice_provider, &scope, &group_id, &device("alice"), &alice.signer_public_key,
-        ).unwrap();
+            &alice_provider,
+            &scope,
+            &group_id,
+            &device("alice"),
+            &alice.signer_public_key,
+        )
+        .unwrap();
         let bob_package =
             decode_key_package(&alice_provider, &scope, &device("bob"), &bob.bytes).unwrap();
         let added = stage_add_member(
-            &alice_provider, &mut alice_group, &scope, &group_id, &bob_package,
-        ).unwrap();
+            &alice_provider,
+            &mut alice_group,
+            &scope,
+            &group_id,
+            &bob_package,
+        )
+        .unwrap();
         merge_pending(
-            &alice_provider, &mut alice_group, &scope, &group_id,
+            &alice_provider,
+            &mut alice_group,
+            &scope,
+            &group_id,
             &added.next_crypto_state,
-        ).unwrap();
+        )
+        .unwrap();
         let bob_group = join_from_welcome(
-            &bob_provider, &scope, &group_id, added.welcome.as_deref().unwrap(),
+            &bob_provider,
+            &scope,
+            &group_id,
+            added.welcome.as_deref().unwrap(),
             &added.next_crypto_state,
-        ).unwrap();
+        )
+        .unwrap();
         validate_direct_call_roster(&alice_group, &scope, &device("alice"), &device("bob"))
             .unwrap();
-        validate_direct_call_roster(&bob_group, &scope, &device("bob"), &device("alice"))
-            .unwrap();
+        validate_direct_call_roster(&bob_group, &scope, &device("bob"), &device("alice")).unwrap();
         let state = &added.next_crypto_state;
-        let sender_secret = export_group_media_secret(
-            &alice_provider, &alice_group, &scope, &group_id, state,
-        ).unwrap();
-        let receiver_secret = export_group_media_secret(
-            &bob_provider, &bob_group, &scope, &group_id, state,
-        ).unwrap();
+        let sender_secret =
+            export_group_media_secret(&alice_provider, &alice_group, &scope, &group_id, state)
+                .unwrap();
+        let receiver_secret =
+            export_group_media_secret(&bob_provider, &bob_group, &scope, &group_id, state).unwrap();
         let media_context = GroupMediaE2eeContext {
             scope: scope.clone(),
             call_id: CallId::from_opaque(oid("fp-m-call")),
@@ -1829,34 +1849,65 @@ mod tests {
             b"endpoint A to endpoint B only",
             KeyId::from_opaque(oid("alice-trusted-key")),
             &signer,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(
             open_endpoint_group_media_wire(
-                &receiver_secret, &media_context, &wire, signer.verifying_key(),
-            ).unwrap(),
+                &receiver_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .unwrap(),
             b"endpoint A to endpoint B only",
         );
         // Public group ID and OpenMLS code are insufficient to reconstruct
         // endpoint-owned private MLS state. Even an independently created
         // same-ID host group cannot process the endpoint-only Add Commit.
-        assert!(load_group(&relay_provider, &scope, &group_id).unwrap().is_none());
-        let relay = create_device_key_package(
-            &relay_provider, &scope, &device("fp-media-host-device"),
-        ).unwrap();
+        assert!(
+            load_group(&relay_provider, &scope, &group_id)
+                .unwrap()
+                .is_none()
+        );
+        let relay =
+            create_device_key_package(&relay_provider, &scope, &device("fp-media-host-device"))
+                .unwrap();
         let (mut relay_group, relay_state) = create_group(
-            &relay_provider, &scope, &group_id,
-            &device("fp-media-host-device"), &relay.signer_public_key,
-        ).unwrap();
+            &relay_provider,
+            &scope,
+            &group_id,
+            &device("fp-media-host-device"),
+            &relay.signer_public_key,
+        )
+        .unwrap();
         let relay_secret = export_group_media_secret(
-            &relay_provider, &relay_group, &scope, &group_id, &relay_state,
-        ).unwrap();
-        assert!(process_commit(
-            &relay_provider, &mut relay_group, &scope, &group_id,
-            &added.commit, state,
-        ).is_err());
-        assert!(open_endpoint_group_media_wire(
-            &relay_secret, &media_context, &wire, signer.verifying_key(),
-        ).is_err());
+            &relay_provider,
+            &relay_group,
+            &scope,
+            &group_id,
+            &relay_state,
+        )
+        .unwrap();
+        assert!(
+            process_commit(
+                &relay_provider,
+                &mut relay_group,
+                &scope,
+                &group_id,
+                &added.commit,
+                state,
+            )
+            .is_err()
+        );
+        assert!(
+            open_endpoint_group_media_wire(
+                &relay_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
