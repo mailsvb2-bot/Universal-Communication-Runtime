@@ -344,10 +344,7 @@ impl EndpointMlsState {
     /// # Errors
     /// Rejects extra, missing, duplicate or cross-scope MLS leaves, stale
     /// crypto-state references, pending transitions and non-direct groups.
-    pub fn authorize_direct_call_roster(
-        &self,
-        peer_device_id: String,
-    ) -> Result<(), JsValue> {
+    pub fn authorize_direct_call_roster(&self, peer_device_id: String) -> Result<(), JsValue> {
         if !self.group_id.as_opaque().as_str().starts_with("fp-mg-")
             || self.pending_transition.is_some()
         {
@@ -365,8 +362,7 @@ impl EndpointMlsState {
             .state
             .as_ref()
             .ok_or_else(|| js_error("mls_state: group not joined"))?;
-        if current_crypto_state(&self.scope, &self.group_id, group)
-            .map_err(debug_error)? != *state
+        if current_crypto_state(&self.scope, &self.group_id, group).map_err(debug_error)? != *state
             || own_device_id(group, &self.scope).map_err(debug_error)? != self.device_id
         {
             return Err(js_error("mls_state: direct Call owner or epoch mismatch"));
@@ -399,7 +395,9 @@ impl EndpointMlsState {
         if self.group_id.as_opaque().as_str().starts_with("fp-mg-")
             && self.direct_roster_generation.get() != Some(self.media_generation.get())
         {
-            return Err(js_error("mls_state: canonical direct Call MLS roster not authorized"));
+            return Err(js_error(
+                "mls_state: canonical direct Call MLS roster not authorized",
+            ));
         }
         let state = self
             .state
