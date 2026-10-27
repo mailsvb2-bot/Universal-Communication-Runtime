@@ -517,20 +517,30 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
           await check();
         }
       }else{
+        // The durable public offer has a foreign key to the canonical Group:
+        // never publish before the initiator's signed epoch-zero creation.
+        if(descriptor.cryptoEpoch===null)return false;
         if(sealed===null){
-          if(descriptor.cryptoEpoch!==null&&descriptor.cryptoEpoch!==0)
+          if(descriptor.cryptoEpoch!==0)
             throw Error("Recipient KeyPackage missing after canonical MLS admission");
           state=new module.EndpointMlsState(user.tenantId,user.namespaceId??undefined,
             descriptor.groupId,user.deviceId);
           await mlsSave(key,state.seal_unjoined_key_package(wrapping),true);
+          sealed=await mlsSnapshot(key);
           await check();
+        }
+        if(descriptor.cryptoEpoch===0){
+          if(!state)state=module.EndpointMlsState.restore_unjoined_key_package(
+            user.tenantId,user.namespaceId??undefined,descriptor.groupId,
+            user.deviceId,wrapping,sealed);
+          // Idempotent retry of the EXACT SAME signed KeyPackage. A failed
+          // first HTTP response must not strand a durable pending offer.
           await host.publishEndpointMlsOffer(user,{
             ...request,keyPackage:new Uint8Array(state.key_package())
           });
           await check();
           return false;
         }
-        if(descriptor.cryptoEpoch===null||descriptor.cryptoEpoch===0)return false;
         try{
           state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
             descriptor.groupId,user.deviceId,wrapping,sealed,
