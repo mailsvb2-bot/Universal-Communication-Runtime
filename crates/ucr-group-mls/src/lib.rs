@@ -1745,6 +1745,96 @@ mod tests {
         );
     }
 
+    // Shared cryptographic fixture helpers keep the confidentiality assertions
+    // independent and auditable rather than suppressing Clippy on a long test.
+    fn endpoint_alice_video_header(
+        media_context: &GroupMediaE2eeContext,
+    ) -> ucr_model::GroupMediaFrameHeader {
+        use ucr_model::VideoSourceKind;
+
+        ucr_model::GroupMediaFrameHeader {
+            scope: media_context.scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: media_context.group_id.clone(),
+            stream_id: oid("camera"),
+            source: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("alice")),
+                kind: PrincipalKind::Person,
+            },
+            source_device_id: device("alice"),
+            negotiation_ref: media_context.negotiation_ref.clone(),
+            negotiation_generation: media_context.negotiation_generation,
+            crypto_epoch: media_context.crypto_epoch,
+            crypto_state_ref: media_context.crypto_state_ref.clone(),
+            crypto_suite: media_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 1,
+            media_timestamp: 90_000,
+            keyframe: true,
+        }
+    }
+
+    fn assert_unadmitted_relay_blind_to_video(
+        scope: &TenantScope,
+        group_id: &GroupId,
+        added: &MlsCommitArtifacts,
+        media_context: &GroupMediaE2eeContext,
+        wire: &[u8],
+        signer: &ucr_crypto::SigningKeyMaterial,
+    ) {
+        use ucr_crypto::open_endpoint_group_media_wire;
+
+        // Even an independently fabricated same-ID group cannot process
+        // the endpoint-only Add Commit or decrypt the signed media wire.
+        let relay_provider = OpenMlsRustCrypto::default();
+        assert!(
+            load_group(&relay_provider, scope, group_id)
+                .unwrap()
+                .is_none()
+        );
+        let relay =
+            create_device_key_package(&relay_provider, scope, &device("fp-media-host-device"))
+                .unwrap();
+        let (mut relay_group, relay_state) = create_group(
+            &relay_provider,
+            scope,
+            group_id,
+            &device("fp-media-host-device"),
+            &relay.signer_public_key,
+        )
+        .unwrap();
+        let relay_secret = export_group_media_secret(
+            &relay_provider,
+            &relay_group,
+            scope,
+            group_id,
+            &relay_state,
+        )
+        .unwrap();
+        assert!(
+            process_commit(
+                &relay_provider,
+                &mut relay_group,
+                scope,
+                group_id,
+                &added.commit,
+                &added.next_crypto_state,
+            )
+            .is_err()
+        );
+        assert!(
+            open_endpoint_group_media_wire(
+                &relay_secret,
+                media_context,
+                wire,
+                signer.verifying_key(),
+            )
+            .is_err()
+        );
+    }
+
     /// An endpoint-created two-Device group never grants the relay a media leaf.
     /// Unlike host-removal tests, the server is not a member in any epoch.
     /// This is cryptographic fixture evidence, not a live browser/SFU call.
@@ -1753,20 +1843,14 @@ mod tests {
         use ucr_crypto::{
             SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
         };
-        use ucr_model::{GroupMediaFrameHeader, KeyId, VideoSourceKind};
+        use ucr_model::KeyId;
 
         let scope = scope();
         let group_id = GroupId::from_opaque(oid("fp-mg-endpoint-only"));
         let alice_provider = OpenMlsRustCrypto::default();
         let bob_provider = OpenMlsRustCrypto::default();
-        let relay_provider = OpenMlsRustCrypto::default();
         let alice = create_device_key_package(&alice_provider, &scope, &device("alice")).unwrap();
         let bob = create_device_key_package(&bob_provider, &scope, &device("bob")).unwrap();
-        assert!(
-            load_group(&relay_provider, &scope, &group_id)
-                .unwrap()
-                .is_none()
-        );
         let (mut alice_group, _) = create_group(
             &alice_provider,
             &scope,
@@ -1824,28 +1908,7 @@ mod tests {
         let wire = seal_endpoint_group_media_wire(
             &sender_secret,
             &media_context,
-            GroupMediaFrameHeader {
-                scope: scope.clone(),
-                call_id: media_context.call_id.clone(),
-                group_id: group_id.clone(),
-                stream_id: oid("camera"),
-                source: PrincipalRef {
-                    principal_id: PrincipalId::from_opaque(oid("alice")),
-                    kind: PrincipalKind::Person,
-                },
-                source_device_id: device("alice"),
-                negotiation_ref: media_context.negotiation_ref.clone(),
-                negotiation_generation: media_context.negotiation_generation,
-                crypto_epoch: media_context.crypto_epoch,
-                crypto_state_ref: media_context.crypto_state_ref.clone(),
-                crypto_suite: media_context.crypto_suite,
-                header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
-                media_kind: MediaKind::Video,
-                video_source_kind: Some(VideoSourceKind::Camera),
-                sequence: 1,
-                media_timestamp: 90_000,
-                keyframe: true,
-            },
+            endpoint_alice_video_header(&media_context),
             b"endpoint A to endpoint B only",
             KeyId::from_opaque(oid("alice-trusted-key")),
             &signer,
@@ -1861,52 +1924,13 @@ mod tests {
             .unwrap(),
             b"endpoint A to endpoint B only",
         );
-        // Public group ID and OpenMLS code are insufficient to reconstruct
-        // endpoint-owned private MLS state. Even an independently created
-        // same-ID host group cannot process the endpoint-only Add Commit.
-        assert!(
-            load_group(&relay_provider, &scope, &group_id)
-                .unwrap()
-                .is_none()
-        );
-        let relay =
-            create_device_key_package(&relay_provider, &scope, &device("fp-media-host-device"))
-                .unwrap();
-        let (mut relay_group, relay_state) = create_group(
-            &relay_provider,
+        assert_unadmitted_relay_blind_to_video(
             &scope,
             &group_id,
-            &device("fp-media-host-device"),
-            &relay.signer_public_key,
-        )
-        .unwrap();
-        let relay_secret = export_group_media_secret(
-            &relay_provider,
-            &relay_group,
-            &scope,
-            &group_id,
-            &relay_state,
-        )
-        .unwrap();
-        assert!(
-            process_commit(
-                &relay_provider,
-                &mut relay_group,
-                &scope,
-                &group_id,
-                &added.commit,
-                state,
-            )
-            .is_err()
-        );
-        assert!(
-            open_endpoint_group_media_wire(
-                &relay_secret,
-                &media_context,
-                &wire,
-                signer.verifying_key(),
-            )
-            .is_err()
+            &added,
+            &media_context,
+            &wire,
+            &signer,
         );
     }
 
