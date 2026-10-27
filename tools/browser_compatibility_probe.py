@@ -298,19 +298,36 @@ Promise.resolve()
       const isBytes = ArrayBuffer.isView(keyPackage) &&
         Object.prototype.toString.call(keyPackage) === "[object Uint8Array]";
       let preJoinEpochRejected = false;
+      let preJoinRefRejected = false;
       try {
         state.crypto_epoch();
       } catch (_) {
         preJoinEpochRejected = true;
       }
+      try {
+        state.crypto_state_ref();
+      } catch (_) {
+        preJoinRefRejected = true;
+      }
+      // Exercise the REAL browser WASM/OpenMLS epoch-zero creator. This is
+      // public authenticator metadata, not a server or JavaScript exporter.
+      state.create_endpoint_group();
+      const initialEpoch = state.crypto_epoch();
+      const initialRef = state.crypto_state_ref();
+      const verifiedEpochZero = initialEpoch === 0n &&
+        typeof initialRef === "string" && /^[0-9a-f]{64}$/.test(initialRef);
       done({
         ok: contract === "ucr.endpoint-wasm.v1" &&
           isBytes &&
           keyPackage.length > 0 &&
-          preJoinEpochRejected,
+          preJoinEpochRejected &&
+          preJoinRefRejected &&
+          verifiedEpochZero,
         contract,
         keyPackageBytes: isBytes ? keyPackage.length : null,
         preJoinEpochRejected,
+        preJoinRefRejected,
+        verifiedEpochZero,
         endpointMlsStateConstructor: typeof module.EndpointMlsState === "function"
       });
     } finally {
