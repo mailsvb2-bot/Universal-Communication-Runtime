@@ -312,7 +312,7 @@ impl SqliteLocalStore {
     /// participant, unverified offer, Join fragment or SFU key map.
     ///
     /// # Errors
-    /// Rejects ambiguous membership, corrupt storage and unavailable SQLite.
+    /// Rejects ambiguous membership, corrupt storage and unavailable `SQLite`.
     pub fn endpoint_mls_direct_call_device_pair(
         &self,
         scope: &TenantScope,
