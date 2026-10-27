@@ -204,10 +204,17 @@ inspection fence the final Join, including a delayed MLS preflight.
 browser coordinator, not production evidence. There is still a crash window
 after the server durably accepts a Commit but before the initiator seals its
 merged local OpenMLS state; this state fails closed and requires an explicit
-recovery design. The first epoch-zero snapshot saved before its public
-publication also fails closed if publication never commits. No successful
-two-physical-device A/V call, real TURN/NAT traversal, simultaneous capture
-revocation or measured quality/latency has been demonstrated by this change.
+recovery design. Epoch-zero creator publication now uses a separate, authenticated
+prepublication snapshot domain. After an uncertain create response or reload,
+the browser restores the **same** creator Group, retries only the signed public
+descriptor, and promotes the sealed state to the admitted epoch-zero domain
+only after matching the canonical authenticator. A forged or mismatched
+descriptor cannot promote it. The remaining **P0 crash window** is after a
+server-accepted Add Commit and before the creator's merged epoch-one state is
+durably sealed; this still fails closed and needs a separately persisted
+pending-commit recovery protocol. No successful two-physical-device A/V call,
+real TURN/NAT traversal, simultaneous capture revocation or measured
+quality/latency has been demonstrated by this change.
 Browser/CI conformance cannot substitute for those gates.
 
 ### Durable recipient KeyPackage before Welcome (PR #330)
@@ -225,20 +232,17 @@ Welcome. Browser Compatibility exercises a real endpoint-created OpenMLS
 Add/Welcome with the recovered KeyPackage and negative cross-Device/key/domain
 checks, not a simulated crypto handshake.
 
-**Still missing for first-call completion:** the `/start` coordinator must
-persist this encrypted pending offer in the existing
-`ucr-endpoint-state-v1` store **before** publishing it to the canonical BFF,
-then use the same stored state when consuming the recipient-bound Welcome.
-The creator must similarly durably save epoch zero before publishing its
-Group, reconcile uncertain Commit acknowledgements, and merge only a
-canonical-accepted transition. The `/client.html` first-party restoration
-path now reads the independently authenticated BFF Group descriptor and
-recipient-bound Welcome, restores the existing sealed endpoint state, and
-checks the exact committed epoch/state reference. It refuses to mint a fresh
-KeyPackage or use server-owned MLS after signed Join. This restoration path
-is not yet exercised by a real first-party browser A/B journey, and the
-`/start` publication coordinator remains missing. The primitive and
-browser-local cryptographic test are not evidence of a one-click A/B call.
+**First-call integration status:** the `/start` coordinator now seals
+the recipient's original KeyPackage before publication, restores it for the
+recipient-bound Welcome, and preserves the creator's epoch-zero Group through
+uncertain create responses using a distinct authenticated snapshot domain.
+The `/client.html` first-party restoration path checks the independently
+authenticated BFF Group descriptor and the exact committed epoch/state
+reference. It refuses to mint a replacement KeyPackage or use server-owned
+MLS after signed Join. Still missing: durable creator **pending Add Commit**
+recovery across a server-accepted CAS and a local crash, plus physical A/B
+WebRTC/TURN/NAT media and measured revoke/stop. Browser-local cryptography
+and a mock-backed coordinator are not evidence of a live one-click call.
 
 ### Authenticated endpoint MLS Group revision/epoch contract (PR #330)
 
