@@ -1031,9 +1031,52 @@ fn endpoint_mls_descriptor(
             .map_err(|_| StatusCode::FORBIDDEN)?;
     let ids = first_party_media::media_runtime_ids(&call.scope, &call.call_id)
         .map_err(|_| StatusCode::CONFLICT)?;
+    // Read the existing canonical Group, never infer its CAS revision from
+    // the accepted Call revision. The two counters evolve independently.
+    // An absent Group is an explicit pre-creation state, not revision zero.
+    let group = state
+        .store
+        .group(&call.scope, &ids.group_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let (group_revision, crypto_epoch, crypto_state_ref) = if let Some(group) = group {
+        if group.scope != call.scope
+            || group.group_id != ids.group_id
+            || group.conversation.conversation_id != ids.conversation_id
+            || group.conversation.kind != ConversationKind::PrivateGroup
+            || group.ownership != GroupOwnership::PersonOwned(participants[0].clone())
+            || group.crypto_state.capability_id.as_deref()
+                != Some(ucr_protocol::GROUP_MLS_CAPABILITY)
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+        let state_ref = group
+            .crypto_state
+            .state_ref
+            .as_ref()
+            .ok_or(StatusCode::CONFLICT)?;
+        if ucr_group_mls::GroupMlsServerCustodyProbe::server_possesses_mls_group(
+            state.store.as_ref(),
+            &call.scope,
+            &ids.group_id,
+        )
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+        (
+            Some(group.revision),
+            Some(group.crypto_state.epoch),
+            Some(state_ref.as_str().to_owned()),
+        )
+    } else {
+        (None, None, None)
+    };
     Ok(json!({
         "callId": req.call_id,
         "expectedRevision": call.revision,
+        "groupRevision": group_revision,
+        "cryptoEpoch": crypto_epoch,
+        "cryptoStateRef": crypto_state_ref,
         "mediaCallId": ids.call_id.as_opaque().as_str(),
         "groupId": ids.group_id.as_opaque().as_str(),
         "conversationId": ids.conversation_id.as_opaque().as_str(),
