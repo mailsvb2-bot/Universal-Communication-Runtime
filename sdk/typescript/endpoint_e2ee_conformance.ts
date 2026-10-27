@@ -1407,24 +1407,38 @@ assert.equal(serverOffers, 1, "server offer is validated before device capture")
 assert.equal(stalePeerCreates, 0, "revoked admission cannot create a stale peer");
 assert.equal(stalePeerCloses, 1, "withdrawn admission retires its orphaned server offer");
 // A client peer newly owned by another path must never be closed by stale cleanup.
-let replacementPeerClosed = 0;
+// A replacement peer and grant may become current while the old offer is
+// awaiting local media. Retire only the old offer with its captured authority.
+const retiredClaims = {session_id: "retired-session"};
+const replacementClaims = {session_id: "replacement-session"};
+const replacementPeer = {connectionState: "connected"};
+const retiredOfferId = "A".repeat(43);
+const retiredOffers: Array<{offerId: string; claims: unknown; grant: string}> = [];
 const replacementCtx: Record<string, any> = {
   token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   navigator: {onLine: true}, peer: null,
   ui: {privacyMode: {value: "secure"}},
-  requireCanonicalMediaHostReady() {}, body: () => ({}),
+  requireCanonicalMediaHostReady() {}, body: () => retiredClaims,
   rtcNetworkConfiguration: () => ({}),
-  api: async () => ({json: async () => ({ice_servers: [], offer_id: "A".repeat(43)})}),
+  api: async () => ({json: async () => ({ice_servers: [], offer_id: retiredOfferId})}),
   ensureLocalMedia: async () => {
-    replacementCtx.peer = {connectionState: "connected"};
+    replacementCtx.peer = replacementPeer;
+    replacementCtx.token = "replacement-grant";
+    replacementCtx.body = () => replacementClaims;
     replacementCtx.mediaCaptureGeneration++;
   },
-  closeServerPeer: async () => {replacementPeerClosed++;},
+  closeServerPeer: async (_keepalive: boolean, offerId: string, claims: unknown, grant: string) => {
+    retiredOffers.push({offerId, claims, grant});
+  },
 };
 runInNewContext(startCode + "\nthis.start = startWebRtc;", replacementCtx);
 await assert.rejects(replacementCtx.start(), /cancelled by conference media teardown/);
-assert.equal(replacementPeerClosed, 0, "stale cleanup cannot close newly owned peer");
+assert.equal(retiredOffers.length, 1, "stale offer must be retired exactly once");
+assert.equal(retiredOffers[0].offerId, retiredOfferId, "cleanup must target the retired offer");
+assert.equal(retiredOffers[0].claims, retiredClaims, "cleanup must retain the original session");
+assert.equal(retiredOffers[0].grant, "fixture-signed-join", "cleanup must not borrow a replacement grant");
+assert.equal(replacementCtx.peer, replacementPeer, "stale cleanup cannot close newly owned peer");
 
 // A missing TURN relay in private mode must fail before microphone/camera prompts.
 let privateCaptures = 0, privateServerCloses = 0;
