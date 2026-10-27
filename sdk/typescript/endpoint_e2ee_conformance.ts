@@ -1722,6 +1722,9 @@ const remoteDescriptionGate = new Promise<void>(resolve => {
 });
 let attemptedStaleAnswer = 0;
 let staleRemoteDescriptionPosts = 0;
+let negotiationPeerCloses = 0;
+const negotiationClaims = {session_id: "original-negotiation-session"};
+const negotiationOfferCloses: Array<{offerId: string; claims: unknown; grant: string}> = [];
 class NegotiationPeer {
   connectionState = "connecting";
   localDescription = {type: "answer", sdp: "local-answer"};
@@ -1731,6 +1734,7 @@ class NegotiationPeer {
   }
   async createAnswer() { attemptedStaleAnswer++; return this.localDescription; }
   async setLocalDescription() {}
+  close() {this.connectionState = "closed"; negotiationPeerCloses++;}
 }
 const negotiationCtx: Record<string, any> = {
   token: "fixture-signed-join",
@@ -1748,10 +1752,16 @@ const negotiationCtx: Record<string, any> = {
     staleRemoteDescriptionPosts++;
     return {ok: true};
   },
-  body: () => ({}), rtcNetworkConfiguration: () => ({}),
+  body: () => negotiationClaims, rtcNetworkConfiguration: () => ({}),
   RTCPeerConnection: NegotiationPeer, MediaStream: class {},
   webrtcRetryTimer: null, e2eeChannel: null, scheduleWebRtcRetry() {},
-  closeServerPeer: async () => {throw new Error("unexpected orphan close during SDP test");},
+  teardownPeer() {
+    if (negotiationCtx.peer) negotiationCtx.peer.close();
+    negotiationCtx.peer = null;
+  },
+  closeServerPeer: async (_keepalive: boolean, offerId: string, claims: unknown, grant: string) => {
+    negotiationOfferCloses.push({offerId, claims, grant});
+  },
 };
 runInNewContext(startCode + "\nthis.start = startWebRtc;", negotiationCtx);
 const blockedNegotiation = negotiationCtx.start();
@@ -1762,6 +1772,15 @@ releaseRemoteDescription();
 await assert.rejects(blockedNegotiation, /cancelled by conference media teardown/);
 assert.equal(attemptedStaleAnswer, 0, "teardown must prevent stale SDP answer");
 assert.equal(staleRemoteDescriptionPosts, 0, "teardown must prevent server SDP write");
+assert.equal(negotiationPeerCloses, 1, "revoked SDP must close the local WebRTC peer");
+assert.equal(negotiationCtx.peer, null, "revoked SDP must clear retired peer ownership");
+assert.equal(negotiationOfferCloses.length, 1, "revoked SDP must retire the remote offer exactly once");
+assert.equal(negotiationOfferCloses[0].offerId, "A".repeat(43),
+  "revoked SDP cleanup must target its original transport attempt");
+assert.equal(negotiationOfferCloses[0].claims, negotiationClaims,
+  "revoked SDP cleanup must retain the original session binding");
+assert.equal(negotiationOfferCloses[0].grant, "fixture-signed-join",
+  "revoked SDP cleanup must not borrow a renewed grant");
 
 const restartCode = browser.slice(
   browser.indexOf("async function restartIce(){"),
