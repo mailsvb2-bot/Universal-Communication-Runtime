@@ -1382,6 +1382,7 @@ let enterStartCapture: () => void = () => {};
 const startCaptureEntered = new Promise<void>(resolve => { enterStartCapture = resolve; });
 let serverOffers = 0, stalePeerCreates = 0, stalePeerCloses = 0;
 const startCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   peer: null,
   navigator: {onLine: true}, ui: {privacyMode: {value: "secure"}},
@@ -1408,6 +1409,7 @@ assert.equal(stalePeerCloses, 1, "withdrawn admission retires its orphaned serve
 // A client peer newly owned by another path must never be closed by stale cleanup.
 let replacementPeerClosed = 0;
 const replacementCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   navigator: {onLine: true}, peer: null,
   ui: {privacyMode: {value: "secure"}},
@@ -1427,6 +1429,7 @@ assert.equal(replacementPeerClosed, 0, "stale cleanup cannot close newly owned p
 // A missing TURN relay in private mode must fail before microphone/camera prompts.
 let privateCaptures = 0, privateServerCloses = 0;
 const privateCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   peer: null,
   navigator: {onLine: true}, ui: {privacyMode: {value: "private"}},
@@ -1446,6 +1449,7 @@ assert.equal(privateServerCloses, 1, "failed privacy negotiation closes the serv
 
 let rejectedCaptures = 0;
 const rejectedCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   navigator: {onLine: true}, ui: {privacyMode: {value: "secure"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
@@ -1460,6 +1464,7 @@ assert.equal(rejectedCaptures, 0, "failed signaling cannot prompt for camera or 
 // the next attempt with a lingering server session.
 let constructorCloses = 0;
 const constructorCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   peer: null, navigator: {onLine: true},
   ui: {privacyMode: {value: "secure"}},
@@ -1481,6 +1486,7 @@ const orphanCloseGate = new Promise<void>(resolve => {releaseOrphanClose = resol
 const orphanCloseStarted = new Promise<void>(resolve => {orphanCloseEntered = resolve;});
 let serializedOffers = 0, serializedCloses = 0;
 const serializedCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   peer: null, navigator: {onLine: true},
   ui: {privacyMode: {value: "secure"}},
