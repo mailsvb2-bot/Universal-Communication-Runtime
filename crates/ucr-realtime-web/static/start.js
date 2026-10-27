@@ -469,11 +469,19 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
       await check();
       if(creator){
         if(descriptor.cryptoEpoch===null){
-          if(sealed!==null)throw Error("Uncommitted MLS creation snapshot requires explicit Call recovery");
-          state=new module.EndpointMlsState(user.tenantId,user.namespaceId??undefined,
-            descriptor.groupId,user.deviceId);
-          state.create_endpoint_group();
-          await mlsSave(key,state.seal_snapshot(wrapping),true);
+          if(sealed===null){
+            state=new module.EndpointMlsState(user.tenantId,user.namespaceId??undefined,
+              descriptor.groupId,user.deviceId);
+            state.create_endpoint_group();
+            // Seal the creator's epoch-zero Group in a distinct AAD domain
+            // BEFORE publishing. A lost HTTP acknowledgement must not mint
+            // another MLS identity or permanently strand the first Group.
+            await mlsSave(key,state.seal_unpublished_group(wrapping),true);
+          }else{
+            state=module.EndpointMlsState.restore_unpublished_group(
+              user.tenantId,user.namespaceId??undefined,descriptor.groupId,
+              user.deviceId,wrapping,sealed);
+          }
           await check();
           await host.publishEndpointMlsGroup(user,{
             ...request,cryptoStateRef:state.crypto_state_ref()
@@ -483,9 +491,32 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
           return false;
         }
         if(sealed===null)throw Error("Initiator's private OpenMLS snapshot is missing");
-        state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
-          descriptor.groupId,user.deviceId,wrapping,sealed,
-          BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef);
+        if(descriptor.cryptoEpoch===0){
+          // An accepted epoch-zero publication may have lost its HTTP reply
+          // or crashed before local promotion. Recover the SAME sealed Group,
+          // verify the canonical digest, then atomically promote the snapshot.
+          let unpublished=false;
+          try{
+            state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
+              descriptor.groupId,user.deviceId,wrapping,sealed,
+              0n,descriptor.cryptoStateRef);
+          }catch{
+            state=module.EndpointMlsState.restore_unpublished_group(
+              user.tenantId,user.namespaceId??undefined,descriptor.groupId,
+              user.deviceId,wrapping,sealed);
+            unpublished=true;
+          }
+          if(state.crypto_state_ref()!==descriptor.cryptoStateRef)
+            throw Error("Published MLS epoch-zero digest differs from local Group");
+          if(unpublished){
+            await mlsSave(key,state.seal_snapshot(wrapping));
+            await check();
+          }
+        }else{
+          state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
+            descriptor.groupId,user.deviceId,wrapping,sealed,
+            BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef);
+        }
         if(descriptor.cryptoEpoch===0){
           const offers=await host.listEndpointMlsOffers(user,request);
           await check();
