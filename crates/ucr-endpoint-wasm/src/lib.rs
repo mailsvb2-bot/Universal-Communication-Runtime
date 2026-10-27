@@ -162,7 +162,9 @@ impl EndpointMlsState {
     /// HTTP create acknowledgement can be retried without minting a new Group.
     pub fn seal_unpublished_group(&self, wrapping_key: &[u8]) -> Result<Vec<u8>, JsValue> {
         if self.pending_transition.is_some() {
-            return Err(js_error("mls_state: unpublished Group has pending transition"));
+            return Err(js_error(
+                "mls_state: unpublished Group has pending transition",
+            ));
         }
         let group = self
             .group
@@ -177,7 +179,9 @@ impl EndpointMlsState {
                 != *state
             || own_device_id(group, &self.scope).map_err(debug_error)? != self.device_id
         {
-            return Err(js_error("mls_state: only own verified epoch-zero Group may be staged"));
+            return Err(js_error(
+                "mls_state: only own verified epoch-zero Group may be staged",
+            ));
         }
         let key = EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
             .map_err(debug_error)?;
@@ -214,10 +218,10 @@ impl EndpointMlsState {
             .map_err(debug_error)?
             .ok_or_else(|| js_error("mls_state: unpublished Group missing from snapshot"))?;
         let state = current_crypto_state(&scope, &group_id, &group).map_err(debug_error)?;
-        if state.epoch != 0
-            || own_device_id(&group, &scope).map_err(debug_error)? != device_id
-        {
-            return Err(js_error("mls_state: unpublished Group owner or epoch mismatch"));
+        if state.epoch != 0 || own_device_id(&group, &scope).map_err(debug_error)? != device_id {
+            return Err(js_error(
+                "mls_state: unpublished Group owner or epoch mismatch",
+            ));
         }
         Ok(Self {
             provider,
