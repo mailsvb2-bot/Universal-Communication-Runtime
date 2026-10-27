@@ -354,7 +354,8 @@ impl EndpointMlsState {
             .state
             .as_ref()
             .ok_or_else(|| js_error("mls_state: group not joined"))?;
-        if current_crypto_state(&self.scope, &self.group_id, group).map_err(debug_error)? != *state {
+        if current_crypto_state(&self.scope, &self.group_id, group).map_err(debug_error)? != *state
+        {
             return Err(js_error("mls_state: local epoch authenticator mismatch"));
         }
         state
