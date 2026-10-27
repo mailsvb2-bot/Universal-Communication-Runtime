@@ -167,6 +167,34 @@ Until a host supplies this canonical authority, the bundled installer emits
 `Canonical device media signing/trust authority is not wired` and the DataChannel
 is closed. That is deliberate and secure, **not a passing two-device test**.
 
+### Endpoint-owned direct-Call MLS roster gate (PR #330)
+
+For a first-party direct media Group (the deterministic `fp-mg-` prefix),
+the endpoint media bridge now refuses to export a media key until its
+**locally verified OpenMLS tree** contains exactly the current Device and
+the independently authorized peer Device, with no extra, duplicate or
+cross-scope leaves. The canonical browser admission resolver must supply
+`expectedPeerDeviceId` from existing authenticated Call/Device/Trust state;
+a Join fragment, SFU frame, or MLS Welcome cannot select that peer.
+`authorize_direct_call_roster` is checked against the current MLS state
+reference and own leaf, then fenced to the current local MLS generation.
+Rekey, Commit, or restore requires a fresh roster authorization. Missing
+resolver/peer/roster verification fails closed before the media exporter.
+
+The shared Rust MLS layer also rejects duplicate canonical Device credentials
+before an Add Commit and refuses exporter access to malformed/duplicate
+credential trees. A real OpenMLS two-leaf/three-leaf regression and a browser
+admission contract regression cover the checks. These are security
+**preconditions**, not proof that the first-party browser currently supplies
+a trusted peer Device or that a physical A↔B call works.
+
+Still required: authenticated BFF delivery of the peer Device/Trust and live
+negotiation binding to the canonical resolver; full endpoint-owned MLS
+creation/KeyPackage/Commit/Welcome orchestration from the one-click user
+journey; verified endpoint acceptance and revoke/stop; two real Devices
+with measured WebRTC/TURN/NAT audio and video. Never claim production-ready
+from roster checks or green CI alone.
+
 ## Verification scope
 
 Current CI can prove module loading, WASM execution, local key package
