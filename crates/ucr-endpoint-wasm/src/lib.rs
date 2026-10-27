@@ -98,7 +98,9 @@ impl EndpointMlsState {
     /// This is endpoint-only encrypted persistence, never server custody.
     pub fn seal_unjoined_key_package(&self, wrapping_key: &[u8]) -> Result<Vec<u8>, JsValue> {
         if self.group.is_some() || self.state.is_some() || self.pending_transition.is_some() {
-            return Err(js_error("mls_state: cannot seal an already joined KeyPackage"));
+            return Err(js_error(
+                "mls_state: cannot seal an already joined KeyPackage",
+            ));
         }
         let key = EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
             .map_err(debug_error)?;
@@ -136,7 +138,9 @@ impl EndpointMlsState {
             .map_err(debug_error)?
             .is_some()
         {
-            return Err(js_error("mls_state: pending KeyPackage snapshot contains joined group"));
+            return Err(js_error(
+                "mls_state: pending KeyPackage snapshot contains joined group",
+            ));
         }
         Ok(Self {
             provider,
