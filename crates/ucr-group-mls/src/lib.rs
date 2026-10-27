@@ -1751,30 +1751,32 @@ mod tests {
         let group_id = GroupId::from_opaque(oid("fp-mg-test-direct"));
         let alice_provider = OpenMlsRustCrypto::default();
         let bob_provider = OpenMlsRustCrypto::default();
-        let alice = create_device_key_package(
-            &alice_provider, &scope, &device("alice"),
-        ).unwrap();
-        let bob = create_device_key_package(
-            &bob_provider, &scope, &device("bob"),
-        ).unwrap();
+        let alice = create_device_key_package(&alice_provider, &scope, &device("alice")).unwrap();
+        let bob = create_device_key_package(&bob_provider, &scope, &device("bob")).unwrap();
         let (mut group, _) = create_group(
-            &alice_provider, &scope, &group_id,
-            &device("alice"), &alice.signer_public_key,
-        ).unwrap();
+            &alice_provider,
+            &scope,
+            &group_id,
+            &device("alice"),
+            &alice.signer_public_key,
+        )
+        .unwrap();
         assert_eq!(
             validate_direct_call_roster(&group, &scope, &device("alice"), &device("bob")),
             Err(GroupMlsError::DeviceIdentityMismatch)
         );
-        let package = decode_key_package(
-            &alice_provider, &scope, &device("bob"), &bob.bytes,
-        ).unwrap();
-        let added = stage_add_member(
-            &alice_provider, &mut group, &scope, &group_id, &package,
-        ).unwrap();
+        let package =
+            decode_key_package(&alice_provider, &scope, &device("bob"), &bob.bytes).unwrap();
+        let added =
+            stage_add_member(&alice_provider, &mut group, &scope, &group_id, &package).unwrap();
         merge_pending(
-            &alice_provider, &mut group, &scope, &group_id,
+            &alice_provider,
+            &mut group,
+            &scope,
+            &group_id,
             &added.next_crypto_state,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(
             validate_direct_call_roster(&group, &scope, &device("alice"), &device("bob")),
             Ok(())
@@ -1790,8 +1792,10 @@ mod tests {
         let fixture = three_member_group();
         assert_eq!(
             validate_direct_call_roster(
-                &fixture.alice_group, &fixture.scope,
-                &device("alice"), &device("bob"),
+                &fixture.alice_group,
+                &fixture.scope,
+                &device("alice"),
+                &device("bob"),
             ),
             Err(GroupMlsError::DeviceIdentityMismatch)
         );
@@ -1804,52 +1808,60 @@ mod tests {
             member_device_ids(&fixture.alice_group, &fixture.scope).unwrap(),
             vec![device("alice"), device("bob"), device("charlie")]
         );
-        let original = current_crypto_state(
-            &fixture.scope, &fixture.group_id, &fixture.alice_group,
-        ).unwrap();
+        let original =
+            current_crypto_state(&fixture.scope, &fixture.group_id, &fixture.alice_group).unwrap();
 
         // A new valid MLS KeyPackage with a fresh signature key still cannot
         // add another leaf under Bob's already-admitted canonical Device ID.
         let duplicate_provider = OpenMlsRustCrypto::default();
-        let duplicate = create_device_key_package(
-            &duplicate_provider, &fixture.scope, &device("bob"),
-        ).unwrap();
+        let duplicate =
+            create_device_key_package(&duplicate_provider, &fixture.scope, &device("bob")).unwrap();
         let validated = decode_key_package(
-            &fixture.alice_provider, &fixture.scope, &device("bob"), &duplicate.bytes,
-        ).unwrap();
+            &fixture.alice_provider,
+            &fixture.scope,
+            &device("bob"),
+            &duplicate.bytes,
+        )
+        .unwrap();
         assert_eq!(
             stage_add_member(
-                &fixture.alice_provider, &mut fixture.alice_group,
-                &fixture.scope, &fixture.group_id, &validated,
-            ).unwrap_err(),
+                &fixture.alice_provider,
+                &mut fixture.alice_group,
+                &fixture.scope,
+                &fixture.group_id,
+                &validated,
+            )
+            .unwrap_err(),
             GroupMlsError::DeviceIdentityMismatch
         );
 
         // The public endpoint transition entry point must reject duplicates
         // even when both packages are otherwise individually valid.
-        let dave = create_device_key_package(
-            &duplicate_provider, &fixture.scope, &device("dave"),
-        ).unwrap();
+        let dave = create_device_key_package(&duplicate_provider, &fixture.scope, &device("dave"))
+            .unwrap();
         assert_eq!(
             stage_transition(
-                &fixture.alice_provider, &mut fixture.alice_group,
-                &fixture.scope, &fixture.group_id,
+                &fixture.alice_provider,
+                &mut fixture.alice_group,
+                &fixture.scope,
+                &fixture.group_id,
                 &MlsTransitionInput::Add(vec![
                     MlsDeviceAdmission {
-                        device_id: device("dave"), key_package: dave.bytes.clone(),
+                        device_id: device("dave"),
+                        key_package: dave.bytes.clone(),
                     },
                     MlsDeviceAdmission {
-                        device_id: device("dave"), key_package: dave.bytes,
+                        device_id: device("dave"),
+                        key_package: dave.bytes,
                     },
                 ]),
-            ).unwrap_err(),
+            )
+            .unwrap_err(),
             GroupMlsError::DeviceIdentityMismatch
         );
         assert!(fixture.alice_group.pending_commit().is_none());
         assert_eq!(
-            current_crypto_state(
-                &fixture.scope, &fixture.group_id, &fixture.alice_group,
-            ).unwrap(),
+            current_crypto_state(&fixture.scope, &fixture.group_id, &fixture.alice_group,).unwrap(),
             original
         );
     }
