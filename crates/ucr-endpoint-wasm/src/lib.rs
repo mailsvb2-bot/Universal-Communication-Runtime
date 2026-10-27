@@ -14,8 +14,8 @@ use ucr_group_mls::{
     BrowserMlsProvider, MlsCommitArtifacts, MlsDeviceAdmission, MlsGroupState, MlsTransitionInput,
     browser_memory_provider, create_device_key_package, create_group, current_crypto_state,
     export_browser_memory_snapshot, export_group_media_secret, import_browser_memory_snapshot,
-    join_from_welcome, load_group, member_device_ids, merge_pending, own_device_id, process_commit,
-    stage_transition,
+    join_from_welcome, load_group, merge_pending, own_device_id, process_commit, stage_transition,
+    validate_direct_call_roster,
 };
 use ucr_model::{
     CallId, CryptoSuite, DeviceId, GroupCryptoState, GroupId, GroupMediaE2eeContext,
@@ -371,13 +371,8 @@ impl EndpointMlsState {
         {
             return Err(js_error("mls_state: direct Call owner or epoch mismatch"));
         }
-        let devices = member_device_ids(group, &self.scope).map_err(debug_error)?;
-        if devices.len() != 2
-            || !devices.contains(&self.device_id)
-            || !devices.contains(&peer)
-        {
-            return Err(js_error("mls_state: direct Call MLS roster mismatch"));
-        }
+        validate_direct_call_roster(group, &self.scope, &self.device_id, &peer)
+            .map_err(debug_error)?;
         self.direct_roster_generation
             .set(Some(self.media_generation.get()));
         Ok(())
