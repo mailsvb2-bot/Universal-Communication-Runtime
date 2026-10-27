@@ -955,6 +955,41 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         call(&server, &alice, "/v1/first-party/call/mls-add-peer", &forged),
         Err(StatusCode::FORBIDDEN)
     );
+    // Even a newly and correctly signed DIFFERENT event cannot reuse the
+    // consumed Group revision. The durable CAS, not the HTTP precheck,
+    // distinguishes exact idempotency from an unauthorized second Add.
+    let stale_event_id = "fp-endpoint-mls-stale-second-add";
+    let stale_proof = encoded_proof(
+        "ucr-first-party-endpoint-mls-add-peer.v1",
+        &json!([
+            alice.tenant_id,
+            alice.namespace_id,
+            alice.participant_id,
+            alice.device,
+            alice_session.signer_key_id,
+            call_id,
+            revision,
+            descriptor["groupId"].as_str().unwrap(),
+            0,
+            stale_event_id,
+            artifacts.next_crypto_state.epoch,
+            next_ref,
+            bob.device,
+            bob_session.signer_key_id,
+            package_digest,
+            sha256_b64(&artifacts.commit),
+            sha256_b64(welcome),
+        ]),
+    )
+    .unwrap();
+    let mut stale = add_peer_request.clone();
+    stale["eventId"] = json!(stale_event_id);
+    stale["signatureBase64Url"] =
+        json!(URL_SAFE_NO_PAD.encode(alice_signer.sign(stale_proof.as_bytes()).to_bytes()));
+    assert_eq!(
+        call(&server, &alice, "/v1/first-party/call/mls-add-peer", &stale),
+        Err(StatusCode::CONFLICT)
+    );
     let admitted_descriptor = call(
         &server,
         &alice,
