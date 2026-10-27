@@ -39,7 +39,7 @@ use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
     ConversationRecord, ConversationRef, DeliveryPolicy, DeviceDescriptor, DeviceId,
-    DeviceLifecycleState, EventId, GroupChange, GroupChangeKind, GroupCryptoState,
+    DeviceLifecycleState, EventId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
     GroupHistoryPolicy, GroupMediaState, GroupOwnership, GroupRecord, GroupRole, IdentityId, KeyId,
     KeyPurpose, NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor, ScopedPrincipal,
     TenantId, TenantScope,
