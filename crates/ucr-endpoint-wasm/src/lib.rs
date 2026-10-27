@@ -157,6 +157,83 @@ impl EndpointMlsState {
         })
     }
 
+    /// Seal an epoch-zero creator Group before publishing its signed descriptor.
+    /// This domain is separate from an admitted epoch snapshot, so an uncertain
+    /// HTTP create acknowledgement can be retried without minting a new Group.
+    pub fn seal_unpublished_group(&self, wrapping_key: &[u8]) -> Result<Vec<u8>, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: unpublished Group has pending transition"));
+        }
+        let group = self
+            .group
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: unpublished Group missing"))?;
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: unpublished Group state missing"))?;
+        if state.epoch != 0
+            || current_crypto_state(&self.scope, &self.group_id, group).map_err(debug_error)?
+                != *state
+            || own_device_id(group, &self.scope).map_err(debug_error)? != self.device_id
+        {
+            return Err(js_error("mls_state: only own verified epoch-zero Group may be staged"));
+        }
+        let key = EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
+            .map_err(debug_error)?;
+        let storage = export_browser_memory_snapshot(&self.provider).map_err(debug_error)?;
+        let plaintext = encode_snapshot_plaintext(&self.key_package, &storage)?;
+        let aad = unpublished_group_aad(&self.scope, &self.group_id, &self.device_id)?;
+        let sealed = seal_endpoint_state(&key, &aad, &plaintext).map_err(debug_error)?;
+        encode_sealed_snapshot(&sealed)
+    }
+
+    /// Recover only the exact creator's unpublished epoch-zero OpenMLS Group.
+    /// The locally verified authenticator supplies the public descriptor for
+    /// idempotent retry; no server-held seed or guessed epoch is introduced.
+    #[wasm_bindgen(js_name = restore_unpublished_group)]
+    pub fn restore_unpublished_group(
+        tenant_id: String,
+        namespace_id: Option<String>,
+        group_id: String,
+        device_id: String,
+        wrapping_key: &[u8],
+        snapshot: &[u8],
+    ) -> Result<EndpointMlsState, JsValue> {
+        let scope = tenant_scope(tenant_id, namespace_id)?;
+        let group_id = GroupId::from_opaque(opaque(group_id, "group_id")?);
+        let device_id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
+        let key = EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
+            .map_err(debug_error)?;
+        let sealed = decode_sealed_snapshot(snapshot)?;
+        let aad = unpublished_group_aad(&scope, &group_id, &device_id)?;
+        let plaintext = open_endpoint_state(&key, &aad, &sealed).map_err(debug_error)?;
+        let (key_package, storage_snapshot) = decode_snapshot_plaintext(plaintext.as_slice())?;
+        let provider = import_browser_memory_snapshot(storage_snapshot).map_err(debug_error)?;
+        let group = load_group(&provider, &scope, &group_id)
+            .map_err(debug_error)?
+            .ok_or_else(|| js_error("mls_state: unpublished Group missing from snapshot"))?;
+        let state = current_crypto_state(&scope, &group_id, &group).map_err(debug_error)?;
+        if state.epoch != 0
+            || own_device_id(&group, &scope).map_err(debug_error)? != device_id
+        {
+            return Err(js_error("mls_state: unpublished Group owner or epoch mismatch"));
+        }
+        Ok(Self {
+            provider,
+            scope,
+            group_id,
+            device_id,
+            key_package: key_package.to_vec(),
+            signer_public_key: Vec::new(),
+            group: Some(group),
+            state: Some(state),
+            pending_transition: None,
+            media_generation: Rc::new(Cell::new(0)),
+            direct_roster_generation: Cell::new(None),
+        })
+    }
+
     /// Creates the media MLS group entirely within this endpoint's OpenMLS provider.
     /// `signer_public_key` must be the public signer generated with this endpoint's
     /// KeyPackage; OpenMLS rejects a signer absent from local private storage.
@@ -735,6 +812,19 @@ fn endpoint_snapshot_aad(
         .as_ref()
         .ok_or_else(|| js_error("mls_state: missing crypto state reference"))?;
     push_snapshot_bytes(&mut aad, state_ref.as_wire_bytes())?;
+    Ok(aad)
+}
+
+/// A prepublication creator snapshot cannot be opened as an admitted Group
+/// or a recipient's pending KeyPackage, even for the same Device.
+fn unpublished_group_aad(
+    scope: &TenantScope,
+    group_id: &GroupId,
+    device_id: &DeviceId,
+) -> Result<Vec<u8>, JsValue> {
+    let marker = group_crypto_state(0, "ucr-unpublished-group-v1".to_owned())?;
+    let mut aad = endpoint_snapshot_aad(scope, group_id, device_id, &marker)?;
+    aad.extend_from_slice(b"\0creator-prepublication-only");
     Ok(aad)
 }
 
