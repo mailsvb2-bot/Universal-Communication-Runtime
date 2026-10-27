@@ -68,28 +68,9 @@ function parseEndpointMlsCallDescriptor(value: unknown): UcrEndpointMlsCallDescr
       (typeof peer === "string" && !/^[A-Za-z0-9_.:@-]{1,128}$/.test(peer))) {
     throw new Error("missing or untrusted committed MLS peer Device");
   }
-  const epoch = value.cryptoEpoch;
-  const revision = value.groupRevision;
-  const stateRef = value.cryptoStateRef;
-  const peerDevice = value.expectedPeerDeviceId;
-  if ((epoch !== null && (!Number.isSafeInteger(epoch) || Number(epoch) < 0)) ||
-      (revision !== null && (!Number.isSafeInteger(revision) || Number(revision) < 0)) ||
-      (stateRef !== null && typeof stateRef !== "string") ||
-      (peerDevice !== null && typeof peerDevice !== "string") ||
-      (epoch === null) !== (stateRef === null) ||
-      (epoch === null && revision !== null) ||
-      (epoch !== null && revision === null) ||
-      (epoch !== null && Number(epoch) > 0 && peerDevice === null) ||
-      (epoch !== null && Number(epoch) === 0 && peerDevice !== null)) {
-    throw new Error("inconsistent canonical MLS epoch, Group revision or Device roster");
-  }
   return Object.freeze({
     callId: requiredId(value.callId, "Call"),
     expectedRevision: Number(value.expectedRevision),
-    expectedPeerDeviceId: peerDevice === null ? null : requiredId(peerDevice, "peer Device"),
-    groupRevision: revision === null ? null : Number(revision),
-    cryptoEpoch: epoch === null ? null : Number(epoch),
-    cryptoStateRef: stateRef === null ? null : requiredId(stateRef, "MLS state"),
     groupRevision: absent ? null : Number(value.groupRevision),
     expectedPeerDeviceId: typeof peer === "string" ? peer : null,
     cryptoEpoch: absent ? null : Number(value.cryptoEpoch),
