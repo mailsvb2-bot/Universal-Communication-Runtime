@@ -820,6 +820,33 @@ Promise.resolve()
             and vault_after.get("ok") is True
         )
 
+        # Real browser race: simultaneous tabs/callers must recover the SAME
+        # atomically inserted MLS snapshot wrapping key, never last-writer-wins.
+        # A lost KEK would permanently strand an endpoint-owned MLS state.
+        wrapping_key_race = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+(async () => {
+  const key = "ucr-mls-wrapping-race:" + crypto.randomUUID();
+  const candidates = await Promise.all(Array.from({length: 16}, () =>
+    window.ucrEndpointWrappingKeyVault.getWrappingKey(key)));
+  const first = candidates[0];
+  const same = candidates.every(bytes =>
+    bytes.length === 32 && bytes.every((value, index) => value === first[index]));
+  const record = await readEndpointWrappingKeyRecord(key);
+  const persisted = await window.ucrEndpointWrappingKeyVault.getWrappingKey(key);
+  const restored = persisted.every((value, index) => value === first[index]);
+  for (const bytes of candidates) bytes.fill(0);
+  persisted.fill(0);
+  return {ok:same && restored && !!record && record.kek.extractable === false,
+    contenders:16, same, restored, nonExtractable:record?.kek.extractable === false};
+})().then(done).catch(error => done({ok:false,error:String(error)}));
+""",
+        )
+        if not isinstance(wrapping_key_race, dict) or wrapping_key_race.get("ok") is not True:
+            raise RuntimeError(f"concurrent MLS wrapping-key creation failed: {wrapping_key_race!r}")
+
         # Real browser codec execution, not a capability-name checkbox. This synthetic
         # local frame probe is intentionally NOT evidence of WAN/TURN or two-device QoE.
         full_hd_codec_probe = execute_async(
@@ -1176,7 +1203,40 @@ const done = arguments[arguments.length - 1];
   ]);
   upgraded.close();
   await deleteDb();
-  done({ok:true,blockedRejected:rejected,lateConnectionDidNotBlockNextUpgrade:true});
+  // Repeat against client.html's own MLS snapshot database opener. It shares
+  // the same DB but has a separate blocked-upgrade/late-onsuccess lifecycle.
+  const oldClient = await Promise.race([
+    new Promise((resolve, reject) => {
+      const request = indexedDB.open(name, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("sealed-snapshots");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("client v1 open failed"));
+    }),
+    timeout("client version 1 open")
+  ]);
+  let clientRejected = false;
+  try {
+    try {
+      await Promise.race([openEndpointStateDb(), timeout("blocked client MLS open")]);
+    } catch (error) {
+      clientRejected = String(error).includes("IndexedDB upgrade blocked");
+    }
+  } finally {
+    oldClient.close();
+  }
+  if (!clientRejected) throw new Error("blocked client MLS open did not fail closed");
+  const upgradedClient = await Promise.race([
+    new Promise((resolve, reject) => {
+      const request = indexedDB.open(name, 3);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("client v3 open failed"));
+    }),
+    timeout("client late-open orphan blocked version 3")
+  ]);
+  upgradedClient.close();
+  await deleteDb();
+  done({ok:true,blockedRejected:rejected,clientBlockedRejected:clientRejected,
+    lateConnectionDidNotBlockNextUpgrade:true,clientLateConnectionClosed:true});
 })().catch(error => done({ok:false,error:String(error)}));
 """,
             )
@@ -1258,6 +1318,7 @@ const done = arguments[arguments.length - 1];
             "schema": "ucr.browser-compatibility.v1",
             "heartbeat_revocation_browser": heartbeat_revocation_browser,
             "indexeddb_blocked_upgrade_browser": blocked_upgrade_browser,
+            "endpoint_wrapping_key_concurrency": wrapping_key_race,
             "browser_requested": args.browser,
             "browser_name": reported.get("browserName"),
             "browser_version": reported.get("browserVersion"),
@@ -1291,6 +1352,7 @@ const done = arguments[arguments.length - 1];
                 "raw_export_rejected": vault_before.get("exportRejected") is True and vault_after.get("exportRejected") is True,
                 "wrapped_not_raw": vault_before.get("wrappedEqualsRaw") is False,
                 "reload_same_dek": vault_reload_verified,
+                "atomic_first_writer_wins": wrapping_key_race.get("ok") is True,
                 "before_refresh": vault_before,
                 "after_refresh": vault_after,
             },
