@@ -1345,7 +1345,8 @@ impl RealtimeSessionRegistry {
         claims: &RealtimeSessionClaims,
         now_unix_ms: i64,
     ) -> Result<(), RealtimeRegistryError> {
-        self.current_join_generation(claims, now_unix_ms).map(|_| ())
+        self.current_join_generation(claims, now_unix_ms)
+            .map(|_| ())
     }
 
     /// Stable generation of the current Join, not the mutable attendance
