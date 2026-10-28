@@ -524,9 +524,16 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .registry
             .leave_if_sequence(claims, expected_session_sequence, now_unix_ms)
             .map_err(map_registry_error)?;
+        // Revocation and downlink retirement are now committed under the
+        // Join/Leave gate. A slow provider close must not block unrelated
+        // Calls from revoking their own grants.
+        drop(_guard);
         let close_result = self
             .confirm_pending_webrtc_close(&claims.scope, &claims.call_id, &claims.session_id)
             .await;
+        // Recheck placement under the same Join/Leave gate: a new authorized
+        // session may have joined while the provider was closing.
+        let _placement_guard = self.sfu_placement_transition_guard().await;
         // Return the retirement transition even if provider shutdown failed.
         // The caller MUST persist attendance and clear ephemeral UI state,
         // then report the failed provider shutdown; the retry queue survives.
@@ -2923,12 +2930,15 @@ where
             .map_err(map_registry_error)?;
         let mut first_error = None;
         for (scope, call_id, session_id) in pending {
-            let _placement_guard = self.sfu_placement_transition_guard().await;
+            // Provider shutdown can block indefinitely. It must not hold the
+            // global Join/Leave gate while another Call needs to revoke access.
             let result = match self
                 .confirm_pending_webrtc_close(&scope, &call_id, &session_id)
                 .await
             {
                 Ok(()) => {
+                    // Placement release still serializes with fresh Join.
+                    let _placement_guard = self.sfu_placement_transition_guard().await;
                     self.release_sfu_call_placement_for_call_if_inactive(
                         &scope,
                         &call_id,
@@ -3019,6 +3029,9 @@ where
                 retired_sessions.push(claims.session_id.clone());
             }
 
+            // All downlinks are already retired. Provider shutdown must not
+            // monopolize the cross-Call Join/Leave gate.
+            drop(_placement_guard);
             for session_id in retired_sessions {
                 if let Err(error) = self
                     .confirm_pending_webrtc_close(&scope, &call_id, &session_id)
@@ -3027,6 +3040,8 @@ where
                     first_cleanup_error.get_or_insert(error);
                 }
             }
+            // Serialize placement release with any concurrent fresh Join.
+            let _placement_guard = self.sfu_placement_transition_guard().await;
             if let Some(error) = first_cleanup_error {
                 first_error.get_or_insert(error);
                 continue;
@@ -4760,6 +4775,153 @@ mod sfu_placement_lifecycle_tests {
                 Ok(())
             }
         }
+    }
+
+    #[derive(Debug)]
+    struct BlockingCloseProvider {
+        blocked_session: SessionId,
+        entered: tokio::sync::Notify,
+        release: (std::sync::Mutex<bool>, std::sync::Condvar),
+    }
+
+    impl BlockingCloseProvider {
+        fn unblock(&self) {
+            let (lock, condition) = &self.release;
+            *lock.lock().expect("provider release lock") = true;
+            condition.notify_all();
+        }
+    }
+
+    impl WebRtcProvider for BlockingCloseProvider {
+        fn current_capabilities(&self) -> Vec<ucr_protocol::CapabilityDescriptor> {
+            Vec::new()
+        }
+
+        fn create_session(
+            &self,
+            _config: &ucr_webrtc::WebRtcSessionConfig,
+        ) -> Result<WebRtcSessionDescription, WebRtcProviderError> {
+            Err(WebRtcProviderError::SessionUnavailable)
+        }
+
+        fn restart_session(
+            &self,
+            _config: &ucr_webrtc::WebRtcSessionConfig,
+        ) -> Result<WebRtcSessionDescription, WebRtcProviderError> {
+            Err(WebRtcProviderError::SessionUnavailable)
+        }
+
+        fn set_remote_description(
+            &self,
+            _description: &WebRtcSessionDescription,
+        ) -> Result<(), WebRtcProviderError> {
+            Err(WebRtcProviderError::SessionUnavailable)
+        }
+
+        fn add_remote_candidate(
+            &self,
+            _candidate: &WebRtcIceCandidate,
+        ) -> Result<(), WebRtcProviderError> {
+            Err(WebRtcProviderError::SessionUnavailable)
+        }
+
+        fn close_session(&self, session_id: &SessionId) -> Result<(), WebRtcProviderError> {
+            if session_id == &self.blocked_session {
+                self.entered.notify_one();
+                let (lock, condition) = &self.release;
+                let mut released = lock.lock().expect("provider release lock");
+                while !*released {
+                    released = condition.wait(released).expect("provider release wait");
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_close_for_one_call_cannot_delay_other_call_revoke() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([17_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("issuer"),
+        );
+        let blocked = claims("blocked-provider-session", "blocked-provider-device");
+        let provider = Arc::new(BlockingCloseProvider {
+            blocked_session: blocked.session_id.clone(),
+            entered: tokio::sync::Notify::new(),
+            release: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+        });
+        let provider_dyn: Arc<dyn WebRtcProvider> = provider.clone();
+        let service = GrpcRealtimeService::with_webrtc(
+            Arc::new(()),
+            Arc::new(()),
+            Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
+            Arc::clone(&issuer),
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+            RealtimeWebRtcDependencies::new(
+                provider_dyn,
+                Arc::new(WebRtcSessionConfigFactory::default()),
+            ),
+        );
+        let mut other = claims("independent-call-session", "independent-call-device");
+        other.call_id = CallId::from_opaque(id("independent-call-id"));
+        let other = issuer
+            .issue(
+                other.scope,
+                other.call_id,
+                other.participant,
+                other.device_id,
+                300,
+                1_000,
+            )
+            .expect("canonical independent grant")
+            .claims;
+        let joined = service
+            .admit_realtime_session_with_sfu_placement(other.clone(), 1_001)
+            .await
+            .expect("independent Join");
+        registry
+            .queue_webrtc_close(&blocked)
+            .expect("queue unrelated provider shutdown");
+
+        let entered = provider.entered.notified();
+        let retry_service = service.clone();
+        let retry = tokio::spawn(async move {
+            retry_service.retry_pending_webrtc_closes(1_002).await
+        });
+        entered.await;
+        let leave = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            service.leave_realtime_session_with_sfu_placement(
+                &other,
+                1_003,
+                joined.join_generation,
+            ),
+        )
+        .await;
+        // Always unblock the fixture before asserting, including on timeout.
+        provider.unblock();
+        let (_transition, cleanup) = leave
+            .expect("unrelated Call must revoke while first provider is blocked")
+            .expect("independent canonical Leave");
+        cleanup.expect("independent provider shutdown");
+        assert_eq!(registry.active_session_count(), 0);
+        assert_eq!(
+            issuer.validate_live_claims(&other, 1_004),
+            Err(JoinTokenError::Revoked),
+            "blocked unrelated provider must not delay durable revocation"
+        );
+        retry.await.expect("retry task").expect("provider unblocked");
+        assert!(
+            registry
+                .pending_webrtc_closes()
+                .expect("shutdown coordinates")
+                .is_empty()
+        );
     }
 
     fn assert_revoked_pending_downlink(
