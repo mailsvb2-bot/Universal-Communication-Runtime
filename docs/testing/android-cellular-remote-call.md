@@ -13,3 +13,32 @@ This prints specific blockers and exits nonzero, leaving the existing successful
 Production-grade remote mode must add: authenticated/restricted public ingress to only the first-party UI and intended APIs, externally valid TLS/Origin, issuer-bound accepted-Call Join, a publicly reachable ICE media candidate or authenticated TURN relaying configured on the actual media implementation, and handset-side verification of A/V/E2EE over mobile data. A generic HTTPS quick tunnel does not relay arbitrary WebRTC UDP and is **not** sufficient. Do not publish the self-service BFF or the operator gRPC endpoint over an unauthenticated quick tunnel.
 
 Acceptance: start one command on Windows, get a time-limited HTTPS address, Android Chrome joins with independently authenticated Device over cellular, maintain >30 minutes bidirectional audio/video across renewal, prove E2EE and proper capture teardown, emit two redacted diagnostics. Until demonstrated, fail closed rather than claiming production-ready remote calling.
+
+## Opt-in public HTTPS edge on the same Windows UCR runtime (PR #330)
+
+The canonical Windows launcher accepts `-PublicOrigin`, `-PublicCertificate`,
+`-PublicPrivateKey` and `-PublicEdgeBind`. It builds the same runtime,
+BFF and HTTPS edge. The gRPC, operator, HTTP gateway and first-party BFF
+remain bound to loopback; only the TLS edge can bind publicly on TCP 443.
+This is **not** a tunnel and **does not** provision DNS, an internet-routable
+host, firewall/NAT mapping, public trust, TURN or second Device enrollment.
+
+Invoke only with a publicly trusted DNS certificate and verified network
+configuration (example paths/names are placeholders, not a live endpoint):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\windows\start-local-first-party-https.ps1" -PublicOrigin "https://call.example.org" -PublicCertificate "C:\certs\fullchain.pem" -PublicPrivateKey "C:\certs\privkey.pem"
+```
+
+The launcher validates HTTPS origin, expiry, key/certificate match and
+hostname; it never installs a public CA into Windows trust. It checks edge
+and bootstrap readiness through HTTPS and explicitly prints
+`UCR_PUBLIC_HTTPS_EDGE_STARTED_NOT_A_CALL_PROOF`, not a successful call.
+Do not use publicly reachable ingress without independently authenticated
+Devices, explicit firewall restrictions, tested public ICE/TURN on the actual
+media provider, rate limiting and an operational security review. The TLS
+edge being reachable is **not** evidence that remote WebRTC works.
+
+The Android-cellular acceptance criteria below remain mandatory: Call →
+authenticated Join → endpoint MLS → actual two-sided media → enforced
+revocation and measured stop, across independent networks.
