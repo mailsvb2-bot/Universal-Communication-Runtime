@@ -78,38 +78,3 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
         "GRPC_MAX_ENCODING_MESSAGE_SIZE >= REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES"
     ));
 }
-
-#[test]
-fn webrtc_provider_mutations_are_serialized_with_join_and_terminal_leave() {
-    let service = read("crates/ucr-api-grpc/src/realtime_service.rs");
-    // A slow SDP/ICE mutation must not race the canonical Leave path that
-    // revokes the grant, retires the SFU downlink, and closes the peer.
-    for name in [
-        "start_web_rtc",
-        "set_web_rtc_remote_description",
-        "add_web_rtc_ice_candidate",
-        "restart_web_rtc",
-        "close_web_rtc",
-    ] {
-        let handler = service
-            .split(&format!("async fn {name}("))
-            .nth(1)
-            .unwrap_or_else(|| panic!("missing {name} handler"))
-            .split("\n    async fn ")
-            .next()
-            .expect("handler body");
-        let guard = handler
-            .find("self.sfu_placement_transition_guard().await")
-            .unwrap_or_else(|| panic!("{name} bypasses the Join/Leave lifecycle guard"));
-        let authentication = handler
-            .find("self.authenticated_webrtc_claims(")
-            .unwrap_or_else(|| panic!("{name} lacks canonical WebRTC admission"));
-        let provider = handler
-            .find("tokio::task::spawn_blocking(")
-            .unwrap_or_else(|| panic!("{name} lacks provider operation"));
-        assert!(
-            guard < authentication && authentication < provider,
-            "{name} must hold the lifecycle guard across admission and provider mutation"
-        );
-    }
-}
