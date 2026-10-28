@@ -877,19 +877,27 @@ async fn handle_live_create(
         return;
     }
     match create_live_peer_connection(&config, e2ee_ingress.cloned()).await {
-        Ok((session, description)) => {
+        Ok((mut session, description)) => {
+            let peer_connection = Arc::clone(&session.peer_connection);
+            session.offer_id = webrtc_offer_id(&description.sdp);
+            // Track the peer before handling an expired or abandoned Create.
+            // A failed close must not lose the only handle to a live transport.
+            sessions.insert(key.clone(), session);
             if shutdown.load(Ordering::Acquire) || command_expired(deadline) {
-                let _ = session.peer_connection.close().await;
+                let result = peer_connection
+                    .close()
+                    .await
+                    .map_err(|_| WebRtcProviderError::Internal);
+                let _ = retire_peer_only_after_confirmed_close(sessions, &key, result);
                 let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
                 return;
             }
-            let peer_connection = Arc::clone(&session.peer_connection);
-            let mut session = session;
-            session.offer_id = webrtc_offer_id(&description.sdp);
-            sessions.insert(key.clone(), session);
             if reply.send(Ok(description)).is_err() {
-                sessions.remove(&key);
-                let _ = peer_connection.close().await;
+                let result = peer_connection
+                    .close()
+                    .await
+                    .map_err(|_| WebRtcProviderError::Internal);
+                let _ = retire_peer_only_after_confirmed_close(sessions, &key, result);
             }
         }
         Err(error) => {
@@ -1635,6 +1643,41 @@ mod tests {
 
         let offer = provider.create_session(&config).expect("retry live offer");
         assert_eq!(offer.session_id, session_id);
+        assert_eq!(provider.close_session(&session_id), Ok(()));
+    }
+
+    #[test]
+    fn abandoned_create_reply_does_not_orphan_peer_or_block_reuse() {
+        let provider = LiveWebRtcProvider::new().expect("live provider");
+        let session_id = SessionId::from_opaque(OpaqueId::new("abandoned-create").expect("id"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS))
+            .expect("future deadline");
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        drop(reply_rx);
+        provider
+            .command_tx
+            .as_ref()
+            .expect("command sender")
+            .try_send(LiveWebRtcCommand::Create {
+                config: config.clone(),
+                deadline,
+                reply: reply_tx,
+            })
+            .expect("queue abandoned create");
+        // The worker serializes this query after Create and its close.
+        assert_eq!(
+            provider.session_offer_id(&session_id),
+            Err(WebRtcProviderError::SessionUnavailable),
+            "abandoned successful offer must close before releasing its slot"
+        );
+        let replacement = provider.create_session(&config).expect("new owned offer");
+        assert_eq!(replacement.session_id, session_id);
         assert_eq!(provider.close_session(&session_id), Ok(()));
     }
 
