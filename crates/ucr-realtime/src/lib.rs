@@ -1332,6 +1332,22 @@ impl RealtimeSessionRegistry {
         Ok((entry.sequence, true))
     }
 
+    /// Checks that a signed session is still joined WITHOUT renewing its presence.
+    ///
+    /// Only the explicit, generation-fenced Heartbeat RPC may refresh a
+    /// first-party participant's connected roster lease. Transport activity
+    /// from an obsolete browser tab must not extend a replacement Join.
+    ///
+    /// # Errors
+    /// Fails for expiry, claim mismatch, missing session or unavailable state.
+    pub fn require_active_session(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<(), RealtimeRegistryError> {
+        self.current_join_generation(claims, now_unix_ms).map(|_| ())
+    }
+
     /// Stable generation of the current Join, not the mutable attendance
     /// sequence returned by heartbeat. Use this for external Leave fencing.
     ///
@@ -2172,6 +2188,55 @@ mod tests {
         registry
             .leave_if_sequence(&claims, second.join_generation, 18_005)
             .expect("new owner can leave");
+    }
+
+    #[test]
+    fn transport_validation_never_renews_reconnected_presence() {
+        let registry = RealtimeSessionRegistry::new(8, 4);
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("transport-presence-fence-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("transport-presence-fence-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let old = registry.join(claims.clone(), 18_001).expect("old Join");
+        let current = registry.join(claims.clone(), 18_002).expect("new Join");
+        assert_ne!(old.join_generation, current.join_generation);
+        let late = 18_002 + CONNECTED_HEARTBEAT_GRACE_MS + 1;
+        for _ in 0..16 {
+            registry
+                .require_active_session(&claims, late)
+                .expect("transport validation must remain read-only");
+        }
+        assert!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, late)
+                .expect("connected roster")
+                .is_empty(),
+            "transport requests must not refresh the replacement Join"
+        );
+        assert_eq!(
+            registry.heartbeat_if_join_generation(&claims, old.join_generation, late),
+            Ok(None),
+            "obsolete Join cannot renew the replacement"
+        );
+        assert_eq!(
+            registry.heartbeat_if_join_generation(&claims, current.join_generation, late),
+            Ok(Some(current.transition.session_sequence)),
+            "only the current generation may renew presence"
+        );
+        assert_eq!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, late)
+                .expect("renewed roster")
+                .len(),
+            1
+        );
     }
 
     #[test]
