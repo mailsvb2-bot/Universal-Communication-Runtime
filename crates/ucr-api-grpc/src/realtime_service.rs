@@ -488,21 +488,29 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .registry
             .leave_if_sequence(claims, expected_session_sequence, now_unix_ms)
             .map_err(map_registry_error)?;
-        self.append_attendance(&transition)?;
         let provider = Arc::clone(&self.webrtc_provider);
         let session_id = claims.session_id.clone();
-        match tokio::task::spawn_blocking(move || provider.close_session(&session_id)).await {
-            Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {
-                self.registry
-                    .acknowledge_webrtc_close(&claims.scope, &claims.call_id, &claims.session_id)
-                    .map_err(map_registry_error)?;
-            }
-            Ok(Err(error)) => return Err(map_webrtc_provider_error(error)),
-            Err(_) => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
-        }
-        let placement_cleanup = self
-            .release_sfu_call_placement_if_inactive(claims, now_unix_ms)
-            .await;
+        let close_result = match tokio::task::spawn_blocking(move || {
+            provider.close_session(&session_id)
+        })
+        .await
+        {
+            Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => self
+                .registry
+                .acknowledge_webrtc_close(&claims.scope, &claims.call_id, &claims.session_id)
+                .map_err(map_registry_error),
+            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+        };
+        // Return the retirement transition even if provider shutdown failed.
+        // The caller MUST persist attendance and clear ephemeral UI state,
+        // then report the failed provider shutdown; the retry queue survives.
+        let placement_cleanup = match close_result {
+            Ok(()) => self
+                .release_sfu_call_placement_if_inactive(claims, now_unix_ms)
+                .await,
+            Err(error) => Err(error),
+        };
         Ok((transition, placement_cleanup))
     }
 
@@ -809,9 +817,9 @@ where
                             expected_session_sequence,
                         )
                         .await?;
-                    // Attendance was already durably appended while retiring
-                    // the live downlink, before provider shutdown was attempted.
-                    let _ = transition;
+                    // Always record departure and clear ephemeral UI state,
+                    // even when the provider close remains pending for retry.
+                    self.append_attendance(&transition)?;
                     conference_runtime(self)
                         .clear_raised_hand(&claims.scope, &claims.call_id, &claims.participant)
                         .map_err(|error| map_conference_error(&error))?;
@@ -4535,10 +4543,12 @@ mod sfu_placement_lifecycle_tests {
         assert_eq!(ordinary_sweep.sessions_reaped, 0);
         assert_eq!(provider.close_attempts.load(Ordering::SeqCst), 0);
 
+        let (_, close_result) = service
+            .leave_realtime_session_with_sfu_placement(&active, 1_003, joined.join_generation)
+            .await
+            .expect("revoke and retire the live downlink");
         assert_eq!(
-            service
-                .leave_realtime_session_with_sfu_placement(&active, 1_003, joined.join_generation)
-                .await,
+            close_result,
             Err(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
         );
         assert_eq!(provider.close_attempts.load(Ordering::SeqCst), 1);
