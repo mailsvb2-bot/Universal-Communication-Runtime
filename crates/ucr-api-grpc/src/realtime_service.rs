@@ -2984,6 +2984,7 @@ where
             // Otherwise one failed close leaves the next terminated participant
             // active in the SFU registry until another cleanup sweep.
             let mut retired_sessions = Vec::new();
+            let mut first_cleanup_error = None;
             for claims in active_claims
                 .iter()
                 .filter(|claims| claims.scope == scope && claims.call_id == call_id)
@@ -3004,21 +3005,24 @@ where
                     .registry
                     .leave_if_sequence(claims, generation, now_unix_ms)
                     .map_err(map_registry_error)?;
-                self.append_attendance(&transition)?;
+                // A failed attendance journal write must not leave other
+                // terminated recipients active in the SFU registry.
+                if let Err(error) = self.append_attendance(&transition) {
+                    first_cleanup_error.get_or_insert(error);
+                }
                 sweep.sessions_reaped = sweep.sessions_reaped.saturating_add(1);
                 retired_sessions.push(claims.session_id.clone());
             }
 
-            let mut first_close_error = None;
             for session_id in retired_sessions {
                 if let Err(error) = self
                     .confirm_pending_webrtc_close(&scope, &call_id, &session_id)
                     .await
                 {
-                    first_close_error.get_or_insert(error);
+                    first_cleanup_error.get_or_insert(error);
                 }
             }
-            if let Some(error) = first_close_error {
+            if let Some(error) = first_cleanup_error {
                 return Err(error);
             }
 
