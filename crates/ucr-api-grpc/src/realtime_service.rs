@@ -4581,7 +4581,10 @@ mod sfu_placement_lifecycle_tests {
             "revoked downlink must not remain in the active SFU roster"
         );
         assert_eq!(
-            registry.pending_webrtc_closes().expect("pending close").len(),
+            registry
+                .pending_webrtc_closes()
+                .expect("pending close")
+                .len(),
             1,
             "failed provider close must retain shutdown coordinates"
         );
