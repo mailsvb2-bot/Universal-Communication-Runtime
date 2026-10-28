@@ -489,17 +489,9 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .registry
             .leave_if_sequence(claims, expected_session_sequence, now_unix_ms)
             .map_err(map_registry_error)?;
-        let provider = Arc::clone(&self.webrtc_provider);
-        let session_id = claims.session_id.clone();
-        let close_result =
-            match tokio::task::spawn_blocking(move || provider.close_session(&session_id)).await {
-                Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => self
-                    .registry
-                    .acknowledge_webrtc_close(&claims.scope, &claims.call_id, &claims.session_id)
-                    .map_err(map_registry_error),
-                Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
-                Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
-            };
+        let close_result = self
+            .confirm_pending_webrtc_close(&claims.scope, &claims.call_id, &claims.session_id)
+            .await;
         // Return the retirement transition even if provider shutdown failed.
         // The caller MUST persist attendance and clear ephemeral UI state,
         // then report the failed provider shutdown; the retry queue survives.
@@ -2894,6 +2886,27 @@ where
         self.cleanup_closed_conferences_at(now_unix_ms).await
     }
 
+    // The pending shutdown coordinates are retained until the provider confirms
+    // closure. Leave, terminal Call cleanup and subsequent sweeps MUST share
+    // this exact acknowledgement boundary; an error cannot discard a retry.
+    async fn confirm_pending_webrtc_close(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        session_id: &SessionId,
+    ) -> Result<(), CanonicalError> {
+        let provider = Arc::clone(&self.webrtc_provider);
+        let closing_session = session_id.clone();
+        match tokio::task::spawn_blocking(move || provider.close_session(&closing_session)).await {
+            Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => self
+                .registry
+                .acknowledge_webrtc_close(scope, call_id, session_id)
+                .map_err(map_registry_error),
+            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+        }
+    }
+
     async fn cleanup_closed_conferences_at(
         &self,
         now_unix_ms: i64,
@@ -2928,18 +2941,8 @@ where
             .map_err(map_registry_error)?
         {
             let _placement_guard = self.sfu_placement_transition_guard().await;
-            let provider = Arc::clone(&self.webrtc_provider);
-            let closing_session = session_id.clone();
-            match tokio::task::spawn_blocking(move || provider.close_session(&closing_session))
-                .await
-            {
-                Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {}
-                Ok(Err(error)) => return Err(map_webrtc_provider_error(error)),
-                Err(_) => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
-            }
-            self.registry
-                .acknowledge_webrtc_close(&scope, &call_id, &session_id)
-                .map_err(map_registry_error)?;
+            self.confirm_pending_webrtc_close(&scope, &call_id, &session_id)
+                .await?;
             self.release_sfu_call_placement_for_call_if_inactive(&scope, &call_id, now_unix_ms)
                 .await?;
         }
@@ -2979,22 +2982,12 @@ where
                 self.append_attendance(&transition)?;
                 sweep.sessions_reaped = sweep.sessions_reaped.saturating_add(1);
 
-                let provider = Arc::clone(&self.webrtc_provider);
-                let session_id = claims.session_id.clone();
-                match tokio::task::spawn_blocking(move || provider.close_session(&session_id)).await
-                {
-                    Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {
-                        self.registry
-                            .acknowledge_webrtc_close(
-                                &claims.scope,
-                                &claims.call_id,
-                                &claims.session_id,
-                            )
-                            .map_err(map_registry_error)?;
-                    }
-                    Ok(Err(error)) => return Err(map_webrtc_provider_error(error)),
-                    Err(_) => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
-                }
+                self.confirm_pending_webrtc_close(
+                    &claims.scope,
+                    &claims.call_id,
+                    &claims.session_id,
+                )
+                .await?;
             }
 
             if let Some(lifecycle) = &self.sfu_placement_lifecycle {
@@ -4530,11 +4523,11 @@ mod sfu_placement_lifecycle_tests {
     }
 
     #[derive(Debug, Default)]
-    struct CloseFailsOnceProvider {
+    struct CloseFailsTwiceProvider {
         close_attempts: AtomicUsize,
     }
 
-    impl WebRtcProvider for CloseFailsOnceProvider {
+    impl WebRtcProvider for CloseFailsTwiceProvider {
         fn current_capabilities(&self) -> Vec<ucr_protocol::CapabilityDescriptor> {
             Vec::new()
         }
@@ -4568,12 +4561,35 @@ mod sfu_placement_lifecycle_tests {
         }
 
         fn close_session(&self, _session_id: &SessionId) -> Result<(), WebRtcProviderError> {
-            if self.close_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            if self.close_attempts.fetch_add(1, Ordering::SeqCst) < 2 {
                 Err(WebRtcProviderError::TemporarilyUnavailable)
             } else {
                 Ok(())
             }
         }
+    }
+
+    fn assert_revoked_pending_downlink(
+        registry: &RealtimeSessionRegistry,
+        issuer: &JoinTokenIssuer,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) {
+        assert_eq!(
+            registry.active_session_count(),
+            0,
+            "revoked downlink must not remain in the active SFU roster"
+        );
+        assert_eq!(
+            registry.pending_webrtc_closes().expect("pending close").len(),
+            1,
+            "failed provider close must retain shutdown coordinates"
+        );
+        assert_eq!(
+            issuer.validate_live_claims(claims, now_unix_ms),
+            Err(JoinTokenError::Revoked),
+            "failed close must never reauthorize a publisher"
+        );
     }
 
     #[tokio::test]
@@ -4586,7 +4602,7 @@ mod sfu_placement_lifecycle_tests {
             )
             .expect("issuer"),
         );
-        let provider = Arc::new(CloseFailsOnceProvider::default());
+        let provider = Arc::new(CloseFailsTwiceProvider::default());
         let provider_dyn: Arc<dyn WebRtcProvider> = provider.clone();
         let service = GrpcRealtimeService::with_webrtc(
             Arc::new(ucr_core::SystemServiceQuotaClock),
@@ -4635,24 +4651,7 @@ mod sfu_placement_lifecycle_tests {
             ))
         );
         assert_eq!(provider.close_attempts.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            registry.active_session_count(),
-            0,
-            "revoked downlink must be removed even when provider close fails"
-        );
-        assert_eq!(
-            registry
-                .pending_webrtc_closes()
-                .expect("pending close")
-                .len(),
-            1,
-            "failed provider close retains only shutdown coordinates"
-        );
-        assert_eq!(
-            issuer.validate_live_claims(&active, 1_004),
-            Err(JoinTokenError::Revoked),
-            "failed close must never reauthorize a media publisher"
-        );
+        assert_revoked_pending_downlink(&registry, &issuer, &active, 1_004);
         assert_eq!(
             service
                 .admit_realtime_session_with_sfu_placement(active.clone(), 1_004)
@@ -4661,8 +4660,18 @@ mod sfu_placement_lifecycle_tests {
             "revoked grant cannot reconnect while shutdown is pending"
         );
 
+        assert_eq!(
+            service.cleanup_closed_conferences_at(1_005).await,
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            )),
+            "a second provider failure must remain retryable"
+        );
+        assert_eq!(provider.close_attempts.load(Ordering::SeqCst), 2);
+        assert_revoked_pending_downlink(&registry, &issuer, &active, 1_005);
+
         let recovered = service
-            .cleanup_closed_conferences_at(1_005)
+            .cleanup_closed_conferences_at(1_006)
             .await
             .expect("sweep retries provider close using revoked canonical grant");
         assert_eq!(
@@ -4677,11 +4686,11 @@ mod sfu_placement_lifecycle_tests {
                 .is_empty(),
             "only a confirmed provider shutdown acknowledges the retry"
         );
-        assert_eq!(provider.close_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(provider.close_attempts.load(Ordering::SeqCst), 3);
         assert_eq!(registry.active_session_count(), 0);
         assert_eq!(
             service
-                .cleanup_closed_conferences_at(1_006)
+                .cleanup_closed_conferences_at(1_007)
                 .await
                 .expect("idempotent subsequent sweep")
                 .sessions_reaped,
