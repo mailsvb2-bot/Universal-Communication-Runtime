@@ -4338,7 +4338,11 @@ mod sfu_placement_lifecycle_tests {
     fn service<L>(
         registry: Arc<RealtimeSessionRegistry>,
         lifecycle: Arc<L>,
-    ) -> GrpcRealtimeService<(), (), ucr_storage_memory::MemoryLocalStore>
+    ) -> GrpcRealtimeService<
+        ucr_core::SystemServiceQuotaClock,
+        DenyTestAuthorization,
+        ucr_storage_memory::MemoryLocalStore,
+    >
     where
         L: RealtimeSfuPlacementLifecycle + 'static,
     {
@@ -4351,8 +4355,8 @@ mod sfu_placement_lifecycle_tests {
         );
         let lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle> = lifecycle;
         GrpcRealtimeService::new(
-            Arc::new(()),
-            Arc::new(()),
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(DenyTestAuthorization),
             Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
             join_issuer,
             registry,
