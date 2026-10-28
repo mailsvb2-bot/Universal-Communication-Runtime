@@ -1000,7 +1000,10 @@ async fn handle_live_close(
         let _ = reply.send(Err(WebRtcProviderError::SessionUnavailable));
         return;
     }
-    let result = match sessions.remove(&key) {
+    // Never discard the only live peer handle before the transport has
+    // confirmed closure. A failed close must remain retryable; otherwise a
+    // revoked session could keep sending after its registry entry is gone.
+    let result = match sessions.get(&key) {
         Some(session) => session
             .peer_connection
             .close()
@@ -1008,6 +1011,9 @@ async fn handle_live_close(
             .map_err(|_| WebRtcProviderError::Internal),
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
+    if result.is_ok() {
+        sessions.remove(&key);
+    }
     let _ = reply.send(result);
 }
 
@@ -1617,6 +1623,54 @@ mod tests {
         let offer = provider.create_session(&config).expect("retry live offer");
         assert_eq!(offer.session_id, session_id);
         assert_eq!(provider.close_session(&session_id), Ok(()));
+    }
+
+    #[test]
+    fn expired_queued_close_preserves_peer_for_retry() {
+        let provider = LiveWebRtcProvider::new().expect("live provider");
+        let session_id = SessionId::from_opaque(OpaqueId::new("close-retry").expect("id"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let offer = provider.create_session(&config).expect("live offer");
+        let offer_id = webrtc_offer_id(&offer.sdp);
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("expired deadline");
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        provider
+            .command_tx
+            .as_ref()
+            .expect("command sender")
+            .try_send(LiveWebRtcCommand::Close {
+                session_id: session_id.clone(),
+                offer_id: Some(offer_id.clone()),
+                deadline: expired,
+                reply: reply_tx,
+            })
+            .expect("queue expired close");
+        assert_eq!(
+            reply_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("expired close response"),
+            Err(WebRtcProviderError::TemporarilyUnavailable)
+        );
+        assert_eq!(
+            provider.session_offer_id(&session_id),
+            Ok(offer_id.clone()),
+            "timed-out close must not discard a live peer"
+        );
+        assert_eq!(
+            provider.close_session_if_offer_matches(&session_id, &offer_id),
+            Ok(()),
+            "authenticated retry must still be able to close the original peer"
+        );
+        assert_eq!(
+            provider.close_session(&session_id),
+            Err(WebRtcProviderError::SessionUnavailable)
+        );
     }
 
     #[test]
