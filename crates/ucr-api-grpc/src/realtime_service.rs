@@ -3026,6 +3026,23 @@ where
                 continue;
             }
 
+            // A prior Leave may have retired a different peer of this Call
+            // before this sweep. If its provider close still lacks an
+            // acknowledgement, do not release placement or erase the Call's
+            // ephemeral cleanup coordinates. The retry queue remains the
+            // canonical shutdown fence, even when no active peer remains.
+            if self
+                .registry
+                .pending_webrtc_closes()
+                .map_err(map_registry_error)?
+                .iter()
+                .any(|(pending_scope, pending_call, _)| {
+                    pending_scope == &scope && pending_call == &call_id
+                })
+            {
+                continue;
+            }
+
             if let Some(lifecycle) = &self.sfu_placement_lifecycle {
                 lifecycle.release_call_placement(&scope, &call_id).await?;
                 self.registry
@@ -4836,6 +4853,113 @@ mod sfu_placement_lifecycle_tests {
                 .len(),
             2,
             "both failed closes retain shutdown-only retry coordinates"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminated_call_keeps_placement_until_all_prior_peer_closes_are_confirmed() {
+        let registry = Arc::new(RealtimeSessionRegistry::with_expired_call_cleanup(8, 2));
+        let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([13_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("issuer"),
+        );
+        let store = Arc::new(ucr_storage_memory::MemoryLocalStore::default());
+        let binding = claims("active-terminated-session", "active-terminated-device");
+        persist_terminated_cleanup_call(&store, &binding);
+        let active = issuer
+            .issue(
+                binding.scope,
+                binding.call_id,
+                binding.participant,
+                binding.device_id,
+                300,
+                1_000,
+            )
+            .expect("signed grant")
+            .claims;
+        let provider = Arc::new(CloseFailsTwiceProvider::default());
+        let provider_dyn: Arc<dyn WebRtcProvider> = provider.clone();
+        let service = GrpcRealtimeService::with_webrtc(
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(DenyTestAuthorization),
+            store,
+            issuer,
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+            RealtimeWebRtcDependencies::new(
+                provider_dyn,
+                Arc::new(WebRtcSessionConfigFactory::default()),
+            ),
+        )
+        .with_sfu_placement_lifecycle(lifecycle.clone());
+        service
+            .admit_realtime_session_with_sfu_placement(active.clone(), 1_001)
+            .await
+            .expect("active downlink");
+
+        let mut older = claims("older-retired-session", "older-retired-device");
+        older.scope = active.scope.clone();
+        older.call_id = active.call_id.clone();
+        registry
+            .queue_webrtc_close(&older)
+            .expect("earlier revoked peer still awaiting shutdown");
+        // The second simulated provider failure belongs to the older peer;
+        // the active peer closes successfully later in the same sweep.
+        assert_eq!(
+            provider.close_session(&older.session_id),
+            Err(WebRtcProviderError::TemporarilyUnavailable)
+        );
+        assert_eq!(
+            service.cleanup_closed_conferences_at(1_005).await,
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            ))
+        );
+        assert_eq!(provider.close_attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(registry.active_session_count(), 0);
+        assert_eq!(
+            registry
+                .pending_webrtc_closes()
+                .expect("unconfirmed shutdown")
+                .len(),
+            1
+        );
+        assert_eq!(
+            lifecycle.releases.load(Ordering::Relaxed),
+            0,
+            "a successful close of one peer must not release another pending peer's placement"
+        );
+        assert_eq!(
+            registry
+                .expired_call_cleanup_candidates_at(1_005)
+                .expect("queued placement cleanup")
+                .len(),
+            1,
+            "pending placement cleanup must remain retryable"
+        );
+
+        service
+            .cleanup_closed_conferences_at(1_006)
+            .await
+            .expect("earlier peer eventually closes");
+        service
+            .sweep_expired_sfu_placements_at(1_007)
+            .await
+            .expect("release acknowledged placement");
+        assert!(
+            registry
+                .pending_webrtc_closes()
+                .expect("confirmed shutdowns")
+                .is_empty()
+        );
+        assert_eq!(
+            lifecycle.releases.load(Ordering::Relaxed),
+            1,
+            "placement may be released exactly once after all closes are confirmed"
         );
     }
 
