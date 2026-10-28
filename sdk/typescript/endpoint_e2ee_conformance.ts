@@ -1816,16 +1816,28 @@ const pendingRestartOffer = new Promise<any>(resolve => {
   releaseRestartOffer = resolve;
 });
 let staleRestartConfigWrites = 0;
+const restartOfferId = "A".repeat(43);
+const restartOwner = Object.freeze({
+  offerId: restartOfferId,
+  claims: Object.freeze({session_id: "original-ice-session"}),
+  token: "original-ice-grant",
+});
+const restartRequests: Array<{path: string; claims: unknown; grant: string}> = [];
 const iceCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 3,
   navigator: {onLine: true}, restarting: false,
+  startWebRtc: {offerId: restartOfferId, offerOwner: restartOwner},
   peer: {connectionState: "connected", setConfiguration() {
     staleRestartConfigWrites++;
   }},
   webrtcRetryTimer: null,
   ui: {privacyMode: {value: "secure"}, webrtcState: {textContent: ""},
     status: {textContent: ""}},
-  api: async () => pendingRestartOffer,
+  api: async (path: string, claims: unknown, _signal: unknown,
+              _keepalive: boolean, grant: string) => {
+    restartRequests.push({path, claims, grant});
+    return pendingRestartOffer;
+  },
   body: () => ({}), rtcNetworkConfiguration: () => ({}),
   clearTimeout() {},
 };
@@ -1834,12 +1846,19 @@ const staleIce = iceCtx.restart();
 iceCtx.mediaActive = false;
 iceCtx.mediaCaptureGeneration++;
 releaseRestartOffer?.({json: async () => ({
-  ice_servers: [], sdp_type: "offer", sdp: "stale-restart",
+  ice_servers: [], offer_id: restartOfferId,
+  sdp_type: "offer", sdp: "stale-restart",
 })});
 await assert.rejects(staleIce, /ICE restart cancelled by conference media teardown/);
 assert.equal(staleRestartConfigWrites, 0,
   "revoked conference must not install new ICE configuration");
 assert.equal(iceCtx.restarting, false, "aborted ICE restart must release restart guard");
+assert.equal(restartRequests.length, 1, "revoked ICE restart must not retry signaling");
+assert.equal(restartRequests[0].path, "/v1/realtime/webrtc/restart");
+assert.equal(restartRequests[0].claims, restartOwner.claims,
+  "ICE restart must use the original offer's session binding");
+assert.equal(restartRequests[0].grant, restartOwner.token,
+  "ICE restart must never borrow a refreshed bearer");
 
 // ICE restart may update SDP, but cannot silently switch the transport's
 // original close fence to an unrelated/replaced WebRTC peer.
@@ -1847,7 +1866,7 @@ let changedFenceConfigurationWrites = 0;
 const changedFenceCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 3,
   navigator: {onLine: true}, restarting: false,
-  startWebRtc: {offerId: "A".repeat(43)},
+  startWebRtc: {offerId: restartOfferId, offerOwner: restartOwner},
   peer: {connectionState: "connected", setConfiguration() {changedFenceConfigurationWrites++;}},
   webrtcRetryTimer: null,
   ui: {privacyMode: {value: "secure"}, webrtcState: {textContent: ""},
@@ -1862,6 +1881,23 @@ runInNewContext(restartCode + "\nthis.restart = restartIce;", changedFenceCtx);
 await assert.rejects(changedFenceCtx.restart(), /ICE restart changed immutable WebRTC transport offer identity/);
 assert.equal(changedFenceConfigurationWrites, 0, "wrong-owner ICE restart cannot alter network configuration");
 assert.equal(changedFenceCtx.restarting, false, "rejected ICE restart must release restart guard");
+
+// A replaced offer or absent original owner must fail before any ICE RPC.
+// A mutable global Join token is never an acceptable fallback.
+let missingOwnerRequests = 0;
+const missingOwnerCtx: Record<string, any> = {
+  ...changedFenceCtx,
+  restarting: false,
+  startWebRtc: {offerId: restartOfferId, offerOwner: null},
+  api: async () => {missingOwnerRequests++; throw new Error("unexpected ICE request");},
+};
+runInNewContext(restartCode + "\nthis.restart = restartIce;", missingOwnerCtx);
+await assert.rejects(missingOwnerCtx.restart(),
+  /ICE restart requires the original WebRTC offer authority/);
+assert.equal(missingOwnerRequests, 0,
+  "ICE restart without original authority must not contact the server");
+assert.equal(changedFenceConfigurationWrites, 0,
+  "missing authority must not reconfigure an unrelated peer");
 
 // Execute browser's canonical roster -> per-viewer SFU subscription journey.
 // The VM never supplies a parallel admission owner or a forged roster.
