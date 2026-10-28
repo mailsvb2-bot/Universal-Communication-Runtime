@@ -46,9 +46,11 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     assert!(heartbeat_handler.contains(".heartbeat_if_join_generation("));
     assert!(heartbeat_handler.contains("if request.expected_session_sequence == 0"));
     assert!(heartbeat_handler.contains("starts_with(\"fp-m-\")"));
-    assert!(!service
-        .replace(heartbeat_handler, "")
-        .contains(".heartbeat(&claims"));
+    assert!(
+        !service
+            .replace(heartbeat_handler, "")
+            .contains(".heartbeat(&claims")
+    );
     assert!(service.contains("self.device_bound_mls_bootstrap(&claims)"));
     assert!(service.contains(".device_id\n            .as_ref()"));
     assert!(
