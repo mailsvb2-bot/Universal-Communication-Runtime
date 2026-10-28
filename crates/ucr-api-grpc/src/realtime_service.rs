@@ -575,6 +575,20 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
                     .map_err(map_registry_error)?;
                 continue;
             }
+            // A revoked realtime session is no longer on the live roster,
+            // but its provider may still hold a peer. Never release its SFU
+            // placement before all pending WebRTC shutdowns are acknowledged.
+            if self
+                .registry
+                .pending_webrtc_closes()
+                .map_err(map_registry_error)?
+                .iter()
+                .any(|(pending_scope, pending_call, _)| {
+                    pending_scope == &scope && pending_call == &call_id
+                })
+            {
+                continue;
+            }
             if lifecycle
                 .release_call_placement(&scope, &call_id)
                 .await
@@ -4368,6 +4382,46 @@ mod sfu_placement_lifecycle_tests {
         assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 1);
         assert_eq!(lifecycle.ensures.load(Ordering::Relaxed), 1);
         assert_eq!(registry.active_session_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_provider_close_blocks_expired_sfu_placement_release() {
+        let registry = Arc::new(RealtimeSessionRegistry::with_expired_call_cleanup(8, 2));
+        let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
+        let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+        let pending = claims("pending-provider-close", "pending-device");
+
+        service
+            .ensure_sfu_call_placement(&pending)
+            .await
+            .expect("placement");
+        registry
+            .queue_call_cleanup_candidate(&pending.scope, &pending.call_id)
+            .expect("queue placement cleanup");
+        registry
+            .queue_webrtc_close(&pending)
+            .expect("queue exact provider shutdown");
+
+        assert_eq!(
+            service.sweep_expired_sfu_placements_at(1_002).await,
+            Ok(0),
+            "unconfirmed provider close must fence placement release"
+        );
+        assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            registry
+                .expired_call_cleanup_candidates_at(1_003)
+                .expect("pending placement")
+                .len(),
+            1,
+            "placement retry remains queued while provider shutdown is pending"
+        );
+
+        registry
+            .acknowledge_webrtc_close(&pending.scope, &pending.call_id, &pending.session_id)
+            .expect("provider closure acknowledged");
+        assert_eq!(service.sweep_expired_sfu_placements_at(1_004).await, Ok(1));
+        assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
