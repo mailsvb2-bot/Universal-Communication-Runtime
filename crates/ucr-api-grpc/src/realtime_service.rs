@@ -2910,10 +2910,7 @@ where
     // A failing provider must not prevent the other revoked peers from being
     // closed. Every failed coordinate remains in the canonical registry's
     // shutdown-only queue; no live downlink is reauthorized on retry.
-    async fn retry_pending_webrtc_closes(
-        &self,
-        now_unix_ms: i64,
-    ) -> Result<(), CanonicalError> {
+    async fn retry_pending_webrtc_closes(&self, now_unix_ms: i64) -> Result<(), CanonicalError> {
         let pending = self
             .registry
             .pending_webrtc_closes()
@@ -2966,7 +2963,9 @@ where
             inspected_calls: calls.len(),
             ..RealtimeCleanupSweep::default()
         };
-        self.retry_pending_webrtc_closes(now_unix_ms).await?;
+        // A failed close of an already revoked peer must not delay retirement
+        // of other downlinks whose durable Call authority has ended.
+        let mut first_error = self.retry_pending_webrtc_closes(now_unix_ms).await.err();
         for (_, (scope, call_id)) in calls {
             if self.cleanup_decision(&scope, &call_id)? != RuntimeCallCleanupDecision::Cleanup {
                 continue;
@@ -3023,7 +3022,8 @@ where
                 }
             }
             if let Some(error) = first_cleanup_error {
-                return Err(error);
+                first_error.get_or_insert(error);
+                continue;
             }
 
             if let Some(lifecycle) = &self.sfu_placement_lifecycle {
@@ -3040,7 +3040,7 @@ where
             sweep.ephemeral_entries_removed =
                 sweep.ephemeral_entries_removed.saturating_add(removed);
         }
-        Ok(sweep)
+        first_error.map_or(Ok(sweep), Err)
     }
 
     fn cleanup_decision(
@@ -4664,7 +4664,9 @@ mod sfu_placement_lifecycle_tests {
 
         assert_eq!(
             service.cleanup_closed_conferences_at(1_005).await,
-            Err(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)),
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            )),
         );
         assert_eq!(
             provider.close_attempts.load(Ordering::SeqCst),
@@ -4672,7 +4674,10 @@ mod sfu_placement_lifecycle_tests {
             "a failed first close must not prevent attempting the second"
         );
         assert_eq!(
-            registry.pending_webrtc_closes().expect("pending shutdowns").len(),
+            registry
+                .pending_webrtc_closes()
+                .expect("pending shutdowns")
+                .len(),
             2
         );
 
@@ -4686,6 +4691,151 @@ mod sfu_placement_lifecycle_tests {
                 .pending_webrtc_closes()
                 .expect("pending shutdowns")
                 .is_empty()
+        );
+    }
+
+    fn persist_terminated_cleanup_call(
+        store: &ucr_storage_memory::MemoryLocalStore,
+        binding: &RealtimeSessionClaims,
+    ) {
+        use ucr_core::{CallStore, ConversationStore};
+        use ucr_model::{
+            CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
+            CallSignallingState, ConversationId, ConversationKind, ConversationRecord,
+            ConversationRef, EventId,
+        };
+
+        let caller = ScopedPrincipal {
+            scope: binding.scope.clone(),
+            principal: binding.participant.clone(),
+        };
+        let conversation = ConversationRef {
+            conversation_id: ConversationId::from_opaque(id("closed-call-conversation")),
+            kind: ConversationKind::Direct,
+        };
+        store
+            .persist_conversation(&ConversationRecord {
+                scope: binding.scope.clone(),
+                conversation: conversation.clone(),
+                parent_conversation_id: None,
+            })
+            .expect("canonical conversation");
+        store
+            .create_call(
+                &caller,
+                &CallSession {
+                    scope: binding.scope.clone(),
+                    call_id: binding.call_id.clone(),
+                    conversation,
+                    initiated_by: caller.principal.clone(),
+                    participants: vec![
+                        CallParticipant {
+                            principal: caller.principal.clone(),
+                            state: CallParticipantState::Accepted,
+                            joined_revision: 0,
+                            left_revision: None,
+                        },
+                        CallParticipant {
+                            principal: PrincipalRef {
+                                principal_id: PrincipalId::from_opaque(id("closed-call-peer")),
+                                kind: PrincipalKind::Person,
+                            },
+                            state: CallParticipantState::Invited,
+                            joined_revision: 0,
+                            left_revision: None,
+                        },
+                    ],
+                    signalling_state: CallSignallingState::Inviting,
+                    reconnecting_participant: None,
+                    media_negotiation_ref: None,
+                    media_negotiation_generation: 0,
+                    replication_generation: 0,
+                    revision: 0,
+                    termination_reason: None,
+                },
+            )
+            .expect("durable call");
+        store
+            .apply_call_signal(
+                &caller,
+                &CallSignal {
+                    event_id: EventId::from_opaque(id("closed-call-cancel")),
+                    scope: binding.scope.clone(),
+                    call_id: binding.call_id.clone(),
+                    expected_revision: 0,
+                    kind: CallSignalKind::Cancel,
+                },
+            )
+            .expect("durable termination");
+    }
+
+    #[tokio::test]
+    async fn failed_pending_shutdown_does_not_keep_terminated_call_downlink_active() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([13_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("issuer"),
+        );
+        let store = Arc::new(ucr_storage_memory::MemoryLocalStore::default());
+        let binding = claims("closed-call-session", "closed-call-device");
+        persist_terminated_cleanup_call(&store, &binding);
+        let active = issuer
+            .issue(
+                binding.scope,
+                binding.call_id,
+                binding.participant,
+                binding.device_id,
+                300,
+                1_000,
+            )
+            .expect("signed grant")
+            .claims;
+        let provider = Arc::new(CloseFailsTwiceProvider::default());
+        let provider_dyn: Arc<dyn WebRtcProvider> = provider.clone();
+        let service = GrpcRealtimeService::with_webrtc(
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(DenyTestAuthorization),
+            store,
+            issuer,
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+            RealtimeWebRtcDependencies::new(
+                provider_dyn,
+                Arc::new(WebRtcSessionConfigFactory::default()),
+            ),
+        );
+        service
+            .admit_realtime_session_with_sfu_placement(active.clone(), 1_001)
+            .await
+            .expect("active downlink");
+        let mut unrelated = claims("older-pending-close", "older-pending-device");
+        unrelated.call_id = CallId::from_opaque(id("unrelated-pending-call"));
+        registry
+            .queue_webrtc_close(&unrelated)
+            .expect("independent pending shutdown");
+
+        assert_eq!(
+            service.cleanup_closed_conferences_at(1_005).await,
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            ))
+        );
+        assert_eq!(
+            registry.active_session_count(),
+            0,
+            "unrelated pending provider failure must not keep a terminated Call receiving media"
+        );
+        assert_eq!(provider.close_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            registry
+                .pending_webrtc_closes()
+                .expect("pending closes")
+                .len(),
+            2,
+            "both failed closes retain shutdown-only retry coordinates"
         );
     }
 
