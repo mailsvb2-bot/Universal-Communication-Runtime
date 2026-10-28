@@ -4521,7 +4521,10 @@ mod sfu_placement_lifecycle_tests {
     struct DenyTestAuthorization;
 
     impl AuthorizationEvaluator for DenyTestAuthorization {
-        fn authorize(&self, _request: &ucr_model::AuthorizationRequest) -> Result<(), CanonicalError> {
+        fn authorize(
+            &self,
+            _request: &ucr_model::AuthorizationRequest,
+        ) -> Result<(), CanonicalError> {
             Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied))
         }
     }
