@@ -17,7 +17,7 @@ Acceptance: start one command on Windows, get a time-limited HTTPS address, Andr
 ## Opt-in public HTTPS edge on the same Windows UCR runtime (PR #330)
 
 The canonical Windows launcher accepts `-PublicOrigin`, `-PublicCertificate`,
-`-PublicPrivateKey` and `-PublicEdgeBind`. It builds the same runtime,
+`-PublicPrivateKey`, `-PublicEdgeBind`, `-TurnUrl` and `-TurnSecretFile`. It builds the same runtime,
 BFF and HTTPS edge. The gRPC, operator, HTTP gateway and first-party BFF
 remain bound to loopback; only the TLS edge can bind publicly on TCP 443.
 This is **not** a tunnel and **does not** provision DNS, an internet-routable
@@ -27,7 +27,7 @@ Invoke only with a publicly trusted DNS certificate and verified network
 configuration (example paths/names are placeholders, not a live endpoint):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\windows\start-local-first-party-https.ps1" -PublicOrigin "https://call.example.org" -PublicCertificate "C:\certs\fullchain.pem" -PublicPrivateKey "C:\certs\privkey.pem"
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\windows\start-local-first-party-https.ps1" -PublicOrigin "https://call.example.org" -PublicCertificate "C:\certs\fullchain.pem" -PublicPrivateKey "C:\certs\privkey.pem" -TurnUrl "turns:turn.example.org:5349?transport=tcp" -TurnSecretFile "C:\certs\turn-rest-secret.hex"
 ```
 
 The launcher validates HTTPS origin, expiry, key/certificate match and
@@ -42,3 +42,14 @@ edge being reachable is **not** evidence that remote WebRTC works.
 The Android-cellular acceptance criteria below remain mandatory: Call →
 authenticated Join → endpoint MLS → actual two-sided media → enforced
 revocation and measured stop, across independent networks.
+
+The TURN REST file is provisioned **separately**, contains a cryptographically
+random 32-byte shared secret (raw bytes or 64 hexadecimal digits), and must
+match the configured coturn `use-auth-secret` secret; protect it with Windows
+file ACLs. The launcher sets the canonical runtime's `UCR_WEBRTC_TURN_URLS`,
+`UCR_WEBRTC_TURN_SECRET_HEX`, and `UCR_WEBRTC_RELAY_ONLY=true` before
+starting the existing realtime owner. The realtime server issues bounded,
+per-session TURN REST credentials; the browser receives only session ICE
+credentials, never the root secret. This does **not** start coturn, provision a
+public DNS hostname, configure the router/firewall or verify an actual relay.
+If TLS or TURN inputs are missing, public mode fails before exposing ingress.
