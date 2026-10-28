@@ -678,6 +678,9 @@ impl fmt::Debug for SessionEntry {
 pub struct RealtimeSessionRegistry {
     entries: Mutex<Vec<SessionEntry>>,
     expired_call_cleanup: Mutex<Vec<(TenantScope, CallId)>>,
+    // Shutdown-only coordinates for revoked WebRTC peers. No credentials,
+    // private media keys or duplicate session admission state live here.
+    pending_webrtc_closes: Mutex<Vec<(TenantScope, CallId, SessionId)>>,
     track_expired_call_cleanup: bool,
     bandwidth_usage: Mutex<Vec<BandwidthWindow>>,
     // Monotonic within one running registry: Leave+Join cannot reuse a lease
@@ -716,6 +719,7 @@ impl RealtimeSessionRegistry {
         Self {
             entries: Mutex::new(Vec::new()),
             expired_call_cleanup: Mutex::new(Vec::new()),
+            pending_webrtc_closes: Mutex::new(Vec::new()),
             track_expired_call_cleanup: false,
             bandwidth_usage: Mutex::new(Vec::new()),
             last_join_generation: AtomicU64::new(0),
@@ -734,12 +738,70 @@ impl RealtimeSessionRegistry {
         Self {
             entries: Mutex::new(Vec::new()),
             expired_call_cleanup: Mutex::new(Vec::new()),
+            pending_webrtc_closes: Mutex::new(Vec::new()),
             track_expired_call_cleanup: true,
             bandwidth_usage: Mutex::new(Vec::new()),
             last_join_generation: AtomicU64::new(0),
             max_sessions,
             queue_capacity,
         }
+    }
+
+    /// Records a revoked WebRTC transport shutdown before retiring its live
+    /// downlink. This queue contains only cleanup coordinates; the canonical
+    /// Join grant remains the sole admission/revocation authority.
+    ///
+    /// # Errors
+    /// Fails if node-local cleanup state is unavailable.
+    pub fn queue_webrtc_close(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), RealtimeRegistryError> {
+        let mut pending = self
+            .pending_webrtc_closes
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        let item = (
+            claims.scope.clone(),
+            claims.call_id.clone(),
+            claims.session_id.clone(),
+        );
+        if !pending.contains(&item) {
+            pending.push(item);
+        }
+        Ok(())
+    }
+
+    /// Returns a snapshot of pending WebRTC shutdown coordinates. A successful
+    /// provider close must be acknowledged separately; a failed close remains
+    /// retryable even after the live registry entry was removed.
+    ///
+    /// # Errors
+    /// Fails if node-local cleanup state is unavailable.
+    pub fn pending_webrtc_closes(
+        &self,
+    ) -> Result<Vec<(TenantScope, CallId, SessionId)>, RealtimeRegistryError> {
+        self.pending_webrtc_closes
+            .lock()
+            .map(|pending| pending.clone())
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)
+    }
+
+    /// Acknowledges only the exact provider session whose shutdown succeeded.
+    ///
+    /// # Errors
+    /// Fails if node-local cleanup state is unavailable.
+    pub fn acknowledge_webrtc_close(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        session_id: &SessionId,
+    ) -> Result<(), RealtimeRegistryError> {
+        self.pending_webrtc_closes
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?
+            .retain(|item| &item.0 != scope || &item.1 != call_id || &item.2 != session_id);
+        Ok(())
     }
 
     /// Returns Calls whose SFU placement cleanup has not yet been acknowledged.
