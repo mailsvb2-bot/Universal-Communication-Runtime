@@ -825,7 +825,7 @@ where
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.registry
-                        .heartbeat(&claims, self.now()?)
+                        .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     let (group_id, mode) = self.mls_admission_context(&claims)?;
                     let binding = self.live_media_binding(&claims);
@@ -876,7 +876,7 @@ where
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.registry
-                        .heartbeat(&claims, self.now()?)
+                        .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     self.register_endpoint_mls_key_package(&claims, body.key_package)?;
                     Ok(pb_acknowledgement(acknowledgement_for(
@@ -911,7 +911,7 @@ where
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.registry
-                        .heartbeat(&claims, self.now()?)
+                        .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     let bootstrap = self.device_bound_mls_bootstrap(&claims)?;
                     pb_mls_bootstrap(bootstrap)
@@ -1003,7 +1003,7 @@ where
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.registry
-                        .heartbeat(&claims, self.now()?)
+                        .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     let actor = actor_for(&claims);
@@ -1047,7 +1047,7 @@ where
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.registry
-                        .heartbeat(&claims, self.now()?)
+                        .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     let actor = actor_for(&claims);
@@ -1082,7 +1082,7 @@ where
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.registry
-                        .heartbeat(&claims, self.now()?)
+                        .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     let actor = actor_for(&claims);
@@ -1121,7 +1121,7 @@ where
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.registry
-                        .heartbeat(&claims, self.now()?)
+                        .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     let actor = actor_for(&claims);
@@ -1166,7 +1166,7 @@ where
                 .and_then(|claims| {
                     let now = self.now()?;
                     self.registry
-                        .heartbeat(&claims, now)
+                        .require_active_session(&claims, now)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     let actor = actor_for(&claims);
@@ -1211,7 +1211,7 @@ where
                 .and_then(|claims| {
                     let now = self.now()?;
                     self.registry
-                        .heartbeat(&claims, now)
+                        .require_active_session(&claims, now)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     // A Universal Conference may mute a participant. A plain
@@ -1260,7 +1260,7 @@ where
                 .and_then(|claims| {
                     let now = self.now()?;
                     self.registry
-                        .heartbeat(&claims, now)
+                        .require_active_session(&claims, now)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     let actor = actor_for(&claims);
@@ -1302,7 +1302,7 @@ where
                 .and_then(|claims| {
                     let now = self.now()?;
                     self.registry
-                        .heartbeat(&claims, now)
+                        .require_active_session(&claims, now)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     let message_id = MessageId::from_opaque(decode_opaque(body.message_id)?);
@@ -1392,7 +1392,7 @@ where
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.registry
-                        .heartbeat(&claims, self.now()?)
+                        .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     let message_id = MessageId::from_opaque(decode_opaque(body.message_id)?);
@@ -1451,7 +1451,7 @@ where
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.registry
-                        .heartbeat(&claims, self.now()?)
+                        .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     let actor = actor_for(&claims);
@@ -2000,7 +2000,7 @@ where
 
         self.require_live_transport_claims(claims)?;
         self.registry
-            .heartbeat(claims, self.now()?)
+            .require_active_session(claims, self.now()?)
             .map_err(map_registry_error)?;
         let device_id = claims
             .device_id
@@ -2080,7 +2080,7 @@ where
     ) -> Result<usize, CanonicalError> {
         self.require_live_transport_claims(claims)?;
         self.registry
-            .heartbeat(claims, self.now()?)
+            .require_active_session(claims, self.now()?)
             .map_err(map_registry_error)?;
         let device_id = claims
             .device_id
@@ -2185,6 +2185,10 @@ where
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
     }
 
+    // WebRTC and encrypted media admission must not renew connected presence.
+    // The explicit generation-fenced Heartbeat RPC is the sole lease refresher.
+    // This is a read-only membership check, not a substitute for a per-operation
+    // Join-generation authorization fence (still required for stale-tab isolation).
     fn authenticated_webrtc_claims(
         &self,
         token: &str,
@@ -2196,7 +2200,7 @@ where
         self.require_accepted_conference_participant(&claims)?;
         self.require_live_universal_conference(&claims)?;
         self.registry
-            .heartbeat(&claims, self.now()?)
+            .require_active_session(&claims, self.now()?)
             .map_err(map_registry_error)?;
         Ok(claims)
     }
