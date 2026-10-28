@@ -1011,7 +1011,9 @@ async fn handle_live_close(
             .map_err(|_| WebRtcProviderError::Internal),
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
-    let _ = reply.send(retire_peer_only_after_confirmed_close(sessions, &key, result));
+    let _ = reply.send(retire_peer_only_after_confirmed_close(
+        sessions, &key, result,
+    ));
 }
 
 // Keep a failed close retryable without handing its live transport slot to
