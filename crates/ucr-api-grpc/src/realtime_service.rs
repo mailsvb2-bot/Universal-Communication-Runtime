@@ -2980,6 +2980,10 @@ where
                     .map_err(map_registry_error)?;
             }
 
+            // Retire ALL revoked downlinks before any fallible provider close.
+            // Otherwise one failed close leaves the next terminated participant
+            // active in the SFU registry until another cleanup sweep.
+            let mut retired_sessions = Vec::new();
             for claims in active_claims
                 .iter()
                 .filter(|claims| claims.scope == scope && claims.call_id == call_id)
@@ -3002,13 +3006,20 @@ where
                     .map_err(map_registry_error)?;
                 self.append_attendance(&transition)?;
                 sweep.sessions_reaped = sweep.sessions_reaped.saturating_add(1);
+                retired_sessions.push(claims.session_id.clone());
+            }
 
-                self.confirm_pending_webrtc_close(
-                    &claims.scope,
-                    &claims.call_id,
-                    &claims.session_id,
-                )
-                .await?;
+            let mut first_close_error = None;
+            for session_id in retired_sessions {
+                if let Err(error) = self
+                    .confirm_pending_webrtc_close(&scope, &call_id, &session_id)
+                    .await
+                {
+                    first_close_error.get_or_insert(error);
+                }
+            }
+            if let Some(error) = first_close_error {
+                return Err(error);
             }
 
             if let Some(lifecycle) = &self.sfu_placement_lifecycle {
