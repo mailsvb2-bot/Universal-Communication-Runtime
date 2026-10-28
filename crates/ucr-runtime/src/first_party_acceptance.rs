@@ -1234,7 +1234,13 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     // Heartbeat keeps the Join generation fence.
     for ((claim, token), generation) in claims.iter().zip(&tokens).zip(&generations) {
         let join = realtime_join_request(claim, token).into_inner();
-        for (sequence, ok) in [(*generation, true), (generation + 1, false)] {
+        // Zero is forbidden for direct-call media, and an obsolete Join
+        // generation cannot refresh the newer session's liveness.
+        for (sequence, ok) in [
+            (*generation, true),
+            (generation + 1, false),
+            (0, false),
+        ] {
             let mut beat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
                 scope: join.scope.clone(),
                 call_id: join.call_id.clone(),
