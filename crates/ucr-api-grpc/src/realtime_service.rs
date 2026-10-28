@@ -4389,6 +4389,81 @@ mod sfu_placement_lifecycle_tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct FailFirstReleasePlacementLifecycle {
+        attempts: AtomicUsize,
+        released_scopes: std::sync::Mutex<Vec<TenantScope>>,
+    }
+
+    #[tonic::async_trait]
+    impl RealtimeSfuPlacementLifecycle for FailFirstReleasePlacementLifecycle {
+        async fn ensure_call_placement(
+            &self,
+            _scope: &TenantScope,
+            _call_id: &CallId,
+        ) -> Result<(), CanonicalError> {
+            Ok(())
+        }
+
+        async fn release_call_placement(
+            &self,
+            scope: &TenantScope,
+            _call_id: &CallId,
+        ) -> Result<(), CanonicalError> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable));
+            }
+            self.released_scopes
+                .lock()
+                .expect("test release log")
+                .push(scope.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_call_placement_release_does_not_starve_other_terminated_calls() {
+        let registry = Arc::new(RealtimeSessionRegistry::with_expired_call_cleanup(8, 2));
+        let lifecycle = Arc::new(FailFirstReleasePlacementLifecycle::default());
+        let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+        let first = claims("release-failure-session-a", "release-failure-device-a");
+        let mut second = claims("release-failure-session-b", "release-failure-device-b");
+        second.scope.tenant_id = TenantId::from_opaque(id("placement-second-tenant"));
+        second.scope.namespace_id =
+            Some(NamespaceId::from_opaque(id("placement-second-namespace")));
+
+        persist_terminated_cleanup_call(&service.store, &first);
+        persist_terminated_cleanup_call(&service.store, &second);
+        registry.join(first.clone(), 1_001).expect("first live peer");
+        registry.join(second.clone(), 1_001).expect("second live peer");
+
+        assert_eq!(
+            service.cleanup_closed_conferences_at(1_002).await,
+            Err(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
+        );
+        assert_eq!(registry.active_session_count(), 0);
+        assert_eq!(lifecycle.attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *lifecycle.released_scopes.lock().expect("test release log"),
+            vec![second.scope.clone()],
+            "failure of the first Call must not starve placement release for the second"
+        );
+        assert_eq!(
+            registry
+                .expired_call_cleanup_candidates_at(1_002)
+                .expect("retry candidates")
+                .len(),
+            1,
+            "only the failed Call remains pending"
+        );
+        assert_eq!(
+            service.sweep_expired_sfu_placements_at(1_003).await,
+            Ok(1),
+            "the first Call's release remains safely retryable"
+        );
+        assert_eq!(lifecycle.attempts.load(Ordering::SeqCst), 3);
+    }
+
     #[tokio::test]
     async fn expiry_cleanup_cannot_release_between_fresh_join_placement_and_admission() {
         let registry = Arc::new(RealtimeSessionRegistry::with_expired_call_cleanup(8, 2));
