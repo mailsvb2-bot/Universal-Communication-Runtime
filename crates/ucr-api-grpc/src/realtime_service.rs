@@ -397,6 +397,21 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         .await
     }
 
+    fn has_pending_webrtc_close_for_call(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<bool, CanonicalError> {
+        Ok(self
+            .registry
+            .pending_webrtc_closes()
+            .map_err(map_registry_error)?
+            .iter()
+            .any(|(pending_scope, pending_call, _)| {
+                pending_scope == scope && pending_call == call_id
+            }))
+    }
+
     async fn release_sfu_call_placement_for_call_if_inactive(
         &self,
         scope: &TenantScope,
@@ -407,14 +422,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .registry
             .active_call_session_count_at(scope, call_id, now_unix_ms)
             .map_err(map_registry_error)?;
-        let pending = self
-            .registry
-            .pending_webrtc_closes()
-            .map_err(map_registry_error)?
-            .iter()
-            .any(|(pending_scope, pending_call, _)| {
-                pending_scope == scope && pending_call == call_id
-            });
+        let pending = self.has_pending_webrtc_close_for_call(scope, call_id)?;
         if active == 0
             && !pending
             && let Some(lifecycle) = &self.sfu_placement_lifecycle
@@ -597,15 +605,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             // A revoked realtime session is no longer on the live roster,
             // but its provider may still hold a peer. Never release its SFU
             // placement before all pending WebRTC shutdowns are acknowledged.
-            if self
-                .registry
-                .pending_webrtc_closes()
-                .map_err(map_registry_error)?
-                .iter()
-                .any(|(pending_scope, pending_call, _)| {
-                    pending_scope == &scope && pending_call == &call_id
-                })
-            {
+            if self.has_pending_webrtc_close_for_call(&scope, &call_id)? {
                 continue;
             }
             if lifecycle
@@ -3037,15 +3037,7 @@ where
             // acknowledgement, do not release placement or erase the Call's
             // ephemeral cleanup coordinates. The retry queue remains the
             // canonical shutdown fence, even when no active peer remains.
-            if self
-                .registry
-                .pending_webrtc_closes()
-                .map_err(map_registry_error)?
-                .iter()
-                .any(|(pending_scope, pending_call, _)| {
-                    pending_scope == &scope && pending_call == &call_id
-                })
-            {
+            if self.has_pending_webrtc_close_for_call(&scope, &call_id)? {
                 continue;
             }
 
@@ -4430,6 +4422,46 @@ mod sfu_placement_lifecycle_tests {
         }
     }
 
+    fn persist_valid_attendance_device(
+        store: &ucr_storage_memory::MemoryLocalStore,
+        claims: &RealtimeSessionClaims,
+    ) {
+        use ucr_core::{DeviceLifecycleStore, IdentityStore, PrincipalIdentityBindingStore};
+        use ucr_model::{
+            DeviceDescriptor, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
+            PrincipalIdentityBinding,
+        };
+
+        let identity_id =
+            IdentityId::from_opaque(claims.participant.principal_id.as_opaque().clone());
+        store
+            .persist_identity(&IdentityRecord {
+                scope: claims.scope.clone(),
+                identity_id: identity_id.clone(),
+                ownership: IdentityOwnership::UcrNative,
+                evidence: IdentityEvidence::SelfAsserted,
+                expires_at_unix_ms: None,
+            })
+            .expect("canonical identity for attendance");
+        store
+            .persist_principal_identity_binding(&PrincipalIdentityBinding {
+                scope: claims.scope.clone(),
+                principal: claims.participant.clone(),
+                identity_id: identity_id.clone(),
+            })
+            .expect("canonical principal identity binding");
+        store
+            .register_device(
+                &claims.scope,
+                &DeviceDescriptor {
+                    device_id: claims.device_id.clone().expect("device-bound session"),
+                    identity_id,
+                    state: DeviceLifecycleState::Active,
+                },
+            )
+            .expect("active canonical attendance device");
+    }
+
     #[tokio::test]
     async fn failed_call_placement_release_does_not_starve_other_terminated_calls() {
         let registry = Arc::new(RealtimeSessionRegistry::with_expired_call_cleanup(8, 2));
@@ -4443,6 +4475,8 @@ mod sfu_placement_lifecycle_tests {
 
         persist_terminated_cleanup_call(&service.store, &first);
         persist_terminated_cleanup_call(&service.store, &second);
+        persist_valid_attendance_device(&service.store, &first);
+        persist_valid_attendance_device(&service.store, &second);
         registry
             .join(first.clone(), 1_001)
             .expect("first live peer");
