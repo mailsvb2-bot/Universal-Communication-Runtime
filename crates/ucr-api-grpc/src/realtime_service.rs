@@ -4890,9 +4890,8 @@ mod sfu_placement_lifecycle_tests {
 
         let entered = provider.entered.notified();
         let retry_service = service.clone();
-        let retry = tokio::spawn(async move {
-            retry_service.retry_pending_webrtc_closes(1_002).await
-        });
+        let retry =
+            tokio::spawn(async move { retry_service.retry_pending_webrtc_closes(1_002).await });
         entered.await;
         let leave = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -4915,7 +4914,10 @@ mod sfu_placement_lifecycle_tests {
             Err(JoinTokenError::Revoked),
             "blocked unrelated provider must not delay durable revocation"
         );
-        retry.await.expect("retry task").expect("provider unblocked");
+        retry
+            .await
+            .expect("retry task")
+            .expect("provider unblocked");
         assert!(
             registry
                 .pending_webrtc_closes()
