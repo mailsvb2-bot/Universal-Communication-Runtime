@@ -1278,6 +1278,38 @@ impl RealtimeSessionRegistry {
         claims: &RealtimeSessionClaims,
         now_unix_ms: i64,
     ) -> Result<u64, RealtimeRegistryError> {
+        self.heartbeat_with_generation(claims, None, now_unix_ms)
+            .map(|(sequence, _)| sequence)
+    }
+
+    /// Refreshes liveness ONLY for the exact current Join lease. An old tab may
+    /// still hold a valid reusable signed grant after another tab reconnects
+    /// the same Session, but it must not keep the replacement on the live roster.
+    /// Compare the generation and mutate last_seen under ONE registry mutex.
+    ///
+    /// Returns None on an obsolete/zero generation without changing liveness.
+    ///
+    /// # Errors
+    /// Fails for expiry, claim mismatch, missing session, or unavailable state.
+    pub fn heartbeat_if_join_generation(
+        &self,
+        claims: &RealtimeSessionClaims,
+        expected_join_generation: u64,
+        now_unix_ms: i64,
+    ) -> Result<Option<u64>, RealtimeRegistryError> {
+        if expected_join_generation == 0 {
+            return Ok(None);
+        }
+        self.heartbeat_with_generation(claims, Some(expected_join_generation), now_unix_ms)
+            .map(|(sequence, matched)| matched.then_some(sequence))
+    }
+
+    fn heartbeat_with_generation(
+        &self,
+        claims: &RealtimeSessionClaims,
+        expected_join_generation: Option<u64>,
+        now_unix_ms: i64,
+    ) -> Result<(u64, bool), RealtimeRegistryError> {
         if now_unix_ms >= claims.expires_at_unix_ms {
             return Err(RealtimeRegistryError::Expired);
         }
@@ -1293,8 +1325,11 @@ impl RealtimeSessionRegistry {
         if entry.claims != *claims {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
+        if expected_join_generation.is_some_and(|expected| expected != entry.join_generation) {
+            return Ok((entry.sequence, false));
+        }
         entry.last_seen_unix_ms = now_unix_ms;
-        Ok(entry.sequence)
+        Ok((entry.sequence, true))
     }
 
     /// Stable generation of the current Join, not the mutable attendance
@@ -2137,6 +2172,56 @@ mod tests {
         registry
             .leave_if_sequence(&claims, second.join_generation, 18_005)
             .expect("new owner can leave");
+    }
+
+    #[test]
+    fn obsolete_join_heartbeat_cannot_revive_reconnected_participant() {
+        let registry = RealtimeSessionRegistry::new(8, 4);
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("heartbeat-generation-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("heartbeat-generation-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let old = registry.join(claims.clone(), 18_001).expect("old Join");
+        let current = registry.join(claims.clone(), 18_002).expect("new Join");
+        assert_ne!(old.join_generation, current.join_generation);
+
+        // A delayed heartbeat from the previous browser tab arrives after the
+        // new tab's two-minute liveness grace. It must NOT keep the new tab
+        // visible or extend its media-receive eligibility.
+        let late = 18_002 + CONNECTED_HEARTBEAT_GRACE_MS + 1;
+        assert_eq!(
+            registry.heartbeat_if_join_generation(&claims, old.join_generation, late),
+            Ok(None)
+        );
+        assert_eq!(
+            registry.heartbeat_if_join_generation(&claims, 0, late),
+            Ok(None)
+        );
+        assert!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, late)
+                .expect("current roster")
+                .is_empty()
+        );
+
+        assert_eq!(
+            registry.heartbeat_if_join_generation(&claims, current.join_generation, late + 1),
+            Ok(Some(current.transition.session_sequence))
+        );
+        assert_eq!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, late + 1)
+                .expect("fresh roster")
+                .len(),
+            1
+        );
     }
 
     #[test]
