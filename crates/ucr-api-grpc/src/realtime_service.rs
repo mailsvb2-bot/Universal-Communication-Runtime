@@ -4428,7 +4428,7 @@ mod sfu_placement_lifecycle_tests {
         let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
         let first = claims("release-failure-session-a", "release-failure-device-a");
         let mut second = claims("release-failure-session-b", "release-failure-device-b");
-        second.scope.tenant_id = TenantId::from_opaque(id("placement-second-tenant"));
+        second.scope.tenant_id = TenantId::from_opaque(id("zz-placement-second-tenant"));
         second.scope.namespace_id =
             Some(NamespaceId::from_opaque(id("placement-second-namespace")));
 
