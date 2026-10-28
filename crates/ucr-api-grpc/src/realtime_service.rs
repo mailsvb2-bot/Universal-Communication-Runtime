@@ -4856,8 +4856,8 @@ mod sfu_placement_lifecycle_tests {
         });
         let provider_dyn: Arc<dyn WebRtcProvider> = provider.clone();
         let service = GrpcRealtimeService::with_webrtc(
-            Arc::new(()),
-            Arc::new(()),
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(DenyTestAuthorization),
             Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
             Arc::clone(&issuer),
             Arc::clone(&registry),
