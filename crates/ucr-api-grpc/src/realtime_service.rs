@@ -1730,6 +1730,11 @@ where
         &self,
         request: Request<pb::RealtimeSetWebRtcRemoteDescriptionRequest>,
     ) -> Result<Response<pb::RealtimeSetWebRtcRemoteDescriptionResponse>, Status> {
+        // Keep SDP/ICE/Close provider mutations serialized with terminal Leave
+        // and reconnect. A provider call authorized before Leave must not
+        // complete after the revoked session's shutdown/retirement boundary.
+        // Offer identity is still required; this is not a Join-generation fence.
+        let _peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let offer_id = body.offer_id.clone().filter(|id| {
@@ -1794,6 +1799,11 @@ where
         &self,
         request: Request<pb::RealtimeAddWebRtcIceCandidateRequest>,
     ) -> Result<Response<pb::RealtimeAddWebRtcIceCandidateResponse>, Status> {
+        // Keep SDP/ICE/Close provider mutations serialized with terminal Leave
+        // and reconnect. A provider call authorized before Leave must not
+        // complete after the revoked session's shutdown/retirement boundary.
+        // Offer identity is still required; this is not a Join-generation fence.
+        let _peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let offer_id = body.offer_id.clone().filter(|id| {
@@ -1947,6 +1957,11 @@ where
         &self,
         request: Request<pb::RealtimeCloseWebRtcRequest>,
     ) -> Result<Response<pb::RealtimeCloseWebRtcResponse>, Status> {
+        // Keep SDP/ICE/Close provider mutations serialized with terminal Leave
+        // and reconnect. A provider call authorized before Leave must not
+        // complete after the revoked session's shutdown/retirement boundary.
+        // Offer identity is still required; this is not a Join-generation fence.
+        let _peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let payload = request.into_inner();
         let offer_id = payload.offer_id;
