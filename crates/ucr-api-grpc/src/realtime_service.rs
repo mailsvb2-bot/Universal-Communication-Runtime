@@ -2951,21 +2951,44 @@ where
                 .iter()
                 .filter(|claims| claims.scope == scope && claims.call_id == call_id)
             {
+                // A terminated Call is already unauthorized. Retire its live
+                // downlink before attempting provider shutdown; otherwise a
+                // failed close can keep receiving SFU frames until the next
+                // sweep. The same canonical cleanup queue handles retries.
+                let generation = match self
+                    .registry
+                    .current_join_generation(claims, now_unix_ms)
+                {
+                    Ok(generation) => generation,
+                    Err(RealtimeRegistryError::SessionUnavailable) => continue,
+                    Err(error) => return Err(map_registry_error(error)),
+                };
+                self.registry
+                    .queue_webrtc_close(claims)
+                    .map_err(map_registry_error)?;
+                let transition = self
+                    .registry
+                    .leave_if_sequence(claims, generation, now_unix_ms)
+                    .map_err(map_registry_error)?;
+                self.append_attendance(&transition)?;
+                sweep.sessions_reaped = sweep.sessions_reaped.saturating_add(1);
+
                 let provider = Arc::clone(&self.webrtc_provider);
                 let session_id = claims.session_id.clone();
                 match tokio::task::spawn_blocking(move || provider.close_session(&session_id)).await
                 {
-                    Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {}
+                    Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {
+                        self.registry
+                            .acknowledge_webrtc_close(
+                                &claims.scope,
+                                &claims.call_id,
+                                &claims.session_id,
+                            )
+                            .map_err(map_registry_error)?;
+                    }
                     Ok(Err(error)) => return Err(map_webrtc_provider_error(error)),
                     Err(_) => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
                 }
-                let transition = match self.registry.leave(claims, now_unix_ms) {
-                    Ok(transition) => transition,
-                    Err(RealtimeRegistryError::SessionUnavailable) => continue,
-                    Err(error) => return Err(map_registry_error(error)),
-                };
-                self.append_attendance(&transition)?;
-                sweep.sessions_reaped = sweep.sessions_reaped.saturating_add(1);
             }
 
             if let Some(lifecycle) = &self.sfu_placement_lifecycle {
