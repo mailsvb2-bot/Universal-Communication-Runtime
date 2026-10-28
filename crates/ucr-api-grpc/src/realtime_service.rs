@@ -485,7 +485,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     where
         S: ConferenceJoinGrantStore,
     {
-        let _guard = self.sfu_placement_transition_guard().await;
+        let placement_guard = self.sfu_placement_transition_guard().await;
         // A stale Leave must not revoke a valid, newer connection grant.
         // The check, canonical revocation, and registry retirement share
         // the same Join/Leave gate, preventing a reset to sequence 1 (ABA).
@@ -527,7 +527,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         // Revocation and downlink retirement are now committed under the
         // Join/Leave gate. A slow provider close must not block unrelated
         // Calls from revoking their own grants.
-        drop(_guard);
+        drop(placement_guard);
         let close_result = self
             .confirm_pending_webrtc_close(&claims.scope, &claims.call_id, &claims.session_id)
             .await;
@@ -2988,7 +2988,7 @@ where
             }
             sweep.closed_calls = sweep.closed_calls.saturating_add(1);
 
-            let _placement_guard = self.sfu_placement_transition_guard().await;
+            let placement_guard = self.sfu_placement_transition_guard().await;
             if self.sfu_placement_lifecycle.is_some() {
                 self.registry
                     .queue_call_cleanup_candidate(&scope, &call_id)
@@ -3031,7 +3031,7 @@ where
 
             // All downlinks are already retired. Provider shutdown must not
             // monopolize the cross-Call Join/Leave gate.
-            drop(_placement_guard);
+            drop(placement_guard);
             for session_id in retired_sessions {
                 if let Err(error) = self
                     .confirm_pending_webrtc_close(&scope, &call_id, &session_id)
