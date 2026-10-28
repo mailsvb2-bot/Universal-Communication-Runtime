@@ -702,18 +702,30 @@ where
                 .and_then(|claims| {
                     self.require_accepted_conference_participant(&claims)?;
                     let now = self.now()?;
-                    self.registry
-                        .heartbeat(&claims, now)
-                        .map_err(map_registry_error)?;
-                    // The client echoes the Join generation, not the attendance counter.
-                    if request.expected_session_sequence != 0 {
-                        let generation = self
-                            .registry
-                            .current_join_generation(&claims, now)
-                            .map_err(map_registry_error)?;
-                        if request.expected_session_sequence != generation {
+                    // A first-party media Call must echo the exact Join lease.
+                    // A zero generation is legacy compatibility only for other
+                    // realtime Calls; it cannot bypass direct-call fencing.
+                    if request.expected_session_sequence == 0 {
+                        if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
                             return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
                         }
+                        self.registry
+                            .heartbeat(&claims, now)
+                            .map_err(map_registry_error)?;
+                    } else if self
+                        .registry
+                        .heartbeat_if_join_generation(
+                            &claims,
+                            request.expected_session_sequence,
+                            now,
+                        )
+                        .map_err(map_registry_error)?
+                        .is_none()
+                    {
+                        // Check and liveness update happen atomically in the
+                        // canonical registry; a stale heartbeat cannot revive
+                        // a newer Join's live receive roster.
+                        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
                     }
                     let admission = self.realtime_admission_state(&claims)?;
                     let media_policy = self.effective_universal_media_policy(&claims)?;
