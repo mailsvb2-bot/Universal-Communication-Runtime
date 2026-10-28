@@ -3063,7 +3063,10 @@ where
 
             // Clearing one Call's ephemeral state must not starve the rest of
             // the terminated Call sweep after their downlinks were retired.
-            match self.conference_state.clear_call_ephemeral_state(&scope, &call_id) {
+            match self
+                .conference_state
+                .clear_call_ephemeral_state(&scope, &call_id)
+            {
                 Ok(removed) => {
                     sweep.ephemeral_entries_removed =
                         sweep.ephemeral_entries_removed.saturating_add(removed);
@@ -4411,7 +4414,9 @@ mod sfu_placement_lifecycle_tests {
             _call_id: &CallId,
         ) -> Result<(), CanonicalError> {
             if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable));
+                return Err(CanonicalError::new(
+                    CanonicalErrorCode::TemporarilyUnavailable,
+                ));
             }
             self.released_scopes
                 .lock()
@@ -4434,12 +4439,18 @@ mod sfu_placement_lifecycle_tests {
 
         persist_terminated_cleanup_call(&service.store, &first);
         persist_terminated_cleanup_call(&service.store, &second);
-        registry.join(first.clone(), 1_001).expect("first live peer");
-        registry.join(second.clone(), 1_001).expect("second live peer");
+        registry
+            .join(first.clone(), 1_001)
+            .expect("first live peer");
+        registry
+            .join(second.clone(), 1_001)
+            .expect("second live peer");
 
         assert_eq!(
             service.cleanup_closed_conferences_at(1_002).await,
-            Err(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            ))
         );
         assert_eq!(registry.active_session_count(), 0);
         assert_eq!(lifecycle.attempts.load(Ordering::SeqCst), 2);
