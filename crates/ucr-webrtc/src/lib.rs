@@ -1011,10 +1011,21 @@ async fn handle_live_close(
             .map_err(|_| WebRtcProviderError::Internal),
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
+    let _ = reply.send(retire_peer_only_after_confirmed_close(sessions, &key, result));
+}
+
+// Keep a failed close retryable without handing its live transport slot to
+// another Join. The same rule is used for both unconditional and offer-fenced
+// provider close operations.
+fn retire_peer_only_after_confirmed_close<T>(
+    sessions: &mut HashMap<String, T>,
+    key: &str,
+    result: Result<(), WebRtcProviderError>,
+) -> Result<(), WebRtcProviderError> {
     if result.is_ok() {
-        sessions.remove(&key);
+        sessions.remove(key);
     }
-    let _ = reply.send(result);
+    result
 }
 
 /// Stable opaque identifier derived from the server's unique original SDP offer.
@@ -1623,6 +1634,32 @@ mod tests {
         let offer = provider.create_session(&config).expect("retry live offer");
         assert_eq!(offer.session_id, session_id);
         assert_eq!(provider.close_session(&session_id), Ok(()));
+    }
+
+    #[test]
+    fn failed_peer_close_retains_handle_until_confirmed_retry() {
+        let mut sessions = HashMap::from([("owned-session".to_owned(), 42_u8)]);
+        assert_eq!(
+            retire_peer_only_after_confirmed_close(
+                &mut sessions,
+                "owned-session",
+                Err(WebRtcProviderError::Internal),
+            ),
+            Err(WebRtcProviderError::Internal)
+        );
+        assert_eq!(
+            sessions.get("owned-session"),
+            Some(&42),
+            "failed close must not discard the only peer handle"
+        );
+        assert_eq!(
+            retire_peer_only_after_confirmed_close(&mut sessions, "owned-session", Ok(())),
+            Ok(())
+        );
+        assert!(
+            !sessions.contains_key("owned-session"),
+            "only confirmed close may release the transport slot"
+        );
     }
 
     #[test]
