@@ -2935,16 +2935,36 @@ where
         // downlink is never kept active just to preserve a provider retry handle.
         // Pending coordinates are node-local infrastructure metadata, not a
         // second Identity/Device/Trust authority or a durable recovery log.
+        let mut pending_shutdown_error = None;
         for (scope, call_id, session_id) in self
             .registry
             .pending_webrtc_closes()
             .map_err(map_registry_error)?
         {
             let _placement_guard = self.sfu_placement_transition_guard().await;
-            self.confirm_pending_webrtc_close(&scope, &call_id, &session_id)
-                .await?;
-            self.release_sfu_call_placement_for_call_if_inactive(&scope, &call_id, now_unix_ms)
-                .await?;
+            // One unavailable provider must not starve cleanup of other
+            // revoked sessions. Preserve the first failure for the caller,
+            // but attempt every independently queued shutdown this sweep.
+            let close_result = self
+                .confirm_pending_webrtc_close(&scope, &call_id, &session_id)
+                .await;
+            let result = match close_result {
+                Ok(()) => {
+                    self.release_sfu_call_placement_for_call_if_inactive(
+                        &scope,
+                        &call_id,
+                        now_unix_ms,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                pending_shutdown_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = pending_shutdown_error {
+            return Err(error);
         }
         for (_, (scope, call_id)) in calls {
             if self.cleanup_decision(&scope, &call_id)? != RuntimeCallCleanupDecision::Cleanup {
@@ -4592,6 +4612,64 @@ mod sfu_placement_lifecycle_tests {
             issuer.validate_live_claims(claims, now_unix_ms),
             Err(JoinTokenError::Revoked),
             "failed close must never reauthorize a publisher"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_shutdown_failure_does_not_starve_other_revoked_sessions() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([13_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("issuer"),
+        );
+        let provider = Arc::new(CloseFailsTwiceProvider::default());
+        let provider_dyn: Arc<dyn WebRtcProvider> = provider.clone();
+        let service = GrpcRealtimeService::with_webrtc(
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(DenyTestAuthorization),
+            Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
+            issuer,
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+            RealtimeWebRtcDependencies::new(
+                provider_dyn,
+                Arc::new(WebRtcSessionConfigFactory::default()),
+            ),
+        );
+        registry
+            .queue_webrtc_close(&claims("pending-a", "device-a"))
+            .expect("queue first revoked peer");
+        registry
+            .queue_webrtc_close(&claims("pending-b", "device-b"))
+            .expect("queue second revoked peer");
+
+        assert_eq!(
+            service.cleanup_closed_conferences_at(1_005).await,
+            Err(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)),
+        );
+        assert_eq!(
+            provider.close_attempts.load(Ordering::SeqCst),
+            2,
+            "a failed first close must not prevent attempting the second"
+        );
+        assert_eq!(
+            registry.pending_webrtc_closes().expect("pending shutdowns").len(),
+            2
+        );
+
+        service
+            .cleanup_closed_conferences_at(1_006)
+            .await
+            .expect("both pending closes eventually acknowledged");
+        assert_eq!(provider.close_attempts.load(Ordering::SeqCst), 4);
+        assert!(
+            registry
+                .pending_webrtc_closes()
+                .expect("pending shutdowns")
+                .is_empty()
         );
     }
 
