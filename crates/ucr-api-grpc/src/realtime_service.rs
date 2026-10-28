@@ -420,6 +420,12 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             && let Some(lifecycle) = &self.sfu_placement_lifecycle
         {
             lifecycle.release_call_placement(scope, call_id).await?;
+            // The same Call may have a queued expiry/terminal cleanup.
+            // A successful release is its acknowledgement as well: otherwise
+            // the later expiry sweep can release the placement a second time.
+            self.registry
+                .acknowledge_expired_call_cleanup(scope, call_id)
+                .map_err(map_registry_error)?;
         }
         Ok(())
     }
