@@ -23,7 +23,7 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     assert!(!proto.contains("RealtimeGetMlsBootstrapRequest {\n  TenantScope scope = 1;\n  OpaqueId call_id = 2;\n  OpaqueId session_id = 3;\n  OpaqueId device_id"));
 
     assert!(service.contains("authenticated_claims(&token, &scope, &call_id, &session_id)"));
-    assert!(service.contains("self.registry\n                        .heartbeat(&claims"));
+    assert!(service.split_whitespace().collect::<Vec<_>>().join(" ").contains("self.registry .heartbeat(&claims"));
     assert!(service.contains("self.device_bound_mls_bootstrap(&claims)"));
     assert!(service.contains(".device_id\n            .as_ref()"));
     assert!(
