@@ -2907,6 +2907,41 @@ where
         self.cleanup_closed_conferences_at(now_unix_ms).await
     }
 
+    // A failing provider must not prevent the other revoked peers from being
+    // closed. Every failed coordinate remains in the canonical registry's
+    // shutdown-only queue; no live downlink is reauthorized on retry.
+    async fn retry_pending_webrtc_closes(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<(), CanonicalError> {
+        let pending = self
+            .registry
+            .pending_webrtc_closes()
+            .map_err(map_registry_error)?;
+        let mut first_error = None;
+        for (scope, call_id, session_id) in pending {
+            let _placement_guard = self.sfu_placement_transition_guard().await;
+            let result = match self
+                .confirm_pending_webrtc_close(&scope, &call_id, &session_id)
+                .await
+            {
+                Ok(()) => {
+                    self.release_sfu_call_placement_for_call_if_inactive(
+                        &scope,
+                        &call_id,
+                        now_unix_ms,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     async fn cleanup_closed_conferences_at(
         &self,
         now_unix_ms: i64,
@@ -2931,41 +2966,7 @@ where
             inspected_calls: calls.len(),
             ..RealtimeCleanupSweep::default()
         };
-        // Retry shutdowns already retired from the live roster. A revoked
-        // downlink is never kept active just to preserve a provider retry handle.
-        // Pending coordinates are node-local infrastructure metadata, not a
-        // second Identity/Device/Trust authority or a durable recovery log.
-        let mut pending_shutdown_error = None;
-        for (scope, call_id, session_id) in self
-            .registry
-            .pending_webrtc_closes()
-            .map_err(map_registry_error)?
-        {
-            let _placement_guard = self.sfu_placement_transition_guard().await;
-            // One unavailable provider must not starve cleanup of other
-            // revoked sessions. Preserve the first failure for the caller,
-            // but attempt every independently queued shutdown this sweep.
-            let close_result = self
-                .confirm_pending_webrtc_close(&scope, &call_id, &session_id)
-                .await;
-            let result = match close_result {
-                Ok(()) => {
-                    self.release_sfu_call_placement_for_call_if_inactive(
-                        &scope,
-                        &call_id,
-                        now_unix_ms,
-                    )
-                    .await
-                }
-                Err(error) => Err(error),
-            };
-            if let Err(error) = result {
-                pending_shutdown_error.get_or_insert(error);
-            }
-        }
-        if let Some(error) = pending_shutdown_error {
-            return Err(error);
-        }
+        self.retry_pending_webrtc_closes(now_unix_ms).await?;
         for (_, (scope, call_id)) in calls {
             if self.cleanup_decision(&scope, &call_id)? != RuntimeCallCleanupDecision::Cleanup {
                 continue;
