@@ -23,6 +23,24 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Parse canonical Windows launcher and reject duplicated script bodies
+        shell: pwsh
+        run: |
+          $file = (Resolve-Path 'scripts/windows/start-local-first-party-https.ps1').Path
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            $parseErrors | ForEach-Object { Write-Host $_.ToString() }
+            throw 'Windows launcher has PowerShell parse errors'
+          }
+          $source = [IO.File]::ReadAllText($file)
+          if ([regex]::Matches($source, '(?m)^param\\(').Count -ne 1 -or
+              [regex]::Matches($source, '(?m)^function Start-Ucr\\(').Count -ne 1 -or
+              [regex]::Matches($source, '(?m)^\\$launched = @\\(\\)').Count -ne 1) {
+            throw 'Windows launcher has duplicated top-level script bodies'
+          }
+          Write-Host 'UCR_WINDOWS_LAUNCHER_PARSE_AND_SINGLE_BODY_OK'
       - name: Check JavaScript parses
         shell: pwsh
         run: node --check crates/ucr-realtime-web/static/start.js
