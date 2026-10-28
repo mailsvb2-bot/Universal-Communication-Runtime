@@ -1285,7 +1285,7 @@ impl RealtimeSessionRegistry {
     /// Refreshes liveness ONLY for the exact current Join lease. An old tab may
     /// still hold a valid reusable signed grant after another tab reconnects
     /// the same Session, but it must not keep the replacement on the live roster.
-    /// Compare the generation and mutate last_seen under ONE registry mutex.
+    /// Compare the generation and mutate `last_seen` under ONE registry mutex.
     ///
     /// Returns None on an obsolete/zero generation without changing liveness.
     ///
