@@ -23,7 +23,32 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     assert!(!proto.contains("RealtimeGetMlsBootstrapRequest {\n  TenantScope scope = 1;\n  OpaqueId call_id = 2;\n  OpaqueId session_id = 3;\n  OpaqueId device_id"));
 
     assert!(service.contains("authenticated_claims(&token, &scope, &call_id, &session_id)"));
-    assert!(service.split_whitespace().collect::<Vec<_>>().join(" ").contains("self.registry .heartbeat(&claims"));
+    // MLS bootstrap must inspect the current Join without extending its lease.
+    // The sole presence-renewing RPC is Heartbeat, with a generation fence for
+    // first-party Calls. Keep this contract independent of rustfmt whitespace.
+    let bootstrap_handler = service
+        .split("async fn get_mls_bootstrap(")
+        .nth(1)
+        .expect("GetMlsBootstrap handler")
+        .split("async fn ")
+        .next()
+        .expect("GetMlsBootstrap body");
+    assert!(bootstrap_handler.contains(".require_active_session(&claims, self.now()?)"));
+    assert!(!bootstrap_handler.contains(".heartbeat(&claims"));
+
+    let heartbeat_handler = service
+        .split("async fn heartbeat_realtime(")
+        .nth(1)
+        .expect("Heartbeat handler")
+        .split("async fn ")
+        .next()
+        .expect("Heartbeat body");
+    assert!(heartbeat_handler.contains(".heartbeat_if_join_generation("));
+    assert!(heartbeat_handler.contains("if request.expected_session_sequence == 0"));
+    assert!(heartbeat_handler.contains("starts_with(\"fp-m-\")"));
+    assert!(!service
+        .replace(heartbeat_handler, "")
+        .contains(".heartbeat(&claims"));
     assert!(service.contains("self.device_bound_mls_bootstrap(&claims)"));
     assert!(service.contains(".device_id\n            .as_ref()"));
     assert!(
