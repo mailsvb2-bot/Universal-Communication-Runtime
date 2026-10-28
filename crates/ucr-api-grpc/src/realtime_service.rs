@@ -1730,11 +1730,6 @@ where
         &self,
         request: Request<pb::RealtimeSetWebRtcRemoteDescriptionRequest>,
     ) -> Result<Response<pb::RealtimeSetWebRtcRemoteDescriptionResponse>, Status> {
-        // Keep SDP/ICE/Close provider mutations serialized with terminal Leave
-        // and reconnect. A provider call authorized before Leave must not
-        // complete after the revoked session's shutdown/retirement boundary.
-        // Offer identity is still required; this is not a Join-generation fence.
-        let _peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let offer_id = body.offer_id.clone().filter(|id| {
@@ -1799,11 +1794,6 @@ where
         &self,
         request: Request<pb::RealtimeAddWebRtcIceCandidateRequest>,
     ) -> Result<Response<pb::RealtimeAddWebRtcIceCandidateResponse>, Status> {
-        // Keep SDP/ICE/Close provider mutations serialized with terminal Leave
-        // and reconnect. A provider call authorized before Leave must not
-        // complete after the revoked session's shutdown/retirement boundary.
-        // Offer identity is still required; this is not a Join-generation fence.
-        let _peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let offer_id = body.offer_id.clone().filter(|id| {
@@ -1957,11 +1947,6 @@ where
         &self,
         request: Request<pb::RealtimeCloseWebRtcRequest>,
     ) -> Result<Response<pb::RealtimeCloseWebRtcResponse>, Status> {
-        // Keep SDP/ICE/Close provider mutations serialized with terminal Leave
-        // and reconnect. A provider call authorized before Leave must not
-        // complete after the revoked session's shutdown/retirement boundary.
-        // Offer identity is still required; this is not a Join-generation fence.
-        let _peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let payload = request.into_inner();
         let offer_id = payload.offer_id;
@@ -3065,18 +3050,28 @@ where
             }
 
             if let Some(lifecycle) = &self.sfu_placement_lifecycle {
-                lifecycle.release_call_placement(&scope, &call_id).await?;
+                // A failed release is retryable through the existing Call
+                // cleanup candidate. Do not starve unrelated terminated Calls.
+                if let Err(error) = lifecycle.release_call_placement(&scope, &call_id).await {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
                 self.registry
                     .acknowledge_expired_call_cleanup(&scope, &call_id)
                     .map_err(map_registry_error)?;
             }
 
-            let removed = self
-                .conference_state
-                .clear_call_ephemeral_state(&scope, &call_id)
-                .map_err(|error| map_conference_error(&error))?;
-            sweep.ephemeral_entries_removed =
-                sweep.ephemeral_entries_removed.saturating_add(removed);
+            // Clearing one Call's ephemeral state must not starve the rest of
+            // the terminated Call sweep after their downlinks were retired.
+            match self.conference_state.clear_call_ephemeral_state(&scope, &call_id) {
+                Ok(removed) => {
+                    sweep.ephemeral_entries_removed =
+                        sweep.ephemeral_entries_removed.saturating_add(removed);
+                }
+                Err(error) => {
+                    first_error.get_or_insert(map_conference_error(&error));
+                }
+            }
         }
         first_error.map_or(Ok(sweep), Err)
     }
