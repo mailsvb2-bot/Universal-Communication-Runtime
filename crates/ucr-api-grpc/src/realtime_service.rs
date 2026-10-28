@@ -351,6 +351,27 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .await
     }
 
+    // The pending shutdown coordinates are retained until the provider confirms
+    // closure. Leave, terminal Call cleanup and subsequent sweeps MUST share
+    // this exact acknowledgement boundary; an error cannot discard a retry.
+    async fn confirm_pending_webrtc_close(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        session_id: &SessionId,
+    ) -> Result<(), CanonicalError> {
+        let provider = Arc::clone(&self.webrtc_provider);
+        let closing_session = session_id.clone();
+        match tokio::task::spawn_blocking(move || provider.close_session(&closing_session)).await {
+            Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => self
+                .registry
+                .acknowledge_webrtc_close(scope, call_id, session_id)
+                .map_err(map_registry_error),
+            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+        }
+    }
+
     async fn ensure_sfu_call_placement(
         &self,
         claims: &RealtimeSessionClaims,
@@ -2884,27 +2905,6 @@ where
     ) -> Result<RealtimeCleanupSweep, CanonicalError> {
         let now_unix_ms = self.now()?;
         self.cleanup_closed_conferences_at(now_unix_ms).await
-    }
-
-    // The pending shutdown coordinates are retained until the provider confirms
-    // closure. Leave, terminal Call cleanup and subsequent sweeps MUST share
-    // this exact acknowledgement boundary; an error cannot discard a retry.
-    async fn confirm_pending_webrtc_close(
-        &self,
-        scope: &TenantScope,
-        call_id: &CallId,
-        session_id: &SessionId,
-    ) -> Result<(), CanonicalError> {
-        let provider = Arc::clone(&self.webrtc_provider);
-        let closing_session = session_id.clone();
-        match tokio::task::spawn_blocking(move || provider.close_session(&closing_session)).await {
-            Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => self
-                .registry
-                .acknowledge_webrtc_close(scope, call_id, session_id)
-                .map_err(map_registry_error),
-            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
-            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
-        }
     }
 
     async fn cleanup_closed_conferences_at(
