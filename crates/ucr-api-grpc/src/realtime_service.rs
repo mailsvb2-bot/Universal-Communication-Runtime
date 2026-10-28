@@ -4517,6 +4517,18 @@ mod sfu_placement_lifecycle_tests {
         assert_eq!(registry.active_session_count(), 1);
     }
 
+    #[derive(Debug)]
+    struct DenyTestAuthorization;
+
+    impl AuthorizationEvaluator for DenyTestAuthorization {
+        fn authorize(
+            &self,
+            _request: &ucr_model::AuthorizationRequest,
+        ) -> Result<(), CanonicalError> {
+            Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied))
+        }
+    }
+
     #[derive(Debug, Default)]
     struct CloseFailsOnceProvider {
         close_attempts: AtomicUsize,
@@ -4577,8 +4589,8 @@ mod sfu_placement_lifecycle_tests {
         let provider = Arc::new(CloseFailsOnceProvider::default());
         let provider_dyn: Arc<dyn WebRtcProvider> = provider.clone();
         let service = GrpcRealtimeService::with_webrtc(
-            Arc::new(()),
-            Arc::new(()),
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(DenyTestAuthorization),
             Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
             Arc::clone(&issuer),
             Arc::clone(&registry),
