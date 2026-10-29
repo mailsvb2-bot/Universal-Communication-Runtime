@@ -27,6 +27,16 @@ class Controls(HTMLParser):
 
 parser = Controls()
 parser.feed(HTML)
+# The consumer cabinet is part of the production entry page, not a detached mockup.
+# Its signed-in UI must exist before start.js binds click handlers.
+for ident in (
+    "pl-new-user", "pl-user-cabinet", "pl-friendly-identity",
+    "pl-copy-invite", "pl-share-invite", "pl-signup-slot",
+):
+    assert ident in parser.ids, "missing PetrelLink cabinet element: " + ident
+assert r"\n const recovery" not in HTML and r"\n if(recovery" not in HTML, (
+    "literal newline escapes break inline onboarding JavaScript"
+)
 assert parser.controls, "no visible forms/buttons found"
 for tag, element in parser.controls:
     ident = element.get("id")
