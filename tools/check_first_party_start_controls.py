@@ -60,6 +60,12 @@ for tag, element in parser.controls:
             "button lacks click handler: " + str(ident)
         )
 
+# A received invitation must remain visible after onboarding, but may not
+# silently create a trusted contact or retain its identifier in the address bar.
+assert 'dataset.invitedContact==="true"' in JS, "invite context lost on login"
+assert 'el("contact-name").focus' in JS, "invite needs visible contact confirmation"
+assert 'calls.addContact(name,peer)' in JS, "contact must use canonical owner"
+assert 'clean.searchParams.delete("contact")' in JS, "invite URL remains after contact add"
 # Dynamic controls must be created with the common click-binding helper.
 for label in ("Аудиозвонок", "Видеозвонок", "Удалить", "Отозвать устройство", "Принять", "Отклонить"):
     assert 'btn("' + label + '"' in JS, "missing dynamic control: " + label
