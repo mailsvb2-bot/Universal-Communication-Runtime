@@ -319,7 +319,7 @@ function renderContacts(contacts) {
   }
   if (!contacts.length) {
     const li = document.createElement("li");
-    li.textContent = "Добавьте контакт с проверенным Identity ID.";
+    li.textContent = "Контактов пока нет. Пригласите знакомого по ссылке или добавьте его код.";
     list.append(li);
   }
 }
@@ -385,7 +385,7 @@ async function dial(contact,media) {
   const key = contact.id + ":" + media;
   const requestId = idempotency.get(key) ?? crypto.randomUUID();
   idempotency.set(key,requestId);
-  message("Проверка Device и создание канонического вызова…");
+  message("Соединяем с собеседником…");
   // Re-establish device authority before making an irreversible canonical Call.
   // A stale cookie must not create a Call which the UI then fails to display.
   const session = await restoreSession();
@@ -484,7 +484,7 @@ async function refresh() {
 async function initialize() {
   authDiagnostic("initialization","started");
   clearInterval(timer);
-  message("Проверка независимо авторизованной Identity и Device…");
+  message("Проверяем защищённый вход…");
   const user = await restoreSession();
   rememberBinding(user);
   const currentScope = principalScope(user);
@@ -569,8 +569,9 @@ el("new-contact").addEventListener("submit", event => {
     const peer = el("contact-peer").value.trim();
     await calls.addContact(name,peer);
     el("new-contact").reset();
+    el("pl-invite-help").hidden=true;
     await updateContacts();
-    message("Контакт сохранён локально. Для звонка требуется ответ собеседника.");
+    message("Контакт добавлен. Теперь выберите аудио- или видеозвонок.");
   });
 });
 // Mark termination before the network request: an in-flight refresh or signed
@@ -622,7 +623,7 @@ el("cancel").addEventListener("click", () => {
 });
 
 el("signup").addEventListener("click",()=>void run(async()=>{
-  message("Создание Identity и первого защищённого устройства…");
+  message("Создаём защищённый профиль…");
   const result=await registerUcrFirstPartyUser(vault,{origin:location.origin});
   showRecovery(result.recoveryCode);
   el("login-tenant").value=result.binding.tenantId;
