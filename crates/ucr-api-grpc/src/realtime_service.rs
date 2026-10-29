@@ -373,7 +373,8 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         call_id: &CallId,
         session_id: &SessionId,
     ) -> Result<(), CanonicalError> {
-        close_pending_webrtc_provider(Arc::clone(&self.webrtc_provider), session_id.clone()).await?;
+        close_pending_webrtc_provider(Arc::clone(&self.webrtc_provider), session_id.clone())
+            .await?;
         self.acknowledge_pending_webrtc_close(scope, call_id, session_id)
     }
 
@@ -2973,9 +2974,9 @@ where
                     continue;
                 }
             };
-            let result = match close.and_then(|()| {
-                self.acknowledge_pending_webrtc_close(&scope, &call_id, &session_id)
-            }) {
+            let result = match close
+                .and_then(|()| self.acknowledge_pending_webrtc_close(&scope, &call_id, &session_id))
+            {
                 Ok(()) => {
                     let _placement_guard = self.sfu_placement_transition_guard().await;
                     self.release_sfu_call_placement_for_call_if_inactive(
@@ -4995,31 +4996,41 @@ mod sfu_placement_lifecycle_tests {
                 Arc::new(WebRtcSessionConfigFactory::default()),
             ),
         );
-        registry.queue_webrtc_close(&blocked).expect("blocked close");
+        registry
+            .queue_webrtc_close(&blocked)
+            .expect("blocked close");
         registry.queue_webrtc_close(&other).expect("other close");
         let entered = provider.entered.notified();
         let retry_service = service.clone();
         let retry =
             tokio::spawn(async move { retry_service.retry_pending_webrtc_closes(1_002).await });
         entered.await;
-        let independent_closed = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            async {
-                loop {
-                    let pending = registry.pending_webrtc_closes().expect("pending closes");
-                    if !pending.iter().any(|(_, _, session)| session == &other.session_id) {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
+        let independent_closed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let pending = registry.pending_webrtc_closes().expect("pending closes");
+                if !pending
+                    .iter()
+                    .any(|(_, _, session)| session == &other.session_id)
+                {
+                    break;
                 }
-            },
-        )
+                tokio::task::yield_now().await;
+            }
+        })
         .await;
         // Unblock even when the assertion fails: never strand the test runtime.
         provider.unblock();
         independent_closed.expect("blocked Call must not starve independent shutdown");
-        retry.await.expect("retry task").expect("all closes confirmed");
-        assert!(registry.pending_webrtc_closes().expect("pending closes").is_empty());
+        retry
+            .await
+            .expect("retry task")
+            .expect("all closes confirmed");
+        assert!(
+            registry
+                .pending_webrtc_closes()
+                .expect("pending closes")
+                .is_empty()
+        );
     }
 
     fn assert_revoked_pending_downlink(
