@@ -154,6 +154,7 @@ button.secondary{background:#274354}
 </details>
 <section id="pl-contacts">
   <h2>Контакты</h2>
+  <p id="pl-invite-help" hidden>Приглашение получено. Укажите, как зовут человека, и нажмите «Добавить». Проверьте его личность через доверенный канал.</p>
   <form id="new-contact">
     <input id="contact-name" aria-label="Имя" maxlength="128" placeholder="Имя" required>
     <input id="contact-peer" aria-label="Код контакта из приглашения" maxlength="128" placeholder="Код контакта из приглашения" required>
@@ -185,10 +186,14 @@ button.secondary{background:#274354}
  const slot=document.getElementById("pl-signup-slot");
  if(signup&&slot)slot.appendChild(signup);
  const recovery=document.getElementById("recovery-output");
- if(recovery&&slot){slot.after(recovery);recovery.hidden=true;}
+ if(recovery){document.getElementById("pl-onboard").after(recovery);}
  const field=document.getElementById("contact-peer");
  const code=new URLSearchParams(location.search).get("contact");
- if(field&&code&&/^[A-Za-z0-9_.:@-]{1,128}$/.test(code))field.value=code;
+ if(field&&code&&/^[A-Za-z0-9_.:@-]{1,128}$/.test(code)){
+   field.value=code;
+   field.setAttribute("data-invited-contact","true");
+   document.getElementById("pl-invite-help").hidden=false;
+ }
 })();
 </script>
 </main>
