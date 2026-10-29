@@ -1515,13 +1515,15 @@ mod tests {
     #[test]
     fn failed_or_abandoned_ice_restart_must_retire_mutated_peer() {
         assert!(!restart_requires_peer_retirement(&Ok(()), false));
-        assert!(restart_requires_peer_retirement::<()>(&Err(
-            WebRtcProviderError::Conflict
-        ), false));
+        assert!(restart_requires_peer_retirement::<()>(
+            &Err(WebRtcProviderError::Conflict),
+            false
+        ));
         assert!(restart_requires_peer_retirement(&Ok(()), true));
-        assert!(restart_requires_peer_retirement::<()>(&Err(
-            WebRtcProviderError::TemporarilyUnavailable
-        ), true));
+        assert!(restart_requires_peer_retirement::<()>(
+            &Err(WebRtcProviderError::TemporarilyUnavailable),
+            true
+        ));
     }
 
     #[test]
