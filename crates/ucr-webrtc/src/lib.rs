@@ -761,6 +761,33 @@ impl LiveWebRtcSession {
     }
 }
 
+// A failed peer setup must not drop the only live transport handle.
+// The worker closes it before reporting failure and retains it quarantined
+// if the provider cannot confirm closure.
+struct LiveWebRtcCreateFailure {
+    error: WebRtcProviderError,
+    retained_peer: Option<LiveWebRtcSession>,
+}
+
+impl LiveWebRtcCreateFailure {
+    fn before_peer(error: WebRtcProviderError) -> Self {
+        Self {
+            error,
+            retained_peer: None,
+        }
+    }
+}
+
+impl fmt::Debug for LiveWebRtcCreateFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LiveWebRtcCreateFailure")
+            .field("error", &self.error)
+            .field("retained_peer", &self.retained_peer.is_some())
+            .finish()
+    }
+}
+
 async fn run_live_webrtc_worker(
     mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
     shutdown: Arc<AtomicBool>,
@@ -915,10 +942,34 @@ async fn handle_live_create(
                 let _ = retire_peer_only_after_confirmed_close(sessions, &key, result);
             }
         }
-        Err(error) => {
-            let _ = reply.send(Err(error));
+        Err(failure) => {
+            retire_failed_live_create(sessions, key, failure, reply).await;
         }
     }
+}
+
+async fn retire_failed_live_create(
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
+    key: String,
+    failure: LiveWebRtcCreateFailure,
+    reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
+) {
+    let LiveWebRtcCreateFailure {
+        error,
+        retained_peer,
+    } = failure;
+    if let Some(session) = retained_peer {
+        let peer = Arc::clone(&session.peer_connection);
+        sessions.insert(key.clone(), session);
+        let result = peer
+            .close()
+            .await
+            .map_err(|_| WebRtcProviderError::Internal);
+        let _ = retire_peer_only_after_confirmed_close(sessions, &key, result);
+    }
+    // A failed setup is never acknowledged while its transport is still
+    // being closed. If close failed, only a retry can release its slot.
+    let _ = reply.send(Err(error));
 }
 
 async fn handle_live_restart(
@@ -1172,13 +1223,13 @@ fn command_expired(deadline: Instant) -> bool {
 async fn create_live_peer_connection(
     config: &WebRtcSessionConfig,
     e2ee_ingress: Option<tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
-) -> Result<(LiveWebRtcSession, WebRtcSessionDescription), WebRtcProviderError> {
+) -> Result<(LiveWebRtcSession, WebRtcSessionDescription), LiveWebRtcCreateFailure> {
     let mut media_engine = MediaEngine::default();
     media_engine
         .register_default_codecs()
-        .map_err(|_| WebRtcProviderError::Internal)?;
+        .map_err(|_| LiveWebRtcCreateFailure::before_peer(WebRtcProviderError::Internal))?;
     let registry = register_default_interceptors(Registry::new(), &mut media_engine)
-        .map_err(|_| WebRtcProviderError::Internal)?;
+        .map_err(|_| LiveWebRtcCreateFailure::before_peer(WebRtcProviderError::Internal))?;
     let api = APIBuilder::new()
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
@@ -1198,13 +1249,30 @@ async fn create_live_peer_connection(
     let peer_connection = Arc::new(
         api.new_peer_connection(engine_config)
             .await
-            .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?,
+            .map_err(|_| {
+                LiveWebRtcCreateFailure::before_peer(WebRtcProviderError::TemporarilyUnavailable)
+            })?,
     );
 
     let e2ee_channel = match e2ee_ingress {
-        Some(ingress_tx) => Some(
-            create_live_e2ee_data_channel(&peer_connection, &config.session_id, ingress_tx).await?,
-        ),
+        Some(ingress_tx) => {
+            match create_live_e2ee_data_channel(&peer_connection, &config.session_id, ingress_tx)
+                .await
+            {
+                Ok(channel) => Some(channel),
+                Err(error) => {
+                    return Err(LiveWebRtcCreateFailure {
+                        error,
+                        retained_peer: Some(LiveWebRtcSession {
+                            offer_id: String::new(),
+                            peer_connection,
+                            e2ee_channel: None,
+                            shutdown_pending: true,
+                        }),
+                    });
+                }
+            }
+        }
         None => None,
     };
 
@@ -1257,10 +1325,15 @@ async fn create_live_peer_connection(
             },
             description,
         )),
-        Err(error) => {
-            let _ = peer_connection.close().await;
-            Err(error)
-        }
+        Err(error) => Err(LiveWebRtcCreateFailure {
+            error,
+            retained_peer: Some(LiveWebRtcSession {
+                offer_id: String::new(),
+                peer_connection,
+                e2ee_channel,
+                shutdown_pending: true,
+            }),
+        }),
     }
 }
 
@@ -1889,6 +1962,37 @@ mod tests {
             // Shutdown retries must still be allowed, even for a quarantined peer.
             let peer = &sessions.get(&key).expect("retained peer").peer_connection;
             peer.close().await.expect("close");
+        });
+    }
+
+    #[test]
+    fn failed_create_closes_real_peer_before_reporting_failure() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let session_id =
+                SessionId::from_opaque(OpaqueId::new("failed-create-peer").expect("id"));
+            let config = WebRtcSessionConfig {
+                session_id: session_id.clone(),
+                ice_servers: Vec::new(),
+                ice_transport_policy: IceTransportPolicy::All,
+            };
+            let (mut session, _) = create_live_peer_connection(&config, None)
+                .await
+                .expect("real peer");
+            session.shutdown_pending = true;
+            let failure = LiveWebRtcCreateFailure {
+                error: WebRtcProviderError::Internal,
+                retained_peer: Some(session),
+            };
+            let (reply, receiver) = std_mpsc::channel();
+            let mut sessions = HashMap::new();
+            retire_failed_live_create(&mut sessions, session_key(&session_id), failure, reply)
+                .await;
+            assert!(sessions.is_empty(), "confirmed close retires failed setup");
+            assert_eq!(receiver.try_recv(), Ok(Err(WebRtcProviderError::Internal)));
         });
     }
 
