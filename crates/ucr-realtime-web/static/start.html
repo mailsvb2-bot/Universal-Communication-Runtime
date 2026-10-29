@@ -161,7 +161,7 @@ button.secondary{background:#274354}
   <div class="actions"><button type="button" id="retry" class="secondary">Повторить проверку входа</button></div>
 </section>
 <section aria-label="Регистрация и восстановление">
-  <h2>Новая учётная запись</h2>
+  <h2>Создание профиля и восстановление</h2>
   <p>Создание постоянного Identity и первого защищённого устройства. Не требуется ранее выданный идентификатор.</p>
   <div class="actions"><button type="button" id="signup">Создать профиль</button></div>
   <h2>Второе устройство и восстановление</h2>
@@ -187,7 +187,7 @@ button.secondary{background:#274354}
   </div>
 </section>
 </details>
-<section id="pl-contacts">
+<section id="pl-contacts" hidden>
   <h2>Контакты</h2>
   <p id="pl-invite-help" hidden>Приглашение получено. Укажите, как зовут человека, и нажмите «Добавить». Проверьте его личность через доверенный канал.</p>
   <form id="new-contact">
@@ -198,12 +198,12 @@ button.secondary{background:#274354}
   <small>Добавляйте только знакомых людей. Сверьте код контакта лично или через доверенный канал — ссылка сама по себе не подтверждает личность.</small>
   <ul id="contacts" aria-label="Мои контакты"></ul>
 </section>
-<section>
+<section id="pl-incoming" hidden>
   <h2>Входящие звонки</h2>
   <ul id="incoming" aria-label="Входящие"></ul>
   <small>В этом браузерном варианте входящие проверяются только при открытом приложении. Фоновые мобильные уведомления ещё требуют отдельного провайдера.</small>
 </section>
-<section>
+<section id="pl-current-call" hidden>
   <h2>Текущий вызов</h2>
   <p id="call-state">Нет активного вызова.</p>
   <div class="actions">
@@ -213,7 +213,7 @@ button.secondary{background:#274354}
 <section role="status" aria-live="polite">
   <h2>Состояние защиты</h2>
   <p id="status">До подтверждения учётной записи и Device камера и микрофон не включаются.</p>
-  <details id="auth-diagnostics" open><summary>Диагностика входа и авторизации</summary><p>Показываются только этапы и коды ошибок. Ключи, токены, Identity ID и коды восстановления не сохраняются.</p><button id="auth-diagnostics-copy" type="button" class="secondary">Скопировать отчёт</button><button id="auth-diagnostics-save" type="button" class="secondary">Сохранить JSON</button><pre id="auth-diagnostics-report" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto"></pre></details>
+  <details id="auth-diagnostics"><summary>Диагностика входа и авторизации</summary><p>Показываются только этапы и коды ошибок. Ключи, токены, Identity ID и коды восстановления не сохраняются.</p><button id="auth-diagnostics-copy" type="button" class="secondary">Скопировать отчёт</button><button id="auth-diagnostics-save" type="button" class="secondary">Сохранить JSON</button><pre id="auth-diagnostics-report" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto"></pre></details>
 </section>
 <script>
 (function(){
