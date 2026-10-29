@@ -66,6 +66,20 @@ assert 'dataset.invitedContact==="true"' in JS, "invite context lost on login"
 assert 'el("contact-name").focus' in JS, "invite needs visible contact confirmation"
 assert 'calls.addContact(name,peer)' in JS, "contact must use canonical owner"
 assert 'clean.searchParams.delete("contact")' in JS, "invite URL remains after contact add"
+# Registration succeeded even when optional list endpoints are unavailable:
+# never send an authenticated user back into the anonymous signup journey.
+assert JS.index('plSetSignedIn(user.participantId)') < JS.index('await authTrace("list_contacts"'), (
+    "canonical sign-in must precede optional contact loading"
+)
+assert 'try {await authTrace("list_devices"' in JS, (
+    "device inventory failure must not invalidate an authenticated profile"
+)
+assert 'if(peer===plOwnIdentity)' in JS and 'knownContacts.some(' in JS, (
+    "contact onboarding must reject self and duplicate entries"
+)
+assert 'document.addEventListener("visibilitychange"' in JS, (
+    "mobile foreground must recheck incoming calls"
+)
 # Dynamic controls must be created with the common click-binding helper.
 for label in ("Аудиозвонок", "Видеозвонок", "Удалить", "Отозвать устройство", "Принять", "Отклонить"):
     assert 'btn("' + label + '"' in JS, "missing dynamic control: " + label
