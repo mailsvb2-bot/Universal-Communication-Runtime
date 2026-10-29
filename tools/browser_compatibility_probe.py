@@ -1085,7 +1085,10 @@ const done = arguments[arguments.length - 1];
   });
   try {
     encoder.configure(config);
-    const canvas = new OffscreenCanvas(1920, 1080);
+    // Materialize a browser-backed frame for Safari's WebCodecs implementation.
+    const canvas = document.createElement("canvas");
+    canvas.width = 1920;
+    canvas.height = 1080;
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("synthetic Full HD canvas unavailable");
     const pixels = ctx.createLinearGradient(0, 0, 1920, 1080);
@@ -1093,8 +1096,11 @@ const done = arguments[arguments.length - 1];
     pixels.addColorStop(1, "#f4c251");
     ctx.fillStyle = pixels;
     ctx.fillRect(0, 0, 1920, 1080);
-    const frame = new VideoFrame(canvas, {timestamp: 0});
-    try { encoder.encode(frame, {keyFrame: true}); } finally { frame.close(); }
+    const bitmap = await createImageBitmap(canvas);
+    try {
+      const frame = new VideoFrame(bitmap, {timestamp: 0});
+      try { encoder.encode(frame, {keyFrame: true}); } finally { frame.close(); }
+    } finally { bitmap.close(); }
     await encoder.flush();
     await decoder.flush();
     return {supported: true, codec: "vp8", sourceWidth: 1920,
