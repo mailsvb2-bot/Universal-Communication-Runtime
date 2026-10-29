@@ -37,6 +37,7 @@ function plSetSignedIn(identity){
   const logged=Boolean(plOwnIdentity);
   el("pl-new-user").hidden=logged;
   el("pl-user-cabinet").hidden=!logged;
+  for(const id of ["pl-contacts","pl-incoming","pl-current-call"])el(id).hidden=!logged;
   if(logged){
     el("pl-friendly-identity").textContent="Профиль активен. Пригласите знакомого или выберите контакт для звонка.";
     const invited=el("contact-peer").dataset.invitedContact==="true";
@@ -690,6 +691,8 @@ el("logout").addEventListener("click",()=>void run(async()=>{
   active=null;accountScope=null;knownContacts=[];idempotency.clear();
   renderContacts([]);renderIncoming([]);el("devices").replaceChildren();
   plSetSignedIn(null);
+  el("new-contact").reset();
+  el("pl-invite-help").hidden=true;
   el("who").textContent="Вы вышли из учётной записи.";
   showActive();
   el("recovery-output").hidden=true;
@@ -708,6 +711,16 @@ document.addEventListener("visibilitychange",()=>{
 });
 window.addEventListener("pagehide", () => clearInterval(timer));
 function explainEntryFailure(error) {
+  // Do not leave an earlier principal's contacts or call metadata on screen
+  // after reauthentication has failed.
+  clearInterval(timer);
+  accountScope=null;
+  active=null;
+  knownContacts=[];
+  idempotency.clear();
+  renderContacts([]);
+  renderIncoming([]);
+  showActive();
   plSetSignedIn(null);
   const detail = error instanceof Error ? error.message : String(error);
   let hint = "Войдите с доверенного устройства, создайте учётную запись или восстановите доступ.";
