@@ -1972,7 +1972,9 @@ mod tests {
                 .await
                 .expect("real peer");
             let mut sessions = HashMap::from([(session_key(&session_id), session)]);
-            let expired = Instant::now().checked_sub(Duration::from_secs(1)).expect("clock");
+            let expired = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("clock");
             let (reply, receiver) = std_mpsc::channel();
             handle_live_close(&mut sessions, session_id, None, expired, reply).await;
             assert_eq!(receiver.try_recv(), Ok(Ok(())));
