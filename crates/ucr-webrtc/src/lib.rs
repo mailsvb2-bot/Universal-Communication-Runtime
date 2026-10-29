@@ -939,12 +939,33 @@ async fn handle_live_restart(
     } else {
         result
     };
-    if reply.send(reply_result).is_ok() && !must_retire {
+    // Never acknowledge a failed or abandoned restart while its mutated
+    // transport can still be sending. Retire first; if close fails, retain
+    // the handle for the canonical retry path rather than releasing its slot.
+    if must_retire {
+        if let Some(session) = sessions.get(&key) {
+            let peer = Arc::clone(&session.peer_connection);
+            retire_restart_before_reporting_error(
+                sessions,
+                &key,
+                async move { peer.close().await.map_err(|_| WebRtcProviderError::Internal) },
+                reply,
+                reply_result,
+            )
+            .await;
+        } else {
+            let _ = reply.send(reply_result);
+        }
+        return;
+    }
+    if reply.send(reply_result).is_ok() {
         if let (Some(session), Some(new_offer_id)) = (sessions.get_mut(&key), new_offer_id) {
             session.offer_id = new_offer_id;
         }
         return;
     }
+    // The successful offer was not delivered: the caller cannot own this
+    // mutated peer. Retire it before allowing any subsequent worker command.
     if let Some(session) = sessions.get(&key) {
         let closed = session
             .peer_connection
@@ -953,6 +974,24 @@ async fn handle_live_restart(
             .map_err(|_| WebRtcProviderError::Internal);
         let _ = retire_peer_only_after_confirmed_close(sessions, &key, closed);
     }
+}
+
+// The reply is an acknowledgement boundary: a failed restart cannot be
+// reported before its transport is confirmed closed (or retained for retry).
+// Generic peer storage and a supplied close future allow deterministic
+// ordering tests without a fake second WebRTC provider.
+async fn retire_restart_before_reporting_error<T, F>(
+    sessions: &mut HashMap<String, T>,
+    key: &str,
+    close: F,
+    reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
+    result: Result<WebRtcSessionDescription, WebRtcProviderError>,
+) where
+    F: std::future::Future<Output = Result<(), WebRtcProviderError>>,
+{
+    let closed = close.await;
+    let _ = retire_peer_only_after_confirmed_close(sessions, key, closed);
+    let _ = reply.send(result);
 }
 
 // Any failed restart may have partially mutated the existing peer. Only a
@@ -1798,6 +1837,66 @@ mod tests {
             !sessions.contains_key("owned-session"),
             "only confirmed close may release the transport slot"
         );
+    }
+
+    #[test]
+    fn restart_failure_reply_waits_for_close_and_retains_failed_close_handle() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let mut sessions = HashMap::from([("owned-session".to_owned(), 42_u8)]);
+            let (reply, receiver) = std_mpsc::channel();
+            let (close_sender, close_receiver) = tokio::sync::oneshot::channel::<()>();
+            let mut completion = Box::pin(retire_restart_before_reporting_error(
+                &mut sessions,
+                "owned-session",
+                async {
+                    let _ = close_receiver.await;
+                    Ok(())
+                },
+                reply,
+                Err(WebRtcProviderError::Internal),
+            ));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(5), &mut completion)
+                    .await
+                    .is_err(),
+                "the reply must wait for the pending peer close"
+            );
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(std_mpsc::TryRecvError::Empty)
+            ));
+            close_sender.send(()).expect("release pending close");
+            completion.await;
+            assert!(sessions.is_empty(), "confirmed close retires the peer");
+            assert_eq!(
+                receiver.try_recv(),
+                Ok(Err(WebRtcProviderError::Internal))
+            );
+
+            let mut failed = HashMap::from([("failed-close".to_owned(), 7_u8)]);
+            let (reply, receiver) = std_mpsc::channel();
+            retire_restart_before_reporting_error(
+                &mut failed,
+                "failed-close",
+                async { Err(WebRtcProviderError::TemporarilyUnavailable) },
+                reply,
+                Err(WebRtcProviderError::Internal),
+            )
+            .await;
+            assert_eq!(
+                failed.get("failed-close"),
+                Some(&7),
+                "failed close must keep the transport handle for retry"
+            );
+            assert_eq!(
+                receiver.try_recv(),
+                Ok(Err(WebRtcProviderError::Internal))
+            );
+        });
     }
 
     #[test]
