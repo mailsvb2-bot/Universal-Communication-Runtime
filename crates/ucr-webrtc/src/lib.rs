@@ -921,11 +921,18 @@ async fn handle_live_restart(
         Some(session) => restart_live_peer_connection(&session.peer_connection, &config).await,
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
-    // ICE restart can change the live transport while its caller has already
-    // timed out or cancelled. Do not retain a mutated peer with no owner of
-    // the new offer. As with Create, keep the handle until close succeeds.
+    // Even a *failed* ICE restart can already have changed the ICE
+    // configuration, credentials or local SDP. A caller that received an
+    // error does not own that mutated transport. Retire it just like an
+    // abandoned success, retaining the handle if peer.close() fails.
     let abandoned = command_expired(deadline);
-    if !abandoned && reply.send(result).is_ok() {
+    let must_retire = restart_requires_peer_retirement(&result, abandoned);
+    let reply_result = if abandoned {
+        Err(WebRtcProviderError::TemporarilyUnavailable)
+    } else {
+        result
+    };
+    if reply.send(reply_result).is_ok() && !must_retire {
         return;
     }
     if let Some(session) = sessions.get(&key) {
@@ -936,9 +943,15 @@ async fn handle_live_restart(
             .map_err(|_| WebRtcProviderError::Internal);
         let _ = retire_peer_only_after_confirmed_close(sessions, &key, closed);
     }
-    if abandoned {
-        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
-    }
+}
+
+// Any failed restart may have partially mutated the existing peer. Only a
+// delivered successful offer can safely leave that transport active.
+fn restart_requires_peer_retirement<T>(
+    result: &Result<T, WebRtcProviderError>,
+    abandoned: bool,
+) -> bool {
+    abandoned || result.is_err()
 }
 
 async fn handle_live_remote_description(
@@ -1498,6 +1511,18 @@ mod tests {
         InMemorySecretProvider, SecretHandle, SecretMaterial, SecretProvider, SecretPurpose,
         SecretVersion,
     };
+
+    #[test]
+    fn failed_or_abandoned_ice_restart_must_retire_mutated_peer() {
+        assert!(!restart_requires_peer_retirement(&Ok(()), false));
+        assert!(restart_requires_peer_retirement::<()>(&Err(
+            WebRtcProviderError::Conflict
+        ), false));
+        assert!(restart_requires_peer_retirement(&Ok(()), true));
+        assert!(restart_requires_peer_retirement::<()>(&Err(
+            WebRtcProviderError::TemporarilyUnavailable
+        ), true));
+    }
 
     #[test]
     fn turn_rest_credentials_are_short_lived_session_bound_and_redacted() {
