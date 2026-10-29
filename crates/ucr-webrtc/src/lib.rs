@@ -1860,16 +1860,15 @@ mod tests {
             .build()
             .expect("test runtime");
         runtime.block_on(async {
-            let session_id = SessionId::from_opaque(
-                OpaqueId::new("shutdown-pending").expect("id"),
-            );
+            let session_id = SessionId::from_opaque(OpaqueId::new("shutdown-pending").expect("id"));
             let config = WebRtcSessionConfig {
                 session_id: session_id.clone(),
                 ice_servers: Vec::new(),
                 ice_transport_policy: IceTransportPolicy::All,
             };
-            let (mut session, description) =
-                create_live_peer_connection(&config, None).await.expect("peer");
+            let (mut session, description) = create_live_peer_connection(&config, None)
+                .await
+                .expect("peer");
             session.shutdown_pending = true;
             assert!(!session.permits_signaling_and_media());
             let key = session_key(&session_id);
