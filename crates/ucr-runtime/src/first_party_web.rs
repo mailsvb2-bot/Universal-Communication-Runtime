@@ -1239,27 +1239,7 @@ fn publish_endpoint_mls_group(
         .store
         .create_group(&conversation, &group, &session.subject)
         .map_err(|_| StatusCode::CONFLICT)?;
-    // A duplicate creation request must not acknowledge a different
-    // endpoint-owned MLS epoch-zero fingerprint. Read the canonical Group
-    // after the write: a concurrent creator or Add Commit can advance it
-    // before this HTTP response is assembled.
-    let committed = state
-        .store
-        .group(&direct.scope, &ids.group_id)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-        .ok_or(StatusCode::CONFLICT)?;
-    if committed.scope != direct.scope
-        || committed.group_id != ids.group_id
-        || committed.conversation != conversation.conversation
-        || committed.ownership != GroupOwnership::PersonOwned(participants[0].clone())
-        || committed.crypto_state.capability_id.as_deref()
-            != Some(ucr_protocol::GROUP_MLS_CAPABILITY)
-        || committed.crypto_state.epoch != 0
-        || committed.crypto_state.state_ref.as_ref().map(OpaqueId::as_str)
-            != Some(req.crypto_state_ref.as_str())
-    {
-        return Err(StatusCode::CONFLICT);
-    }
+    confirm_endpoint_mls_group_publication(state, &group)?;
     Ok(json!({
         "callId": req.call_id,
         "groupId": ids.group_id.as_opaque().as_str(),
@@ -1267,6 +1247,31 @@ fn publish_endpoint_mls_group(
         "cryptoStateRef": req.crypto_state_ref,
         "requiresEndpointOwnedCommit": true,
     }))
+}
+
+// A successful or duplicate Group insert must acknowledge only the exact
+// canonical epoch-zero fingerprint. A competing endpoint Commit may have
+// advanced the Group before this HTTP response; never return a false ACK.
+fn confirm_endpoint_mls_group_publication(
+    state: &State,
+    expected: &GroupRecord,
+) -> Result<(), StatusCode> {
+    let committed = state
+        .store
+        .group(&expected.scope, &expected.group_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::CONFLICT)?;
+    if committed.scope != expected.scope
+        || committed.group_id != expected.group_id
+        || committed.conversation != expected.conversation
+        || committed.ownership != expected.ownership
+        || committed.crypto_state.capability_id != expected.crypto_state.capability_id
+        || committed.crypto_state.epoch != 0
+        || committed.crypto_state.state_ref != expected.crypto_state.state_ref
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    Ok(())
 }
 
 fn decode_mls_public_wire(encoded: &str) -> Result<Vec<u8>, StatusCode> {
