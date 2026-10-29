@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#111827">
-<title>UCR Conference</title>
+<title>Конференция PetrelLink</title>
 <style>
 :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark;--ucr-background:#0b1020;--ucr-card:#111827;--ucr-text:#f8fafc;--ucr-muted:#cbd5e1;--ucr-panel:#0f172a;--ucr-panel-deep:#020617;--ucr-border:#334155;--ucr-accent:#f8fafc;--ucr-accent-text:#0f172a}
 body{margin:0;background:var(--ucr-background);color:var(--ucr-text);min-height:100vh;display:grid;place-items:center}
@@ -50,8 +50,8 @@ canvas.remote-media.hidden{display:none}
 <body>
 <main>
 <section class="card">
-<div class="brand"><img id="brand-logo" class="brand-logo hidden" alt="" referrerpolicy="no-referrer"><h1 id="brand-name">UCR Conference</h1></div>
-<p id="intro">Secure realtime session. Join credentials remain in this page fragment and are never placed in the request URL.</p>
+<div class="brand"><img id="brand-logo" class="brand-logo hidden" alt="" referrerpolicy="no-referrer"><h1 id="brand-name">Конференция PetrelLink</h1></div>
+<p id="intro">Защищённое соединение. Данные входа не передаются в адресе запроса.</p>
 <form id="room-lobby" class="hidden">
   <h2>Войти в эфир</h2>
   <p>Локальная комната. Спикер публикует камеру и микрофон и показывает экран кнопкой «Показать экран». Зритель только слушает и смотрит. Камера открывается здесь и остаётся картинкой этого звонка: отдельной страницы, которая заново спрашивает устройство, нет. Второе окно с другим именем входит как другой человек. Спикер может выгнать зрителя, заблокировать его или запретить чат на время.</p>
@@ -123,7 +123,7 @@ canvas.remote-media.hidden{display:none}
   <button id="ucr-diagnostics-save" class="secondary" type="button">Сохранить JSON</button>
   <pre id="ucr-diagnostics-live" aria-live="off">Подготовка диагностики…</pre>
 </details>
-<p id="footer-note" class="small">Media permission is requested only after joining. Recording is a separate explicit UCR capability with consent and retention policy.</p>
+<p id="footer-note" class="small">Media permission is requested only after joining. Recording is a отдельная возможность PetrelLink with consent and retention policy.</p>
 </section>
 </main>
 <script>
@@ -406,7 +406,7 @@ const BRAND_LOGO_URL_MAX=2048;
 const BRAND_COLOR=/^#[0-9a-fA-F]{6}$/;
 const COPY={
   en:{
-    defaultTitle:"UCR Conference",intro:"Secure realtime session. Join credentials remain in this page fragment and are never placed in the request URL.",
+    defaultTitle:"Конференция PetrelLink",intro:"Secure realtime session. Join credentials remain in this page fragment and are never placed in the request URL.",
     state:"State",webrtc:"WebRTC",packets:"Encrypted packets",expires:"Expires",ready:"Ready",idle:"Idle",
     you:"You",yourScreen:"Your screen",remote:"Remote",microphone:"Microphone",camera:"Camera",
     defaultMicrophone:"Default microphone",defaultCamera:"Default camera",muteMicrophone:"Mute microphone",unmuteMicrophone:"Unmute microphone",startMicrophone:"Start microphone",microphoneUnavailable:"Microphone unavailable",
@@ -414,14 +414,14 @@ const COPY={
     shareScreen:"Share screen",raiseHand:"Raise hand",lowerHand:"Lower hand",reaction:"Reaction",react:"React",
     activeSpeakerNone:"Active speaker: none",activeSpeakerPrefix:"Active speaker: ",chat:"Conference chat",message:"Message",send:"Send",
     join:"Join conference",leave:"Leave",readingGrant:"Reading signed join grant…",
-    footer:"Media permission is requested only after joining. Recording is a separate explicit UCR capability with consent and retention policy.",
+    footer:"Media permission is requested only after joining. Recording is a отдельная возможность PetrelLink with consent and retention policy.",
     waitingRoom:"You are in the waiting room. Media will start automatically when the host starts the conference.",
     waitingEntry:"Waiting for the host to open conference entry…",
     waitingScheduled:"The conference has not started yet. This page will join automatically when entry opens.",
     handRaised:"Your hand is raised.",handLowered:"Your hand is lowered."
   },
   ru:{
-    defaultTitle:"Конференция UCR",intro:"Защищённая сессия в реальном времени. Данные входа остаются во фрагменте этой страницы и не передаются в URL запросов.",
+    defaultTitle:"Конференция PetrelLink",intro:"Защищённая сессия в реальном времени. Данные входа остаются во фрагменте этой страницы и не передаются в URL запросов.",
     state:"Состояние",webrtc:"WebRTC",packets:"Зашифрованные пакеты",expires:"Доступ до",ready:"Готово",idle:"Ожидание",
     you:"Вы",yourScreen:"Ваш экран",remote:"Участники",microphone:"Микрофон",camera:"Камера",
     defaultMicrophone:"Микрофон по умолчанию",defaultCamera:"Камера по умолчанию",muteMicrophone:"Выключить микрофон",unmuteMicrophone:"Включить микрофон",startMicrophone:"Включить микрофон",microphoneUnavailable:"Микрофон недоступен",
@@ -429,14 +429,21 @@ const COPY={
     shareScreen:"Показать экран",raiseHand:"Поднять руку",lowerHand:"Опустить руку",reaction:"Реакция",react:"Отправить реакцию",
     activeSpeakerNone:"Активный спикер: нет",activeSpeakerPrefix:"Активный спикер: ",chat:"Чат конференции",message:"Сообщение",send:"Отправить",
     join:"Войти в конференцию",leave:"Выйти",readingGrant:"Проверка ссылки для входа…",
-    footer:"Доступ к камере и микрофону запрашивается только после входа. Запись — отдельная возможность UCR с согласием участников и политикой хранения.",
+    footer:"Доступ к камере и микрофону запрашивается только после входа. Запись — отдельная возможность PetrelLink с согласием участников и политикой хранения.",
     waitingRoom:"Вы в комнате ожидания. Медиа включится автоматически, когда ведущий начнёт конференцию.",
     waitingEntry:"Ожидание открытия входа ведущим…",
     waitingScheduled:"Конференция ещё не началась. Страница подключится автоматически, когда вход откроется.",
     handRaised:"Ваша рука поднята.",handLowered:"Ваша рука опущена."
   }
 };
-let locale="en",brandNameOverride="",brandWaitingText="";
+const PETRELLINK_LANGUAGE_KEY="petrellink.language.v1";
+function savedPetrelLinkLanguage(){
+  try {
+    const lang=localStorage.getItem(PETRELLINK_LANGUAGE_KEY);
+    return lang==="en"?"en":"ru";
+  } catch (_) {return "ru";}
+}
+let locale=savedPetrelLinkLanguage(),brandNameOverride="",brandWaitingText="";
 
 function tr(key){return (COPY[locale]&&COPY[locale][key])||COPY.en[key]||key;}
 function boundedBrandText(value,max){return typeof value==="string"&&value.trim().length>0&&value.trim().length<=max?value.trim():null;}
@@ -475,10 +482,10 @@ function applyLocale(language){
 function waitCopy(key){return brandWaitingText||tr(key);}
 function applyBrandingFromFragment(params){
   const raw=params.get(BRANDING_FRAGMENT_KEY);
-  if(!raw||raw.length>BRANDING_MAX_JSON_BYTES){applyLocale("en");return;}
+  if(!raw||raw.length>BRANDING_MAX_JSON_BYTES){applyLocale(savedPetrelLinkLanguage());return;}
   let branding;
-  try{branding=JSON.parse(raw);}catch(_){applyLocale("en");return;}
-  if(!branding||typeof branding!=="object"||Array.isArray(branding)){applyLocale("en");return;}
+  try{branding=JSON.parse(raw);}catch(_){applyLocale(savedPetrelLinkLanguage());return;}
+  if(!branding||typeof branding!=="object"||Array.isArray(branding)){applyLocale(savedPetrelLinkLanguage());return;}
   const name=boundedBrandText(branding.name,BRAND_NAME_MAX);if(name)brandNameOverride=name;
   const waiting=boundedBrandText(branding.waitingText,BRAND_WAITING_TEXT_MAX);if(waiting)brandWaitingText=waiting;
   const accent=normalizeBrandColor(branding.accentColor);
@@ -487,7 +494,7 @@ function applyBrandingFromFragment(params){
   if(background){document.documentElement.style.setProperty("--ucr-background",background);const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.setAttribute("content",background);}
   const logo=normalizeBrandLogo(branding.logoUrl);
   if(logo){ui.brandLogo.src=logo;ui.brandLogo.classList.remove("hidden");}
-  applyLocale(branding.language==="ru"?"ru":"en");
+  applyLocale(branding.language==="ru"||branding.language==="en"?branding.language:savedPetrelLinkLanguage());
 }
 
 function fail(message){ui.state.textContent="Error";ui.status.textContent=message;ui.join.disabled=true;}
