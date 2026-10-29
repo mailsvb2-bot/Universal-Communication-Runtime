@@ -814,6 +814,55 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         }),
     )
     .expect("creator publishes signed endpoint-only MLS epoch zero");
+    // A lost HTTP acknowledgement must allow an exact retry, but a second
+    // independently signed epoch-zero fingerprint must never receive a
+    // false success response for the already committed canonical Group.
+    let exact_retry = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-create",
+        &json!({
+            "binding": alice, "callId": call_id, "expectedRevision": revision,
+            "cryptoStateRef": first_ref,
+            "signatureBase64Url": URL_SAFE_NO_PAD.encode(create_signature.to_bytes()),
+        }),
+    )
+    .expect("identical creator publication retry");
+    assert_eq!(exact_retry["cryptoStateRef"], first_ref);
+    let conflicting_ref = "forged-epoch-zero-fingerprint";
+    let conflicting_signature = alice_signer.sign(
+        encoded_proof(
+            "ucr-first-party-endpoint-mls-create.v1",
+            &json!([
+                alice.tenant_id,
+                alice.namespace_id,
+                alice.participant_id,
+                alice.device,
+                alice_session.signer_key_id,
+                call_id,
+                revision,
+                descriptor["groupId"].as_str().unwrap(),
+                0,
+                conflicting_ref,
+            ]),
+        )
+        .unwrap()
+        .as_bytes(),
+    );
+    assert_eq!(
+        call(
+            &server,
+            &alice,
+            "/v1/first-party/call/mls-create",
+            &json!({
+                "binding": alice, "callId": call_id, "expectedRevision": revision,
+                "cryptoStateRef": conflicting_ref,
+                "signatureBase64Url": URL_SAFE_NO_PAD.encode(conflicting_signature.to_bytes()),
+            }),
+        )
+        .err(),
+        Some(StatusCode::CONFLICT),
+    );
     let created_descriptor = call(
         &server,
         &alice,
