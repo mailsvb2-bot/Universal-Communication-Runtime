@@ -1186,6 +1186,22 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             .server_possesses_mls_group(&scope, &group_id)
             .unwrap()
     );
+    // The durable media epoch is not a decryption key. Even with the
+    // authentic captured ciphertext and sender signature, a caller using
+    // a different MLS epoch cannot open the frame. Keep this negative
+    // cryptographic assertion in the same real Call/Join acceptance test.
+    let mut wrong_epoch_context = media_context.clone();
+    wrong_epoch_context.crypto_epoch = media_context.crypto_epoch + 1;
+    assert!(
+        open_endpoint_group_media_wire(
+            &bob_secret,
+            &wrong_epoch_context,
+            &wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "media ciphertext must remain bound to the admitted MLS epoch"
+    );
 
     // A third person never sees nor joins the Call.
     assert!(join_accepted(&server, &carol, &call_id, revision).is_err());
