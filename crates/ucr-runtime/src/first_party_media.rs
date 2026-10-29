@@ -342,6 +342,9 @@ where
         || group.conversation.kind != ConversationKind::PrivateGroup
         || group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
         || group.crypto_state.state_ref.is_none()
+        // Epoch zero means only the creator exists: the recipient has not
+        // joined via a committed endpoint-owned Welcome. No media yet.
+        || group.crypto_state.epoch == 0
         || group.ownership != GroupOwnership::PersonOwned(participants[0].clone())
         || group.public_policy.is_some()
     {
