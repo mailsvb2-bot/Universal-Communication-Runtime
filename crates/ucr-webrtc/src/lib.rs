@@ -751,6 +751,14 @@ struct LiveWebRtcSession {
     offer_id: String,
     peer_connection: Arc<RTCPeerConnection>,
     e2ee_channel: Option<LiveWebRtcE2eeChannel>,
+    // Failed close retains the peer for retry, not for further media/signaling.
+    shutdown_pending: bool,
+}
+
+impl LiveWebRtcSession {
+    fn permits_signaling_and_media(&self) -> bool {
+        !self.shutdown_pending
+    }
 }
 
 async fn run_live_webrtc_worker(
@@ -811,6 +819,7 @@ async fn run_live_webrtc_worker(
                 } else {
                     sessions
                         .get(&session_key(&session_id))
+                        .filter(|session| session.permits_signaling_and_media())
                         .map(|session| session.offer_id.clone())
                         .ok_or(WebRtcProviderError::SessionUnavailable)
                 };
@@ -884,6 +893,9 @@ async fn handle_live_create(
             // A failed close must not lose the only handle to a live transport.
             sessions.insert(key.clone(), session);
             if shutdown.load(Ordering::Acquire) || command_expired(deadline) {
+                if let Some(retained) = sessions.get_mut(&key) {
+                    retained.shutdown_pending = true;
+                }
                 let result = peer_connection
                     .close()
                     .await
@@ -893,6 +905,9 @@ async fn handle_live_create(
                 return;
             }
             if reply.send(Ok(description)).is_err() {
+                if let Some(retained) = sessions.get_mut(&key) {
+                    retained.shutdown_pending = true;
+                }
                 let result = peer_connection
                     .close()
                     .await
@@ -917,6 +932,13 @@ async fn handle_live_restart(
         return;
     }
     let key = session_key(&config.session_id);
+    if sessions
+        .get(&key)
+        .is_some_and(|session| !session.permits_signaling_and_media())
+    {
+        let _ = reply.send(Err(WebRtcProviderError::SessionUnavailable));
+        return;
+    }
     let result = match sessions.get(&key) {
         Some(session) => restart_live_peer_connection(&session.peer_connection, &config).await,
         None => Err(WebRtcProviderError::SessionUnavailable),
@@ -943,7 +965,8 @@ async fn handle_live_restart(
     // transport can still be sending. Retire first; if close fails, retain
     // the handle for the canonical retry path rather than releasing its slot.
     if must_retire {
-        if let Some(session) = sessions.get(&key) {
+        if let Some(session) = sessions.get_mut(&key) {
+            session.shutdown_pending = true;
             let peer = Arc::clone(&session.peer_connection);
             retire_restart_before_reporting_error(
                 sessions,
@@ -970,7 +993,8 @@ async fn handle_live_restart(
     }
     // The successful offer was not delivered: the caller cannot own this
     // mutated peer. Retire it before allowing any subsequent worker command.
-    if let Some(session) = sessions.get(&key) {
+    if let Some(session) = sessions.get_mut(&key) {
+        session.shutdown_pending = true;
         let closed = session
             .peer_connection
             .close()
@@ -1019,6 +1043,9 @@ async fn handle_live_remote_description(
         return;
     }
     let result = match sessions.get(&session_key(&description.session_id)) {
+        Some(session) if !session.permits_signaling_and_media() => {
+            Err(WebRtcProviderError::SessionUnavailable)
+        }
         Some(session) if offer_id.as_deref().is_some_and(|id| id != session.offer_id) => {
             Err(WebRtcProviderError::SessionUnavailable)
         }
@@ -1042,6 +1069,9 @@ async fn handle_live_remote_candidate(
         return;
     }
     let result = match sessions.get(&session_key(&candidate.session_id)) {
+        Some(session) if !session.permits_signaling_and_media() => {
+            Err(WebRtcProviderError::SessionUnavailable)
+        }
         Some(session) if offer_id.as_deref().is_some_and(|id| id != session.offer_id) => {
             Err(WebRtcProviderError::SessionUnavailable)
         }
@@ -1065,6 +1095,7 @@ async fn handle_live_send_e2ee(
     let result = match sessions.get_mut(&session_key(&session_id)) {
         Some(LiveWebRtcSession {
             e2ee_channel: Some(channel),
+            shutdown_pending: false,
             ..
         }) => channel.send(&envelope, deadline).await,
         Some(_) | None => Err(WebRtcProviderError::SessionUnavailable),
@@ -1095,12 +1126,16 @@ async fn handle_live_close(
     // Never discard the only live peer handle before the transport has
     // confirmed closure. A failed close must remain retryable; otherwise a
     // revoked session could keep sending after its registry entry is gone.
-    let result = match sessions.get(&key) {
-        Some(session) => session
-            .peer_connection
-            .close()
-            .await
-            .map_err(|_| WebRtcProviderError::Internal),
+    let result = match sessions.get_mut(&key) {
+        Some(session) => {
+            // Quarantine BEFORE the fallible close: a retained peer is retry-only.
+            session.shutdown_pending = true;
+            session
+                .peer_connection
+                .close()
+                .await
+                .map_err(|_| WebRtcProviderError::Internal)
+        }
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
     let _ = reply.send(retire_peer_only_after_confirmed_close(
@@ -1218,6 +1253,7 @@ async fn create_live_peer_connection(
                 offer_id: String::new(),
                 peer_connection,
                 e2ee_channel,
+                shutdown_pending: false,
             },
             description,
         )),
@@ -1815,6 +1851,46 @@ mod tests {
         let replacement = provider.create_session(&config).expect("new owned offer");
         assert_eq!(replacement.session_id, session_id);
         assert_eq!(provider.close_session(&session_id), Ok(()));
+    }
+
+    #[test]
+    fn shutdown_pending_peer_rejects_restart_and_remote_signaling() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let session_id = SessionId::from_opaque(
+                OpaqueId::new("shutdown-pending").expect("id"),
+            );
+            let config = WebRtcSessionConfig {
+                session_id: session_id.clone(),
+                ice_servers: Vec::new(),
+                ice_transport_policy: IceTransportPolicy::All,
+            };
+            let (mut session, description) =
+                create_live_peer_connection(&config, None).await.expect("peer");
+            session.shutdown_pending = true;
+            assert!(!session.permits_signaling_and_media());
+            let key = session_key(&session_id);
+            let mut sessions = HashMap::from([(key.clone(), session)]);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let (reply, receiver) = std_mpsc::channel();
+            handle_live_restart(&mut sessions, config, deadline, reply).await;
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(Err(WebRtcProviderError::SessionUnavailable))
+            ));
+            let (reply, receiver) = std_mpsc::channel();
+            handle_live_remote_description(&sessions, description, None, deadline, reply).await;
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(Err(WebRtcProviderError::SessionUnavailable))
+            ));
+            // Shutdown retries must still be allowed, even for a quarantined peer.
+            let peer = &sessions.get(&key).expect("retained peer").peer_connection;
+            peer.close().await.expect("close");
+        });
     }
 
     #[test]
