@@ -1688,6 +1688,18 @@ fn endpoint_mls_bootstrap(
         .map_err(|_| StatusCode::FORBIDDEN)?;
     let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
         .map_err(|_| StatusCode::CONFLICT)?;
+    // Never hand out an endpoint bootstrap for a legacy server-custodied
+    // MLS group. The server may relay public Welcome/Commit bytes, but may
+    // not possess the Group private state on this first-party media path.
+    if ucr_group_mls::GroupMlsServerCustodyProbe::server_possesses_mls_group(
+        state.store.as_ref(),
+        &direct.scope,
+        &ids.group_id,
+    )
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    {
+        return Err(StatusCode::CONFLICT);
+    }
     let bootstrap = state
         .store
         .mls_bootstrap_for_device(&direct.scope, &ids.group_id, &device(&session.binding)?)
