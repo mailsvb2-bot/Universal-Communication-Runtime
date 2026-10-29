@@ -1372,6 +1372,21 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         ),
         "ended direct Call must not be re-admitted: {rejoin:?}"
     );
+    // A previously admitted sender must also lose the media-operation
+    // authority immediately after Hangup, even with its original bearer.
+    // Rejected heartbeat alone does not prove the realtime media fence.
+    let after_audio = realtime
+        .report_audio_level(audio(&claims[0], &tokens[0]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            after_audio.result,
+            Some(pb::realtime_report_audio_level_response::Result::Error(_))
+        ),
+        "ended media Call must reject the previously authorized sender: {after_audio:?}"
+    );
     // An already-open session of the ended Call cannot keep heartbeating.
     let join = realtime_join_request(&claims[1], &tokens[1]).into_inner();
     let mut beat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
