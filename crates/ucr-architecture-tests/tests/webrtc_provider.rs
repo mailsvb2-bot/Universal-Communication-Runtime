@@ -12,6 +12,10 @@ fn read(path: &str) -> String {
     fs::read_to_string(root().join(path)).expect("architecture source")
 }
 
+fn assert_shared_ice_turn_configuration(provider: &str) {
+    assert_shared_ice_turn_configuration(&provider);
+}
+
 fn assert_publisher_quota_boundary(realtime_service: &str, runtime: &str) {
     assert!(realtime_service.contains("claim_universal_publisher_quota"));
     assert!(realtime_service.contains("claim_publisher_slot"));
