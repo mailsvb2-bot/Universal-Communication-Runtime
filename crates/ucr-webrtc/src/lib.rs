@@ -800,7 +800,7 @@ async fn run_live_webrtc_worker(
                 config,
                 deadline,
                 reply,
-            } => handle_live_restart(&sessions, config, deadline, reply).await,
+            } => handle_live_restart(&mut sessions, config, deadline, reply).await,
             LiveWebRtcCommand::GetOfferId {
                 session_id,
                 deadline,
@@ -907,7 +907,7 @@ async fn handle_live_create(
 }
 
 async fn handle_live_restart(
-    sessions: &HashMap<String, LiveWebRtcSession>,
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
     config: WebRtcSessionConfig,
     deadline: Instant,
     reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
@@ -916,11 +916,29 @@ async fn handle_live_restart(
         let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
         return;
     }
-    let result = match sessions.get(&session_key(&config.session_id)) {
+    let key = session_key(&config.session_id);
+    let result = match sessions.get(&key) {
         Some(session) => restart_live_peer_connection(&session.peer_connection, &config).await,
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
-    let _ = reply.send(result);
+    // ICE restart can change the live transport while its caller has already
+    // timed out or cancelled. Do not retain a mutated peer with no owner of
+    // the new offer. As with Create, keep the handle until close succeeds.
+    let abandoned = command_expired(deadline);
+    if !abandoned && reply.send(result).is_ok() {
+        return;
+    }
+    if let Some(session) = sessions.get(&key) {
+        let closed = session
+            .peer_connection
+            .close()
+            .await
+            .map_err(|_| WebRtcProviderError::Internal);
+        let _ = retire_peer_only_after_confirmed_close(sessions, &key, closed);
+    }
+    if abandoned {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+    }
 }
 
 async fn handle_live_remote_description(
@@ -1675,6 +1693,42 @@ mod tests {
             provider.session_offer_id(&session_id),
             Err(WebRtcProviderError::SessionUnavailable),
             "abandoned successful offer must close before releasing its slot"
+        );
+        let replacement = provider.create_session(&config).expect("new owned offer");
+        assert_eq!(replacement.session_id, session_id);
+        assert_eq!(provider.close_session(&session_id), Ok(()));
+    }
+
+    #[test]
+    fn abandoned_restart_reply_closes_changed_peer_before_reuse() {
+        let provider = LiveWebRtcProvider::new().expect("live provider");
+        let session_id = SessionId::from_opaque(OpaqueId::new("abandoned-restart").expect("id"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        provider.create_session(&config).expect("initial live offer");
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS))
+            .expect("future deadline");
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        drop(reply_rx);
+        provider
+            .command_tx
+            .as_ref()
+            .expect("command sender")
+            .try_send(LiveWebRtcCommand::Restart {
+                config: config.clone(),
+                deadline,
+                reply: reply_tx,
+            })
+            .expect("queue abandoned restart");
+        // The worker serializes this query after the restart and its cleanup.
+        assert_eq!(
+            provider.session_offer_id(&session_id),
+            Err(WebRtcProviderError::SessionUnavailable),
+            "cancelled ICE restart must not retain a mutated live peer"
         );
         let replacement = provider.create_session(&config).expect("new owned offer");
         assert_eq!(replacement.session_id, session_id);
