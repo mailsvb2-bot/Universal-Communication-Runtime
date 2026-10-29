@@ -31,6 +31,30 @@ const idempotency = new Map();
 const HINT_KEY = "ucr.first-party.last-device.v1";
 const ACTIVE_CALL_HINT_KEY = "ucr.first-party.active-call.v1";
 const authDiagnostics=[];
+let plOwnIdentity=null;
+function plSetSignedIn(identity){
+  plOwnIdentity=identity||null;
+  const logged=Boolean(plOwnIdentity);
+  el("pl-new-user").hidden=logged;
+  el("pl-user-cabinet").hidden=!logged;
+  if(logged)el("pl-friendly-identity").textContent="Профиль активен. Пригласите знакомого или выберите контакт для звонка.";
+}
+function plInviteUrl(){
+  if(!plOwnIdentity)return null;
+  const url=new URL("/start",location.origin);
+  url.searchParams.set("contact",plOwnIdentity);
+  return url.href;
+}
+el("pl-copy-invite").addEventListener("click",()=>void run(async()=>{
+  const url=plInviteUrl();if(!url)return;
+  await navigator.clipboard.writeText(url);
+  message("Приглашение скопировано. Попросите знакомого сверить код с вами.");
+}));
+el("pl-share-invite").addEventListener("click",()=>void run(async()=>{
+  const url=plInviteUrl();if(!url)return;
+  if(navigator.share){await navigator.share({title:"PetrelLink — контакт",url});}
+  else{await navigator.clipboard.writeText(url);message("Приглашение скопировано.");}
+}));
 function authHttpCode(error){
   const match=String(error instanceof Error?error.message:"").match(/HTTP (401|403|404|409|429|500|502|503)/);
   return match?Number(match[1]):null;
@@ -478,7 +502,7 @@ async function initialize() {
   }
   await authTrace("list_contacts",()=>updateContacts());
   await authTrace("list_devices",()=>updateDevices());
-  el("who").textContent = "Identity: " + user.participantId + " · Device: " + user.deviceId;
+  el("who").textContent = "Устройство подтверждено";\n  plSetSignedIn(user.participantId);
   // Successful device reauthentication is independent from Call state.
   // A malformed/stale canonical Call must not invalidate a trusted Device.
   message("Доверенное устройство подтверждено. Проверяем состояние вызовов…");
@@ -635,7 +659,7 @@ el("logout").addEventListener("click",()=>void run(async()=>{
   clearInterval(timer);
   active=null;accountScope=null;knownContacts=[];idempotency.clear();
   renderContacts([]);renderIncoming([]);el("devices").replaceChildren();
-  el("who").textContent="Вы вышли из учётной записи.";
+  plSetSignedIn(null);\n  el("who").textContent="Вы вышли из учётной записи.";
   showActive();
   el("recovery-output").hidden=true;
   el("recovery-code").value="";
@@ -643,7 +667,7 @@ el("logout").addEventListener("click",()=>void run(async()=>{
 }));
 
 window.addEventListener("pagehide", () => clearInterval(timer));
-function explainEntryFailure(error) {
+function explainEntryFailure(error) {\n  plSetSignedIn(null);
   const detail = error instanceof Error ? error.message : String(error);
   let hint = "Войдите с доверенного устройства, создайте учётную запись или восстановите доступ.";
   if (/HTTP 503/.test(detail)) hint = "Сервер входа не подключён: запустите first-party BFF.";
