@@ -2941,6 +2941,7 @@ where
     // closed. Every failed coordinate remains in the canonical registry's
     // shutdown-only queue; no live downlink is reauthorized on retry.
     async fn retry_pending_webrtc_closes(&self, now_unix_ms: i64) -> Result<(), CanonicalError> {
+        const MAX_PARALLEL_CLOSE_RETRIES: usize = 8;
         let pending = self
             .registry
             .pending_webrtc_closes()
@@ -2948,7 +2949,6 @@ where
         // Independent revoked Calls must not wait behind one blocked provider.
         // Bound concurrency, preserve the one canonical shutdown queue, and
         // serialize placement release with fresh Join only AFTER close.
-        const MAX_PARALLEL_CLOSE_RETRIES: usize = 8;
         let mut pending = pending.into_iter();
         let mut in_flight = tokio::task::JoinSet::new();
         let mut first_error = None;
@@ -2966,13 +2966,10 @@ where
             let Some(completed) = in_flight.join_next().await else {
                 break;
             };
-            let (scope, call_id, session_id, close) = match completed {
-                Ok(completed) => completed,
-                Err(_) => {
-                    // A failed task cannot discard its canonical retry entry.
-                    first_error.get_or_insert(CanonicalError::new(CanonicalErrorCode::Internal));
-                    continue;
-                }
+            let Ok((scope, call_id, session_id, close)) = completed else {
+                // A failed task cannot discard its canonical retry entry.
+                first_error.get_or_insert(CanonicalError::new(CanonicalErrorCode::Internal));
+                continue;
             };
             let result = match close
                 .and_then(|()| self.acknowledge_pending_webrtc_close(&scope, &call_id, &session_id))
