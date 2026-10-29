@@ -171,7 +171,7 @@ button.secondary{background:#274354}
 (function(){
  const signup=document.getElementById("signup");
  const slot=document.getElementById("pl-signup-slot");
- if(signup&&slot)slot.appendChild(signup);
+ if(signup&&slot)slot.appendChild(signup);\n const recovery=document.getElementById("recovery-output");\n if(recovery&&slot)slot.after(recovery);
  const field=document.getElementById("contact-peer");
  const code=new URLSearchParams(location.search).get("contact");
  if(field&&code&&/^[A-Za-z0-9_.:@-]{1,128}$/.test(code))field.value=code;
