@@ -927,12 +927,22 @@ async fn handle_live_restart(
     // abandoned success, retaining the handle if peer.close() fails.
     let abandoned = command_expired(deadline);
     let must_retire = restart_requires_peer_retirement(&result, abandoned);
+    // An ICE restart issues a new SDP offer. The previous offer fence must
+    // stop authorizing remote answers, ICE candidates and late closes.
+    // Only publish the new fence after the caller receives the new offer.
+    let new_offer_id = result
+        .as_ref()
+        .ok()
+        .map(|description| webrtc_offer_id(&description.sdp));
     let reply_result = if abandoned {
         Err(WebRtcProviderError::TemporarilyUnavailable)
     } else {
         result
     };
     if reply.send(reply_result).is_ok() && !must_retire {
+        if let (Some(session), Some(new_offer_id)) = (sessions.get_mut(&key), new_offer_id) {
+            session.offer_id = new_offer_id;
+        }
         return;
     }
     if let Some(session) = sessions.get(&key) {
@@ -1959,14 +1969,35 @@ mod tests {
             .expect("original offer ID");
         assert_eq!(offer_id, webrtc_offer_id(&initial.sdp));
         let restarted = provider.restart_session(&config).expect("restart offer");
-        assert_eq!(provider.session_offer_id(&session_id), Ok(offer_id.clone()));
         assert_eq!(restarted.session_id, session_id);
         assert_eq!(restarted.sdp_type, ucr_model::WebRtcSdpType::Offer);
         assert!(restarted.sdp.starts_with("v=0"));
         assert_ne!(initial.sdp, restarted.sdp);
-        assert_ne!(offer_id, webrtc_offer_id(&restarted.sdp));
+        let restarted_offer_id = webrtc_offer_id(&restarted.sdp);
+        assert_ne!(offer_id, restarted_offer_id);
+        assert_eq!(
+            provider.session_offer_id(&session_id),
+            Ok(restarted_offer_id.clone()),
+            "successful ICE restart must rotate the offer fence"
+        );
+        let stale_ice = WebRtcIceCandidate {
+            session_id: session_id.clone(),
+            candidate: "candidate:1 1 udp 2122260223 192.0.2.1 54400 typ host".to_owned(),
+            sdp_mid: Some("0".to_owned()),
+            sdp_mline_index: Some(0),
+        };
+        assert_eq!(
+            provider.add_remote_candidate_if_offer_matches(&stale_ice, &offer_id),
+            Err(WebRtcProviderError::SessionUnavailable),
+            "pre-restart ICE must not mutate the restarted peer"
+        );
         assert_eq!(
             provider.close_session_if_offer_matches(&session_id, &offer_id),
+            Err(WebRtcProviderError::SessionUnavailable),
+            "late pre-restart close must not retire the new offer"
+        );
+        assert_eq!(
+            provider.close_session_if_offer_matches(&session_id, &restarted_offer_id),
             Ok(())
         );
     }
