@@ -1239,6 +1239,27 @@ fn publish_endpoint_mls_group(
         .store
         .create_group(&conversation, &group, &session.subject)
         .map_err(|_| StatusCode::CONFLICT)?;
+    // A duplicate creation request must not acknowledge a different
+    // endpoint-owned MLS epoch-zero fingerprint. Read the canonical Group
+    // after the write: a concurrent creator or Add Commit can advance it
+    // before this HTTP response is assembled.
+    let committed = state
+        .store
+        .group(&direct.scope, &ids.group_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::CONFLICT)?;
+    if committed.scope != direct.scope
+        || committed.group_id != ids.group_id
+        || committed.conversation != conversation.conversation
+        || committed.ownership != GroupOwnership::PersonOwned(participants[0].clone())
+        || committed.crypto_state.capability_id.as_deref()
+            != Some(ucr_protocol::GROUP_MLS_CAPABILITY)
+        || committed.crypto_state.epoch != 0
+        || committed.crypto_state.state_ref.as_ref().map(OpaqueId::as_str)
+            != Some(req.crypto_state_ref.as_str())
+    {
+        return Err(StatusCode::CONFLICT);
+    }
     Ok(json!({
         "callId": req.call_id,
         "groupId": ids.group_id.as_opaque().as_str(),
