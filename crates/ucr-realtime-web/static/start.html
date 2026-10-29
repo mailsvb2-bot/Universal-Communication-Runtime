@@ -27,6 +27,35 @@ li:last-child{border-bottom:0}
 .call-stage{border-color:#6689bf;background:#152440}.call-steps{display:flex;gap:12px;flex-wrap:wrap;color:#d3e2f8}.call-steps span{border:1px solid #536884;padding:8px 12px;border-radius:8px}.call-steps [aria-current=step]{background:#235388;color:#fff}.media-entry{margin-top:12px;font-weight:650}
 small{color:#9aaaca;line-height:1.5;display:block}
 [hidden]{display:none!important}
+
+/* PetrelLink consumer shell: security owners remain unchanged. */
+:root{background:#07111d;color:#eef8ff}
+body{padding:clamp(14px,3vw,38px);background:radial-gradient(ellipse at 90% 0%,#12384a 0%,#07111d 55%)}
+main{max-width:1040px}
+h1{font-size:clamp(2rem,5vw,3.4rem);letter-spacing:-.045em}
+section{background:#102338;border-color:#264359;box-shadow:0 10px 34px #0003}
+button{background:#65ead5;color:#06232b}
+button.secondary{background:#274354}
+#pl-header{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+#pl-header a{color:#65ead5;text-decoration:none;font-weight:700}
+#pl-language{background:#142b3b;color:white;border:1px solid #40616d;padding:10px}
+#pl-hero{margin:22px 0 12px}
+#pl-hero p{max-width:710px}
+#pl-onboard{border-color:#65ead5}
+#pl-onboard strong{font-size:1.18rem}
+#pl-invite{overflow-wrap:anywhere}
+#pl-advanced>summary{cursor:pointer;color:#b3cbd6;padding:13px 3px}
+#pl-advanced>summary:focus-visible{outline:2px solid #65ead5}
+#pl-advanced section{margin:12px 0}
+#pl-user-cabinet[hidden],#pl-new-user[hidden]{display:none}
+#pl-user-cabinet{display:grid;gap:10px}
+#pl-user-cabinet .pl-kicker{font-weight:bold;color:#65ead5}
+#pl-new-user p{margin:12px 0}
+#new-contact{margin-bottom:12px}
+#contacts li .identity{display:none}
+#incoming li .identity{font-size:.8rem}
+#pl-top-actions{display:flex;flex-wrap:wrap;gap:10px}
+@media(max-width:620px){form{display:grid}form input,form button{width:100%}section{padding:16px}}
 </style>
 <script>
 (function(){
@@ -72,7 +101,7 @@ small{color:#9aaaca;line-height:1.5;display:block}
   <p id="video-guide" class="media-entry">Сначала зарегистрируйте устройство. Экран с камерой откроется автоматически после принятия вызова собеседником.</p>
   <small id="video-readiness">Проверка готовности браузерного медиашлюза…</small>
 </section>
-<section aria-label="Учётная запись">
+<details id="pl-advanced"><summary>Настройки безопасности и восстановление доступа</summary>\n<section aria-label="Учётная запись">
   <h2>Моё устройство</h2>
   <p id="who" class="identity">Проверка независимой авторизации…</p>
   <form id="device-login" aria-label="Вход с существующим защищённым устройством">
@@ -88,7 +117,7 @@ small{color:#9aaaca;line-height:1.5;display:block}
 <section aria-label="Регистрация и восстановление">
   <h2>Новая учётная запись</h2>
   <p>Создание постоянного Identity и первого защищённого устройства. Не требуется ранее выданный идентификатор.</p>
-  <div class="actions"><button type="button" id="signup">Создать учётную запись и первое устройство</button></div>
+  <div class="actions"><button type="button" id="signup">Создать профиль</button></div>
   <h2>Второе устройство и восстановление</h2>
   <p>На новом устройстве укажите свой Identity ID и текущий одноразовый код восстановления. После привязки выдаётся новый код.</p>
   <form id="recover-form">
@@ -115,10 +144,10 @@ small{color:#9aaaca;line-height:1.5;display:block}
   <h2>Контакты</h2>
   <form id="new-contact">
     <input id="contact-name" aria-label="Имя" maxlength="128" placeholder="Имя" required>
-    <input id="contact-peer" aria-label="Проверенный идентификатор собеседника" maxlength="128" placeholder="Проверенный Identity ID" required>
+    <input id="contact-peer" aria-label="Код контакта из приглашения" maxlength="128" placeholder="Код контакта из приглашения" required>
     <button type="submit">Добавить</button>
   </form>
-  <small>Идентификатор собеседника необходимо независимо проверить. Имя и телефон не являются доказательством личности. Адресная книга зашифрована на устройстве.</small>
+  <small>Добавляйте только знакомых людей. Сверьте код контакта лично или через доверенный канал — ссылка сама по себе не подтверждает личность.</small>
   <ul id="contacts" aria-label="Мои контакты"></ul>
 </section>
 <section>
@@ -138,6 +167,16 @@ small{color:#9aaaca;line-height:1.5;display:block}
   <p id="status">До подтверждения учётной записи и Device камера и микрофон не включаются.</p>
   <details id="auth-diagnostics" open><summary>Диагностика входа и авторизации</summary><p>Показываются только этапы и коды ошибок. Ключи, токены, Identity ID и коды восстановления не сохраняются.</p><button id="auth-diagnostics-copy" type="button" class="secondary">Скопировать отчёт</button><button id="auth-diagnostics-save" type="button" class="secondary">Сохранить JSON</button><pre id="auth-diagnostics-report" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto"></pre></details>
 </section>
+<script>
+(function(){
+ const signup=document.getElementById("signup");
+ const slot=document.getElementById("pl-signup-slot");
+ if(signup&&slot)slot.appendChild(signup);
+ const field=document.getElementById("contact-peer");
+ const code=new URLSearchParams(location.search).get("contact");
+ if(field&&code&&/^[A-Za-z0-9_.:@-]{1,128}$/.test(code))field.value=code;
+})();
+</script>
 </main>
 </body>
 </html>
