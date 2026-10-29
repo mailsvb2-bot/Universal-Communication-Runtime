@@ -56,6 +56,13 @@ button.secondary{background:#274354}
 #incoming li .identity{font-size:.8rem}
 #pl-top-actions{display:flex;flex-wrap:wrap;gap:10px}
 @media(max-width:620px){form{display:grid}form input,form button{width:100%}section{padding:16px}}
+#pl-onboard{border-color:#4fdacb;background:linear-gradient(125deg,#15374a,#101e33)}
+#pl-header{display:flex;align-items:center;justify-content:space-between;gap:10px}
+#pl-header select{margin-left:8px;background:#0b1222;color:white;padding:8px}
+#pl-onboard h1{font-size:clamp(2rem,4vw,3rem)}
+#pl-user-cabinet .actions{margin-top:12px}
+#pl-advanced summary{cursor:pointer;padding:12px}
+#pl-advanced section{margin:12px 0}
 </style>
 <script>
 (function(){
@@ -86,10 +93,13 @@ button.secondary{background:#274354}
 </head>
 <body>
 <main>
-<h1>PetrelLink — Защищённая связь</h1>
-<label for="pl-language">Язык / Language</label>
-<select id="pl-language" aria-label="Язык интерфейса"><option value="ru">Русский</option><option value="en">English</option></select>
-<p>Контакт → один вызов → согласие собеседника → отдельное разрешение на защищённую медиасессию.</p>
+<header id="pl-header"><strong>PetrelLink</strong><label for="pl-language">Язык <select id="pl-language" aria-label="Язык интерфейса"><option value="ru">Русский</option><option value="en">English</option></select></label></header>
+<section id="pl-onboard">
+  <h1>Общайтесь с близкими</h1>
+  <p>Защищённые аудио- и видеозвонки. Создайте профиль, пригласите знакомого и нажмите «Позвонить».</p>
+  <div id="pl-new-user"><h2>Начать общение</h2><p>Первое устройство будет зарегистрировано автоматически.</p><div id="pl-signup-slot"></div></div>
+  <div id="pl-user-cabinet" hidden><h2>Ваш профиль готов</h2><p id="pl-friendly-identity">Добавьте контакт для первого звонка.</p><div class="actions"><button id="pl-copy-invite" type="button">Скопировать приглашение</button><button id="pl-share-invite" type="button" class="secondary">Поделиться приглашением</button></div></div>
+</section>
 <section class="call-stage" aria-label="Видеозвонок">
   <h2>Экран видеозвонка</h2>
   <div class="call-steps" aria-label="Этапы соединения">
@@ -101,7 +111,8 @@ button.secondary{background:#274354}
   <p id="video-guide" class="media-entry">Сначала зарегистрируйте устройство. Экран с камерой откроется автоматически после принятия вызова собеседником.</p>
   <small id="video-readiness">Проверка готовности браузерного медиашлюза…</small>
 </section>
-<details id="pl-advanced"><summary>Настройки безопасности и восстановление доступа</summary>\n<section aria-label="Учётная запись">
+<details id="pl-advanced"><summary>Настройки безопасности и восстановление доступа</summary>
+<section aria-label="Учётная запись">
   <h2>Моё устройство</h2>
   <p id="who" class="identity">Проверка независимой авторизации…</p>
   <form id="device-login" aria-label="Вход с существующим защищённым устройством">
@@ -140,7 +151,8 @@ button.secondary{background:#274354}
     <button type="button" id="logout" class="secondary">Выйти</button>
   </div>
 </section>
-<section>
+</details>
+<section id="pl-contacts">
   <h2>Контакты</h2>
   <form id="new-contact">
     <input id="contact-name" aria-label="Имя" maxlength="128" placeholder="Имя" required>
@@ -171,7 +183,9 @@ button.secondary{background:#274354}
 (function(){
  const signup=document.getElementById("signup");
  const slot=document.getElementById("pl-signup-slot");
- if(signup&&slot)slot.appendChild(signup);\n const recovery=document.getElementById("recovery-output");\n if(recovery&&slot)slot.after(recovery);
+ if(signup&&slot)slot.appendChild(signup);
+ const recovery=document.getElementById("recovery-output");
+ if(recovery&&slot){slot.after(recovery);recovery.hidden=true;}
  const field=document.getElementById("contact-peer");
  const code=new URLSearchParams(location.search).get("contact");
  if(field&&code&&/^[A-Za-z0-9_.:@-]{1,128}$/.test(code))field.value=code;
