@@ -13,7 +13,10 @@ fn read(path: &str) -> String {
 }
 
 fn assert_shared_ice_turn_configuration(provider: &str) {
-    assert_shared_ice_turn_configuration(&provider);
+    assert!(provider.contains("fn live_webrtc_ice_configuration("));
+    assert!(provider.contains("ice_transport_policy: match config.ice_transport_policy"));
+    assert!(provider.contains("let engine_config = live_webrtc_ice_configuration(config);"));
+    assert!(provider.contains(".set_configuration(live_webrtc_ice_configuration(config))"));
 }
 
 fn assert_publisher_quota_boundary(realtime_service: &str, runtime: &str) {
@@ -66,10 +69,7 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(provider.contains("add_ice_candidate(RTCIceCandidateInit"));
     assert!(provider.contains("restart_ice()"));
     assert!(provider.contains("restart_live_peer_connection"));
-    assert!(provider.contains("fn live_webrtc_ice_configuration("));
-    assert!(provider.contains("ice_transport_policy: match config.ice_transport_policy"));
-    assert!(provider.contains("let engine_config = live_webrtc_ice_configuration(config);"));
-    assert!(provider.contains(".set_configuration(live_webrtc_ice_configuration(config))"));
+    assert_shared_ice_turn_configuration(&provider);
     assert!(provider.contains("TurnRestSecret([u8; 32])"));
     assert!(provider.contains("ZeroizeOnDrop"));
     assert!(provider.contains("MessageDigest::sha1()"));
