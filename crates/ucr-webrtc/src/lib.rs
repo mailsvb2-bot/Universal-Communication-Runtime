@@ -1246,13 +1246,9 @@ async fn create_live_peer_connection(
         },
         ..Default::default()
     };
-    let peer_connection = Arc::new(
-        api.new_peer_connection(engine_config)
-            .await
-            .map_err(|_| {
-                LiveWebRtcCreateFailure::before_peer(WebRtcProviderError::TemporarilyUnavailable)
-            })?,
-    );
+    let peer_connection = Arc::new(api.new_peer_connection(engine_config).await.map_err(|_| {
+        LiveWebRtcCreateFailure::before_peer(WebRtcProviderError::TemporarilyUnavailable)
+    })?);
 
     let e2ee_channel = match e2ee_ingress {
         Some(ingress_tx) => {
