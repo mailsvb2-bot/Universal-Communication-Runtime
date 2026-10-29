@@ -37,6 +37,14 @@ for ident in (
 assert r"\n const recovery" not in HTML and r"\n if(recovery" not in HTML, (
     "literal newline escapes break inline onboarding JavaScript"
 )
+# A newly registered user must still see their one-time recovery code after
+# the signed-in state hides the new-user registration panel.
+assert 'document.getElementById("pl-onboard").after(recovery)' in HTML, (
+    "recovery code must be moved outside the hidden registration panel"
+)
+assert 'id="pl-invite-help"' in HTML and 'data-invited-contact' in HTML, (
+    "invitation must have an understandable contact-add path"
+)
 assert parser.controls, "no visible forms/buttons found"
 for tag, element in parser.controls:
     ident = element.get("id")
