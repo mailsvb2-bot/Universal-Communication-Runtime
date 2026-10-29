@@ -948,7 +948,11 @@ async fn handle_live_restart(
             retire_restart_before_reporting_error(
                 sessions,
                 &key,
-                async move { peer.close().await.map_err(|_| WebRtcProviderError::Internal) },
+                async move {
+                    peer.close()
+                        .await
+                        .map_err(|_| WebRtcProviderError::Internal)
+                },
                 reply,
                 reply_result,
             )
@@ -1872,10 +1876,7 @@ mod tests {
             close_sender.send(()).expect("release pending close");
             completion.await;
             assert!(sessions.is_empty(), "confirmed close retires the peer");
-            assert_eq!(
-                receiver.try_recv(),
-                Ok(Err(WebRtcProviderError::Internal))
-            );
+            assert_eq!(receiver.try_recv(), Ok(Err(WebRtcProviderError::Internal)));
 
             let mut failed = HashMap::from([("failed-close".to_owned(), 7_u8)]);
             let (reply, receiver) = std_mpsc::channel();
@@ -1892,10 +1893,7 @@ mod tests {
                 Some(&7),
                 "failed close must keep the transport handle for retry"
             );
-            assert_eq!(
-                receiver.try_recv(),
-                Ok(Err(WebRtcProviderError::Internal))
-            );
+            assert_eq!(receiver.try_recv(), Ok(Err(WebRtcProviderError::Internal)));
         });
     }
 
