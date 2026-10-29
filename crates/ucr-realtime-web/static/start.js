@@ -502,7 +502,8 @@ async function initialize() {
   }
   await authTrace("list_contacts",()=>updateContacts());
   await authTrace("list_devices",()=>updateDevices());
-  el("who").textContent = "Устройство подтверждено";\n  plSetSignedIn(user.participantId);
+  el("who").textContent = "Устройство подтверждено";
+  plSetSignedIn(user.participantId);
   // Successful device reauthentication is independent from Call state.
   // A malformed/stale canonical Call must not invalidate a trusted Device.
   message("Доверенное устройство подтверждено. Проверяем состояние вызовов…");
@@ -659,7 +660,8 @@ el("logout").addEventListener("click",()=>void run(async()=>{
   clearInterval(timer);
   active=null;accountScope=null;knownContacts=[];idempotency.clear();
   renderContacts([]);renderIncoming([]);el("devices").replaceChildren();
-  plSetSignedIn(null);\n  el("who").textContent="Вы вышли из учётной записи.";
+  plSetSignedIn(null);
+  el("who").textContent="Вы вышли из учётной записи.";
   showActive();
   el("recovery-output").hidden=true;
   el("recovery-code").value="";
@@ -667,7 +669,8 @@ el("logout").addEventListener("click",()=>void run(async()=>{
 }));
 
 window.addEventListener("pagehide", () => clearInterval(timer));
-function explainEntryFailure(error) {\n  plSetSignedIn(null);
+function explainEntryFailure(error) {
+  plSetSignedIn(null);
   const detail = error instanceof Error ? error.message : String(error);
   let hint = "Войдите с доверенного устройства, создайте учётную запись или восстановите доступ.";
   if (/HTTP 503/.test(detail)) hint = "Сервер входа не подключён: запустите first-party BFF.";
