@@ -60,6 +60,19 @@ use super::{
     pb_crypto_suite, pb_error, pb_opaque, pb_principal_ref, pb_scope,
 };
 
+// One provider-close execution path for terminal Leave and retry sweeps.
+// A pending shutdown is acknowledged only after confirmed transport closure.
+async fn close_pending_webrtc_provider(
+    provider: Arc<dyn WebRtcProvider>,
+    session_id: SessionId,
+) -> Result<(), CanonicalError> {
+    match tokio::task::spawn_blocking(move || provider.close_session(&session_id)).await {
+        Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => Ok(()),
+        Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+        Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+    }
+}
+
 pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const REALTIME_BEARER_PREFIX: &str = "Bearer ";
 const REALTIME_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
@@ -360,16 +373,19 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         call_id: &CallId,
         session_id: &SessionId,
     ) -> Result<(), CanonicalError> {
-        let provider = Arc::clone(&self.webrtc_provider);
-        let closing_session = session_id.clone();
-        match tokio::task::spawn_blocking(move || provider.close_session(&closing_session)).await {
-            Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => self
-                .registry
-                .acknowledge_webrtc_close(scope, call_id, session_id)
-                .map_err(map_registry_error),
-            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
-            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
-        }
+        close_pending_webrtc_provider(Arc::clone(&self.webrtc_provider), session_id.clone()).await?;
+        self.acknowledge_pending_webrtc_close(scope, call_id, session_id)
+    }
+
+    fn acknowledge_pending_webrtc_close(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        session_id: &SessionId,
+    ) -> Result<(), CanonicalError> {
+        self.registry
+            .acknowledge_webrtc_close(scope, call_id, session_id)
+            .map_err(map_registry_error)
     }
 
     async fn ensure_sfu_call_placement(
@@ -2928,16 +2944,39 @@ where
             .registry
             .pending_webrtc_closes()
             .map_err(map_registry_error)?;
+        // Independent revoked Calls must not wait behind one blocked provider.
+        // Bound concurrency, preserve the one canonical shutdown queue, and
+        // serialize placement release with fresh Join only AFTER close.
+        const MAX_PARALLEL_CLOSE_RETRIES: usize = 8;
+        let mut pending = pending.into_iter();
+        let mut in_flight = tokio::task::JoinSet::new();
         let mut first_error = None;
-        for (scope, call_id, session_id) in pending {
-            // Provider shutdown can block indefinitely. It must not hold the
-            // global Join/Leave gate while another Call needs to revoke access.
-            let result = match self
-                .confirm_pending_webrtc_close(&scope, &call_id, &session_id)
-                .await
-            {
+        loop {
+            while in_flight.len() < MAX_PARALLEL_CLOSE_RETRIES {
+                let Some((scope, call_id, session_id)) = pending.next() else {
+                    break;
+                };
+                let provider = Arc::clone(&self.webrtc_provider);
+                in_flight.spawn(async move {
+                    let close = close_pending_webrtc_provider(provider, session_id.clone()).await;
+                    (scope, call_id, session_id, close)
+                });
+            }
+            let Some(completed) = in_flight.join_next().await else {
+                break;
+            };
+            let (scope, call_id, session_id, close) = match completed {
+                Ok(completed) => completed,
+                Err(_) => {
+                    // A failed task cannot discard its canonical retry entry.
+                    first_error.get_or_insert(CanonicalError::new(CanonicalErrorCode::Internal));
+                    continue;
+                }
+            };
+            let result = match close.and_then(|()| {
+                self.acknowledge_pending_webrtc_close(&scope, &call_id, &session_id)
+            }) {
                 Ok(()) => {
-                    // Placement release still serializes with fresh Join.
                     let _placement_guard = self.sfu_placement_transition_guard().await;
                     self.release_sfu_call_placement_for_call_if_inactive(
                         &scope,
@@ -4924,6 +4963,63 @@ mod sfu_placement_lifecycle_tests {
                 .expect("shutdown coordinates")
                 .is_empty()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_pending_close_does_not_starve_other_revoked_calls() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let blocked = claims("blocked-sweep-session", "blocked-sweep-device");
+        let mut other = claims("independent-sweep-session", "independent-sweep-device");
+        other.call_id = CallId::from_opaque(id("independent-sweep-call"));
+        let provider = Arc::new(BlockingCloseProvider {
+            blocked_session: blocked.session_id.clone(),
+            entered: tokio::sync::Notify::new(),
+            release: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+        });
+        let provider_dyn: Arc<dyn WebRtcProvider> = provider.clone();
+        let service = GrpcRealtimeService::with_webrtc(
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(DenyTestAuthorization),
+            Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
+            Arc::new(
+                JoinTokenIssuer::new(
+                    JoinTokenKey::from_bytes([17_u8; 32]),
+                    "https://conference.example.test/join",
+                )
+                .expect("issuer"),
+            ),
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+            RealtimeWebRtcDependencies::new(
+                provider_dyn,
+                Arc::new(WebRtcSessionConfigFactory::default()),
+            ),
+        );
+        registry.queue_webrtc_close(&blocked).expect("blocked close");
+        registry.queue_webrtc_close(&other).expect("other close");
+        let entered = provider.entered.notified();
+        let retry_service = service.clone();
+        let retry =
+            tokio::spawn(async move { retry_service.retry_pending_webrtc_closes(1_002).await });
+        entered.await;
+        let independent_closed = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                loop {
+                    let pending = registry.pending_webrtc_closes().expect("pending closes");
+                    if !pending.iter().any(|(_, _, session)| session == &other.session_id) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            },
+        )
+        .await;
+        // Unblock even when the assertion fails: never strand the test runtime.
+        provider.unblock();
+        independent_closed.expect("blocked Call must not starve independent shutdown");
+        retry.await.expect("retry task").expect("all closes confirmed");
+        assert!(registry.pending_webrtc_closes().expect("pending closes").is_empty());
     }
 
     fn assert_revoked_pending_downlink(
