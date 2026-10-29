@@ -80,6 +80,15 @@ assert 'if(peer===plOwnIdentity)' in JS and 'knownContacts.some(' in JS, (
 assert 'document.addEventListener("visibilitychange"' in JS, (
     "mobile foreground must recheck incoming calls"
 )
+# Never render a former account's contact book or active call before verified
+# device reauthentication. Security diagnostics must not dominate the UI.
+for ident in ("pl-contacts", "pl-incoming", "pl-current-call"):
+    assert f'id="{ident}" hidden' in HTML, f"unauthenticated panel visible: {ident}"
+    assert f'"{ident}"' in JS, f"panel not bound to authenticated state: {ident}"
+assert '<details id="auth-diagnostics">' in HTML, "diagnostics should be collapsed"
+assert 'accountScope=null;\n  active=null;\n  knownContacts=[];' in JS, (
+    "failed authentication must clear prior principal's UI data"
+)
 # Dynamic controls must be created with the common click-binding helper.
 for label in ("Аудиозвонок", "Видеозвонок", "Удалить", "Отозвать устройство", "Принять", "Отклонить"):
     assert 'btn("' + label + '"' in JS, "missing dynamic control: " + label
