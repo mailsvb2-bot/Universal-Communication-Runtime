@@ -1962,8 +1962,7 @@ mod tests {
             .build()
             .expect("test runtime");
         runtime.block_on(async {
-            let session_id =
-                SessionId::from_opaque(OpaqueId::new("expired-close").expect("id"));
+            let session_id = SessionId::from_opaque(OpaqueId::new("expired-close").expect("id"));
             let config = WebRtcSessionConfig {
                 session_id: session_id.clone(),
                 ice_servers: Vec::new(),
@@ -2096,7 +2095,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_queued_close_preserves_peer_for_retry() {
+    fn expired_queued_close_retires_peer_even_after_deadline() {
         let provider = LiveWebRtcProvider::new().expect("live provider");
         let session_id = SessionId::from_opaque(OpaqueId::new("close-retry").expect("id"));
         let config = WebRtcSessionConfig {
@@ -2125,17 +2124,17 @@ mod tests {
             reply_rx
                 .recv_timeout(Duration::from_secs(2))
                 .expect("expired close response"),
-            Err(WebRtcProviderError::TemporarilyUnavailable)
+            Ok(())
         );
         assert_eq!(
             provider.session_offer_id(&session_id),
-            Ok(offer_id.clone()),
-            "timed-out close must not discard a live peer"
+            Err(WebRtcProviderError::SessionUnavailable),
+            "expired close must retire the peer instead of keeping media alive"
         );
         assert_eq!(
             provider.close_session_if_offer_matches(&session_id, &offer_id),
-            Ok(()),
-            "authenticated retry must still be able to close the original peer"
+            Err(WebRtcProviderError::SessionUnavailable),
+            "a retired peer must not be resurrected by a retry"
         );
         assert_eq!(
             provider.close_session(&session_id),
