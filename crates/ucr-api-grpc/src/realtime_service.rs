@@ -1309,6 +1309,9 @@ where
                     self.registry
                         .require_active_session(&claims, now)
                         .map_err(map_registry_error)?;
+                    // Media operations must revalidate the durable Call, not only
+                    // the cached session lease: Hangup revokes old bearer use.
+                    self.require_accepted_conference_participant(&claims)?;
                     self.require_live_universal_conference(&claims)?;
                     // A Universal Conference may mute a participant. A plain
                     // MLS Group Call has no such profile: publication is then
