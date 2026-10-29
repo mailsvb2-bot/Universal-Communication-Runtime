@@ -37,7 +37,16 @@ function plSetSignedIn(identity){
   const logged=Boolean(plOwnIdentity);
   el("pl-new-user").hidden=logged;
   el("pl-user-cabinet").hidden=!logged;
-  if(logged)el("pl-friendly-identity").textContent="Профиль активен. Пригласите знакомого или выберите контакт для звонка.";
+  if(logged){
+    el("pl-friendly-identity").textContent="Профиль активен. Пригласите знакомого или выберите контакт для звонка.";
+    const invited=el("contact-peer").dataset.invitedContact==="true";
+    if(invited) {
+      el("pl-invite-help").hidden=false;
+      // The invite is only a locator, not authority to authenticate its sender.
+      el("pl-contacts").scrollIntoView({behavior:"smooth",block:"start"});
+      el("contact-name").focus({preventScroll:true});
+    }
+  }
 }
 function plInviteUrl(){
   if(!plOwnIdentity)return null;
@@ -569,7 +578,14 @@ el("new-contact").addEventListener("submit", event => {
     const peer = el("contact-peer").value.trim();
     await calls.addContact(name,peer);
     el("new-contact").reset();
+    delete el("contact-peer").dataset.invitedContact;
     el("pl-invite-help").hidden=true;
+    // Never retain the unverified invitation locator in a shareable URL.
+    if(new URLSearchParams(location.search).has("contact")){
+      const clean=new URL(location.href);
+      clean.searchParams.delete("contact");
+      history.replaceState(null,"",clean.href);
+    }
     await updateContacts();
     message("Контакт добавлен. Теперь выберите аудио- или видеозвонок.");
   });
