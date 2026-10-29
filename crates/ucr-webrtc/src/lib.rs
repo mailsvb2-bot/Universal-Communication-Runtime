@@ -1220,6 +1220,21 @@ fn command_expired(deadline: Instant) -> bool {
     Instant::now() >= deadline
 }
 
+fn live_webrtc_ice_configuration(config: &WebRtcSessionConfig) -> RTCConfiguration {
+    RTCConfiguration {
+        ice_servers: config
+            .ice_servers
+            .iter()
+            .map(engine_ice_server)
+            .collect::<Vec<_>>(),
+        ice_transport_policy: match config.ice_transport_policy {
+            IceTransportPolicy::All => RTCIceTransportPolicy::All,
+            IceTransportPolicy::RelayOnly => RTCIceTransportPolicy::Relay,
+        },
+        ..Default::default()
+    }
+}
+
 async fn create_live_peer_connection(
     config: &WebRtcSessionConfig,
     e2ee_ingress: Option<tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
@@ -1234,18 +1249,7 @@ async fn create_live_peer_connection(
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
         .build();
-    let engine_config = RTCConfiguration {
-        ice_servers: config
-            .ice_servers
-            .iter()
-            .map(engine_ice_server)
-            .collect::<Vec<_>>(),
-        ice_transport_policy: match config.ice_transport_policy {
-            IceTransportPolicy::All => RTCIceTransportPolicy::All,
-            IceTransportPolicy::RelayOnly => RTCIceTransportPolicy::Relay,
-        },
-        ..Default::default()
-    };
+    let engine_config = live_webrtc_ice_configuration(config);
     let peer_connection = Arc::new(api.new_peer_connection(engine_config).await.map_err(|_| {
         LiveWebRtcCreateFailure::before_peer(WebRtcProviderError::TemporarilyUnavailable)
     })?);
@@ -1338,18 +1342,7 @@ async fn restart_live_peer_connection(
     config: &WebRtcSessionConfig,
 ) -> Result<WebRtcSessionDescription, WebRtcProviderError> {
     peer_connection
-        .set_configuration(RTCConfiguration {
-            ice_servers: config
-                .ice_servers
-                .iter()
-                .map(engine_ice_server)
-                .collect::<Vec<_>>(),
-            ice_transport_policy: match config.ice_transport_policy {
-                IceTransportPolicy::All => RTCIceTransportPolicy::All,
-                IceTransportPolicy::RelayOnly => RTCIceTransportPolicy::Relay,
-            },
-            ..Default::default()
-        })
+        .set_configuration(live_webrtc_ice_configuration(config))
         .await
         .map_err(|_| WebRtcProviderError::Conflict)?;
     peer_connection
