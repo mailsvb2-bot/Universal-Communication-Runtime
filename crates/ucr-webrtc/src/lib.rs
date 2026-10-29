@@ -1708,7 +1708,9 @@ mod tests {
             ice_servers: Vec::new(),
             ice_transport_policy: IceTransportPolicy::All,
         };
-        provider.create_session(&config).expect("initial live offer");
+        provider
+            .create_session(&config)
+            .expect("initial live offer");
         let deadline = Instant::now()
             .checked_add(Duration::from_secs(LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS))
             .expect("future deadline");
