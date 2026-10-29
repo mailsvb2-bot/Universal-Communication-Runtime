@@ -1158,13 +1158,14 @@ async fn handle_live_close(
     sessions: &mut HashMap<String, LiveWebRtcSession>,
     session_id: SessionId,
     offer_id: Option<String>,
-    deadline: Instant,
+    _deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
 ) {
-    if command_expired(deadline) {
-        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
-        return;
-    }
+    // Close is a safety operation, not a new admission. A blocked Create or
+    // Restart may outlive the caller's request timeout; once the worker
+    // recovers, it must still retire the revoked peer instead of discarding
+    // the queued Close solely because its reply deadline expired.
+    // The offer fence below still rejects stale closes for a newer offer.
     let key = session_key(&session_id);
     if offer_id.as_deref().is_some_and(|expected| {
         sessions
@@ -1951,6 +1952,35 @@ mod tests {
             // Shutdown retries must still be allowed, even for a quarantined peer.
             let peer = &sessions.get(&key).expect("retained peer").peer_connection;
             peer.close().await.expect("close");
+        });
+    }
+
+    #[test]
+    fn expired_queued_close_still_retires_real_peer() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let session_id =
+                SessionId::from_opaque(OpaqueId::new("expired-close").expect("id"));
+            let config = WebRtcSessionConfig {
+                session_id: session_id.clone(),
+                ice_servers: Vec::new(),
+                ice_transport_policy: IceTransportPolicy::All,
+            };
+            let (session, _) = create_live_peer_connection(&config, None)
+                .await
+                .expect("real peer");
+            let mut sessions = HashMap::from([(session_key(&session_id), session)]);
+            let expired = Instant::now() - Duration::from_secs(1);
+            let (reply, receiver) = std_mpsc::channel();
+            handle_live_close(&mut sessions, session_id, None, expired, reply).await;
+            assert_eq!(receiver.try_recv(), Ok(Ok(())));
+            assert!(
+                sessions.is_empty(),
+                "a timed-out caller must not leave a revoked peer active"
+            );
         });
     }
 
