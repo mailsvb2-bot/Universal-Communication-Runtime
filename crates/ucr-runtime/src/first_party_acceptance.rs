@@ -1186,6 +1186,21 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             .server_possesses_mls_group(&scope, &group_id)
             .unwrap()
     );
+    // An SFU/server that only stores the signed Commit, Welcome and the
+    // forwarded ciphertext cannot synthesize the endpoint's MLS exporter.
+    // Prove that a fabricated exporter fails authentic AEAD opening while
+    // the independently joined Bob endpoint succeeds above.
+    let server_without_exporter = ucr_crypto::GroupMediaEpochSecret::from_exporter_bytes([0; 32]);
+    assert!(
+        open_endpoint_group_media_wire(
+            &server_without_exporter,
+            &media_context,
+            &wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "server-side ciphertext and public MLS state must not open media without endpoint exporter"
+    );
     // The durable media epoch is not a decryption key. Even with the
     // authentic captured ciphertext and sender signature, a caller using
     // a different MLS epoch cannot open the frame. Keep this negative
