@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Cache-Control" content="no-store">
-<title>UCR — Защищённые звонки</title>
+<title>PetrelLink — Защищённая связь</title>
 <style>
 :root{color-scheme:dark;font:16px system-ui,sans-serif;background:#0b1222;color:#edf3ff}
 *{box-sizing:border-box}body{margin:0;padding:24px;min-height:100vh}
@@ -28,12 +28,38 @@ li:last-child{border-bottom:0}
 small{color:#9aaaca;line-height:1.5;display:block}
 [hidden]{display:none!important}
 </style>
+<script>
+(function(){
+  const KEY="petrellink.language.v1";
+  const allowed=["ru","en"];
+  const query=new URLSearchParams(location.search).get("lang");
+  let lang=query && allowed.includes(query) ? query : null;
+  if(!lang){try{lang=localStorage.getItem(KEY)}catch(_){}}
+  if(!allowed.includes(lang))lang="ru";
+  document.documentElement.lang=lang;
+  document.addEventListener("DOMContentLoaded",()=>{
+    const select=document.getElementById("pl-language");
+    if(!select)return;
+    select.value=lang;
+    select.addEventListener("change",()=>{
+      const next=select.value;
+      if(!allowed.includes(next))return;
+      try{localStorage.setItem(KEY,next)}catch(_){}
+      document.documentElement.lang=next;
+      // Only the Russian UI is translated completely at this stage.
+      // Preserve selected locale for conference pages.
+    });
+  });
+})();
+</script>
 <script defer src="/readiness.js"></script>
 <script type="module" src="/start.js"></script>
 </head>
 <body>
 <main>
-<h1>UCR — Защищённые звонки</h1>
+<h1>PetrelLink — Защищённая связь</h1>
+<label for="pl-language">Язык / Language</label>
+<select id="pl-language" aria-label="Язык интерфейса"><option value="ru">Русский</option><option value="en">English</option></select>
 <p>Контакт → один вызов → согласие собеседника → отдельное разрешение на защищённую медиасессию.</p>
 <section class="call-stage" aria-label="Видеозвонок">
   <h2>Экран видеозвонка</h2>
