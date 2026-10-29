@@ -78,3 +78,19 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
         "GRPC_MAX_ENCODING_MESSAGE_SIZE >= REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES"
     ));
 }
+
+#[test]
+fn direct_media_requires_committed_endpoint_owned_epoch() {
+    let media = read("crates/ucr-runtime/src/first_party_media.rs");
+    let start = media
+        .split("pub(crate) fn prepare_direct_call_media<S>(")
+        .nth(1)
+        .expect("canonical direct media preparation");
+    let gate = start
+        .split("let media = ensure_media_call(")
+        .next()
+        .expect("media admission boundary");
+    assert!(gate.contains("group.crypto_state.epoch == 0"));
+    assert!(gate.contains("server_possesses_mls_group("));
+    assert!(gate.contains("GroupMemberState::Active"));
+}
