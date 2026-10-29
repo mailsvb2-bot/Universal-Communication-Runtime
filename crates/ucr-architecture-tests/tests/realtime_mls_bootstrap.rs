@@ -94,3 +94,23 @@ fn direct_media_requires_committed_endpoint_owned_epoch() {
     assert!(gate.contains("server_possesses_mls_group("));
     assert!(gate.contains("GroupMemberState::Active"));
 }
+
+#[test]
+fn first_party_bootstrap_rejects_server_custody_before_welcome() {
+    let web = read("crates/ucr-runtime/src/first_party_web.rs");
+    let handler = web
+        .split("fn endpoint_mls_bootstrap(")
+        .nth(1)
+        .expect("first party endpoint bootstrap")
+        .split("fn issue_join(")
+        .next()
+        .expect("bootstrap boundary");
+    let custody_check = handler
+        .find("server_possesses_mls_group(")
+        .expect("server custody must fail closed");
+    let welcome_load = handler
+        .find(".mls_bootstrap_for_device(")
+        .expect("canonical device-bound Welcome retrieval");
+    assert!(custody_check < welcome_load);
+    assert!(handler.contains("return Err(StatusCode::CONFLICT)"));
+}
