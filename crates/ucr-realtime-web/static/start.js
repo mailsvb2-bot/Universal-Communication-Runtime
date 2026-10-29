@@ -509,10 +509,17 @@ async function initialize() {
     renderIncoming([]);
     renderContacts([]);
   }
-  await authTrace("list_contacts",()=>updateContacts());
-  await authTrace("list_devices",()=>updateDevices());
+  // A successful canonical Device sign-in is independent of auxiliary
+  // contacts/devices reads. Do not leave a registered user on the signup screen.
   el("who").textContent = "Устройство подтверждено";
   plSetSignedIn(user.participantId);
+  const optionalErrors=[];
+  try {await authTrace("list_contacts",()=>updateContacts());}
+  catch(error) {optionalErrors.push("контакты");renderContacts([]);}
+  try {await authTrace("list_devices",()=>updateDevices());}
+  catch(error) {optionalErrors.push("устройства");el("devices").replaceChildren();}
+  if(optionalErrors.length)message("Вы вошли. Временно не удалось загрузить: "+
+    optionalErrors.join(", ")+". Повторите проверку входа.");
   // Successful device reauthentication is independent from Call state.
   // A malformed/stale canonical Call must not invalidate a trusted Device.
   message("Доверенное устройство подтверждено. Проверяем состояние вызовов…");
@@ -576,6 +583,11 @@ el("new-contact").addEventListener("submit", event => {
   void run(async () => {
     const name = el("contact-name").value.trim();
     const peer = el("contact-peer").value.trim();
+    if(!accountScope || !plOwnIdentity)throw Error("Сначала войдите в свой профиль.");
+    if(peer===plOwnIdentity)throw Error("Нельзя добавить собственный профиль.");
+    if(knownContacts.some(contact=>contact.peerIdentityId===peer)){
+      throw Error("Этот человек уже добавлен в контакты.");
+    }
     await calls.addContact(name,peer);
     el("new-contact").reset();
     delete el("contact-peer").dataset.invitedContact;
@@ -685,6 +697,15 @@ el("logout").addEventListener("click",()=>void run(async()=>{
   message("Серверная сессия закрыта. Приватный ключ остаётся на устройстве для повторного входа.");
 }));
 
+// Mobile tabs become hidden during permission prompts and app switching.
+// Catch up immediately on foreground instead of waiting for the next interval.
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden || !accountScope || navigating || busy)return;
+  void refresh().catch(error=>{
+    authDiagnostic("periodic_refresh","failed",error);
+    message("Не удалось обновить состояние звонков. Повторите проверку входа.");
+  });
+});
 window.addEventListener("pagehide", () => clearInterval(timer));
 function explainEntryFailure(error) {
   plSetSignedIn(null);
