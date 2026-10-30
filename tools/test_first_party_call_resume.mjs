@@ -507,7 +507,7 @@ const authContext={
     identity.tenantId,identity.namespaceId,identity.participantId,identity.deviceId]),
   authenticateUcrFirstPartyDevice:async()=>{reauthCount++;return user;},
 };
-runInNewContext(source.slice(authBegin,authEnd)+"\\nthis.restoreSession=restoreSession;",authContext);
+runInNewContext(source.slice(authBegin,authEnd)+"\nthis.restoreSession=restoreSession;",authContext);
 let rejectPendingCookie;
 authContext.host.resumeAuthenticatedDevice=()=>new Promise((_resolve,reject)=>{
   rejectPendingCookie=reject;
