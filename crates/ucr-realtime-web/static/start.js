@@ -503,12 +503,16 @@ function renderIncoming(items) {
 }
 async function refresh() {
   if (refreshing || navigating) return;
+  // A response from an older login generation must not clear or overwrite a
+  // newly authenticated Device, even when the server returns a late 401.
+  const refreshScope=accountScope, refreshGeneration=uiAuthGeneration;
   refreshing = true;
   try {
     let user;
     try {
       user = await restoreSession();
     } catch (error) {
+      if(refreshScope!==accountScope || refreshGeneration!==uiAuthGeneration)return;
       // Only an authorization/trust failure invalidates the visible identity.
       // Temporary network, rate-limit and 5xx failures keep the periodic
       // retry alive; no new Call/Join can succeed without server admission.
@@ -518,6 +522,7 @@ async function refresh() {
       }
       throw error;
     }
+    if(refreshScope!==accountScope || refreshGeneration!==uiAuthGeneration)return;
     if (accountScope !== principalScope(user)) {
       // Another tab may have changed Identity/Device while the UI was open.
       forgetActiveCall();
