@@ -171,12 +171,8 @@ fn signed_login(state: &State, binding: &Binding, signer: &SigningKey) {
     )
     .expect("login challenge");
     let proof = signed_login_proof(binding, signer, &issued);
-    let (response, cookie) = login_route(
-        state,
-        "/v1/first-party/login/verify",
-        &proof,
-    )
-    .expect("fresh independent canonical Device login");
+    let (response, cookie) = login_route(state, "/v1/first-party/login/verify", &proof)
+        .expect("fresh independent canonical Device login");
     assert_eq!(
         serde_json::from_value::<Binding>(response).unwrap(),
         *binding
