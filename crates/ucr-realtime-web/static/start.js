@@ -54,6 +54,14 @@ function plSetSignedIn(identity){
 // One fail-closed UI reset for logout, revoked sessions and cross-tab account changes.
 // It clears previously authenticated contact, Device, Call and recovery views.
 function plClearAuthenticatedView(preserveRecoveryCode=false){
+  // A received contact invitation is an untrusted locator, not auth state.
+  // Keep it only through the FIRST anonymous onboarding failure; never carry
+  // it across logout, revoked Device, or an authenticated account switch.
+  const inviteField=el("contact-peer");
+  const pendingInvite=!accountScope && !plOwnIdentity &&
+    inviteField.dataset.invitedContact==="true" &&
+    /^[A-Za-z0-9_.:@-]{1,128}$/.test(inviteField.value)
+      ? inviteField.value : null;
   uiAuthGeneration++;
   clearInterval(timer);
   accountScope=null;
@@ -67,6 +75,8 @@ function plClearAuthenticatedView(preserveRecoveryCode=false){
   plSetSignedIn(null);
   el("who").textContent="Нет подтверждённой сессии.";
   el("new-contact").reset();
+  if(pendingInvite!==null) inviteField.value=pendingInvite;
+  else delete inviteField.dataset.invitedContact;
   el("pl-invite-help").hidden=true;
   // An account signup/recovery may have committed before session issuance.
   // Never destroy the one-time rotated recovery code on a failed first login.
