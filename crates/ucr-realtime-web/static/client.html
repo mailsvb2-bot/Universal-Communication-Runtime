@@ -1966,6 +1966,7 @@ async function startWebRtcOnce(forceMedia=false){
     startWebRtc.offerOwner=Object.freeze({
       offerId:offer.offer_id,claims:Object.freeze({...startingClaims}),token:startingToken
     });
+    const startingOwner=startWebRtc.offerOwner;
     rtcConfig=rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value);
     await ensureLocalMedia(forceMedia);
     ensureCurrent();
@@ -2002,8 +2003,14 @@ async function startWebRtcOnce(forceMedia=false){
     // a replacement session that happened to become current while awaiting SDP.
     if(!sessionActive||!mediaActive||peer!==pc||
        generation!==mediaCaptureGeneration)return;
+    // ICE restart rotates the server's SDP-hash offer fence. Use the latest
+    // fence only while this exact peer still holds the ORIGINAL grant/claims.
+    const currentOwner=startWebRtc.offerOwner;
+    if(!currentOwner||currentOwner.claims!==startingOwner.claims||
+       currentOwner.token!==startingToken||
+       currentOwner.offerId!==startWebRtc.offerId)return;
     await api("/v1/realtime/webrtc/ice",
-      {...startingClaims,offer_id:offer.offer_id,candidate:candidate.candidate,
+      {...startingClaims,offer_id:currentOwner.offerId,candidate:candidate.candidate,
        sdp_mid:candidate.sdpMid,sdp_mline_index:candidate.sdpMLineIndex},
       undefined,false,startingToken);
   };
