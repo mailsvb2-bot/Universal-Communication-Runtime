@@ -194,6 +194,32 @@ async function exerciseNegotiation({failAt=null,replace=false,rotateToken=false}
     assert.equal(closed,0);
     assert.equal(signals.length,2,"Successful SDP must submit one answer and ICE candidate");
     assert.equal(context.startWebRtc.offerId,oldOffer);
+    // Exercise the actual onicecandidate closure after a successful restart.
+    // The original peer/grant is unchanged, but the server offer fence rotated.
+    const restartOffer="h".repeat(43),owner=context.startWebRtc.offerOwner;
+    context.startWebRtc.offerOwner=Object.freeze({
+      offerId:restartOffer,claims:owner.claims,token:owner.token
+    });
+    context.startWebRtc.offerId=restartOffer;
+    createdPeer.onicecandidate({candidate:{
+      candidate:"candidate:2",sdpMid:"0",sdpMLineIndex:0
+    }});
+    await new Promise(resolve=>setTimeout(resolve,0));
+    const iceAfterRestart=calls.filter(item=>item.path.endsWith("/ice"));
+    assert.equal(iceAfterRestart.length,2,"Restarted peer must publish ICE once");
+    assert.equal(iceAfterRestart[1].payload.offer_id,restartOffer);
+    assert.equal(iceAfterRestart[1].auth,"Bearer original-grant");
+    // A replacement owner cannot borrow this peer's stale ICE callback.
+    context.startWebRtc.offerOwner=Object.freeze({
+      offerId:newOffer,claims:newClaims,token:"replacement-grant"
+    });
+    context.startWebRtc.offerId=newOffer;
+    createdPeer.onicecandidate({candidate:{
+      candidate:"candidate:3",sdpMid:"0",sdpMLineIndex:0
+    }});
+    await new Promise(resolve=>setTimeout(resolve,0));
+    assert.equal(calls.filter(item=>item.path.endsWith("/ice")).length,2,
+      "Stale peer ICE must not signal under replacement Call/Join");
   }
 }
 for(const failAt of ["remote","answer","local","submit","ice"]){
