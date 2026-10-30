@@ -123,6 +123,39 @@ def prove_reverse(port: int) -> None:
         )
 
 
+def wait_for_chrome_package(*, attempts: int = 8, delay_seconds: int = 3) -> None:
+    """Require a real installed Chrome APK after Android package-manager warmup.
+
+    A freshly booted Play Store emulator may briefly return an empty `pm path`
+    even after the boot step successfully resolved Chrome. Never substitute
+    another browser or claim mobile evidence without the real APK.
+    """
+    last_result = ""
+    for attempt in range(1, attempts + 1):
+        package = run(
+            ["adb", "shell", "pm", "path", CHROME_PACKAGE],
+            timeout=20,
+            check=False,
+        )
+        if package.returncode == 0 and any(
+            line.strip().startswith("package:")
+            for line in package.stdout.splitlines()
+        ):
+            return
+        last_result = f"rc={package.returncode} output={package.stdout[-1500:]!r}"
+        if attempt < attempts:
+            print(
+                f"Android package manager not ready for Chrome "
+                f"({attempt}/{attempts}): {last_result}",
+                flush=True,
+            )
+            time.sleep(delay_seconds)
+    raise RuntimeError(
+        "Google Chrome APK was not verified after bounded package-manager "
+        f"retries ({attempts} attempts): {last_result}"
+    )
+
+
 def clear_first_run() -> None:
     result = start_chrome("about:blank")
     print(
@@ -152,13 +185,7 @@ def main() -> int:
     args = parser.parse_args()
 
     args.output.unlink(missing_ok=True)
-    package = run(
-        ["adb", "shell", "pm", "path", CHROME_PACKAGE],
-        timeout=20,
-        check=False,
-    )
-    if package.returncode != 0 or "package:" not in package.stdout:
-        raise RuntimeError("Google Chrome package is not installed in the emulator")
+    wait_for_chrome_package()
 
     command = [
         sys.executable,
