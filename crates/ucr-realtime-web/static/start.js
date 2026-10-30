@@ -27,6 +27,8 @@ const calls = createUcrContactCallJourney(host,vault);
 let active = null, busy = false, navigating = false, refreshing = false, timer = null;
 let knownContacts = [];
 let accountScope = null;
+// Fence delayed authenticated reads across logout, revoke and same-Identity re-login.
+let uiAuthGeneration = 0;
 const idempotency = new Map();
 const HINT_KEY = "ucr.first-party.last-device.v1";
 const ACTIVE_CALL_HINT_KEY = "ucr.first-party.active-call.v1";
@@ -52,6 +54,7 @@ function plSetSignedIn(identity){
 // One fail-closed UI reset for logout, revoked sessions and cross-tab account changes.
 // It clears previously authenticated contact, Device, Call and recovery views.
 function plClearAuthenticatedView(preserveRecoveryCode=false){
+  uiAuthGeneration++;
   clearInterval(timer);
   accountScope=null;
   active=null;
@@ -282,7 +285,9 @@ function showRecovery(code) {
   message("Новый одноразовый код создан. Сохраните его отдельно: повторно он не показывается.");
 }
 async function updateDevices() {
+  const scope=accountScope, generation=uiAuthGeneration;
   const records = await host.listDevices();
+  if(!scope || scope!==accountScope || generation!==uiAuthGeneration)return;
   const list = el("devices");
   list.replaceChildren();
   for (const record of records) {
@@ -299,8 +304,10 @@ async function updateDevices() {
         if(!window.confirm("Отзыв устройства необратим. Подтвердить?"))return;
         const own=record.deviceId===(await host.resumeAuthenticatedDevice()).deviceId;
         await host.revokeDevice(record.deviceId);
-        if(own){forgetBinding();forgetActiveCall();clearInterval(timer);active=null;accountScope=null;
-          renderContacts([]);renderIncoming([]);showActive();message("Это устройство отозвано. Повторный вход с ним невозможен.");
+        if(own){
+          forgetBinding();forgetActiveCall();
+          plClearAuthenticatedView();
+          message("Это устройство отозвано. Повторный вход с ним невозможен.");
         }else{await updateDevices();}
       },"secondary"));
       li.append(actions);
@@ -355,7 +362,12 @@ function renderContacts(contacts) {
     list.append(li);
   }
 }
-async function updateContacts() {renderContacts(await calls.contacts());}
+async function updateContacts() {
+  const scope=accountScope, generation=uiAuthGeneration;
+  const contacts=await calls.contacts();
+  if(!scope || scope!==accountScope || generation!==uiAuthGeneration)return;
+  renderContacts(contacts);
+}
 function nameFor(identity) {
   return knownContacts.find(c => c.peerIdentityId === identity)?.displayName ?? identity;
 }
@@ -489,9 +501,11 @@ async function refresh() {
       throw Error("учётная запись сменилась — требуется повторная проверка");
     }
     if (!active) await restoreActiveCall(user);
+    const verifiedGeneration=uiAuthGeneration;
     const incoming = await authTrace("incoming_calls",()=>calls.incoming());
     // Never paint a former Identity's incoming Calls after logout or Device switch.
-    if (accountScope !== principalScope(user) || navigating) return;
+    if (accountScope !== principalScope(user) ||
+        uiAuthGeneration!==verifiedGeneration || navigating) return;
     renderIncoming(incoming);
     if (active) {
       // Snapshot the exact Call and Device generation before the async read.
@@ -528,6 +542,7 @@ async function initialize() {
     if (accountScope !== null) forgetActiveCall();
     // Switching user or Device must never reuse another identity's selected
     // Call, cached UI state, or in-flight idempotency keys.
+    uiAuthGeneration++;
     accountScope = currentScope;
     knownContacts = [];
     idempotency.clear();
