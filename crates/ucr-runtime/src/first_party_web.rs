@@ -1253,8 +1253,43 @@ fn dispatch_post(
     // the Device gate through the complete synchronous canonical operation.
     // Logout waits for an earlier operation to finish, then revokes it; an
     // operation queued behind Logout cannot mutate Call or issue signed Join.
-    let gate = protected_action_gate(state, &auth.binding)?;
-    let _action = gate.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    // Revoking another Device must also fence that Device's in-flight
+    // protected actions. Lock both gates in a stable order so simultaneous
+    // cross-Device revocations cannot deadlock.
+    let target_binding = if path == "/v1/first-party/device/revoke" {
+        let revoke: RevokeRequest = parse(body)?;
+        ensure_binding(&revoke.binding, auth)?;
+        opaque(&revoke.device_id)?;
+        Some(Binding {
+            device: revoke.device_id,
+            ..auth.binding.clone()
+        })
+    } else {
+        None
+    };
+    let own_gate = protected_action_gate(state, &auth.binding)?;
+    let target_gate = target_binding
+        .as_ref()
+        .filter(|target| *target != &auth.binding)
+        .map(|target| protected_action_gate(state, target))
+        .transpose()?;
+    let (first_gate, second_gate) = if target_binding
+        .as_ref()
+        .is_some_and(|target| target.device < auth.binding.device)
+    {
+        (
+            target_gate.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
+            Some(&own_gate),
+        )
+    } else {
+        (&own_gate, target_gate.as_ref())
+    };
+    let _first = first_gate
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let _second = second_gate
+        .map(|gate| gate.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE))
+        .transpose()?;
     {
         let ledger = state
             .sessions
