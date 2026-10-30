@@ -28,7 +28,7 @@ function makeView({code="alice.device-1",invited=true,scope=null,identity=null}=
     accountScope:scope,plOwnIdentity:identity,uiAuthGeneration:0,
     active:{},knownContacts:[{id:"old"}],timer:null,idempotency:new Map([["old",true]]),
     clearInterval(){},renderContacts(){},renderIncoming(){},showActive(){},
-    plSetSignedIn(){this.plOwnIdentity=null;},
+    plSetSignedIn(){state.plOwnIdentity=null;},
     el(id){assert.ok(nodes[id],"unexpected UI node "+id);return nodes[id];},
   };
   runInNewContext(resetSource+"\nthis.resetView=plClearAuthenticatedView;",state);
