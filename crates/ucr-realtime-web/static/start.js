@@ -51,7 +51,7 @@ function plSetSignedIn(identity){
 }
 // One fail-closed UI reset for logout, revoked sessions and cross-tab account changes.
 // It clears previously authenticated contact, Device, Call and recovery views.
-function plClearAuthenticatedView(){
+function plClearAuthenticatedView(preserveRecoveryCode=false){
   clearInterval(timer);
   accountScope=null;
   active=null;
@@ -64,8 +64,12 @@ function plClearAuthenticatedView(){
   plSetSignedIn(null);
   el("new-contact").reset();
   el("pl-invite-help").hidden=true;
-  el("recovery-output").hidden=true;
-  el("recovery-code").value="";
+  // An account signup/recovery may have committed before session issuance.
+  // Never destroy the one-time rotated recovery code on a failed first login.
+  if(!preserveRecoveryCode){
+    el("recovery-output").hidden=true;
+    el("recovery-code").value="";
+  }
 }
 function plInviteUrl(){
   if(!plOwnIdentity)return null;
@@ -722,9 +726,9 @@ document.addEventListener("visibilitychange",()=>{
 });
 window.addEventListener("pagehide", () => clearInterval(timer));
 function explainEntryFailure(error) {
-  // Do not leave an earlier principal's contacts or call metadata on screen
-  // after reauthentication has failed.
-  plClearAuthenticatedView();
+  // A committed signup/recovery can fail to obtain a session under capacity.
+  // Hide stale identity data, but retain the one-time recovery credential.
+  plClearAuthenticatedView(true);
   const detail = error instanceof Error ? error.message : String(error);
   let hint = "Войдите с доверенного устройства, создайте учётную запись или восстановите доступ.";
   if (/HTTP 503/.test(detail)) hint = "Сервер входа не подключён: запустите first-party BFF.";
