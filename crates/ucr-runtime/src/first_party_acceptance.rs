@@ -1059,6 +1059,21 @@ fn verified_login_pending(
     (pending, subject, key_id, public_key)
 }
 
+fn assert_device_sessions_retired(server: &State, binding: &Binding) {
+    assert_eq!(
+        server
+            .sessions
+            .lock()
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|session| session.binding == *binding)
+            .count(),
+        0,
+        "Logout must retire even a newer cookie issued before its completion"
+    );
+}
+
 #[test]
 fn logout_atomically_fences_old_login_verify_and_retires_all_device_cookies() {
     let db = TestDb::new();
@@ -1131,18 +1146,7 @@ fn logout_atomically_fences_old_login_verify_and_retires_all_device_cookies() {
         Some(StatusCode::UNAUTHORIZED),
         "a delayed protected POST must revalidate its session after Logout"
     );
-    assert_eq!(
-        server
-            .sessions
-            .lock()
-            .unwrap()
-            .sessions
-            .iter()
-            .filter(|session| session.binding == alice)
-            .count(),
-        0,
-        "Logout must retire even a newer cookie issued before its completion"
-    );
+    assert_device_sessions_retired(&server, &alice);
 
     assert_eq!(
         issue_session(
