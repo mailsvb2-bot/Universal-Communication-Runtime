@@ -595,17 +595,20 @@ authContext.authenticateUcrFirstPartyDevice=async()=>{reauthCount++;return user;
 assert.equal((await authContext.restoreSession()).deviceId,user.deviceId);
 assert.equal(reauthCount,2);
 
-// Execute the actual logout listener with an intentionally delayed HTTP reply.
-// The sensitive UI and Call/Join fence must close before that reply exists.
+// Logout must bypass the ordinary busy lock. In particular, a pending Call
+// acceptance or signed Join must never make the user-facing Logout a no-op.
+// Execute the actual listener with an intentionally delayed server response.
 const logoutBegin=source.indexOf('el("logout").addEventListener("click"');
 const logoutEnd=source.indexOf("// Mobile tabs become hidden",logoutBegin);
 assert.ok(logoutBegin>=0 && logoutEnd>logoutBegin);
-let logoutClick,completeLogout,logoutPromise,forgotBinding=0,forgotCall=0;
+let logoutClick,completeLogout,forgotBinding=0,forgotCall=0,serverLogoutCalls=0;
+let logoutMessage="";
 const who={textContent:""};
 const logoutContext={
-  uiAuthGeneration:0,accountScope:scope,active:{call:acceptedCall},
+  busy:true,navigating:false,uiAuthGeneration:0,accountScope:scope,
+  active:{call:acceptedCall},
   el:id=>id==="logout"?{addEventListener:(_event,handler)=>{logoutClick=handler;}}:who,
-  run:action=>{logoutPromise=action();return logoutPromise;},
+  run:()=>{throw Error("security Logout must bypass the busy UI action gate");},
   forgetBinding:()=>{forgotBinding++;},
   forgetActiveCall:()=>{forgotCall++;},
   plClearAuthenticatedView:()=>{
@@ -614,28 +617,48 @@ const logoutContext={
     logoutContext.active=null;
   },
   host:{logout:()=>{
+    serverLogoutCalls++;
     assert.equal(logoutContext.active,null,"local Call must stop before HTTP logout");
     assert.equal(logoutContext.uiAuthGeneration,1,"pending Join must be fenced");
     return new Promise(resolve=>{completeLogout=resolve;});
   }},
-  message(){},
+  message:value=>{logoutMessage=value;},
 };
-runInNewContext(source.slice(logoutBegin,logoutEnd),logoutContext);
+runInNewContext(source.slice(logoutBegin-25,logoutEnd)+
+  "\\nthis.logoutState=()=>logoutInFlight;",logoutContext);
 assert.equal(typeof logoutClick,"function");
-logoutClick();
+logoutClick(); // A busy action MUST NOT swallow Logout.
 assert.equal(forgotBinding,1);
 assert.equal(forgotCall,1);
 assert.equal(logoutContext.active,null);
 assert.equal(logoutContext.accountScope,null);
-assert.equal(typeof completeLogout,"function");
+assert.equal(logoutContext.uiAuthGeneration,1);
+assert.equal(serverLogoutCalls,1);
+assert.equal(logoutContext.logoutState(),true);
+logoutClick(); // Repeated clicks cannot issue duplicate concurrent Logout.
+assert.equal(serverLogoutCalls,1);
 completeLogout();
-await logoutPromise;
+await new Promise(resolve=>setImmediate(resolve));
 assert.match(who.textContent,/вышли/);
+assert.equal(logoutContext.logoutState(),false);
+
+// An ambiguous server failure cannot be presented as a completed sign-out:
+// the HttpOnly cookie may still exist even though local Call admission stopped.
+logoutContext.accountScope=scope;
+logoutContext.active={call:acceptedCall};
+let rejectLogout;
+logoutContext.host.logout=()=>new Promise((_resolve,reject)=>{rejectLogout=reject;});
+logoutClick();
+assert.equal(logoutContext.active,null);
+rejectLogout(new Error("HTTP 503: unavailable"));
+await new Promise(resolve=>setImmediate(resolve));
+assert.match(logoutMessage,/выход на сервере не подтверждён/);
+assert.equal(logoutContext.logoutState(),false);
 
 assert.match(source,/const call = await calls\.start\(contact\.id,media,requestId\);[\s\S]*?rememberActiveCall\(call,session\.participantId\);/);
 assert.match(source,/const result = await calls\.signal\(call\.callId,"accept"\);[\s\S]*?rememberActiveCall\(result,session\.participantId\);/);
 assert.match(source,/if \(!active\) await restoreActiveCall\(user\);/);
 assert.match(source,/if \(fresh\.state === "terminated"\) \{\s*forgetActiveCall\(inspectedLocator\);/);
-assert.match(source,/forgetBinding\(\);\s*forgetActiveCall\(\);\s*plClearAuthenticatedView\(\);\s*await host\.logout\(\);/);
+assert.match(source,/forgetBinding\\(\\);\\s*forgetActiveCall\\(\\);\\s*plClearAuthenticatedView\\(\\);/);
 assert.doesNotMatch(snippet,/calls\.join\(/,"untrusted locator cannot mint a Join");
 console.log("PASS: canonical Call resume is scope-fenced, inspected, and cleared on terminal/denied state");
