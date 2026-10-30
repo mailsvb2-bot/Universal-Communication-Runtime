@@ -1096,11 +1096,26 @@ const done = arguments[arguments.length - 1];
     pixels.addColorStop(1, "#f4c251");
     ctx.fillStyle = pixels;
     ctx.fillRect(0, 0, 1920, 1080);
-    const bitmap = await createImageBitmap(canvas);
+    // Safari WebDriver may reject ImageBitmap from a detached canvas even
+    // though its VP8 encoder works. Attach a real renderable source, then
+    // require a genuinely encoded and decoded Full HD frame as before.
+    canvas.style.cssText =
+      "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;pointer-events:none";
+    document.body.appendChild(canvas);
     try {
-      const frame = new VideoFrame(bitmap, {timestamp: 0});
+      canvas.getBoundingClientRect(); // Flush layout before WebKit reads pixels.
+      let frame;
+      try {
+        const bitmap = await createImageBitmap(canvas);
+        try { frame = new VideoFrame(bitmap, {timestamp: 0}); }
+        finally { bitmap.close(); }
+      } catch (_) {
+        // HTMLCanvasElement is also a valid WebCodecs source. Do not
+        // report success unless the real encoder and decoder both work.
+        frame = new VideoFrame(canvas, {timestamp: 0});
+      }
       try { encoder.encode(frame, {keyFrame: true}); } finally { frame.close(); }
-    } finally { bitmap.close(); }
+    } finally { canvas.remove(); }
     await encoder.flush();
     await decoder.flush();
     return {supported: true, codec: "vp8", sourceWidth: 1920,
