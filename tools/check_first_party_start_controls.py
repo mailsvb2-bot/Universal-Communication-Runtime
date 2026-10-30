@@ -96,7 +96,10 @@ assert 'button.addEventListener("click", () => void run(callback))' in JS
 assert "const session = await restoreSession();\n  const call = await calls.start" in JS
 # A revoked cookie, logout in another tab, or changed canonical Device must
 # hide the old identity/invitation and clear sensitive UI before retry.
-assert "function plClearAuthenticatedView()" in JS
+assert "function plClearAuthenticatedView(preserveRecoveryCode=false)" in JS
+assert 'if(!preserveRecoveryCode){' in JS and (
+    'plClearAuthenticatedView(true);' in JS.split("function explainEntryFailure(error)", 1)[1]
+), "failed first login must not destroy a freshly issued one-time recovery code"
 for sensitive in (
     'accountScope=null;', 'active=null;', 'knownContacts=[];',
     'idempotency.clear();', 'renderContacts([]);', 'renderIncoming([]);',
