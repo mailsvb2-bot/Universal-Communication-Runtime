@@ -117,6 +117,9 @@ assert re.search(
     r"\s*catch\s*\(error\)\s*\{[^}]*plClearAuthenticatedView\(\);",
     refresh, re.S
 ), "failed session revalidation must hide the former user's cabinet"
+assert 'error instanceof TypeError || [429,500,502,503].includes(code)' in refresh, (
+    "transient network failures must retain automatic session polling"
+)
 assert re.search(
     r"if\s*\(accountScope !== principalScope\(user\)\)\s*\{"
     r"[^}]*plClearAuthenticatedView\(\);",
