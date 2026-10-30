@@ -93,7 +93,8 @@ assert 'accountScope=null;\n  active=null;\n  knownContacts=[];' in JS, (
 for label in ("Аудиозвонок", "Видеозвонок", "Удалить", "Отозвать устройство", "Принять", "Отклонить"):
     assert 'btn("' + label + '"' in JS, "missing dynamic control: " + label
 assert 'button.addEventListener("click", () => void run(callback))' in JS
-assert "const session = await restoreSession();\n  const call = await calls.start" in JS
+assert "const session = await restoreSession();" in JS
+assert "const call = await calls.start(contact.id,media,requestId);" in JS
 # A revoked cookie, logout in another tab, or changed canonical Device must
 # hide the old identity/invitation and clear sensitive UI before retry.
 assert "function plClearAuthenticatedView(preserveRecoveryCode=false)" in JS
@@ -139,6 +140,15 @@ for function_name in ("updateDevices", "updateContacts"):
     assert "generation!==uiAuthGeneration" in body, f"{function_name} paints stale data"
 assert 'if(own){\n          forgetBinding();forgetActiveCall();\n          plClearAuthenticatedView();' in JS, (
     "self-revoked Device must hide its former authenticated cabinet"
+)
+assert 'generation!==uiAuthGeneration' in JS.split("async function restoreActiveCall(user)", 1)[1].split("function setCallStage", 1)[0], (
+    "late Call inspection must not restore a Call after same-Device reauthentication"
+)
+assert 'Device changed during Call creation' in JS and 'generation!==uiAuthGeneration' in JS.split("async function dial(contact,media)", 1)[1].split("function renderIncoming", 1)[0], (
+    "late Call creation must not paint another authenticated account"
+)
+assert 'el("who").textContent="Нет подтверждённой сессии."' in JS, (
+    "revoked session must not keep showing trusted-device status"
 )
 assert 'uiAuthGeneration!==verifiedGeneration' in refresh, (
     "late incoming-call response must not repaint a newer login"
