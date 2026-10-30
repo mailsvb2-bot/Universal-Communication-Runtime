@@ -1239,3 +1239,45 @@ fn protected_action_gate_serializes_logout_and_rejects_stale_join() {
         "a post-Logout signed Join cannot reuse a pre-Logout Session"
     );
 }
+
+
+#[test]
+fn cross_device_revoke_waits_for_target_protected_action_gate() {
+    let db = TestDb::new();
+    let server = Arc::new(state(&db.0));
+    let (alice, _, _) = signup(&server, 74);
+    let auth = session_of(&server, &alice);
+    let target = Binding {
+        device: "other-device".to_owned(),
+        ..alice.clone()
+    };
+    let gate = protected_action_gate(&server, &target).unwrap();
+    let in_flight = gate.lock().unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let revoke_server = Arc::clone(&server);
+    let body = serde_json::to_vec(&json!({
+        "binding": alice,
+        "deviceId": target.device
+    }))
+    .unwrap();
+    let revoke = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        dispatch_post(
+            &revoke_server,
+            "/v1/first-party/device/revoke",
+            &body,
+            Some(&auth),
+        )
+    });
+    started_rx.recv().unwrap();
+    assert!(
+        !revoke.is_finished(),
+        "revocation must wait for the target Device's admitted action"
+    );
+    drop(in_flight);
+    assert_eq!(
+        revoke.join().unwrap().err(),
+        Some(StatusCode::FORBIDDEN),
+        "an unregistered target remains forbidden after its gate is released"
+    );
+}
