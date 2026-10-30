@@ -3,9 +3,10 @@
 //! It deliberately does not bootstrap Root Identities or silently trust a new Device.
 
 use std::{
+    collections::HashMap,
     convert::Infallible,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -73,7 +74,7 @@ const SESSION_TTL: Duration = Duration::from_mins(30);
 const COOKIE_NAME: &str = "__Host-ucr_fp";
 type HttpResponse = Response<Full<Bytes>>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Binding {
     tenant_id: String,
@@ -222,6 +223,7 @@ struct Pending {
     key_id: Option<String>,
     public_key: Option<[u8; 32]>,
     until: Instant,
+    login_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +234,49 @@ struct Session {
     signer_key_id: String,
     signer_public_key: [u8; 32],
     until: Instant,
+}
+
+// Login and Logout share ONE lock: a completed Logout revokes every session
+// for that Device, and a pre-Logout challenge can never issue a later cookie.
+// This is process-local, like the existing session pool; multi-process BFF
+// authentication remains a separate release gate.
+#[derive(Debug, Default)]
+struct SessionLedger {
+    sessions: Vec<Session>,
+    // Short-lived Device-specific challenge fences, not a second Identity store.
+    login_generations: HashMap<Binding, (u64, Instant)>,
+    next_generation: u64,
+    global_generation: u64,
+}
+
+impl SessionLedger {
+    fn generation(&self, binding: &Binding) -> u64 {
+        self.login_generations
+            .get(binding)
+            .filter(|(_, until)| *until > Instant::now())
+            .map_or(self.global_generation, |(generation, _)| {
+                (*generation).max(self.global_generation)
+            })
+    }
+
+    fn revoke_device(&mut self, binding: &Binding) {
+        self.sessions.retain(|session| &session.binding != binding);
+        let now = Instant::now();
+        self.login_generations.retain(|_, (_, until)| *until > now);
+        self.next_generation = self.next_generation.saturating_add(1);
+        if self.login_generations.len() >= MAX_SESSIONS
+            && !self.login_generations.contains_key(binding)
+        {
+            // Never drop a live fence to admit an old challenge: conservatively
+            // invalidate all pending logins on exceptional capacity pressure.
+            self.global_generation = self.next_generation;
+            self.login_generations.clear();
+        }
+        self.login_generations.insert(
+            binding.clone(),
+            (self.next_generation, now + CHALLENGE_TTL + CHALLENGE_TTL),
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -246,7 +291,10 @@ struct State {
     untrusted_consumed: Mutex<Vec<([u8; 32], Instant)>>,
     recovery_consumed: Mutex<Vec<([u8; 32], Instant)>>,
     signup_admissions: Mutex<Vec<Instant>>,
-    sessions: Mutex<Vec<Session>>,
+    sessions: Mutex<SessionLedger>,
+    // One in-process serialization gate per canonical Device. Weak entries are
+    // pruned so anonymous/retired Devices cannot grow this map without bound.
+    protected_actions: Mutex<HashMap<Binding, Weak<Mutex<()>>>>,
 }
 
 #[derive(Debug)]
@@ -313,7 +361,8 @@ pub(super) async fn serve(
         untrusted_consumed: Mutex::new(Vec::new()),
         recovery_consumed: Mutex::new(Vec::new()),
         signup_admissions: Mutex::new(Vec::new()),
-        sessions: Mutex::new(Vec::new()),
+        sessions: Mutex::new(SessionLedger::default()),
+        protected_actions: Mutex::new(HashMap::new()),
     });
     println!(
         "UCR_FIRST_PARTY_READY loopback={} https_edge=required",
@@ -484,17 +533,38 @@ fn random_key() -> Result<[u8; 32], StatusCode> {
 
 type ChallengeMac = hmac::Hmac<Sha256>;
 
+fn current_login_generation(state: &State, binding: &Binding) -> Result<u64, StatusCode> {
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(sessions.generation(binding))
+}
+
+// Explicitly bind the MAC to one purpose, signer descriptor and Logout epoch.
+#[derive(Clone, Copy)]
+struct ChallengeMacContext<'a> {
+    purpose: &'a str,
+    key_id: Option<&'a str>,
+    public_key: Option<&'a [u8; 32]>,
+    login_generation: Option<u64>,
+}
+
 /// MAC over the challenge core and EVERYTHING the challenge is bound to.
 fn challenge_mac(
     state: &State,
     label: &[u8],
     core: &[u8],
     binding: &Binding,
-    purpose: &str,
-    key_id: Option<&str>,
-    public_key: Option<&[u8; 32]>,
+    context: ChallengeMacContext<'_>,
 ) -> Result<[u8; 32], StatusCode> {
     use hmac::Mac as _;
+    let ChallengeMacContext {
+        purpose,
+        key_id,
+        public_key,
+        login_generation,
+    } = context;
     let mut mac = <ChallengeMac as hmac::KeyInit>::new_from_slice(&state.challenge_key)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let bound = serde_json::to_vec(&json!([
@@ -511,6 +581,10 @@ fn challenge_mac(
         mac.update(&(part.len() as u64).to_be_bytes());
         mac.update(part);
     }
+    if let Some(generation) = login_generation {
+        mac.update(&8u64.to_be_bytes());
+        mac.update(&generation.to_be_bytes());
+    }
     Ok(mac.finalize().into_bytes().into())
 }
 
@@ -525,6 +599,9 @@ fn challenge(
     key_id: Option<&str>,
     public_key: Option<[u8; 32]>,
 ) -> Result<Value, StatusCode> {
+    let login_generation = (purpose == "login")
+        .then(|| current_login_generation(state, binding))
+        .transpose()?;
     // Always one-time and short-lived, but STATELESS: the challenge is sealed
     // with a per-process MAC key, so issuing one allocates no server memory and
     // no anonymous actor can exhaust a shared pool to lock everyone else out.
@@ -537,23 +614,25 @@ fn challenge(
     core.push(CHALLENGE_VERSION);
     core.extend_from_slice(&expiry.to_be_bytes());
     core.extend_from_slice(&random_key()?[..16]);
+    let context = ChallengeMacContext {
+        purpose,
+        key_id,
+        public_key: public_key.as_ref(),
+        login_generation,
+    };
     let tag = challenge_mac(
         state,
         b"ucr-first-party-challenge-id.v1",
         &core,
         binding,
-        purpose,
-        key_id,
-        public_key.as_ref(),
+        context,
     )?;
     let nonce = challenge_mac(
         state,
         b"ucr-first-party-challenge-nonce.v1",
         &core,
         binding,
-        purpose,
-        key_id,
-        public_key.as_ref(),
+        context,
     )?;
     let mut id = core;
     id.extend_from_slice(&tag);
@@ -583,14 +662,21 @@ fn consume(
     let (core, tag) = raw.split_at(25);
     let key_id = key.map(|(key_id, _)| key_id);
     let public_key = key.map(|(_, public_key)| public_key);
+    let login_generation = (purpose == "login")
+        .then(|| current_login_generation(state, binding))
+        .transpose()?;
+    let context = ChallengeMacContext {
+        purpose,
+        key_id,
+        public_key: public_key.as_ref(),
+        login_generation,
+    };
     let expected = challenge_mac(
         state,
         b"ucr-first-party-challenge-id.v1",
         core,
         binding,
-        purpose,
-        key_id,
-        public_key.as_ref(),
+        context,
     )?;
     if !bool::from(expected.ct_eq(tag)) {
         return Err(StatusCode::UNAUTHORIZED);
@@ -609,9 +695,7 @@ fn consume(
         b"ucr-first-party-challenge-nonce.v1",
         core,
         binding,
-        purpose,
-        key_id,
-        public_key.as_ref(),
+        context,
     )?;
     Ok(Pending {
         purpose,
@@ -621,6 +705,7 @@ fn consume(
         key_id: key_id.map(str::to_owned),
         public_key,
         until: Instant::now() + Duration::from_millis(expiry - now),
+        login_generation,
     })
 }
 
@@ -723,18 +808,42 @@ fn encoded_proof(prefix: &str, context: &Value) -> Result<String, StatusCode> {
     ))
 }
 
+// A delayed POST body must not resurrect a session after Logout. Every
+// protected action, including Logout, acquires this same per-Device gate only
+// AFTER its body has been read; no mutex is held across a network await.
+fn protected_action_gate(state: &State, binding: &Binding) -> Result<Arc<Mutex<()>>, StatusCode> {
+    let mut gates = state
+        .protected_actions
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    gates.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(gate) = gates.get(binding).and_then(Weak::upgrade) {
+        return Ok(gate);
+    }
+    let gate = Arc::new(Mutex::new(()));
+    gates.insert(binding.clone(), Arc::downgrade(&gate));
+    Ok(gate)
+}
+
 fn issue_session(
     state: &State,
     binding: Binding,
     subject: ScopedPrincipal,
     signer_key_id: String,
     signer_public_key: [u8; 32],
+    login_generation: Option<u64>,
 ) -> Result<(Value, String), StatusCode> {
+    let gate = protected_action_gate(state, &binding)?;
+    let _action = gate.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let token = nonce()?;
-    let mut sessions = state
+    let mut ledger = state
         .sessions
         .lock()
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if login_generation.is_some_and(|expected| ledger.generation(&binding) != expected) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let sessions = &mut ledger.sessions;
     sessions.retain(|session| session.until > Instant::now());
     // A new login evicts only the SAME Identity's oldest session, so one
     // actor cannot push other people's sessions out or block their login.
@@ -792,8 +901,11 @@ fn authenticated(state: &State, request: &Request<Incoming>) -> Result<Session, 
             .sessions
             .lock()
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        sessions.retain(|session| session.until > Instant::now());
         sessions
+            .sessions
+            .retain(|session| session.until > Instant::now());
+        sessions
+            .sessions
             .iter()
             .find(|s| s.token == token)
             .cloned()
@@ -1915,6 +2027,69 @@ fn dispatch_post(
         return account_route(state, path, body);
     }
     let auth = session.ok_or(StatusCode::UNAUTHORIZED)?;
+    // Revalidate the cookie AFTER the possibly slow request body, and hold
+    // the Device gate through the complete synchronous canonical operation.
+    // Logout waits for an earlier operation to finish, then revokes it; an
+    // operation queued behind Logout cannot mutate Call or issue signed Join.
+    // Revoking another Device must also fence that Device's in-flight
+    // protected actions. Lock both gates in a stable order so simultaneous
+    // cross-Device revocations cannot deadlock.
+    let target_binding = if path == "/v1/first-party/device/revoke" {
+        let revoke: RevokeRequest = parse(body)?;
+        ensure_binding(&revoke.binding, auth)?;
+        opaque(&revoke.device_id)?;
+        Some(Binding {
+            device: revoke.device_id,
+            ..auth.binding.clone()
+        })
+    } else {
+        None
+    };
+    let own_gate = protected_action_gate(state, &auth.binding)?;
+    let target_gate = target_binding
+        .as_ref()
+        .filter(|target| *target != &auth.binding)
+        .map(|target| protected_action_gate(state, target))
+        .transpose()?;
+    let (first_gate, second_gate) = if target_binding
+        .as_ref()
+        .is_some_and(|target| target.device < auth.binding.device)
+    {
+        (
+            target_gate
+                .as_ref()
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
+            Some(&own_gate),
+        )
+    } else {
+        (&own_gate, target_gate.as_ref())
+    };
+    let _first = first_gate
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let _second = second_gate
+        .map(|gate| gate.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE))
+        .transpose()?;
+    {
+        let ledger = state
+            .sessions
+            .lock()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        if !ledger.sessions.iter().any(|current| {
+            current.token == auth.token
+                && current.binding == auth.binding
+                && current.until > Instant::now()
+        }) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    if subject_for(state, &auth.binding)? != auth.subject {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let (key_id, public_key) = trusted_key(state, &auth.binding)?;
+    if key_id != auth.signer_key_id || public_key != auth.signer_public_key {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     if path == "/v1/first-party/logout" {
         let input: BoundRequest = parse(body)?;
         ensure_binding(&input.binding, auth)?;
@@ -1922,7 +2097,14 @@ fn dispatch_post(
             .sessions
             .lock()
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        sessions.retain(|item| item.token != auth.token);
+        if !sessions
+            .sessions
+            .iter()
+            .any(|item| item.token == auth.token)
+        {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        sessions.revoke_device(&auth.binding);
         let cookie =
             format!("{COOKIE_NAME}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict");
         return Ok((json!({"signedOut": true}), Some(cookie)));
@@ -2117,6 +2299,7 @@ fn account_session_after_commit(
         subject,
         signing_key.key_id.as_opaque().as_str().to_owned(),
         verifier_key,
+        None,
     )
     .ok()
     .map(|(_, cookie)| cookie)
@@ -2153,7 +2336,14 @@ fn login_route(
             )?;
             verify_ed25519(public_key, &signed, &proof.signature_base64_url)?;
             spend(state, &pending)?;
-            let (value, cookie) = issue_session(state, proof.binding, subject, key_id, public_key)?;
+            let (value, cookie) = issue_session(
+                state,
+                proof.binding,
+                subject,
+                key_id,
+                public_key,
+                pending.login_generation,
+            )?;
             return Ok((value, Some(cookie)));
         }
         _ => return Err(StatusCode::NOT_FOUND),
@@ -2198,10 +2388,9 @@ fn device_route(
                 .sessions
                 .lock()
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-            sessions.retain(|item| {
-                !(item.binding.tenant_id == auth.binding.tenant_id
-                    && item.binding.namespace_id == auth.binding.namespace_id
-                    && item.binding.device == input.device_id)
+            sessions.revoke_device(&Binding {
+                device: input.device_id,
+                ..auth.binding.clone()
             });
             json!({"revoked": true})
         }

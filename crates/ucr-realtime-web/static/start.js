@@ -27,10 +27,80 @@ const calls = createUcrContactCallJourney(host,vault);
 let active = null, busy = false, navigating = false, refreshing = false, timer = null;
 let knownContacts = [];
 let accountScope = null;
+// Fence delayed authenticated reads across logout, revoke and same-Identity re-login.
+let uiAuthGeneration = 0;
 const idempotency = new Map();
 const HINT_KEY = "ucr.first-party.last-device.v1";
 const ACTIVE_CALL_HINT_KEY = "ucr.first-party.active-call.v1";
 const authDiagnostics=[];
+let plOwnIdentity=null;
+function plSetSignedIn(identity){
+  plOwnIdentity=identity||null;
+  const logged=Boolean(plOwnIdentity);
+  el("pl-new-user").hidden=logged;
+  el("pl-user-cabinet").hidden=!logged;
+  for(const id of ["pl-contacts","pl-incoming","pl-current-call"])el(id).hidden=!logged;
+  if(logged){
+    el("pl-friendly-identity").textContent="Профиль активен. Пригласите знакомого или выберите контакт для звонка.";
+    const invited=el("contact-peer").dataset.invitedContact==="true";
+    if(invited) {
+      el("pl-invite-help").hidden=false;
+      // The invite is only a locator, not authority to authenticate its sender.
+      el("pl-contacts").scrollIntoView({behavior:"smooth",block:"start"});
+      el("contact-name").focus({preventScroll:true});
+    }
+  }
+}
+// One fail-closed UI reset for logout, revoked sessions and cross-tab account changes.
+// It clears previously authenticated contact, Device, Call and recovery views.
+function plClearAuthenticatedView(preserveRecoveryCode=false){
+  // A received contact invitation is an untrusted locator, not auth state.
+  // Keep it only through the FIRST anonymous onboarding failure; never carry
+  // it across logout, revoked Device, or an authenticated account switch.
+  const inviteField=el("contact-peer");
+  const pendingInvite=!accountScope && !plOwnIdentity &&
+    inviteField.dataset.invitedContact==="true" &&
+    /^[A-Za-z0-9_.:@-]{1,128}$/.test(inviteField.value)
+      ? inviteField.value : null;
+  uiAuthGeneration++;
+  clearInterval(timer);
+  accountScope=null;
+  active=null;
+  knownContacts=[];
+  idempotency.clear();
+  renderContacts([]);
+  renderIncoming([]);
+  el("devices").replaceChildren();
+  showActive();
+  plSetSignedIn(null);
+  el("who").textContent="Нет подтверждённой сессии.";
+  el("new-contact").reset();
+  if(pendingInvite!==null) inviteField.value=pendingInvite;
+  else delete inviteField.dataset.invitedContact;
+  el("pl-invite-help").hidden=true;
+  // An account signup/recovery may have committed before session issuance.
+  // Never destroy the one-time rotated recovery code on a failed first login.
+  if(!preserveRecoveryCode){
+    el("recovery-output").hidden=true;
+    el("recovery-code").value="";
+  }
+}
+function plInviteUrl(){
+  if(!plOwnIdentity)return null;
+  const url=new URL("/start",location.origin);
+  url.searchParams.set("contact",plOwnIdentity);
+  return url.href;
+}
+el("pl-copy-invite").addEventListener("click",()=>void run(async()=>{
+  const url=plInviteUrl();if(!url)return;
+  await navigator.clipboard.writeText(url);
+  message("Приглашение скопировано. Попросите знакомого сверить код с вами.");
+}));
+el("pl-share-invite").addEventListener("click",()=>void run(async()=>{
+  const url=plInviteUrl();if(!url)return;
+  if(navigator.share){await navigator.share({title:"PetrelLink — контакт",url});}
+  else{await navigator.clipboard.writeText(url);message("Приглашение скопировано.");}
+}));
 function authHttpCode(error){
   const match=String(error instanceof Error?error.message:"").match(/HTTP (401|403|404|409|429|500|502|503)/);
   return match?Number(match[1]):null;
@@ -112,8 +182,19 @@ function lastBinding() {
   }
 }
 async function restoreSession() {
-  try {return await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());}
-  catch(error) {
+  // Logout/revoke must fence an in-flight cookie check before it can
+  // silently reauthenticate and issue a new browser session.
+  const generation=uiAuthGeneration;
+  try {
+    const resumed=await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());
+    if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+    return resumed;
+  } catch(error) {
+    if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+    // Only an expired/absent cookie (401) authorizes a fresh possession proof.
+    // A transient network/5xx failure, rate limit or 403 must not silently
+    // issue another session or turn a failed status check into a login attempt.
+    if(authHttpCode(error)!==401)throw error;
     const hint=lastBinding();
     if(!hint){
       authDiagnostic("device_reauthentication","unavailable");
@@ -125,6 +206,7 @@ async function restoreSession() {
     // If the server revoked this Device, do not turn the hint into trust.
     const verified=await authTrace("device_reauthentication",()=>authenticateUcrFirstPartyDevice(
       vault,{origin:location.origin},hint));
+    if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
     if(principalScope(verified)!==principalScope(hint)){
       authDiagnostic("device_scope_verification","failed");
       forgetBinding();
@@ -188,6 +270,7 @@ async function restoreActiveCall(user) {
   try {hint=JSON.parse(locator);}
   catch {forgetActiveCall(locator);return;}
   const scope=principalScope(user);
+  const generation=uiAuthGeneration;
   if (!hint || typeof hint!=="object" || hint.scope!==scope ||
       accountScope!==scope || typeof hint.callId!=="string" ||
       !/^[A-Za-z0-9_.:@-]{1,128}$/.test(hint.callId)) {
@@ -197,7 +280,9 @@ async function restoreActiveCall(user) {
     const call=await calls.inspect(hint.callId);
     // Inspect checks current canonical participant, Device and Call membership.
     // A delayed response cannot restore a Call after account/Device switch.
-    if (accountScope!==scope) {forgetActiveCall(locator);return;}
+    if (accountScope!==scope || generation!==uiAuthGeneration) {
+      forgetActiveCall(locator);return;
+    }
     // A new Call (or a newer locator) wins over this in-flight inspection.
     if (active || activeCallLocator()!==locator) return;
     if (call.state==="terminated") {forgetActiveCall(locator);return;}
@@ -226,7 +311,9 @@ function showRecovery(code) {
   message("Новый одноразовый код создан. Сохраните его отдельно: повторно он не показывается.");
 }
 async function updateDevices() {
+  const scope=accountScope, generation=uiAuthGeneration;
   const records = await host.listDevices();
+  if(!scope || scope!==accountScope || generation!==uiAuthGeneration)return;
   const list = el("devices");
   list.replaceChildren();
   for (const record of records) {
@@ -243,8 +330,10 @@ async function updateDevices() {
         if(!window.confirm("Отзыв устройства необратим. Подтвердить?"))return;
         const own=record.deviceId===(await host.resumeAuthenticatedDevice()).deviceId;
         await host.revokeDevice(record.deviceId);
-        if(own){forgetBinding();forgetActiveCall();clearInterval(timer);active=null;accountScope=null;
-          renderContacts([]);renderIncoming([]);showActive();message("Это устройство отозвано. Повторный вход с ним невозможен.");
+        if(own){
+          forgetBinding();forgetActiveCall();
+          plClearAuthenticatedView();
+          message("Это устройство отозвано. Повторный вход с ним невозможен.");
         }else{await updateDevices();}
       },"secondary"));
       li.append(actions);
@@ -295,11 +384,16 @@ function renderContacts(contacts) {
   }
   if (!contacts.length) {
     const li = document.createElement("li");
-    li.textContent = "Добавьте контакт с проверенным Identity ID.";
+    li.textContent = "Контактов пока нет. Пригласите знакомого по ссылке или добавьте его код.";
     list.append(li);
   }
 }
-async function updateContacts() {renderContacts(await calls.contacts());}
+async function updateContacts() {
+  const scope=accountScope, generation=uiAuthGeneration;
+  const contacts=await calls.contacts();
+  if(!scope || scope!==accountScope || generation!==uiAuthGeneration)return;
+  renderContacts(contacts);
+}
 function nameFor(identity) {
   return knownContacts.find(c => c.peerIdentityId === identity)?.displayName ?? identity;
 }
@@ -723,6 +817,7 @@ async function beginMedia(callId) {
   if (!selected || selected.terminating || selected.call.callId !== callId ||
       selected.call.state !== "active") return;
   const selectedScope = accountScope;
+  const selectedGeneration = uiAuthGeneration;
   const selectedLocator = activeCallLocator();
   // This coordinator permits Join ONLY after the recipient has accepted
   // and the canonical owner reports ACTIVE. It never creates trust or keys.
@@ -744,7 +839,8 @@ async function beginMedia(callId) {
   if (!grant || grant.callId !== callId) throw Error("Call admission mismatch");
   // Periodic inspection may replace the object for the SAME active Call.
   // Fence by canonical Call/Device state, not mutable UI object identity.
-  if (navigating || accountScope !== selectedScope || !active ||
+  if (navigating || uiAuthGeneration !== selectedGeneration ||
+      accountScope !== selectedScope || !active ||
       active.terminating || active.call.callId !== callId ||
       active.call.state !== "active" ||
       activeCallLocator() !== selectedLocator) return;
@@ -770,11 +866,18 @@ async function dial(contact,media) {
   const key = contact.id + ":" + media;
   const requestId = idempotency.get(key) ?? crypto.randomUUID();
   idempotency.set(key,requestId);
-  message("Проверка Device и создание канонического вызова…");
+  message("Соединяем с собеседником…");
   // Re-establish device authority before making an irreversible canonical Call.
   // A stale cookie must not create a Call which the UI then fails to display.
+  const scope=accountScope, generation=uiAuthGeneration;
   const session = await restoreSession();
+  if(!scope || scope!==accountScope || generation!==uiAuthGeneration ||
+     principalScope(session)!==scope)throw Error("Device changed before Call creation");
   const call = await calls.start(contact.id,media,requestId);
+  // The Call owner may have committed before a concurrent logout/revocation.
+  // Never repaint that stale Call under a new or unauthenticated Device.
+  if(scope!==accountScope || generation!==uiAuthGeneration)
+    throw Error("Device changed during Call creation; inspect the prior Call before retry");
   active = {call,identity:session.participantId};
   rememberActiveCall(call,session.participantId);
   showActive();
@@ -795,10 +898,21 @@ function renderIncoming(items) {
     actions.className = "actions";
     actions.append(
       btn("Принять",async () => {
+        const scope=accountScope, generation=uiAuthGeneration;
+        const locator=activeCallLocator();
+        if(!scope)throw Error("Требуется подтверждённая Device-сессия");
         if (active && active.call.state !== "terminated") throw Error("вы уже участвуете в другом вызове");
-        if (activeCallLocator() !== null) throw Error("сначала дождитесь проверки незавершённого вызова");
+        if (locator !== null) throw Error("сначала дождитесь проверки незавершённого вызова");
         const result = await calls.signal(call.callId,"accept");
+        if (!result || result.callId !== call.callId) throw Error("Call acceptance mismatch");
+        // The server may have accepted this Call, but an old UI callback may
+        // never install it under a new (even same-Device) login generation.
+        if(accountScope!==scope || uiAuthGeneration!==generation ||
+           activeCallLocator()!==locator || (active && active.call.state!=="terminated"))return;
         const session = await host.resumeAuthenticatedDevice();
+        if(principalScope(session)!==scope)throw Error("Device changed during Call acceptance");
+        if(accountScope!==scope || uiAuthGeneration!==generation ||
+           activeCallLocator()!==locator || (active && active.call.state!=="terminated"))return;
         active = {call:result,identity:session.participantId};
         rememberActiveCall(result,session.participantId);
         showActive();
@@ -820,27 +934,38 @@ function renderIncoming(items) {
 }
 async function refresh() {
   if (refreshing || navigating) return;
+  // A response from an older login generation must not clear or overwrite a
+  // newly authenticated Device, even when the server returns a late 401.
+  const refreshScope=accountScope, refreshGeneration=uiAuthGeneration;
   refreshing = true;
   try {
-    const user = await restoreSession();
+    let user;
+    try {
+      user = await restoreSession();
+    } catch (error) {
+      if(refreshScope!==accountScope || refreshGeneration!==uiAuthGeneration)return;
+      // Only an authorization/trust failure invalidates the visible identity.
+      // Temporary network, rate-limit and 5xx failures keep the periodic
+      // retry alive; no new Call/Join can succeed without server admission.
+      const code=authHttpCode(error);
+      if(!(error instanceof TypeError || [429,500,502,503].includes(code))){
+        plClearAuthenticatedView();
+      }
+      throw error;
+    }
+    if(refreshScope!==accountScope || refreshGeneration!==uiAuthGeneration)return;
     if (accountScope !== principalScope(user)) {
-      // Fail closed immediately if the user logs out or changes Device in
-      // another tab. Never keep the former user's contacts/Call on screen.
-      clearInterval(timer);
+      // Another tab may have changed Identity/Device while the UI was open.
       forgetActiveCall();
-      accountScope = null;
-      active = null;
-      knownContacts = [];
-      idempotency.clear();
-      renderContacts([]);
-      renderIncoming([]);
-      showActive();
+      plClearAuthenticatedView();
       throw Error("учётная запись сменилась — требуется повторная проверка");
     }
     if (!active) await restoreActiveCall(user);
+    const verifiedGeneration=uiAuthGeneration;
     const incoming = await authTrace("incoming_calls",()=>calls.incoming());
     // Never paint a former Identity's incoming Calls after logout or Device switch.
-    if (accountScope !== principalScope(user) || navigating) return;
+    if (accountScope !== principalScope(user) ||
+        uiAuthGeneration!==verifiedGeneration || navigating) return;
     renderIncoming(incoming);
     if (active) {
       // Snapshot the exact Call and Device generation before the async read.
@@ -869,7 +994,7 @@ async function refresh() {
 async function initialize() {
   authDiagnostic("initialization","started");
   clearInterval(timer);
-  message("Проверка независимо авторизованной Identity и Device…");
+  message("Проверяем защищённый вход…");
   const user = await restoreSession();
   rememberBinding(user);
   const currentScope = principalScope(user);
@@ -877,6 +1002,7 @@ async function initialize() {
     if (accountScope !== null) forgetActiveCall();
     // Switching user or Device must never reuse another identity's selected
     // Call, cached UI state, or in-flight idempotency keys.
+    uiAuthGeneration++;
     accountScope = currentScope;
     knownContacts = [];
     idempotency.clear();
@@ -885,9 +1011,17 @@ async function initialize() {
     renderIncoming([]);
     renderContacts([]);
   }
-  await authTrace("list_contacts",()=>updateContacts());
-  await authTrace("list_devices",()=>updateDevices());
-  el("who").textContent = "Identity: " + user.participantId + " · Device: " + user.deviceId;
+  // A successful canonical Device sign-in is independent of auxiliary
+  // contacts/devices reads. Do not leave a registered user on the signup screen.
+  el("who").textContent = "Устройство подтверждено";
+  plSetSignedIn(user.participantId);
+  const optionalErrors=[];
+  try {await authTrace("list_contacts",()=>updateContacts());}
+  catch(error) {optionalErrors.push("контакты");renderContacts([]);}
+  try {await authTrace("list_devices",()=>updateDevices());}
+  catch(error) {optionalErrors.push("устройства");el("devices").replaceChildren();}
+  if(optionalErrors.length)message("Вы вошли. Временно не удалось загрузить: "+
+    optionalErrors.join(", ")+". Повторите проверку входа.");
   // Successful device reauthentication is independent from Call state.
   // A malformed/stale canonical Call must not invalidate a trusted Device.
   message("Доверенное устройство подтверждено. Проверяем состояние вызовов…");
@@ -951,10 +1085,23 @@ el("new-contact").addEventListener("submit", event => {
   void run(async () => {
     const name = el("contact-name").value.trim();
     const peer = el("contact-peer").value.trim();
+    if(!accountScope || !plOwnIdentity)throw Error("Сначала войдите в свой профиль.");
+    if(peer===plOwnIdentity)throw Error("Нельзя добавить собственный профиль.");
+    if(knownContacts.some(contact=>contact.peerIdentityId===peer)){
+      throw Error("Этот человек уже добавлен в контакты.");
+    }
     await calls.addContact(name,peer);
     el("new-contact").reset();
+    delete el("contact-peer").dataset.invitedContact;
+    el("pl-invite-help").hidden=true;
+    // Never retain the unverified invitation locator in a shareable URL.
+    if(new URLSearchParams(location.search).has("contact")){
+      const clean=new URL(location.href);
+      clean.searchParams.delete("contact");
+      history.replaceState(null,"",clean.href);
+    }
     await updateContacts();
-    message("Контакт сохранён локально. Для звонка требуется ответ собеседника.");
+    message("Контакт добавлен. Теперь выберите аудио- или видеозвонок.");
   });
 });
 // Mark termination before the network request: an in-flight refresh or signed
@@ -1006,7 +1153,7 @@ el("cancel").addEventListener("click", () => {
 });
 
 el("signup").addEventListener("click",()=>void run(async()=>{
-  message("Создание Identity и первого защищённого устройства…");
+  message("Создаём защищённый профиль…");
   const result=await registerUcrFirstPartyUser(vault,{origin:location.origin});
   showRecovery(result.recoveryCode);
   el("login-tenant").value=result.binding.tenantId;
@@ -1037,22 +1184,45 @@ el("rotate-recovery").addEventListener("click",()=>void run(async()=>{
   const code=await host.rotateRecoveryCode();
   showRecovery(code);
 }));
-el("logout").addEventListener("click",()=>void run(async()=>{
-  await host.logout();
+// Logout is a security action, not a regular UI mutation. A slow dial,
+// incoming acceptance, or MLS preflight may hold the ordinary busy lock;
+// never discard the user's Logout click while that work is pending.
+let logoutInFlight=false;
+el("logout").addEventListener("click",()=>{
+  if(logoutInFlight)return;
+  logoutInFlight=true;
+  // Synchronously fence all old Call/Join continuations BEFORE any await.
   forgetBinding();
   forgetActiveCall();
-  clearInterval(timer);
-  active=null;accountScope=null;knownContacts=[];idempotency.clear();
-  renderContacts([]);renderIncoming([]);el("devices").replaceChildren();
-  el("who").textContent="Вы вышли из учётной записи.";
-  showActive();
-  el("recovery-output").hidden=true;
-  el("recovery-code").value="";
-  message("Серверная сессия закрыта. Приватный ключ остаётся на устройстве для повторного входа.");
-}));
+  plClearAuthenticatedView();
+  void (async()=>{
+    try{
+      await host.logout();
+      el("who").textContent="Вы вышли из учётной записи.";
+      message("Серверная сессия закрыта. Приватный ключ остаётся на устройстве для повторного входа.");
+    }catch(error){
+      // HttpOnly cookies cannot be cleared by client JavaScript. Never claim
+      // that server Logout succeeded after an ambiguous network failure.
+      message("Локальный доступ закрыт, но выход на сервере не подтверждён: "+
+        (error instanceof Error?error.message:String(error)));
+    }finally{logoutInFlight=false;}
+  })();
+});
 
+// Mobile tabs become hidden during permission prompts and app switching.
+// Catch up immediately on foreground instead of waiting for the next interval.
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden || !accountScope || navigating || busy)return;
+  void refresh().catch(error=>{
+    authDiagnostic("periodic_refresh","failed",error);
+    message("Не удалось обновить состояние звонков. Повторите проверку входа.");
+  });
+});
 window.addEventListener("pagehide", () => clearInterval(timer));
 function explainEntryFailure(error) {
+  // A committed signup/recovery can fail to obtain a session under capacity.
+  // Hide stale identity data, but retain the one-time recovery credential.
+  plClearAuthenticatedView(true);
   const detail = error instanceof Error ? error.message : String(error);
   let hint = "Войдите с доверенного устройства, создайте учётную запись или восстановите доступ.";
   if (/HTTP 503/.test(detail)) hint = "Сервер входа не подключён: запустите first-party BFF.";

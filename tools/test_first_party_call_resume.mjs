@@ -55,7 +55,7 @@ const storage={
 const hintKey="ucr.first-party.active-call.v1";
 let inspections=0,rendered=0,incomingRendered=0,navigatedTo=null;
 const context={
-  accountScope:scope,active:null,sessionStorage:storage,
+  accountScope:scope,active:null,uiAuthGeneration:0,sessionStorage:storage,
   idempotency:new Map(),crypto:{randomUUID:()=>"retry-id"},
   restoreSession:async()=>user,message(){},
   refreshing:false,navigating:false,timer:null,knownContacts:[],
@@ -150,6 +150,21 @@ await stale;
 assert.equal(context.active.call.callId,newer.callId);
 assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
 
+// Same Identity/Device after logout is still a NEW authentication generation.
+// The old in-flight inspection must not restore its previous Call.
+context.active=null;
+forgetActiveCall();
+rememberActiveCall(call,"alice");
+let releaseOldGeneration;
+context.calls.inspect=()=>new Promise(resolve=>{releaseOldGeneration=resolve;});
+const oldGenerationResume=restoreActiveCall(user);
+context.uiAuthGeneration++;
+releaseOldGeneration(call);
+await oldGenerationResume;
+assert.equal(context.active,null,"old auth generation cannot restore a Call");
+assert.equal(values.has(hintKey),false);
+context.uiAuthGeneration=0;
+
 // Even a late canonical denial must not delete the replacement locator.
 let rejectOld;
 context.active=null;
@@ -188,7 +203,22 @@ await dial({id:"contact-b"},"video");
 assert.equal(starts,1);
 assert.equal(context.active.call.callId,newer.callId);
 assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
-assert.match(source,/if \(activeCallLocator\(\) !== null\) throw Error\("сначала дождитесь проверки незавершённого вызова"\);/);
+
+// A Call creation that finishes after a Device session change may exist on
+// the canonical owner, but must not be painted under the replacement login.
+context.active=null;
+forgetActiveCall();
+let finishStaleDial,signalStaleDial;
+const staleDialStarted=new Promise(resolve=>{signalStaleDial=resolve;});
+context.calls.start=()=>new Promise(resolve=>{finishStaleDial=resolve;signalStaleDial();});
+const staleDial=dial({id:"contact-b"},"audio");
+await staleDialStarted;
+context.uiAuthGeneration++;
+finishStaleDial(newer);
+await assert.rejects(staleDial,/Device changed during Call creation/);
+assert.equal(context.active,null,"late Call creation must not repaint another Device");
+assert.equal(values.has(hintKey),false);
+assert.match(source,/if \(locator !== null\) throw Error\("сначала дождитесь проверки незавершённого вызова"\);/);
 
 // A periodic inspect begun for an old Call must not overwrite a newly dialed Call.
 context.active={call,identity:"alice"};
@@ -268,6 +298,22 @@ assert.equal(values.get("ucrFirstPartyDirectCall"),accepted.callId);
 context.navigating=false;
 navigatedTo=null;
 
+// A Join from a previous authentication generation must not navigate even if
+// the same Identity/Device and same Call locator were re-established.
+context.active={call:accepted,identity:"alice"};
+forgetActiveCall();
+rememberActiveCall(accepted,"alice");
+let finishOldGenerationJoin,signalOldGenerationJoin;
+const oldGenerationJoinStarted=new Promise(resolve=>{signalOldGenerationJoin=resolve;});
+context.calls.join=()=>new Promise(resolve=>{finishOldGenerationJoin=resolve;signalOldGenerationJoin();});
+const staleGenerationJoin=beginMedia(accepted.callId);
+await oldGenerationJoinStarted;
+context.uiAuthGeneration++;
+finishOldGenerationJoin({callId:accepted.callId,joinFragment:"#signed"});
+await staleGenerationJoin;
+assert.equal(context.navigating,false,"prior login generation must never navigate");
+assert.equal(navigatedTo,null,"old signed Join must not navigate after reauthentication");
+
 // A pending incoming-list response cannot repaint a former Device's Calls.
 forgetActiveCall();
 context.active=null;
@@ -284,6 +330,41 @@ await staleIncoming;
 assert.equal(incomingRendered,previousIncomingCount,
   "late incoming list must not display after logout or Device switch");
 context.accountScope=scope;
+
+// A delayed 401 from the PREVIOUS authentication generation must not erase
+// a fresh login. This is distinct from a current-generation 401, which must
+// still fail closed. A transient 503 must preserve the visible session.
+let denyOldSession, signalOldSession;
+const oldSessionStarted=new Promise(resolve=>{signalOldSession=resolve;});
+context.restoreSession=()=>new Promise((_resolve,reject)=>{
+  denyOldSession=reject;
+  signalOldSession();
+});
+let authViewResets=0;
+context.plClearAuthenticatedView=()=>{
+  authViewResets++;
+  context.accountScope=null;
+  context.uiAuthGeneration++;
+};
+const oldAuthRefresh=refresh();
+await oldSessionStarted;
+context.uiAuthGeneration++; // another tab or explicit reauthentication won
+denyOldSession(new Error("HTTP 401: retired browser session"));
+await oldAuthRefresh;
+assert.equal(authViewResets,0,"old 401 cannot clear newly authenticated Device");
+assert.equal(context.accountScope,scope,"new authenticated scope must survive old denial");
+
+context.restoreSession=async()=>{throw Error("HTTP 401: current session revoked");};
+await assert.rejects(refresh(),/HTTP 401/);
+assert.equal(authViewResets,1,"current-generation 401 must clear revoked Device");
+
+context.accountScope=scope;
+context.restoreSession=async()=>{throw Error("HTTP 503: temporary outage");};
+await assert.rejects(refresh(),/HTTP 503/);
+assert.equal(authViewResets,1,"transient network outage must not clear authenticated Device");
+context.restoreSession=async()=>user;
+context.accountScope=scope;
+context.uiAuthGeneration=0;
 
 // A user-requested hangup must fence BOTH a fresh Join and a Join already
 // waiting on the canonical server, even when a periodic inspect races.
@@ -386,10 +467,198 @@ await new Promise(resolve=>setImmediate(resolve));
 assert.equal(context.active.call.state,"terminated");
 context.busy=false;
 
+// Execute the REAL incoming-accept handler with delayed canonical responses.
+// A cross-tab logout or same-Device reauthentication must fence the callback
+// both after acceptance and after the separate session verification.
+const incomingBegin=source.indexOf("function renderIncoming(items) {");
+const incomingEnd=source.indexOf("async function refresh() {",incomingBegin);
+assert.ok(incomingBegin>=0 && incomingEnd>incomingBegin);
+const handlers=new Map();
+const incomingContext={
+  accountScope:scope,uiAuthGeneration:0,active:null,
+  document:{createElement:()=>({append(){},textContent:"",className:""})},
+  el:id=>{assert.equal(id,"incoming");return {replaceChildren(){},append(){}};},
+  nameFor:id=>id,
+  btn:(label,callback)=>{handlers.set(label,callback);return {label};},
+  activeCallLocator:()=>null,
+  calls:{},
+  host:{},
+  principalScope:user=>JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]),
+  rememberActiveCall(){throw Error("stale accept cannot save Call locator");},
+  showActive(){throw Error("stale accept cannot paint Call");},
+  beginMedia(){throw Error("stale accept cannot join media");},
+  refresh(){},
+};
+runInNewContext(source.slice(incomingBegin,incomingEnd)+
+  "\nthis.renderIncoming=renderIncoming;",incomingContext);
+incomingContext.renderIncoming([call]);
+const acceptIncoming=handlers.get("Принять");
+assert.equal(typeof acceptIncoming,"function");
+let finishOldAccept;
+incomingContext.calls.signal=()=>new Promise(resolve=>{finishOldAccept=resolve;});
+incomingContext.host.resumeAuthenticatedDevice=async()=>user;
+const staleAccept=acceptIncoming();
+incomingContext.uiAuthGeneration++;
+finishOldAccept({...call,state:"active"});
+await staleAccept;
+assert.equal(incomingContext.active,null,"old generation must not paint accepted Call");
+
+let finishOldSession;
+incomingContext.calls.signal=async()=>({...call,state:"active"});
+incomingContext.host.resumeAuthenticatedDevice=()=>new Promise(resolve=>{finishOldSession=resolve;});
+const staleSessionAccept=acceptIncoming();
+// Flush the separate VM context's promise jobs before checking the verifier.
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(typeof finishOldSession,"function","accept must verify canonical Device");
+incomingContext.uiAuthGeneration++;
+finishOldSession(user);
+await staleSessionAccept;
+assert.equal(incomingContext.active,null,"late Device verification must not paint Call");
+
+let savedAccepts=0,mediaAccepts=0;
+incomingContext.host.resumeAuthenticatedDevice=async()=>user;
+incomingContext.rememberActiveCall=()=>{savedAccepts++;};
+incomingContext.showActive=()=>{};
+incomingContext.beginMedia=async()=>{mediaAccepts++;};
+await acceptIncoming();
+assert.equal(incomingContext.active.call.callId,call.callId);
+assert.equal(savedAccepts,1);
+assert.equal(mediaAccepts,1,"fresh accepted Call must still enter canonical media");
+
+incomingContext.active=null;
+incomingContext.host.resumeAuthenticatedDevice=async()=>({...user,deviceId:"other-device"});
+await assert.rejects(acceptIncoming(),/Device changed during Call acceptance/);
+assert.equal(incomingContext.active,null,"wrong Device must not adopt accepted Call");
+
+// A pending cookie check must not perform a fresh Device reauthentication
+// after explicit logout or a same-Device session replacement.
+const authBegin=source.indexOf("async function restoreSession() {");
+const authEnd=source.indexOf("function clearRetryKey(call) {",authBegin);
+assert.ok(authBegin>=0 && authEnd>authBegin);
+let reauthCount=0;
+const authContext={
+  uiAuthGeneration:0,
+  host:{},vault:{},location:{origin:"https://localhost"},
+  authTrace:async(_stage,op)=>op(),lastBinding:()=>user,
+  authHttpCode:error=>Number(String(error.message).match(/HTTP (\d+)/)?.[1]??0),
+  authDiagnostic(){},forgetBinding(){},
+  principalScope:identity=>JSON.stringify([
+    identity.tenantId,identity.namespaceId,identity.participantId,identity.deviceId]),
+  authenticateUcrFirstPartyDevice:async()=>{reauthCount++;return user;},
+};
+runInNewContext(source.slice(authBegin,authEnd)+"\nthis.restoreSession=restoreSession;",authContext);
+let rejectPendingCookie;
+authContext.host.resumeAuthenticatedDevice=()=>new Promise((_resolve,reject)=>{
+  rejectPendingCookie=reject;
+});
+const staleCookie=authContext.restoreSession();
+authContext.uiAuthGeneration++;
+rejectPendingCookie(new Error("HTTP 401: old session expired"));
+await assert.rejects(staleCookie,/Device session changed during authentication/);
+assert.equal(reauthCount,0,"logout must block late automatic Device reauthentication");
+
+// Reauthentication itself may already be in flight when logout happens.
+let finishReauthentication;
+authContext.uiAuthGeneration=0;
+authContext.host.resumeAuthenticatedDevice=async()=>{throw Error("HTTP 401: expired");};
+authContext.authenticateUcrFirstPartyDevice=()=>{
+  reauthCount++;
+  return new Promise(resolve=>{finishReauthentication=resolve;});
+};
+const staleReauthentication=authContext.restoreSession();
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(typeof finishReauthentication,"function");
+authContext.uiAuthGeneration++;
+finishReauthentication(user);
+await assert.rejects(staleReauthentication,/Device session changed during authentication/);
+assert.equal(reauthCount,1);
+
+// An unavailable session endpoint is not proof of an expired cookie. It must
+// NEVER initiate a new login/Set-Cookie behind the user's back. Only 401 may
+// invoke the protected existing-Device possession flow.
+authContext.uiAuthGeneration=0;
+for (const error of [
+  new Error("HTTP 503: session endpoint unavailable"),
+  new Error("HTTP 429: rate limited"),
+  new Error("HTTP 403: trust denied"),
+  new TypeError("network offline"),
+]) {
+  authContext.host.resumeAuthenticatedDevice=async()=>{throw error;};
+  await assert.rejects(authContext.restoreSession(),rejected=>rejected===error);
+  assert.equal(reauthCount,1,"non-401 session failure must not mint another cookie");
+}
+
+// The current generation must still recover with its original protected signer.
+authContext.host.resumeAuthenticatedDevice=async()=>{throw Error("HTTP 401: expired");};
+authContext.uiAuthGeneration=0;
+authContext.authenticateUcrFirstPartyDevice=async()=>{reauthCount++;return user;};
+assert.equal((await authContext.restoreSession()).deviceId,user.deviceId);
+assert.equal(reauthCount,2);
+
+// Logout must bypass the ordinary busy lock. In particular, a pending Call
+// acceptance or signed Join must never make the user-facing Logout a no-op.
+// Execute the actual listener with an intentionally delayed server response.
+const logoutBegin=source.indexOf('el("logout").addEventListener("click"');
+const logoutEnd=source.indexOf("// Mobile tabs become hidden",logoutBegin);
+assert.ok(logoutBegin>=0 && logoutEnd>logoutBegin);
+let logoutClick,completeLogout,forgotBinding=0,forgotCall=0,serverLogoutCalls=0;
+let logoutMessage="";
+const who={textContent:""};
+const logoutContext={
+  busy:true,navigating:false,uiAuthGeneration:0,accountScope:scope,
+  active:{call:acceptedCall},
+  el:id=>id==="logout"?{addEventListener:(_event,handler)=>{logoutClick=handler;}}:who,
+  run:()=>{throw Error("security Logout must bypass the busy UI action gate");},
+  forgetBinding:()=>{forgotBinding++;},
+  forgetActiveCall:()=>{forgotCall++;},
+  plClearAuthenticatedView:()=>{
+    logoutContext.uiAuthGeneration++;
+    logoutContext.accountScope=null;
+    logoutContext.active=null;
+  },
+  host:{logout:()=>{
+    serverLogoutCalls++;
+    assert.equal(logoutContext.active,null,"local Call must stop before HTTP logout");
+    assert.equal(logoutContext.uiAuthGeneration,1,"pending Join must be fenced");
+    return new Promise(resolve=>{completeLogout=resolve;});
+  }},
+  message:value=>{logoutMessage=value;},
+};
+runInNewContext(source.slice(source.indexOf("let logoutInFlight=false;",logoutBegin-200),logoutEnd)+
+  "\nthis.logoutState=()=>logoutInFlight;",logoutContext);
+assert.equal(typeof logoutClick,"function");
+logoutClick(); // A busy action MUST NOT swallow Logout.
+assert.equal(forgotBinding,1);
+assert.equal(forgotCall,1);
+assert.equal(logoutContext.active,null);
+assert.equal(logoutContext.accountScope,null);
+assert.equal(logoutContext.uiAuthGeneration,1);
+assert.equal(serverLogoutCalls,1);
+assert.equal(logoutContext.logoutState(),true);
+logoutClick(); // Repeated clicks cannot issue duplicate concurrent Logout.
+assert.equal(serverLogoutCalls,1);
+completeLogout();
+await new Promise(resolve=>setImmediate(resolve));
+assert.match(who.textContent,/вышли/);
+assert.equal(logoutContext.logoutState(),false);
+
+// An ambiguous server failure cannot be presented as a completed sign-out:
+// the HttpOnly cookie may still exist even though local Call admission stopped.
+logoutContext.accountScope=scope;
+logoutContext.active={call:acceptedCall};
+let rejectLogout;
+logoutContext.host.logout=()=>new Promise((_resolve,reject)=>{rejectLogout=reject;});
+logoutClick();
+assert.equal(logoutContext.active,null);
+rejectLogout(new Error("HTTP 503: unavailable"));
+await new Promise(resolve=>setImmediate(resolve));
+assert.match(logoutMessage,/выход на сервере не подтверждён/);
+assert.equal(logoutContext.logoutState(),false);
+
 assert.match(source,/const call = await calls\.start\(contact\.id,media,requestId\);[\s\S]*?rememberActiveCall\(call,session\.participantId\);/);
 assert.match(source,/const result = await calls\.signal\(call\.callId,"accept"\);[\s\S]*?rememberActiveCall\(result,session\.participantId\);/);
 assert.match(source,/if \(!active\) await restoreActiveCall\(user\);/);
 assert.match(source,/if \(fresh\.state === "terminated"\) \{\s*forgetActiveCall\(inspectedLocator\);/);
-assert.match(source,/await host\.logout\(\);\s*forgetBinding\(\);\s*forgetActiveCall\(\);/);
+assert.match(source,/forgetBinding\(\);\s*forgetActiveCall\(\);\s*plClearAuthenticatedView\(\);/);
 assert.doesNotMatch(snippet,/calls\.join\(/,"untrusted locator cannot mint a Join");
 console.log("PASS: canonical Call resume is scope-fenced, inspected, and cleared on terminal/denied state");

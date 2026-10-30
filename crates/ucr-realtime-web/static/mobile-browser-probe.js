@@ -43,7 +43,8 @@
     const userAgent = navigator.userAgent || "";
     const failures = [];
     const checks = {
-      referencePage: document.title === "UCR Conference",
+      // Match the actual branded reference page, not the retired UCR title.
+      referencePage: document.title === "Конференция PetrelLink",
       joinFunction: typeof window.join === "function",
       restartIceFunction: typeof window.restartIce === "function",
       applyMediaPolicyFunction: typeof window.applyMediaPolicy === "function",

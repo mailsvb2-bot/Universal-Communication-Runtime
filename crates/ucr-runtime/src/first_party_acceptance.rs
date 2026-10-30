@@ -66,7 +66,8 @@ fn state(path: &PathBuf) -> State {
         untrusted_consumed: Mutex::new(Vec::new()),
         recovery_consumed: Mutex::new(Vec::new()),
         signup_admissions: Mutex::new(Vec::new()),
-        sessions: Mutex::new(Vec::new()),
+        sessions: Mutex::new(SessionLedger::default()),
+        protected_actions: Mutex::new(HashMap::new()),
     }
 }
 
@@ -182,29 +183,9 @@ fn signed_login(state: &State, binding: &Binding, signer: &SigningKey) {
         &serde_json::to_vec(binding).unwrap(),
     )
     .expect("login challenge");
-    let signed_payload = encoded_proof(
-        "ucr-first-party-device-login.v1",
-        &json!([
-            binding.tenant_id,
-            binding.namespace_id,
-            binding.participant_id,
-            binding.device,
-            issued["challengeId"].as_str().unwrap(),
-            issued["challengeBytesBase64Url"].as_str().unwrap(),
-        ]),
-    )
-    .unwrap();
-    let proof = json!({
-        "binding": binding,
-        "challengeId": issued["challengeId"],
-        "signatureBase64Url": URL_SAFE_NO_PAD.encode(signer.sign(signed_payload.as_bytes()).to_bytes())
-    });
-    let (response, cookie) = login_route(
-        state,
-        "/v1/first-party/login/verify",
-        &serde_json::to_vec(&proof).unwrap(),
-    )
-    .expect("fresh independent canonical Device login");
+    let proof = signed_login_proof(binding, signer, &issued);
+    let (response, cookie) = login_route(state, "/v1/first-party/login/verify", &proof)
+        .expect("fresh independent canonical Device login");
     assert_eq!(
         serde_json::from_value::<Binding>(response).unwrap(),
         *binding
@@ -404,12 +385,12 @@ fn recovery_returns_rotated_code_even_when_browser_session_capacity_is_exhausted
     // unrelated identity consumed the last browser-session slot.
     {
         let mut sessions = server.sessions.lock().unwrap();
-        let template = sessions[0].clone();
-        sessions.clear();
+        let template = sessions.sessions[0].clone();
+        sessions.sessions.clear();
         for n in 0..MAX_SESSIONS {
             let mut other = template.clone();
             other.binding.participant_id = format!("unrelated-{}", n / MAX_SESSIONS_PER_IDENTITY);
-            sessions.push(other);
+            sessions.sessions.push(other);
         }
     }
     let recovered = Binding {
@@ -449,7 +430,7 @@ fn recovery_returns_rotated_code_even_when_browser_session_capacity_is_exhausted
 
     // The endpoint owns the new signer; once session capacity is available it
     // can independently authenticate, and the returned code can recover again.
-    server.sessions.lock().unwrap().clear();
+    server.sessions.lock().unwrap().sessions.clear();
     signed_login(&server, &recovered, &signer);
     recover(&server, &alice, &next_code, "subsequent-recovery", 92)
         .expect("returned recovery code remains usable");
@@ -516,7 +497,7 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
                 .is_some()
         );
     }
-    assert_eq!(restarted.sessions.lock().unwrap().len(), 4);
+    assert_eq!(restarted.sessions.lock().unwrap().sessions.len(), 4);
     // Revoke B's recovered Device via the canonical owner, then verify that
     // its old signer is rejected even after another complete server restart.
     verify_revoked_device_stays_revoked(
@@ -589,6 +570,7 @@ fn session_of(state: &State, binding: &Binding) -> Session {
         .sessions
         .lock()
         .unwrap()
+        .sessions
         .iter()
         .rev()
         .find(|session| session.binding == *binding)
@@ -1544,6 +1526,7 @@ fn anonymous_challenge_flood_cannot_lock_out_signup_or_login() {
     let sessions = server.sessions.lock().unwrap();
     assert_eq!(
         sessions
+            .sessions
             .iter()
             .filter(|s| s.binding.participant_id == alice.participant_id)
             .count(),
@@ -1551,9 +1534,281 @@ fn anonymous_challenge_flood_cannot_lock_out_signup_or_login() {
     );
     assert_eq!(
         sessions
+            .sessions
             .iter()
             .filter(|s| s.binding.participant_id == bob.participant_id)
             .count(),
         1
+    );
+}
+
+fn signed_login_proof(binding: &Binding, signer: &SigningKey, issued: &Value) -> Vec<u8> {
+    let proof_bytes = encoded_proof(
+        "ucr-first-party-device-login.v1",
+        &json!([
+            binding.tenant_id,
+            binding.namespace_id,
+            binding.participant_id,
+            binding.device,
+            issued["challengeId"],
+            issued["challengeBytesBase64Url"],
+        ]),
+    )
+    .unwrap();
+    serde_json::to_vec(&json!({
+        "binding": binding,
+        "challengeId": issued["challengeId"],
+        "signatureBase64Url": URL_SAFE_NO_PAD.encode(
+            signer.sign(proof_bytes.as_bytes()).to_bytes()
+        ),
+    }))
+    .unwrap()
+}
+
+fn verified_login_pending(
+    state: &State,
+    binding: &Binding,
+    body: &[u8],
+) -> (Pending, ScopedPrincipal, String, [u8; 32]) {
+    let parsed: LoginProof = parse(body).unwrap();
+    let pending = consume(state, binding, &parsed.challenge_id, "login", None).unwrap();
+    let subject = subject_for(state, binding).unwrap();
+    let (key_id, public_key) = trusted_key(state, binding).unwrap();
+    let signed = encoded_proof(
+        "ucr-first-party-device-login.v1",
+        &json!([
+            binding.tenant_id,
+            binding.namespace_id,
+            binding.participant_id,
+            binding.device,
+            pending.id,
+            pending.nonce,
+        ]),
+    )
+    .unwrap();
+    verify_ed25519(public_key, &signed, &parsed.signature_base64_url).unwrap();
+    spend(state, &pending).unwrap();
+    (pending, subject, key_id, public_key)
+}
+
+fn assert_device_sessions_retired(server: &State, binding: &Binding) {
+    assert_eq!(
+        server
+            .sessions
+            .lock()
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|session| session.binding == *binding)
+            .count(),
+        0,
+        "Logout must retire even a newer cookie issued before its completion"
+    );
+}
+
+#[test]
+fn logout_atomically_fences_old_login_verify_and_retires_all_device_cookies() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, alice_signer, _) = signup(&server, 101);
+    let (bob, bob_signer, _) = signup(&server, 102);
+    signed_login(&server, &alice, &alice_signer);
+    let old_session = session_of(&server, &alice);
+    assert!(
+        server
+            .sessions
+            .lock()
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|session| session.binding == alice)
+            .count()
+            >= 2
+    );
+
+    // Both challenges are issued BEFORE Alice logs out. A Device logout must
+    // invalidate Alice's pending signed proof without locking out Bob.
+    let (alice_challenge, _) = login_route(
+        &server,
+        "/v1/first-party/login/challenge",
+        &serde_json::to_vec(&alice).unwrap(),
+    )
+    .unwrap();
+    let (bob_challenge, _) = login_route(
+        &server,
+        "/v1/first-party/login/challenge",
+        &serde_json::to_vec(&bob).unwrap(),
+    )
+    .unwrap();
+    // Use a real Device signature, not a synthetic successful login response.
+    let alice_proof = signed_login_proof(&alice, &alice_signer, &alice_challenge);
+    let bob_proof = signed_login_proof(&bob, &bob_signer, &bob_challenge);
+
+    // Deterministic concurrency interleaving: signature was verified and its
+    // challenge consumed, but the response/cookie has NOT been issued yet.
+    let (pending, subject, key_id, public_key) =
+        verified_login_pending(&server, &alice, &alice_proof);
+
+    let (response, clear_cookie) = dispatch_post(
+        &server,
+        "/v1/first-party/logout",
+        &serde_json::to_vec(&json!({"binding": alice})).unwrap(),
+        Some(&old_session),
+    )
+    .unwrap();
+    assert_eq!(response["signedOut"], true);
+    assert!(clear_cookie.unwrap().contains("Max-Age=0"));
+    // Simulate a protected POST authenticated before its slow body completed.
+    // The previously cloned session must not issue a signed Join after Logout,
+    // even if its body arrives only after the cookie was revoked.
+    let delayed_join = serde_json::to_vec(&json!({
+        "binding": alice,
+        "callId": "stale-call",
+        "expectedRevision": 0,
+    }))
+    .unwrap();
+    assert_eq!(
+        dispatch_post(
+            &server,
+            "/v1/first-party/call/join-accepted",
+            &delayed_join,
+            Some(&old_session),
+        )
+        .err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a delayed protected POST must revalidate its session after Logout"
+    );
+    assert_device_sessions_retired(&server, &alice);
+
+    assert_eq!(
+        issue_session(
+            &server,
+            alice.clone(),
+            subject,
+            key_id,
+            public_key,
+            pending.login_generation,
+        )
+        .err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "verified pre-Logout login must not issue a cookie after Logout"
+    );
+    assert_eq!(
+        login_route(&server, "/v1/first-party/login/verify", &alice_proof).err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a signed pre-Logout challenge must fail even if verification starts late"
+    );
+    assert_eq!(
+        dispatch_post(
+            &server,
+            "/v1/first-party/logout",
+            &serde_json::to_vec(&json!({"binding": alice})).unwrap(),
+            Some(&old_session),
+        )
+        .err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a retired cookie cannot execute a second Logout"
+    );
+    login_route(&server, "/v1/first-party/login/verify", &bob_proof)
+        .expect("another Device's pre-Logout challenge must remain valid");
+    signed_login(&server, &alice, &alice_signer);
+}
+
+#[test]
+fn protected_action_gate_serializes_logout_and_rejects_stale_join() {
+    let db = TestDb::new();
+    let server = Arc::new(state(&db.0));
+    let (alice, _, _) = signup(&server, 37);
+    let old_session = server
+        .sessions
+        .lock()
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|session| session.binding == alice)
+        .unwrap()
+        .clone();
+    let gate = protected_action_gate(&server, &alice).unwrap();
+    // Model a protected synchronous Call operation already admitted for this
+    // Device. Logout must wait for its gate, never revoke in its middle.
+    let in_flight = gate.lock().unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let logout_server = Arc::clone(&server);
+    let logout_auth = old_session.clone();
+    let logout_body = serde_json::to_vec(&json!({"binding": alice})).unwrap();
+    let logout = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        dispatch_post(
+            &logout_server,
+            "/v1/first-party/logout",
+            &logout_body,
+            Some(&logout_auth),
+        )
+    });
+    started_rx.recv().unwrap();
+    assert!(
+        !logout.is_finished(),
+        "Logout cannot bypass the active Device gate"
+    );
+    drop(in_flight);
+    let (response, _) = logout.join().unwrap().unwrap();
+    assert_eq!(response["signedOut"], true);
+    let stale_join = serde_json::to_vec(&json!({
+        "binding": alice,
+        "callId": "stale-call",
+        "expectedRevision": 0,
+    }))
+    .unwrap();
+    assert_eq!(
+        dispatch_post(
+            &server,
+            "/v1/first-party/call/join-accepted",
+            &stale_join,
+            Some(&old_session),
+        )
+        .err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a post-Logout signed Join cannot reuse a pre-Logout Session"
+    );
+}
+
+#[test]
+fn cross_device_revoke_waits_for_target_protected_action_gate() {
+    let db = TestDb::new();
+    let server = Arc::new(state(&db.0));
+    let (alice, _, _) = signup(&server, 74);
+    let auth = session_of(&server, &alice);
+    let target = Binding {
+        device: "other-device".to_owned(),
+        ..alice.clone()
+    };
+    let gate = protected_action_gate(&server, &target).unwrap();
+    let in_flight = gate.lock().unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let revoke_server = Arc::clone(&server);
+    let body = serde_json::to_vec(&json!({
+        "binding": alice,
+        "deviceId": target.device
+    }))
+    .unwrap();
+    let revoke = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        dispatch_post(
+            &revoke_server,
+            "/v1/first-party/device/revoke",
+            &body,
+            Some(&auth),
+        )
+    });
+    started_rx.recv().unwrap();
+    assert!(
+        !revoke.is_finished(),
+        "revocation must wait for the target Device's admitted action"
+    );
+    drop(in_flight);
+    assert_eq!(
+        revoke.join().unwrap().err(),
+        Some(StatusCode::FORBIDDEN),
+        "an unregistered target remains forbidden after its gate is released"
     );
 }
