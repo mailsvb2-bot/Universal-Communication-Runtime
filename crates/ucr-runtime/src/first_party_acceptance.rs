@@ -1177,3 +1177,58 @@ fn logout_atomically_fences_old_login_verify_and_retires_all_device_cookies() {
         .expect("another Device's pre-Logout challenge must remain valid");
     signed_login(&server, &alice, &alice_signer);
 }
+
+#[test]
+fn protected_action_gate_serializes_logout_and_rejects_stale_join() {
+    let db = TestDb::new();
+    let server = Arc::new(state(&db.0));
+    let (alice, _, _) = signup(&server, 37);
+    let old_session = server
+        .sessions
+        .lock()
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|session| session.binding == alice)
+        .unwrap()
+        .clone();
+    let gate = protected_action_gate(&server, &alice).unwrap();
+    // Model a protected synchronous Call operation already admitted for this
+    // Device. Logout must wait for its gate, never revoke in its middle.
+    let in_flight = gate.lock().unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let logout_server = Arc::clone(&server);
+    let logout_auth = old_session.clone();
+    let logout_body = serde_json::to_vec(&json!({"binding": alice})).unwrap();
+    let logout = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        dispatch_post(
+            &logout_server,
+            "/v1/first-party/logout",
+            &logout_body,
+            Some(&logout_auth),
+        )
+    });
+    started_rx.recv().unwrap();
+    assert!(!logout.is_finished(), "Logout cannot bypass the active Device gate");
+    drop(in_flight);
+    let (response, _) = logout.join().unwrap().unwrap();
+    assert_eq!(response["signedOut"], true);
+    let stale_join = serde_json::to_vec(&json!({
+        "binding": alice,
+        "callId": "stale-call",
+        "expectedRevision": 0,
+    }))
+    .unwrap();
+    assert_eq!(
+        dispatch_post(
+            &server,
+            "/v1/first-party/call/join-accepted",
+            &stale_join,
+            Some(&old_session),
+        )
+        .err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a post-Logout signed Join cannot reuse a pre-Logout Session"
+    );
+}
