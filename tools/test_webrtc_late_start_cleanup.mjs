@@ -207,8 +207,8 @@ console.log("PASS: SDP/ICE failure retires exact original offer, closes old peer
 // ICE restart and ordinary Leave cleanup must never borrow a newer bearer
 // grant for the old offer. This executes the actual browser functions with
 // delayed restart responses and independently mutable Call/Join state.
-async function exerciseIceOwnership({replace=false,mismatchedOffer=false}={}){
-  const oldOffer="e".repeat(43),newOffer="f".repeat(43);
+async function exerciseIceOwnership({replace=false,rotatedOffer=false}={}){
+  const oldOffer="e".repeat(43),newOffer="f".repeat(43),restartOffer="g".repeat(43);
   const oldClaims={tenant_id:"t",namespace_id:null,call_id:"call-old",session_id:"session-old"};
   const newClaims={tenant_id:"t",namespace_id:null,call_id:"call-new",session_id:"session-new"};
   const oldOwner=Object.freeze({offerId:oldOffer,claims:oldClaims,token:"old-grant"});
@@ -252,18 +252,25 @@ async function exerciseIceOwnership({replace=false,mismatchedOffer=false}={}){
     context.startWebRtc.offerId=newOffer;
   }
   resolveRestart({ok:true,json:async()=>({
-    offer_id:mismatchedOffer?newOffer:oldOffer,
+    offer_id:rotatedOffer?restartOffer:oldOffer,
     ice_servers:[],sdp_type:"offer",sdp:"offer"
   })});
-  if(replace||mismatchedOffer){
-    await assert.rejects(restarted,
-      replace?/ICE restart cancelled/:/immutable WebRTC transport offer identity/);
-    assert.equal(configured,0,"Stale or substituted ICE offer must not reconfigure the peer");
+  if(replace){
+    await assert.rejects(restarted,/ICE restart cancelled/);
+    assert.equal(configured,0,"Stale ICE response must not reconfigure the peer");
     assert.equal(remoteDescriptions,0,"Stale ICE response must not reach SDP");
+    const staleClose=calls.find(item=>item.path.endsWith("/close"));
+    assert.ok(staleClose,"Late rotated restart must retire its own server offer");
+    assert.equal(staleClose.payload.offer_id,rotatedOffer?restartOffer:oldOffer);
+    assert.equal(staleClose.payload.call_id,oldClaims.call_id);
+    assert.equal(staleClose.auth,"Bearer old-grant");
   }else{
     assert.equal(await restarted,true);
     assert.equal(configured,1);
     assert.equal(remoteDescriptions,1);
+    assert.equal(context.startWebRtc.offerId,rotatedOffer?restartOffer:oldOffer);
+    assert.equal(context.startWebRtc.offerOwner.offerId,rotatedOffer?restartOffer:oldOffer);
+    assert.equal(context.startWebRtc.offerOwner.token,"old-grant");
   }
   const signals=calls.filter(item=>item.path.endsWith("/restart")||
     item.path.endsWith("/remote-description"));
@@ -273,7 +280,7 @@ async function exerciseIceOwnership({replace=false,mismatchedOffer=false}={}){
     assert.equal(item.payload.call_id,oldClaims.call_id);
     assert.equal(item.payload.session_id,oldClaims.session_id);
     if(item.path.endsWith("/remote-description"))
-      assert.equal(item.payload.offer_id,oldOffer);
+      assert.equal(item.payload.offer_id,rotatedOffer?restartOffer:oldOffer);
   }
   if(!replace){
     // The same original authority is required when Leave closes this offer.
@@ -282,7 +289,7 @@ async function exerciseIceOwnership({replace=false,mismatchedOffer=false}={}){
     assert.ok(close,"Server-side WebRTC close must be attempted");
     assert.equal(close.auth,"Bearer old-grant");
     assert.equal(close.payload.call_id,oldClaims.call_id);
-    assert.equal(close.payload.offer_id,oldOffer);
+    assert.equal(close.payload.offer_id,rotatedOffer?restartOffer:oldOffer);
     assert.equal(context.startWebRtc.offerId,null);
     assert.equal(context.startWebRtc.offerOwner,null);
   }else{
@@ -294,5 +301,6 @@ async function exerciseIceOwnership({replace=false,mismatchedOffer=false}={}){
 }
 await exerciseIceOwnership();
 await exerciseIceOwnership({replace:true});
-await exerciseIceOwnership({mismatchedOffer:true});
-console.log("PASS: ICE restart and Leave close bind to original offer owner despite token rotation, replacement and substituted SDP (MOCK HTTP, NOT live media)");
+await exerciseIceOwnership({rotatedOffer:true});
+await exerciseIceOwnership({replace:true,rotatedOffer:true});
+console.log("PASS: rotated ICE restart fence follows the original grant for SDP/Leave; late responses close only their own offer after replacement (MOCK HTTP, NOT live media)");
