@@ -625,7 +625,7 @@ const logoutContext={
   message:value=>{logoutMessage=value;},
 };
 runInNewContext(source.slice(source.indexOf("let logoutInFlight=false;",logoutBegin-200),logoutEnd)+
-  "\\nthis.logoutState=()=>logoutInFlight;",logoutContext);
+  "\nthis.logoutState=()=>logoutInFlight;",logoutContext);
 assert.equal(typeof logoutClick,"function");
 logoutClick(); // A busy action MUST NOT swallow Logout.
 assert.equal(forgotBinding,1);
@@ -659,6 +659,6 @@ assert.match(source,/const call = await calls\.start\(contact\.id,media,requestI
 assert.match(source,/const result = await calls\.signal\(call\.callId,"accept"\);[\s\S]*?rememberActiveCall\(result,session\.participantId\);/);
 assert.match(source,/if \(!active\) await restoreActiveCall\(user\);/);
 assert.match(source,/if \(fresh\.state === "terminated"\) \{\s*forgetActiveCall\(inspectedLocator\);/);
-assert.match(source,/forgetBinding\\(\\);\\s*forgetActiveCall\\(\\);\\s*plClearAuthenticatedView\\(\\);/);
+assert.match(source,/forgetBinding\(\);\s*forgetActiveCall\(\);\s*plClearAuthenticatedView\(\);/);
 assert.doesNotMatch(snippet,/calls\.join\(/,"untrusted locator cannot mint a Join");
 console.log("PASS: canonical Call resume is scope-fenced, inspected, and cleared on terminal/denied state");
