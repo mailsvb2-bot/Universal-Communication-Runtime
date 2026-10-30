@@ -5,6 +5,19 @@ import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
 
 const source=readFileSync("crates/ucr-realtime-web/static/start.js","utf8");
+const mediaPage=readFileSync("crates/ucr-realtime-web/static/client.html","utf8");
+assert.match(source,/ucr-e2ee-state:fp-v1:/,"pre-Join MLS must use a scoped sealed snapshot");
+assert.match(mediaPage,/ucr-e2ee-state:fp-v1:/,"media page must restore the SAME scoped MLS snapshot");
+assert.match(mediaPage,/function endpointAdapterPersistenceStorageKey\(/,
+  "media transport state must have an independent record name, not an independent authority");
+assert.match(mediaPage,/key\+":media-adapter-v1"/,
+  "opaque media adapter persistence must never overwrite the OpenMLS provider");
+assert.match(source,/navigator\.locks\.request\("ucr-first-party-mls:"\+key/,
+  "pre-Join cross-tab OpenMLS state must be serialized");
+assert.match(mediaPage,/navigator\.locks\.request\("ucr-first-party-mls:"\+key/,
+  "post-Join state must share the same cross-tab lock");
+assert.match(source,/state\.authorize_direct_call_roster\(committed\.expectedPeerDeviceId\)/,
+  "signed Join must require the exact locally verified two-Device MLS roster");
 const begin=source.indexOf("function principalScope(user) {");
 const end=source.indexOf("function message(value) {",begin);
 assert.ok(begin>=0 && end>begin,"first-party Call resume implementation missing");
@@ -46,6 +59,8 @@ const context={
   idempotency:new Map(),crypto:{randomUUID:()=>"retry-id"},
   restoreSession:async()=>user,message(){},
   refreshing:false,navigating:false,timer:null,knownContacts:[],
+  mlsPreparation:null,
+  prepareFirstPartyEndpointMls:async()=>true,
   clearInterval(){},renderContacts(){},renderIncoming(){incomingRendered++;},
   authTrace:async(_stage,operation)=>operation(),clearRetryKey(){},
   setCallStage(){},URL,location:{origin:"https://localhost",replace(url){navigatedTo=url;}},
@@ -191,6 +206,29 @@ await oldRefresh;
 assert.equal(context.active.call.callId,newer.callId,"stale refresh must not replace newer Call");
 assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId,
   "stale terminal refresh must not delete newer Call locator");
+
+// MLS is a mandatory pre-Join gate, not an optional optimization.
+const acceptedForMls={...call,state:"active"};
+context.active={call:acceptedForMls,identity:"alice"};
+forgetActiveCall();
+rememberActiveCall(acceptedForMls,"alice");
+let preflightJoinAttempts=0;
+context.calls.join=async()=>{preflightJoinAttempts++;return {callId:call.callId,joinFragment:"#signed"};};
+context.prepareFirstPartyEndpointMls=async()=>false;
+await beginMedia(call.callId);
+assert.equal(preflightJoinAttempts,0,"no Join before the independently admitted MLS pair");
+assert.equal(context.navigating,false);
+let finishMls,signalMls;
+const mlsStarted=new Promise(resolve=>{signalMls=resolve;});
+context.prepareFirstPartyEndpointMls=()=>new Promise(resolve=>{finishMls=resolve;signalMls();});
+const pendingMls=beginMedia(call.callId);
+await mlsStarted;
+context.active.terminating=true; // Hangup while KeyPackage/Welcome is still pending.
+finishMls(true);
+await pendingMls;
+assert.equal(preflightJoinAttempts,0,"a late successful MLS preflight cannot bypass Hangup");
+context.active.terminating=false;
+context.prepareFirstPartyEndpointMls=async()=>true;
 
 // A delayed accepted-Call Join cannot navigate to an ended/replaced Call.
 const accepted={...call,state:"active"};

@@ -8,6 +8,18 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use ucr_core::{IdentityDeviceLookupStore, TrustedSigningKeyStore};
+use ucr_crypto::{
+    SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+};
+use ucr_group_mls::{
+    GroupMlsServerCustodyProbe, MlsDeviceAdmission, MlsTransitionInput, browser_memory_provider,
+    create_device_key_package, create_group, export_group_media_secret, join_from_welcome,
+    merge_pending, stage_transition,
+};
+use ucr_model::{
+    CryptoSuite, GroupId, GroupMediaE2eeContext, GroupMediaFrameHeader, KeyId, MediaKind,
+    VideoSourceKind,
+};
 use ucr_realtime::JoinTokenKey;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(600_000);
@@ -666,8 +678,8 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
 
     let db = TestDb::new();
     let server = state(&db.0);
-    let (alice, _, _) = signup(&server, 41);
-    let (bob, _, _) = signup(&server, 42);
+    let (alice, alice_signer, _) = signup(&server, 41);
+    let (bob, bob_signer, _) = signup(&server, 42);
     let (carol, _, _) = signup(&server, 43);
 
     // The non-loginable media host is never a callable contact.
@@ -691,6 +703,20 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     let call_id = started["callId"].as_str().unwrap().to_owned();
     let revision = started["revision"].as_u64().unwrap();
 
+    // Endpoint-owned bootstrap is subject to the SAME canonical Join admission.
+    for binding in [&alice, &bob, &carol] {
+        assert_eq!(
+            call(
+                &server,
+                binding,
+                "/v1/first-party/call/mls-descriptor",
+                &json!({"binding": binding, "callId": call_id, "expectedRevision": revision}),
+            )
+            .err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+    }
+
     // Before the callee accepted, nobody gets media authority.
     assert_eq!(
         join_accepted(&server, &alice, &call_id, revision).err(),
@@ -703,6 +729,495 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     let accepted = signal(&server, &bob, &call_id, revision, "accept").expect("callee accepts");
     assert_eq!(accepted["state"], "active");
     let revision = accepted["revision"].as_u64().unwrap();
+    let descriptor = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-descriptor",
+        &json!({"binding": alice, "callId": call_id, "expectedRevision": revision}),
+    )
+    .expect("authorized endpoint MLS descriptor");
+    assert_eq!(descriptor["callId"], call_id);
+    assert_eq!(descriptor["creatorPrincipalId"], alice.participant_id);
+    assert_eq!(descriptor["peerPrincipalId"], bob.participant_id);
+    assert_eq!(descriptor["deviceId"], alice.device);
+    assert_eq!(descriptor["requiresEndpointOwnedCommit"], true);
+    // Before the creator publishes an endpoint-owned Group, there is no
+    // canonical Group CAS revision. Zero is a real revision, not absence.
+    assert!(descriptor["groupRevision"].is_null());
+    assert!(descriptor["cryptoEpoch"].is_null());
+    assert!(descriptor["cryptoStateRef"].is_null());
+    assert!(descriptor["expectedPeerDeviceId"].is_null());
+    assert!(
+        descriptor["groupId"]
+            .as_str()
+            .unwrap()
+            .starts_with("fp-mg-")
+    );
+    assert_eq!(
+        call(
+            &server,
+            &carol,
+            "/v1/first-party/call/mls-descriptor",
+            &json!({"binding": carol, "callId": call_id, "expectedRevision": revision})
+        )
+        .err(),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    // Real browser-equivalent endpoint MLS progression: no server member,
+    // no server private signing/HPKE or exported media secret.
+    let scope = scope(&alice).expect("same canonical tenant scope");
+    let group_id = GroupId::from_opaque(opaque(descriptor["groupId"].as_str().unwrap()).unwrap());
+    let alice_id = device(&alice).unwrap();
+    let bob_id = device(&bob).unwrap();
+    let alice_provider = browser_memory_provider();
+    let bob_provider = browser_memory_provider();
+    let alice_pkg = create_device_key_package(&alice_provider, &scope, &alice_id).unwrap();
+    let (mut alice_mls, first_state) = create_group(
+        &alice_provider,
+        &scope,
+        &group_id,
+        &alice_id,
+        &alice_pkg.signer_public_key,
+    )
+    .unwrap();
+    let first_ref = first_state.state_ref.as_ref().unwrap().as_str();
+    let alice_session = session_of(&server, &alice);
+    let bob_session = session_of(&server, &bob);
+    let create_signature = alice_signer.sign(
+        encoded_proof(
+            "ucr-first-party-endpoint-mls-create.v1",
+            &json!([
+                alice.tenant_id,
+                alice.namespace_id,
+                alice.participant_id,
+                alice.device,
+                alice_session.signer_key_id,
+                call_id,
+                revision,
+                descriptor["groupId"].as_str().unwrap(),
+                0,
+                first_ref,
+            ]),
+        )
+        .unwrap()
+        .as_bytes(),
+    );
+    call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-create",
+        &json!({
+            "binding": alice, "callId": call_id, "expectedRevision": revision,
+            "cryptoStateRef": first_ref,
+            "signatureBase64Url": URL_SAFE_NO_PAD.encode(create_signature.to_bytes()),
+        }),
+    )
+    .expect("creator publishes signed endpoint-only MLS epoch zero");
+    // A lost HTTP acknowledgement must allow an exact retry, but a second
+    // independently signed epoch-zero fingerprint must never receive a
+    // false success response for the already committed canonical Group.
+    let exact_retry = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-create",
+        &json!({
+            "binding": alice, "callId": call_id, "expectedRevision": revision,
+            "cryptoStateRef": first_ref,
+            "signatureBase64Url": URL_SAFE_NO_PAD.encode(create_signature.to_bytes()),
+        }),
+    )
+    .expect("identical creator publication retry");
+    assert_eq!(exact_retry["cryptoStateRef"], first_ref);
+    let conflicting_ref = "forged-epoch-zero-fingerprint";
+    let conflicting_signature = alice_signer.sign(
+        encoded_proof(
+            "ucr-first-party-endpoint-mls-create.v1",
+            &json!([
+                alice.tenant_id,
+                alice.namespace_id,
+                alice.participant_id,
+                alice.device,
+                alice_session.signer_key_id,
+                call_id,
+                revision,
+                descriptor["groupId"].as_str().unwrap(),
+                0,
+                conflicting_ref,
+            ]),
+        )
+        .unwrap()
+        .as_bytes(),
+    );
+    assert_eq!(
+        call(
+            &server,
+            &alice,
+            "/v1/first-party/call/mls-create",
+            &json!({
+                "binding": alice, "callId": call_id, "expectedRevision": revision,
+                "cryptoStateRef": conflicting_ref,
+                "signatureBase64Url": URL_SAFE_NO_PAD.encode(conflicting_signature.to_bytes()),
+            }),
+        )
+        .err(),
+        Some(StatusCode::CONFLICT),
+    );
+    let created_descriptor = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-descriptor",
+        &json!({"binding": alice, "callId": call_id, "expectedRevision": revision}),
+    )
+    .expect("read canonical MLS revision after creator publication");
+    assert_eq!(created_descriptor["groupRevision"], 0);
+    assert_eq!(created_descriptor["cryptoEpoch"], 0);
+    assert_eq!(created_descriptor["cryptoStateRef"], first_ref);
+    assert!(created_descriptor["expectedPeerDeviceId"].is_null());
+    assert!(
+        !server
+            .store
+            .server_possesses_mls_group(&scope, &group_id)
+            .unwrap()
+    );
+
+    let bob_package = create_device_key_package(&bob_provider, &scope, &bob_id).unwrap();
+    let package_digest = sha256_b64(&bob_package.bytes);
+    let recipient_signature = bob_signer.sign(
+        encoded_proof(
+            "ucr-first-party-endpoint-mls-key-package.v1",
+            &json!([
+                bob.tenant_id,
+                bob.namespace_id,
+                bob.participant_id,
+                bob.device,
+                bob_session.signer_key_id,
+                call_id,
+                descriptor["groupId"].as_str().unwrap(),
+                package_digest,
+            ]),
+        )
+        .unwrap()
+        .as_bytes(),
+    );
+    call(
+        &server,
+        &bob,
+        "/v1/first-party/call/mls-offer",
+        &json!({
+            "binding": bob, "callId": call_id, "expectedRevision": revision,
+            "recipientSignerKeyId": bob_session.signer_key_id,
+            "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&bob_package.bytes),
+            "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(recipient_signature.to_bytes()),
+        }),
+    )
+    .expect("Bob's trusted Device publishes public MLS package");
+    let offers = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-offers",
+        &json!({
+            "binding": alice, "callId": call_id, "expectedRevision": revision,
+        }),
+    )
+    .expect("Alice may read only active Call's recipient offers");
+    assert_eq!(offers["offers"].as_array().unwrap().len(), 1);
+    assert_eq!(offers["offers"][0]["recipientDeviceId"], bob.device);
+
+    let artifacts = stage_transition(
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
+        &MlsTransitionInput::Add(vec![MlsDeviceAdmission {
+            device_id: bob_id.clone(),
+            key_package: bob_package.bytes.clone(),
+        }]),
+    )
+    .expect("local OpenMLS Add and Welcome");
+    let event_id = "fp-endpoint-mls-acceptance-add-1";
+    let next_ref = artifacts
+        .next_crypto_state
+        .state_ref
+        .as_ref()
+        .unwrap()
+        .as_str();
+    let welcome = artifacts.welcome.as_ref().expect("recipient Welcome");
+    let sender_proof = encoded_proof(
+        "ucr-first-party-endpoint-mls-add-peer.v1",
+        &json!([
+            alice.tenant_id,
+            alice.namespace_id,
+            alice.participant_id,
+            alice.device,
+            alice_session.signer_key_id,
+            call_id,
+            revision,
+            descriptor["groupId"].as_str().unwrap(),
+            0,
+            event_id,
+            artifacts.next_crypto_state.epoch,
+            next_ref,
+            bob.device,
+            bob_session.signer_key_id,
+            package_digest,
+            sha256_b64(&artifacts.commit),
+            sha256_b64(welcome),
+        ]),
+    )
+    .unwrap();
+    let sender_signature = alice_signer.sign(sender_proof.as_bytes());
+    let add_peer_request = json!({
+        "binding": alice, "callId": call_id, "expectedRevision": revision,
+        "groupRevision": 0, "eventId": event_id,
+        "cryptoEpoch": artifacts.next_crypto_state.epoch,
+        "cryptoStateRef": next_ref, "recipientDeviceId": bob.device,
+        "recipientSignerKeyId": bob_session.signer_key_id,
+        "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&bob_package.bytes),
+        "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(recipient_signature.to_bytes()),
+        "commitBase64Url": URL_SAFE_NO_PAD.encode(&artifacts.commit),
+        "welcomeBase64Url": URL_SAFE_NO_PAD.encode(welcome),
+        "signatureBase64Url": URL_SAFE_NO_PAD.encode(sender_signature.to_bytes()),
+    });
+    let persisted = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-add-peer",
+        &add_peer_request,
+    )
+    .expect("server atomically records signed Commit/Welcome without opening MLS");
+    // Simulate an HTTP acknowledgement lost AFTER SQLite committed. The
+    // identical Device-signed event must be a durable duplicate, not 409.
+    let retried = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-add-peer",
+        &add_peer_request,
+    )
+    .expect("identical signed Commit retries after canonical epoch advance");
+    assert_eq!(retried, persisted);
+    // A different event ID with the old signature is NOT a retry. The
+    // canonical Ed25519 verifier rejects the changed proof as UNAUTHORIZED,
+    // before durable Group CAS or any other storage side effect.
+    let mut forged = add_peer_request.clone();
+    forged["eventId"] = json!("fp-endpoint-mls-forged-replay");
+    assert_eq!(
+        call(
+            &server,
+            &alice,
+            "/v1/first-party/call/mls-add-peer",
+            &forged
+        ),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+    let after_forgery = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-descriptor",
+        &json!({"binding": alice, "callId": call_id, "expectedRevision": revision}),
+    )
+    .expect("forged signed event cannot mutate canonical Group");
+    assert_eq!(after_forgery["groupRevision"], 1);
+    assert_eq!(after_forgery["cryptoStateRef"], next_ref);
+    // Even a newly and correctly signed DIFFERENT event cannot reuse the
+    // consumed Group revision. The durable CAS, not the HTTP precheck,
+    // distinguishes exact idempotency from an unauthorized second Add.
+    let stale_event_id = "fp-endpoint-mls-stale-second-add";
+    let stale_proof = encoded_proof(
+        "ucr-first-party-endpoint-mls-add-peer.v1",
+        &json!([
+            alice.tenant_id,
+            alice.namespace_id,
+            alice.participant_id,
+            alice.device,
+            alice_session.signer_key_id,
+            call_id,
+            revision,
+            descriptor["groupId"].as_str().unwrap(),
+            0,
+            stale_event_id,
+            artifacts.next_crypto_state.epoch,
+            next_ref,
+            bob.device,
+            bob_session.signer_key_id,
+            package_digest,
+            sha256_b64(&artifacts.commit),
+            sha256_b64(welcome),
+        ]),
+    )
+    .unwrap();
+    let mut stale = add_peer_request.clone();
+    stale["eventId"] = json!(stale_event_id);
+    stale["signatureBase64Url"] =
+        json!(URL_SAFE_NO_PAD.encode(alice_signer.sign(stale_proof.as_bytes()).to_bytes()));
+    assert_eq!(
+        call(&server, &alice, "/v1/first-party/call/mls-add-peer", &stale),
+        Err(StatusCode::CONFLICT)
+    );
+    let admitted_descriptor = call(
+        &server,
+        &alice,
+        "/v1/first-party/call/mls-descriptor",
+        &json!({"binding": alice, "callId": call_id, "expectedRevision": revision}),
+    )
+    .expect("read canonical MLS revision after endpoint Add");
+    assert_eq!(admitted_descriptor["groupRevision"], 1);
+    assert_eq!(
+        admitted_descriptor["cryptoEpoch"],
+        artifacts.next_crypto_state.epoch
+    );
+    assert_eq!(admitted_descriptor["cryptoStateRef"], next_ref);
+    assert_eq!(admitted_descriptor["expectedPeerDeviceId"], bob.device);
+    assert_eq!(
+        server
+            .store
+            .endpoint_mls_direct_call_device_pair(&scope, &group_id)
+            .unwrap(),
+        Some((alice.device.clone(), bob.device.clone()))
+    );
+    let recipient_descriptor = call(
+        &server,
+        &bob,
+        "/v1/first-party/call/mls-descriptor",
+        &json!({"binding": bob, "callId": call_id, "expectedRevision": revision}),
+    )
+    .expect("recipient independently reads exact committed creator Device");
+    assert_eq!(recipient_descriptor["expectedPeerDeviceId"], alice.device);
+
+    merge_pending(
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
+        &artifacts.next_crypto_state,
+    )
+    .expect("sender merges locally after durable acceptance");
+    let handoff = call(
+        &server,
+        &bob,
+        "/v1/first-party/call/mls-bootstrap",
+        &json!({
+            "binding": bob, "callId": call_id, "expectedRevision": revision,
+        }),
+    )
+    .expect("only Bob receives encrypted Welcome");
+    assert_eq!(handoff["deviceId"], bob.device);
+    let delivered_welcome = URL_SAFE_NO_PAD
+        .decode(handoff["welcomeBase64Url"].as_str().unwrap())
+        .unwrap();
+    let bob_mls = join_from_welcome(
+        &bob_provider,
+        &scope,
+        &group_id,
+        &delivered_welcome,
+        &artifacts.next_crypto_state,
+    )
+    .expect("recipient decrypts Welcome using his own MLS private key");
+    let alice_secret = export_group_media_secret(
+        &alice_provider,
+        &alice_mls,
+        &scope,
+        &group_id,
+        &artifacts.next_crypto_state,
+    )
+    .unwrap();
+    let bob_secret = export_group_media_secret(
+        &bob_provider,
+        &bob_mls,
+        &scope,
+        &group_id,
+        &artifacts.next_crypto_state,
+    )
+    .unwrap();
+    // A real authenticated media frame proves that the two endpoint-only
+    // OpenMLS exporters interoperate. We intentionally do NOT implement
+    // PartialEq on secret key material or leak its bytes into test output.
+    let media_context = GroupMediaE2eeContext {
+        scope: scope.clone(),
+        call_id: CallId::from_opaque(opaque(&call_id).unwrap()),
+        group_id: group_id.clone(),
+        negotiation_ref: opaque("endpoint-mls-test-negotiation").unwrap(),
+        negotiation_generation: 1,
+        crypto_epoch: artifacts.next_crypto_state.epoch,
+        crypto_state_ref: artifacts.next_crypto_state.state_ref.clone().unwrap(),
+        crypto_suite: CryptoSuite::UcrV1,
+    };
+    let signing_key = SigningKeyMaterial::from_seed([71; 32]);
+    let wire = seal_endpoint_group_media_wire(
+        &alice_secret,
+        &media_context,
+        GroupMediaFrameHeader {
+            scope: scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: group_id.clone(),
+            stream_id: opaque("endpoint-mls-test-video").unwrap(),
+            source: alice_session.subject.principal.clone(),
+            source_device_id: alice_id.clone(),
+            negotiation_ref: media_context.negotiation_ref.clone(),
+            negotiation_generation: media_context.negotiation_generation,
+            crypto_epoch: media_context.crypto_epoch,
+            crypto_state_ref: media_context.crypto_state_ref.clone(),
+            crypto_suite: media_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 1,
+            media_timestamp: 90_000,
+            keyframe: true,
+        },
+        b"only recipient OpenMLS endpoints can decrypt this video",
+        KeyId::from_opaque(opaque("endpoint-mls-test-signature").unwrap()),
+        &signing_key,
+    )
+    .expect("endpoint encrypts authenticated video");
+    assert_eq!(
+        open_endpoint_group_media_wire(
+            &bob_secret,
+            &media_context,
+            &wire,
+            signing_key.verifying_key(),
+        )
+        .expect("peer decrypts the same video with a distinct local MLS provider"),
+        b"only recipient OpenMLS endpoints can decrypt this video",
+    );
+    assert!(
+        !server
+            .store
+            .server_possesses_mls_group(&scope, &group_id)
+            .unwrap()
+    );
+    // An SFU/server that only stores the signed Commit, Welcome and the
+    // forwarded ciphertext cannot synthesize the endpoint's MLS exporter.
+    // Prove that a fabricated exporter fails authentic AEAD opening while
+    // the independently joined Bob endpoint succeeds above.
+    let server_without_exporter = ucr_crypto::GroupMediaEpochSecret::from_exporter_bytes([0; 32]);
+    assert!(
+        open_endpoint_group_media_wire(
+            &server_without_exporter,
+            &media_context,
+            &wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "server-side ciphertext and public MLS state must not open media without endpoint exporter"
+    );
+    // The durable media epoch is not a decryption key. Even with the
+    // authentic captured ciphertext and sender signature, a caller using
+    // a different MLS epoch cannot open the frame. Keep this negative
+    // cryptographic assertion in the same real Call/Join acceptance test.
+    let mut wrong_epoch_context = media_context.clone();
+    wrong_epoch_context.crypto_epoch = media_context.crypto_epoch + 1;
+    assert!(
+        open_endpoint_group_media_wire(
+            &bob_secret,
+            &wrong_epoch_context,
+            &wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "media ciphertext must remain bound to the admitted MLS epoch"
+    );
+
     // A third person never sees nor joins the Call.
     assert!(join_accepted(&server, &carol, &call_id, revision).is_err());
 
@@ -762,8 +1277,8 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .collect::<Vec<PrincipalRef>>();
     assert_eq!(
         members.len(),
-        3,
-        "exactly host + both participants: {members:?}"
+        2,
+        "only the two accepted endpoint participants: {members:?}"
     );
     assert!(members.contains(&claims[0].participant));
     assert!(members.contains(&claims[1].participant));
@@ -799,7 +1314,9 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     // Heartbeat keeps the Join generation fence.
     for ((claim, token), generation) in claims.iter().zip(&tokens).zip(&generations) {
         let join = realtime_join_request(claim, token).into_inner();
-        for (sequence, ok) in [(*generation, true), (generation + 1, false)] {
+        // Zero is forbidden for direct-call media, and an obsolete Join
+        // generation cannot refresh the newer session's liveness.
+        for (sequence, ok) in [(*generation, true), (generation + 1, false), (0, false)] {
             let mut beat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
                 scope: join.scope.clone(),
                 call_id: join.call_id.clone(),
@@ -885,6 +1402,21 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             Some(pb::realtime_join_response::Result::Error(_))
         ),
         "ended direct Call must not be re-admitted: {rejoin:?}"
+    );
+    // A previously admitted sender must also lose the media-operation
+    // authority immediately after Hangup, even with its original bearer.
+    // Rejected heartbeat alone does not prove the realtime media fence.
+    let after_audio = realtime
+        .report_audio_level(audio(&claims[0], &tokens[0]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            after_audio.result,
+            Some(pb::realtime_report_audio_level_response::Result::Error(_))
+        ),
+        "ended media Call must reject the previously authorized sender: {after_audio:?}"
     );
     // An already-open session of the ended Call cannot keep heartbeating.
     let join = realtime_join_request(&claims[1], &tokens[1]).into_inner();

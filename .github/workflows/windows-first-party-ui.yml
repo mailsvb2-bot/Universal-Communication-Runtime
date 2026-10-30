@@ -6,6 +6,8 @@ on:
       - 'crates/ucr-realtime-web/static/start.js'
       - 'tools/check_first_party_start_controls.py'
       - 'tools/test_first_party_call_resume.mjs'
+      - 'tools/test_first_party_mls_coordinator.mjs'
+      - 'tools/test_webrtc_late_start_cleanup.mjs'
       - 'tools/check_first_party_call_revision_contract.py'
       - 'tools/check_first_party_media_admission_contract.py'
       - 'crates/ucr-realtime-web/static/client.html'
@@ -21,6 +23,24 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Parse canonical Windows launcher and reject duplicated script bodies
+        shell: pwsh
+        run: |
+          $file = (Resolve-Path 'scripts/windows/start-local-first-party-https.ps1').Path
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            $parseErrors | ForEach-Object { Write-Host $_.ToString() }
+            throw 'Windows launcher has PowerShell parse errors'
+          }
+          $source = [IO.File]::ReadAllText($file)
+          if ([regex]::Matches($source, '(?m)^param\(').Count -ne 1 -or
+              [regex]::Matches($source, '(?m)^function Start-Ucr\(').Count -ne 1 -or
+              [regex]::Matches($source, '(?m)^\$launched = @\(\)').Count -ne 1) {
+            throw 'Windows launcher has duplicated top-level script bodies'
+          }
+          Write-Host 'UCR_WINDOWS_LAUNCHER_PARSE_AND_SINGLE_BODY_OK'
       - name: Check JavaScript parses
         shell: pwsh
         run: node --check crates/ucr-realtime-web/static/start.js
@@ -30,6 +50,12 @@ jobs:
       - name: Exercise canonical Call reload recovery
         shell: pwsh
         run: node tools/test_first_party_call_resume.mjs
+      - name: Exercise authenticated pre-Join A/B MLS coordination
+        shell: pwsh
+        run: node tools/test_first_party_mls_coordinator.mjs
+      - name: Exercise offer-scoped cleanup after late WebRTC start
+        shell: pwsh
+        run: node tools/test_webrtc_late_start_cleanup.mjs
       - name: Check call creation revision contract
         shell: pwsh
         run: python tools/check_first_party_call_revision_contract.py

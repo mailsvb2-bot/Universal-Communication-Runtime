@@ -508,8 +508,8 @@ function readGrant(raw){
   return {tenant_id,namespace_id,call_id,participant_kind,participant_id,device_id,session_id,issued,not_before,expires};
 }
 function body(){return {tenant_id:claims.tenant_id,namespace_id:claims.namespace_id,call_id:claims.call_id,session_id:claims.session_id};}
-async function api(path,payload,signal,keepalive=false){
-  const r=await fetch(path,{method:"POST",headers:{"Authorization":"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify(payload),signal,keepalive});
+async function api(path,payload,signal,keepalive=false,bearerToken=token){
+  const r=await fetch(path,{method:"POST",headers:{"Authorization":"Bearer "+bearerToken,"Content-Type":"application/json"},body:JSON.stringify(payload),signal,keepalive});
   if(!r.ok){
     if(ucrDiagnosticAllowedPaths.has(path))ucrRecordDiagnostic(path+" HTTP "+r.status,"http");
     let detail=null;try{detail=await r.clone().json();}catch(_){}
@@ -550,27 +550,78 @@ function openEndpointStateDb(){
   if(!globalThis.indexedDB)return Promise.reject(new Error("IndexedDB is unavailable"));
   return new Promise((resolve,reject)=>{
     const request=indexedDB.open(ENDPOINT_STATE_DB_NAME,ENDPOINT_STATE_DB_VERSION);
+    let settled=false;
     request.onupgradeneeded=()=>{
+      // A blocked version upgrade may succeed after its caller has already
+      // rejected. Never mutate storage or leak that late database handle.
+      if(settled){try{request.transaction?.abort();}catch(_){}return;}
       const db=request.result;
       if(!db.objectStoreNames.contains(ENDPOINT_STATE_OBJECT_STORE))db.createObjectStore(ENDPOINT_STATE_OBJECT_STORE);
       if(!db.objectStoreNames.contains(ENDPOINT_WRAPPING_KEY_OBJECT_STORE))db.createObjectStore(ENDPOINT_WRAPPING_KEY_OBJECT_STORE);
     };
-    request.onsuccess=()=>resolve(request.result);
-    request.onerror=()=>reject(request.error||new Error("IndexedDB open failed"));
-    request.onblocked=()=>reject(new Error("IndexedDB upgrade blocked"));
+    request.onsuccess=()=>{
+      const db=request.result;
+      if(settled){db.close();return;}
+      settled=true;resolve(db);
+    };
+    request.onerror=()=>{
+      if(settled)return;
+      settled=true;reject(request.error||new Error("IndexedDB open failed"));
+    };
+    request.onblocked=()=>{
+      if(settled)return;
+      settled=true;reject(new Error("IndexedDB upgrade blocked"));
+    };
   });
 }
-async function saveEndpointState(key,value){
-  key=endpointStateKey(key);const bytes=endpointStateBytes(value);const db=await openEndpointStateDb();
-  try{
-    await new Promise((resolve,reject)=>{
-      const tx=db.transaction(ENDPOINT_STATE_OBJECT_STORE,"readwrite");
-      tx.objectStore(ENDPOINT_STATE_OBJECT_STORE).put(Array.from(bytes),key);
-      tx.oncomplete=()=>resolve();
-      tx.onerror=()=>reject(tx.error||new Error("IndexedDB write failed"));
-      tx.onabort=()=>reject(tx.error||new Error("IndexedDB write aborted"));
-    });
-  }finally{db.close();}
+async function saveEndpointState(key,value,expectedExisting=undefined){
+  key=endpointStateKey(key);const bytes=endpointStateBytes(value);
+  // For the canonical first-party MLS state, the snapshot observed before
+  // Welcome/epoch restore is a CAS precondition. A second tab (or /start.js)
+  // may have advanced it while this tab was waiting on authenticated BFF.
+  // Never overwrite that newer private OpenMLS epoch with a stale snapshot.
+  const expected=expectedExisting===undefined?undefined:
+    expectedExisting===null?null:endpointStateBytes(expectedExisting).slice();
+  const persist=async()=>{
+    const db=await openEndpointStateDb();
+    try{
+      await new Promise((resolve,reject)=>{
+        const tx=db.transaction(ENDPOINT_STATE_OBJECT_STORE,"readwrite");
+        const store=tx.objectStore(ENDPOINT_STATE_OBJECT_STORE);
+        let stale=false;
+        if(expected===undefined){
+          store.put(Array.from(bytes),key);
+        }else{
+          const read=store.get(key);
+          read.onsuccess=()=>{
+            try{
+              const stored=read.result;
+              const previous=stored===undefined?null:
+                endpointStateBytes(Array.isArray(stored)?new Uint8Array(stored):stored);
+              const same=previous===null?expected===null:
+                expected!==null&&previous.length===expected.length&&
+                previous.every((byte,index)=>byte===expected[index]);
+              if(!same){stale=true;tx.abort();return;}
+              store.put(Array.from(bytes),key);
+            }catch(_){stale=true;tx.abort();}
+          };
+        }
+        tx.oncomplete=()=>resolve();
+        tx.onerror=()=>reject(tx.error||new Error("IndexedDB write failed"));
+        tx.onabort=()=>reject(stale?
+          new Error("Endpoint MLS snapshot changed during restore; retry canonical admission"):
+          tx.error||new Error("IndexedDB write aborted"));
+      });
+    }finally{db.close();}
+  };
+  // A second tab must not overwrite the pre-Join creator/recipient state
+  // while the canonical Commit is being accepted and locally merged.
+  if(key.startsWith("ucr-e2ee-state:fp-v1:")){
+    if(!navigator.locks?.request)
+      throw new Error("Cross-tab MLS persistence lock unavailable");
+    return navigator.locks.request("ucr-first-party-mls:"+key,{mode:"exclusive"},persist);
+  }
+  return persist();
 }
 async function loadEndpointState(key){
   key=endpointStateKey(key);const db=await openEndpointStateDb();
@@ -642,20 +693,26 @@ async function readEndpointWrappingKeyRecord(key){
     });
   }finally{db.close();}
 }
-async function writeEndpointWrappingKeyRecord(key,record){
+async function addEndpointWrappingKeyRecord(key,record){
   key=endpointStateKey(key);record=endpointWrappingKeyRecord(record);const db=await openEndpointStateDb();
   try{
     await new Promise((resolve,reject)=>{
       const tx=db.transaction(ENDPOINT_WRAPPING_KEY_OBJECT_STORE,"readwrite");
-      tx.objectStore(ENDPOINT_WRAPPING_KEY_OBJECT_STORE).put({
+      // add(), not put(): two tabs must never replace an existing KEK and
+      // make an already sealed endpoint MLS snapshot permanently unreadable.
+      const insertion=tx.objectStore(ENDPOINT_WRAPPING_KEY_OBJECT_STORE).add({
         version:record.version,
         kek:record.kek,
         iv:Array.from(record.iv),
         wrapped:Array.from(record.wrapped)
       },key);
       tx.oncomplete=()=>resolve();
-      tx.onerror=()=>reject(tx.error||new Error("IndexedDB wrapping-key write failed"));
-      tx.onabort=()=>reject(tx.error||new Error("IndexedDB wrapping-key write aborted"));
+      // The request has the exact ConstraintError; tx.error may still be
+      // null while the request error bubbles, so preserve the losing-race
+      // classification for the canonical winner recovery path.
+      insertion.onerror=()=>reject(insertion.error||new Error("IndexedDB wrapping-key insert failed"));
+      tx.onerror=()=>reject(insertion.error||tx.error||new Error("IndexedDB wrapping-key write failed"));
+      tx.onabort=()=>reject(insertion.error||tx.error||new Error("IndexedDB wrapping-key write aborted"));
     });
   }finally{db.close();}
 }
@@ -673,19 +730,31 @@ async function createEndpointWrappingKeyRecord(key){
       wrappingKey
     ));
     const record={version:ENDPOINT_WRAPPING_KEY_RECORD_VERSION,kek,iv,wrapped};
-    await writeEndpointWrappingKeyRecord(key,record);
+    await addEndpointWrappingKeyRecord(key,record);
     return {record:endpointWrappingKeyRecord(record),wrappingKey};
   }catch(error){
     wrappingKey.fill(0);
     throw error;
   }
 }
-async function getEndpointWrappingKey(key){
+async function getEndpointWrappingKey(key,{requireExisting=false}={}){
   key=endpointStateKey(key);
   let record=await readEndpointWrappingKeyRecord(key);
   if(record===null){
-    const created=await createEndpointWrappingKeyRecord(key);
-    return endpointWrappingKeyBytes(created.wrappingKey);
+    // Never create a replacement KEK while restoring an existing sealed MLS
+    // snapshot. That would permanently orphan its original encryption key.
+    if(requireExisting)throw new Error("Sealed endpoint MLS wrapping key is missing");
+    try{
+      const created=await createEndpointWrappingKeyRecord(key);
+      return endpointWrappingKeyBytes(created.wrappingKey);
+    }catch(error){
+      // A competing tab may have committed the only canonical wrapping key
+      // after our initial read. Discard our losing plaintext and use its
+      // committed winner; never rotate or overwrite the stored key.
+      if(!error||error.name!=="ConstraintError")throw error;
+      record=await readEndpointWrappingKeyRecord(key);
+      if(record===null)throw new Error("Endpoint wrapping-key race has no committed winner");
+    }
   }
   const plaintext=new Uint8Array(await crypto.subtle.decrypt(
     {name:"AES-GCM",iv:record.iv,additionalData:endpointWrappingKeyAad(key)},
@@ -777,7 +846,7 @@ function endpointApplyBootstrapCommits(state,bootstrap,startCommitIndex=0){
 async function restoreEndpointMlsSnapshot(module,groupId,snapshot,bootstrap){
   const key=endpointPersistenceStorageKey();
   if(!key)throw new Error("Endpoint MLS persistence requires a Device-bound identity");
-  const wrappingKey=await getEndpointWrappingKey(key);
+  const wrappingKey=await getEndpointWrappingKey(key,{requireExisting:true});
   try{
     const states=endpointBootstrapStates(bootstrap);
     for(let index=states.length-1;index>=0;index--){
@@ -805,12 +874,12 @@ async function restoreEndpointMlsSnapshot(module,groupId,snapshot,bootstrap){
     wrappingKey.fill(0);
   }
 }
-async function sealEndpointMlsSnapshot(state){
+async function sealEndpointMlsSnapshot(state,expectedExisting=undefined){
   const key=endpointPersistenceStorageKey();
   if(!key)throw new Error("Endpoint MLS persistence requires a Device-bound identity");
   const wrappingKey=await getEndpointWrappingKey(key);
   try{
-    await saveEndpointState(key,state.seal_snapshot(wrappingKey));
+    await saveEndpointState(key,state.seal_snapshot(wrappingKey),expectedExisting);
   }finally{
     wrappingKey.fill(0);
   }
@@ -852,6 +921,89 @@ async function ensureEndpointMlsReady(){
     if(endpointMlsBootstrapAbort===controller)endpointMlsBootstrapAbort=null;
   }
 }
+// The first-party accepted Call has its OWN authenticated MLS descriptor and
+// recipient-bound Welcome. Never fetch a legacy realtime registration package
+// or create a new KeyPackage after the signed Join has been issued.
+async function restoreAuthenticatedFirstPartyMls(module,context,identity,sealed,signal,requireCurrent){
+  const host=firstPartyCanonicalHttpHost;
+  const callId=sessionStorage.getItem("ucrFirstPartyDirectCall");
+  if(!host||!callId||!identity.call_id.startsWith("fp-m-")||signal.aborted){
+    throw new Error("Authenticated first-party MLS handoff unavailable");
+  }
+  const user=await host.resumeAuthenticatedDevice();
+  requireCurrent();
+  if(user.tenantId!==identity.tenant_id||
+     user.namespaceId!==(identity.namespace_id??null)||
+     user.participantId!==identity.participant_id||
+     user.deviceId!==identity.device_id){
+    throw new Error("First-party Device changed before MLS restoration");
+  }
+  const call=await host.getDirectCall(user,callId);
+  requireCurrent();
+  if(call.state!=="active")throw new Error("Canonical direct Call ended before MLS restoration");
+  const descriptor=await host.describeAcceptedCallMls(user,{
+    callId,expectedRevision:call.revision
+  });
+  requireCurrent();
+  if(descriptor.mediaCallId!==identity.call_id||
+     descriptor.groupId!==context.group_id||
+     descriptor.deviceId!==identity.device_id||
+     descriptor.cryptoEpoch===null||!descriptor.cryptoStateRef||
+     Number(context.group_crypto_epoch)!==descriptor.cryptoEpoch){
+    throw new Error("First-party MLS Group/epoch is not canonically committed");
+  }
+  const key=endpointPersistenceStorageKey(identity);
+  if(!key||sealed===null)throw new Error("First-party private MLS state was not saved before Join");
+  const wrappingKey=await getEndpointWrappingKey(key,{requireExisting:true});
+  let restored=null;
+  try{
+    requireCurrent();
+    try{
+      restored=module.EndpointMlsState.restore(
+        identity.tenant_id,identity.namespace_id??undefined,context.group_id,
+        identity.device_id,wrappingKey,sealed,
+        BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef
+      );
+    }catch(_){
+      if(descriptor.creatorPrincipalId===user.participantId){
+        throw new Error("Initiator MLS state is missing after canonical Commit");
+      }
+      // Only the independently authenticated recipient may use the durable
+      // Welcome for the exact KeyPackage previously published by this Device.
+      const handoff=await host.fetchEndpointMlsBootstrap(user,{
+        callId,expectedRevision:call.revision
+      });
+      requireCurrent();
+      if(handoff.groupId!==descriptor.groupId||
+         handoff.cryptoEpoch!==descriptor.cryptoEpoch||
+         handoff.cryptoStateRef!==descriptor.cryptoStateRef){
+        throw new Error("Recipient MLS Welcome differs from canonical Group");
+      }
+      restored=module.EndpointMlsState.restore_unjoined_key_package(
+        identity.tenant_id,identity.namespace_id??undefined,context.group_id,
+        identity.device_id,wrappingKey,sealed
+      );
+      restored.join_from_welcome(handoff.welcome,BigInt(handoff.welcomeEpoch),
+        handoff.welcomeStateRef);
+      for(const item of handoff.commits){
+        restored.process_commit(item.commit,BigInt(item.cryptoEpoch),item.cryptoStateRef);
+      }
+    }
+    requireCurrent();
+    if(BigInt(restored.crypto_epoch())!==BigInt(descriptor.cryptoEpoch)||
+       restored.crypto_state_ref()!==descriptor.cryptoStateRef){
+      throw new Error("Restored first-party MLS state does not match canonical epoch");
+    }
+    const state=restored;
+    restored=null;
+    return {state,bootstrap:{current_crypto_state:{
+      crypto_epoch:descriptor.cryptoEpoch,crypto_state_ref:descriptor.cryptoStateRef
+    }}};
+  }finally{
+    wrappingKey.fill(0);
+    if(restored&&typeof restored.free==="function")restored.free();
+  }
+}
 async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
   const sessionGeneration=sessionLifecycleGeneration;
   const identity=claims;
@@ -869,6 +1021,9 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
     const context=await fetchEndpointMlsContext(signal);
     requireCurrent();
     if(context.endpoint_state_mode==="legacy_server_owned"){
+      if(identity.call_id.startsWith("fp-m-")){
+        throw new Error("Server-owned MLS is forbidden for first-party E2EE Calls");
+      }
       endpointMlsGroupId=context.group_id;
       window.ucrEndpointMlsSession=Object.freeze({
         contractVersion:ENDPOINT_WASM_CONTRACT_VERSION,
@@ -885,7 +1040,13 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
     const sealed=await loadEndpointState(persistenceKey);
     requireCurrent();
     let bootstrap;
-    if(context.endpoint_state_mode==="restore"){
+    if(identity.call_id.startsWith("fp-m-")){
+      const restored=await restoreAuthenticatedFirstPartyMls(
+        module,context,identity,sealed,signal,requireCurrent
+      );
+      state=restored.state;
+      bootstrap=restored.bootstrap;
+    }else if(context.endpoint_state_mode==="restore"){
       if(sealed===null)throw new Error("Endpoint-owned MLS state is already admitted but its sealed local snapshot is missing");
       bootstrap=await fetchEndpointMlsBootstrap(signal);
       requireCurrent();
@@ -924,7 +1085,10 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
     if(BigInt(state.crypto_epoch())!==BigInt(bootstrap.current_crypto_state.crypto_epoch)){
       throw new Error("Endpoint MLS epoch does not match canonical current state");
     }
-    await sealEndpointMlsSnapshot(state);
+    // A first-party Call must not roll back a newer endpoint MLS snapshot
+    // saved by /start.js or another active tab during asynchronous restoration.
+    await sealEndpointMlsSnapshot(state,
+      identity.call_id.startsWith("fp-m-")?sealed:undefined);
     requireCurrent();
     endpointMlsState=state;
     endpointMlsGroupId=context.group_id;
@@ -952,18 +1116,33 @@ function endpointPersistence(adapter){
 }
 function endpointPersistenceStorageKey(identity=claims){
   if(!identity||!identity.device_id)return null;
-  const key="ucr-e2ee-state:"+JSON.stringify([
-    identity.tenant_id,
-    identity.namespace_id,
-    identity.call_id,
-    identity.participant_kind,
-    identity.participant_id,
-    identity.device_id
-  ]);
+  // /start.js and client.html MUST refer to the same sealed, endpoint-owned
+  // MLS state before and after signed Join. The direct-call key derives only
+  // from the independently authenticated canonical Device/Call binding, not
+  // from a fragment's session ID or a second identity/key registry.
+  const direct=identity.call_id?.startsWith("fp-m-");
+  const key=(direct?"ucr-e2ee-state:fp-v1:":"ucr-e2ee-state:")+JSON.stringify(
+    direct?[
+      identity.tenant_id,identity.namespace_id,identity.call_id,
+      identity.participant_id,identity.device_id
+    ]:[
+      identity.tenant_id,identity.namespace_id,identity.call_id,
+      identity.participant_kind,identity.participant_id,identity.device_id
+    ]
+  );
   return key.length>0&&key.length<=ENDPOINT_STATE_KEY_MAX?key:null;
 }
+// The media adapter may persist its own opaque transport state, but it MUST
+// never overwrite the canonical OpenMLS provider snapshot in the same DB.
+function endpointAdapterPersistenceStorageKey(identity=claims){
+  const key=endpointPersistenceStorageKey(identity);
+  if(!key)return null;
+  if(!identity?.call_id?.startsWith("fp-m-"))return key;
+  const separate=key+":media-adapter-v1";
+  return separate.length<=ENDPOINT_STATE_KEY_MAX?separate:null;
+}
 async function restoreEndpointPersistedState(adapter,identity=claims){
-  const persistence=endpointPersistence(adapter),key=endpointPersistenceStorageKey(identity);
+  const persistence=endpointPersistence(adapter),key=endpointAdapterPersistenceStorageKey(identity);
   if(!persistence||!key)return "unavailable";
   const snapshot=await loadEndpointState(key);
   if(snapshot===null)return "empty";
@@ -975,7 +1154,7 @@ async function restoreEndpointPersistedState(adapter,identity=claims){
   return "restored";
 }
 async function persistEndpointState(adapter,identity=claims){
-  const persistence=endpointPersistence(adapter),key=endpointPersistenceStorageKey(identity);
+  const persistence=endpointPersistence(adapter),key=endpointAdapterPersistenceStorageKey(identity);
   if(!persistence||!key)return false;
   const snapshot=await persistence.sealState();
   if(snapshot===null||snapshot===undefined)return false;
@@ -1005,7 +1184,7 @@ function requireCompatibleE2eeAdapter(adapter){
 // First-party calls use the SAME authenticated Device/Trust owner as /start.
 // Never use the local-room authority for a first-party Call, and never infer
 // trust from a Join URL or a browser-side key alone.
-let firstPartyDeviceAuthorityPromise=null;
+let firstPartyDeviceAuthorityPromise=null,firstPartyCanonicalHttpHost=null;
 async function installFirstPartyDeviceAuthority(){
   if(!claims||typeof claims.call_id!=="string"||!claims.call_id.startsWith("fp-")||
      sessionStorage.getItem("ucrLocalRoom")==="1")return;
@@ -1042,6 +1221,7 @@ async function installFirstPartyDeviceAuthority(){
        signer.publicKey.some((byte,index)=>byte!==trust.activeKey.publicKey[index])){
       throw new Error("Authenticated Device signer is not currently trusted");
     }
+    firstPartyCanonicalHttpHost=host;
     window.ucrProtectedDeviceKeyVault=vault;
     window.ucrCanonicalDeviceAuthority=host;
     window.ucrFirstPartyAuthenticatedBinding=user;
@@ -1679,19 +1859,34 @@ function teardownPeer(){
   if(peer){peer.onicecandidate=null;peer.ontrack=null;peer.ondatachannel=null;peer.onconnectionstatechange=null;peer.close();peer=null;}
   remoteStream=null;ui.remoteVideo.srcObject=null;ui.webrtcState.textContent="Idle";
 }
-async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims=null){
+async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims=null,retiredToken=null){
   // Only an offer's owner can retire that attempt. An absent token must not
   // issue a session-wide close that could erase a new peer in another tab.
   const offerId=retiredOfferId||startWebRtc.offerId;
   if((!sessionActive&&!retiredOfferId)||!offerId)return;
+  // The original offer owner, not a later session's mutable global token,
+  // authorizes cleanup after Leave, renewal, or a competing Join.
+  const owner=startWebRtc.offerOwner?.offerId===offerId?startWebRtc.offerOwner:null;
+  const closeClaims=retiredClaims||owner?.claims;
+  const closeToken=retiredToken??owner?.token;
+  if(!closeClaims||!closeToken){
+    ucrRecordDiagnostic("WebRTC close refused: original offer authority missing","webrtc");
+    return;
+  }
   try{
-    await api("/v1/realtime/webrtc/close",{...(retiredClaims||body()),offer_id:offerId},undefined,keepalive);
-    if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
+    await api("/v1/realtime/webrtc/close",{...closeClaims,offer_id:offerId},undefined,keepalive,closeToken);
+    if(startWebRtc.offerId===offerId){
+      startWebRtc.offerId=null;
+      if(startWebRtc.offerOwner===owner)startWebRtc.offerOwner=null;
+    }
   }catch(error){
     const message=String(error?.message||error);
     if(/\b404\b|not_found|offer_not_found/i.test(message)){
       ucrRecordDiagnostic("WebRTC offer already retired on close","webrtc");
-      if(startWebRtc.offerId===offerId)startWebRtc.offerId=null;
+      if(startWebRtc.offerId===offerId){
+        startWebRtc.offerId=null;
+        if(startWebRtc.offerOwner===owner)startWebRtc.offerOwner=null;
+      }
     }else{
       ucrRecordDiagnostic("WebRTC close failed: "+ucrDiagnosticReason(message),"webrtc");
     }
@@ -1743,24 +1938,34 @@ async function startWebRtcOnce(forceMedia=false){
     retireEndpointMlsState();
   }
   if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
+  // Reject missing canonical trust before reading a grant or allocating an offer.
+  // The preflight must remain earlier than body() even in isolated SDK tests.
+  requireCanonicalMediaHostReady();
   const generation=mediaCaptureGeneration;
+  // Bind cleanup to the exact grant that allocated this WebRTC offer. A late
+  // start response after Leave must not inherit a replacement grant/token.
+  const startingClaims=body(),startingToken=token;
   const ensureCurrent=()=>{
     if(generation!==mediaCaptureGeneration||!sessionActive||!mediaActive||!navigator.onLine){
       throw new Error("WebRTC start cancelled by conference media teardown");
     }
   };
-  requireCanonicalMediaHostReady();
   // Network/privacy validation precedes browser device permissions.
   let offer,rtcConfig,serverPeerOpened=false;
   try{
-    const response=await api("/v1/realtime/webrtc/start",body());
+    const response=await api("/v1/realtime/webrtc/start",startingClaims,undefined,false,startingToken);
     serverPeerOpened=true;
     offer=await response.json();
     if(!offer||typeof offer.offer_id!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(offer.offer_id)){
       throw new Error("Canonical WebRTC offer is missing its transport attempt identity");
     }
-    startWebRtc.offerId=offer.offer_id;
+    // A revoked or replaced grant may receive a successful, delayed start
+    // response. Do not install its offer as the current peer owner.
     ensureCurrent();
+    startWebRtc.offerId=offer.offer_id;
+    startWebRtc.offerOwner=Object.freeze({
+      offerId:offer.offer_id,claims:Object.freeze({...startingClaims}),token:startingToken
+    });
     rtcConfig=rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value);
     await ensureLocalMedia(forceMedia);
     ensureCurrent();
@@ -1768,8 +1973,11 @@ async function startWebRtcOnce(forceMedia=false){
     // Admission withdrawal invalidates physical capture, not the authenticated
     // realtime session. Close the server peer even if mediaActive was revoked.
     // Never send a stale close after a different client peer has taken ownership.
-    if(serverPeerOpened&&sessionActive&&!peer){
-      await closeServerPeer();
+    if(serverPeerOpened&&offer&&typeof offer.offer_id==="string"&&
+       /^[A-Za-z0-9_-]{43}$/.test(offer.offer_id)){
+      // Offer-scoped close is safe even after Leave or a replacement Join.
+      // Without it, a late /start response can orphan the remote provider.
+      await closeServerPeer(false,offer.offer_id,startingClaims,startingToken);
     }
     throw error;
   }
@@ -1779,7 +1987,7 @@ async function startWebRtcOnce(forceMedia=false){
   }catch(error){
     // The server allocated an offer, but the browser rejected peer creation.
     // No local peer owns that offer; release the server session for retry.
-    if(sessionActive&&!peer)await closeServerPeer();
+    await closeServerPeer(false,offer.offer_id,startingClaims,startingToken);
     throw error;
   }
   peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
@@ -1790,13 +1998,20 @@ async function startWebRtcOnce(forceMedia=false){
   let remoteDescriptionAccepted=false;
   const pendingCandidates=[];
   const sendCandidate=async candidate=>{
-    if(!sessionActive||peer!==pc)return;
-    await api("/v1/realtime/webrtc/ice",{...body(),offer_id:offer.offer_id,candidate:candidate.candidate,sdp_mid:candidate.sdpMid,sdp_mline_index:candidate.sdpMLineIndex});
+    // ICE belongs to the grant and offer that allocated this peer, never to
+    // a replacement session that happened to become current while awaiting SDP.
+    if(!sessionActive||!mediaActive||peer!==pc||
+       generation!==mediaCaptureGeneration)return;
+    await api("/v1/realtime/webrtc/ice",
+      {...startingClaims,offer_id:offer.offer_id,candidate:candidate.candidate,
+       sdp_mid:candidate.sdpMid,sdp_mline_index:candidate.sdpMLineIndex},
+      undefined,false,startingToken);
   };
   pc.ondatachannel=event=>attachE2eeDataChannel(event.channel);
   pc.ontrack=event=>{event.track.stop();if(typeof e2eeAdapterReady==="undefined"||!e2eeAdapterReady)ui.status.textContent="Unexpected RTP track rejected; conference media must use endpoint E2EE transport.";};
   pc.onicecandidate=event=>{
-    if(!event.candidate||!sessionActive)return;
+    if(!event.candidate||!sessionActive||!mediaActive||peer!==pc||
+       generation!==mediaCaptureGeneration)return;
     if(!remoteDescriptionAccepted){pendingCandidates.push(event.candidate);return;}
     sendCandidate(event.candidate).catch(e=>{ui.status.textContent="ICE candidate rejected: "+e.message;});
   };
@@ -1810,27 +2025,52 @@ async function startWebRtcOnce(forceMedia=false){
     }
     if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
   };
-  await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
-  ensureOwnedPeer();
-  const answer=await pc.createAnswer();
-  ensureOwnedPeer();
-  await pc.setLocalDescription(answer);
-  ensureOwnedPeer();
-  await api("/v1/realtime/webrtc/remote-description",{...body(),offer_id:startWebRtc.offerId,sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
-  ensureOwnedPeer();
-  remoteDescriptionAccepted=true;
-  for(const candidate of pendingCandidates.splice(0)){ensureOwnedPeer();await sendCandidate(candidate);}
-  ensureOwnedPeer();
-  // SDP signalling completion must not overwrite a later ICE/DTLS state.
-  // Render the peer's actual current state, not a stale assumption.
-  ui.webrtcState.textContent=pc.connectionState||"Connecting";
+  try{
+    await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
+    ensureOwnedPeer();
+    const answer=await pc.createAnswer();
+    ensureOwnedPeer();
+    await pc.setLocalDescription(answer);
+    ensureOwnedPeer();
+    await api("/v1/realtime/webrtc/remote-description",
+      {...startingClaims,offer_id:offer.offer_id,
+       sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp},
+      undefined,false,startingToken);
+    ensureOwnedPeer();
+    remoteDescriptionAccepted=true;
+    for(const candidate of pendingCandidates.splice(0)){
+      ensureOwnedPeer();
+      await sendCandidate(candidate);
+    }
+    ensureOwnedPeer();
+    // SDP completion must not overwrite a later ICE/DTLS state.
+    ui.webrtcState.textContent=pc.connectionState||"Connecting";
+  }catch(error){
+    // Any failed SDP/ICE stage must release the exact server-side offer,
+    // including after Leave or grant replacement. Never tear down a newer peer.
+    try{
+      if(peer===pc)teardownPeer();
+      else pc.close();
+    }catch(cleanupError){
+      ucrRecordDiagnostic("WebRTC local negotiation cleanup failed: "+
+        ucrDiagnosticReason(String(cleanupError?.message||cleanupError)),"webrtc");
+    }finally{
+      await closeServerPeer(false,offer.offer_id,startingClaims,startingToken);
+    }
+    throw error;
+  }
 }
 async function restartIce(){
   if(restarting||!sessionActive||!mediaActive||!navigator.onLine||!peer)return false;
-  const generation=mediaCaptureGeneration,pc=peer;
+  const generation=mediaCaptureGeneration,pc=peer,owner=startWebRtc.offerOwner;
+  // An ICE restart is not a new Call or Join. It must retain the exact
+  // authenticated owner of the original server-side WebRTC offer.
+  if(!owner||owner.offerId!==startWebRtc.offerId)
+    throw new Error("ICE restart requires the original WebRTC offer authority");
   const ensureCurrent=()=>{
     if(!sessionActive||!mediaActive||!navigator.onLine||
-       generation!==mediaCaptureGeneration||peer!==pc||pc.connectionState==="closed"){
+       generation!==mediaCaptureGeneration||peer!==pc||pc.connectionState==="closed"||
+       startWebRtc.offerOwner!==owner||startWebRtc.offerId!==owner.offerId){
       throw new Error("ICE restart cancelled by conference media teardown");
     }
   };
@@ -1838,12 +2078,13 @@ async function restartIce(){
   try{
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     ui.webrtcState.textContent="ICE restart";
-    const response=await api("/v1/realtime/webrtc/restart",body());
+    const response=await api("/v1/realtime/webrtc/restart",
+      owner.claims,undefined,false,owner.token);
     const offer=await response.json();
     ensureCurrent();
     // ICE restart changes SDP, not ownership of the original WebRTC attempt.
     // A mismatched fence must not be installed as a new network configuration.
-    if(!offer||offer.offer_id!==startWebRtc.offerId){
+    if(!offer||offer.offer_id!==owner.offerId){
       throw new Error("ICE restart changed immutable WebRTC transport offer identity");
     }
     pc.setConfiguration(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
@@ -1853,7 +2094,10 @@ async function restartIce(){
     ensureCurrent();
     await pc.setLocalDescription(answer);
     ensureCurrent();
-    await api("/v1/realtime/webrtc/remote-description",{...body(),offer_id:startWebRtc.offerId,sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
+    await api("/v1/realtime/webrtc/remote-description",
+      {...owner.claims,offer_id:owner.offerId,
+       sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp},
+      undefined,false,owner.token);
     ensureCurrent();
     ui.webrtcState.textContent="Reconnecting";
     ui.status.textContent="Network path changed. ICE restart is reconnecting media without recreating the conference session.";
@@ -3023,6 +3267,47 @@ function installLocalRoomMediaHost(){
 }
 // ONE admission resolver for the local room and first-party Calls: trust comes
 // from the canonical mls-context trusted_device_keys of the media Group Call.
+// For a first-party direct Call, the expected MLS peer is NOT inferred from
+// SFU frames, Welcome or a join URL. The independently authenticated BFF
+// resolves the two committed Device IDs against live canonical Identity/Trust.
+async function verifiedFirstPartyPeerDevice(bootstrap,context){
+  if(!bootstrap.claims.callId.startsWith("fp-m-"))return null;
+  const callId=sessionStorage.getItem("ucrFirstPartyDirectCall");
+  const host=firstPartyCanonicalHttpHost;
+  if(!host||!callId||!/^[A-Za-z0-9_.:@-]{1,128}$/.test(callId)){
+    throw new Error("First-party accepted Call authority unavailable");
+  }
+  const user=await host.resumeAuthenticatedDevice();
+  if(!sessionActive||!claims||claims.session_id!==bootstrap.claims.sessionId||
+     user.tenantId!==bootstrap.claims.tenantId||
+     user.namespaceId!==bootstrap.claims.namespaceId||
+     user.participantId!==bootstrap.claims.participantId||
+     user.deviceId!==bootstrap.claims.deviceId){
+    throw new Error("First-party Device changed during MLS admission");
+  }
+  const call=await host.getDirectCall(user,callId);
+  if(call.state!=="active"||!Number.isSafeInteger(call.revision)){
+    throw new Error("Canonical direct Call is no longer active");
+  }
+  const descriptor=await host.describeAcceptedCallMls(user,{
+    callId,expectedRevision:call.revision
+  });
+  const peer=descriptor.expectedPeerDeviceId;
+  if(!sessionActive||!claims||claims.session_id!==bootstrap.claims.sessionId||
+     descriptor.mediaCallId!==bootstrap.claims.callId||
+     descriptor.groupId!==bootstrap.groupId||
+     descriptor.deviceId!==bootstrap.claims.deviceId||
+     descriptor.cryptoEpoch!==Number(bootstrap.state.crypto_epoch())||
+     descriptor.cryptoStateRef!==bootstrap.state.crypto_state_ref()||
+     !peer||peer===bootstrap.claims.deviceId){
+    throw new Error("Committed canonical MLS peer Device does not match this Call");
+  }
+  const keys=Array.isArray(context.trusted_device_keys)?context.trusted_device_keys:[];
+  if(keys.filter(key=>key.device_id===peer).length!==1){
+    throw new Error("Expected MLS peer has no unique current trusted signing key");
+  }
+  return peer;
+}
 function createEndpointAdmissionResolver(){
   return async bootstrap=>{
     const context=await fetchEndpointMlsContext();
@@ -3034,6 +3319,7 @@ function createEndpointAdmissionResolver(){
       throw new Error("Endpoint MLS epoch differs from the canonical conference epoch");
     }
     const keys=Array.isArray(context.trusted_device_keys)?context.trusted_device_keys:[];
+    const expectedPeerDeviceId=await verifiedFirstPartyPeerDevice(bootstrap,context);
     const local=keys.find(key=>key.device_id===bootstrap.claims.deviceId);
     if(!local)throw new Error("This device has no active trusted signing key");
     if(!window.ucrProtectedDeviceKeyVault){
@@ -3076,6 +3362,7 @@ function createEndpointAdmissionResolver(){
       signingKeyId:local.key_id,
       signingSeed:seed,
       trustedLocalVerifyingKey:endpointBase64ToBytes(local.public_key_base64),
+      ...(expectedPeerDeviceId?{expectedPeerDeviceId}:{}),
       trustedKeys:{
         resolve(_header,keyId){
           const key=keyById.get(keyId);

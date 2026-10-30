@@ -167,6 +167,145 @@ Until a host supplies this canonical authority, the bundled installer emits
 `Canonical device media signing/trust authority is not wired` and the DataChannel
 is closed. That is deliberate and secure, **not a passing two-device test**.
 
+### First-party pre-Join OpenMLS orchestration (draft PR #330)
+
+The `/start.js` contact journey now drives the endpoint-owned OpenMLS
+lifecycle **before** requesting a signed media Join. Both browser identities
+must already have independently authenticated, active canonical Device/Trust
+sessions and an accepted direct Call. The BFF remains the only Call, Group,
+Device, Trust, epoch and recipient-admission authority.
+
+The initiator creates the private OpenMLS group locally, seals its epoch-zero
+provider in the existing `ucr-endpoint-state-v1` IndexedDB, and publishes only
+a Device-signed public state reference. After this canonical Group exists, the
+recipient seals its original private KeyPackage provider, publishes its
+Device-signed public KeyPackage and waits. The initiator reads the independently
+verified single-device offer, stages a real OpenMLS Add, submits its signed
+Commit/Welcome to the canonical Group CAS, merges only after server acceptance,
+and seals the new epoch. The recipient restores its **original** private
+KeyPackage, processes the recipient-bound Welcome/commits, verifies the exact
+epoch/state reference, and seals the joined state. Both endpoints verify the
+two-device local OpenMLS roster against the authenticated BFF's committed peer
+Device before `join-accepted`. No server MLS host leaf or private seed is
+created by this browser path.
+
+The pre-Join and media pages intentionally use one scoped encrypted snapshot
+key, `ucr-e2ee-state:fp-v1:[tenant,namespace,mediaCall,participant,device]`,
+and the same IndexedDB stores, AES-GCM wrapping AAD and nonextractable KEK.
+Any optional opaque media-adapter transport snapshot is stored under a distinct
+`:media-adapter-v1` record key so it cannot overwrite the private OpenMLS
+provider snapshot; this is not a second identity or crypto authority.
+Cross-tab writes require the browser's Web Locks API; an unsupported browser
+fails closed. A pending public offer is retried with the **same** sealed
+KeyPackage, never silently replaced. Hangup, Device change and stale Call
+inspection fence the final Join, including a delayed MLS preflight.
+
+**Not yet proven by a physical call:** this is a first implementation of the
+browser coordinator, not production evidence. Epoch-zero creator publication
+uses a separate, authenticated prepublication snapshot domain. After an
+uncertain create response or reload, the browser restores the **same** creator
+Group and promotes the sealed state only after checking the canonical
+authenticator. A forged or mismatched descriptor cannot promote it.
+
+The initial endpoint-owned Add now also has a write-ahead recovery record in
+the existing encrypted IndexedDB state store. Before sending the signed
+Commit/Welcome, the creator seals its locally merged next-epoch OpenMLS
+snapshot and persists the exact public Commit, Welcome, event ID, recipient
+Device and expected canonical revision. After a lost acknowledgement or crash,
+the creator checks the independently authenticated canonical epoch/state
+reference: it retries the exact signed event only if the server still reports
+the original epoch, or promotes the sealed snapshot only after confirming the
+matching committed epoch and recipient Device. A conflicting epoch fails
+closed; it never mints a replacement Commit or MLS identity. The first-party
+BFF delegates replay decisions to the canonical SQLite transaction, which
+permits the **identical** previously accepted signed event while refusing
+stale, altered or unauthorized transitions. This is tested with an actual
+SQLite-backed BFF acceptance test and a separate mock-backed browser restart
+test. Neither proves power-loss durability on a physical device.
+
+Still open: real A/B media transport, simultaneous capture revocation and
+measured quality/latency across two physical devices and NAT/TURN. Browser
+and CI conformance cannot substitute for those release gates.
+
+### Durable recipient KeyPackage before Welcome (PR #330)
+
+The browser WASM endpoint now provides `seal_unjoined_key_package` and
+`restore_unjoined_key_package` for the **recipient's existing private OpenMLS
+provider**, before a Welcome has arrived. The sealed snapshot uses the same
+endpoint-only state encryption as active epochs, but a separate authenticated
+AAD domain bound to canonical Tenant/Namespace/Group/Device. An active Group
+snapshot cannot be restored as a pending offer, nor can an offer be restored
+for a different Device or under a different wrapping key. The public
+KeyPackage bytes remain identical across reload; publishing a replacement
+KeyPackage after a transient delay must not silently orphan the accepted
+Welcome. Browser Compatibility exercises a real endpoint-created OpenMLS
+Add/Welcome with the recovered KeyPackage and negative cross-Device/key/domain
+checks, not a simulated crypto handshake.
+
+**First-call integration status:** the `/start` coordinator now seals
+the recipient's original KeyPackage before publication, restores it for the
+recipient-bound Welcome, and preserves the creator's epoch-zero Group through
+uncertain create responses using a distinct authenticated snapshot domain.
+The `/client.html` first-party restoration path checks the independently
+authenticated BFF Group descriptor and the exact committed epoch/state
+reference. It refuses to mint a replacement KeyPackage or use server-owned
+MLS after signed Join. The creator's initial Add Commit now has a sealed write-ahead
+recovery record and exact signed-event replay; this remains browser-local
+recovery, not a measured physical-device power-loss test. Physical A/B
+WebRTC/TURN/NAT media and measured revoke/stop are still missing. Browser-local
+cryptography and a mock-backed coordinator are not evidence of a live one-click call.
+
+### Authenticated endpoint MLS Group revision/epoch contract (PR #330)
+
+The same first-party `POST /v1/first-party/call/mls-descriptor` now returns
+`groupRevision`, `cryptoEpoch` and `cryptoStateRef` **from the existing
+canonical Group owner**. All three are JSON `null` before the Group exists;
+after endpoint-only creation they are `0`, `0` and the public MLS epoch
+authenticator digest, respectively. A committed Add/Remove/Rekey advances the
+canonical Group CAS revision independently of the accepted direct Call revision.
+The browser rejects mixed null/non-null fields, malformed epochs and unsafe
+revisions; the signed Add request must match the freshly inspected Group
+revision and propose exactly the next epoch. A stale concurrent writer still
+fails the server's atomic Group CAS. A Group with contradictory ownership,
+scope, capability or retained server-held OpenMLS private state is refused.
+
+The WASM `EndpointMlsState.crypto_state_ref()` returns only the locally
+verified public hash of the current MLS epoch authenticator. It refuses
+unjoined, pending or inconsistent states and does **not** expose the MLS
+exporter, private signer or HPKE secrets. This is the required initial
+`mls-create` signing input, not independent proof of the two-device roster.
+The browser must still orchestrate the full authenticated KeyPackage,
+Commit/Welcome, sealed state persistence, roster validation, media admission
+and stop/revoke journey; these contract additions alone are **not** a live call.
+
+### Endpoint-owned direct-Call MLS roster gate (PR #330)
+
+For a first-party direct media Group (the deterministic `fp-mg-` prefix),
+the endpoint media bridge now refuses to export a media key until its
+**locally verified OpenMLS tree** contains exactly the current Device and
+the independently authorized peer Device, with no extra, duplicate or
+cross-scope leaves. The canonical browser admission resolver must supply
+`expectedPeerDeviceId` from existing authenticated Call/Device/Trust state;
+a Join fragment, SFU frame, or MLS Welcome cannot select that peer.
+`authorize_direct_call_roster` is checked against the current MLS state
+reference and own leaf, then fenced to the current local MLS generation.
+Rekey, Commit, or restore requires a fresh roster authorization. Missing
+resolver/peer/roster verification fails closed before the media exporter.
+
+The shared Rust MLS layer also rejects duplicate canonical Device credentials
+before an Add Commit and refuses exporter access to malformed/duplicate
+credential trees. A real OpenMLS two-leaf/three-leaf regression and a browser
+admission contract regression cover the checks. These are security
+**preconditions**, not proof that the first-party browser currently supplies
+a trusted peer Device or that a physical A↔B call works.
+
+Still required: authenticated BFF delivery of the peer Device/Trust and live
+negotiation binding to the canonical resolver; full endpoint-owned MLS
+creation/KeyPackage/Commit/Welcome orchestration from the one-click user
+journey; verified endpoint acceptance and revoke/stop; two real Devices
+with measured WebRTC/TURN/NAT audio and video. Never claim production-ready
+from roster checks or green CI alone.
+
 ## Verification scope
 
 Current CI can prove module loading, WASM execution, local key package
@@ -368,3 +507,33 @@ vault consistency only. The BFF independently verifies that public key
 against the signature, exact session binding and consumed challenge before
 publishing it to the canonical TrustedSigningKeyStore. A replayed challenge,
 retired session or mismatched Device must fail closed.
+
+## Committed two-Device direct-call admission fence (PR #330)
+
+For a first-party direct Call, the canonical SQLite Group MLS transition is
+the source of the **exact creator/recipient Device pair**. The authenticated
+BFF reads the committed transition and its Device admissions, checks that
+each Device still belongs to the correct accepted Identity and retains an
+active canonical trusted signing key, and refuses ambiguous or revoked pairs.
+A signed Join for the media Call is now restricted to one of those exact
+Devices, not any other Device owned by the same participant.
+
+The `/v1/first-party/call/mls-descriptor` response includes
+`expectedPeerDeviceId`, which is `null` before the endpoint-owned Add is
+durably committed. The browser HTTP adapter rejects missing, malformed,
+self-referential or pre-commit peer IDs. The reference media resolver fetches
+this value through the independently authenticated same-origin first-party
+session, checks its Call, Group, Device and MLS epoch against the signed media
+Join and endpoint-local OpenMLS state, and requires one matching current
+trusted peer signing descriptor. It never selects the peer from a Welcome,
+SFU frame or join fragment. The Rust/WASM exact two-leaf roster check is a
+separate, mandatory cryptographic enforcement layer.
+
+**Remaining release blockers:** This device-pair fence does **not** orchestrate
+the initial endpoint-owned group creation, recipient KeyPackage publication,
+Commit/Welcome delivery and sealed cross-page state handoff from
+`start.js`. The reference `client.html` still uses the legacy realtime
+bootstrap flow for that stage. No two physical Devices, NAT/TURN, real A/V
+media, revocation measurement or production-readiness evidence is established
+by this change. Both PR #329 (host-decrypt reproducer) and PR #330 remain
+draft; the endpoint-only path must be integrated end-to-end before merge.

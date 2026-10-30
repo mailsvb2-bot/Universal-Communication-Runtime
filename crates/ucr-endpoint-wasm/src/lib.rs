@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
+use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
 
@@ -10,9 +11,11 @@ use ucr_crypto::{
     seal_endpoint_group_media_wire, seal_endpoint_state,
 };
 use ucr_group_mls::{
-    BrowserMlsProvider, MlsGroupState, browser_memory_provider, create_device_key_package,
-    current_crypto_state, export_browser_memory_snapshot, export_group_media_secret,
-    import_browser_memory_snapshot, join_from_welcome, load_group, own_device_id, process_commit,
+    BrowserMlsProvider, MlsCommitArtifacts, MlsDeviceAdmission, MlsGroupState, MlsTransitionInput,
+    browser_memory_provider, create_device_key_package, create_group, current_crypto_state,
+    export_browser_memory_snapshot, export_group_media_secret, import_browser_memory_snapshot,
+    join_from_welcome, load_group, merge_pending, own_device_id, process_commit, stage_transition,
+    validate_direct_call_roster,
 };
 use ucr_model::{
     CallId, CryptoSuite, DeviceId, GroupCryptoState, GroupId, GroupMediaE2eeContext,
@@ -43,8 +46,14 @@ pub struct EndpointMlsState {
     group_id: GroupId,
     device_id: DeviceId,
     key_package: Vec<u8>,
+    signer_public_key: Vec<u8>,
     group: Option<MlsGroupState>,
     state: Option<GroupCryptoState>,
+    pending_transition: Option<MlsCommitArtifacts>,
+    media_generation: Rc<Cell<u64>>,
+    // A direct Call must revalidate its exact endpoint-only MLS roster after
+    // every rekey/Welcome/restore before any media exporter can be used.
+    direct_roster_generation: Cell<Option<u64>>,
 }
 
 #[wasm_bindgen]
@@ -60,18 +69,21 @@ impl EndpointMlsState {
         let group_id = GroupId::from_opaque(opaque(group_id, "group_id")?);
         let device_id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
         let provider = browser_memory_provider();
-        let key_package = create_device_key_package(&provider, &scope, &device_id)
-            .map_err(debug_error)?
-            .bytes;
+        let created =
+            create_device_key_package(&provider, &scope, &device_id).map_err(debug_error)?;
 
         Ok(Self {
             provider,
             scope,
             group_id,
             device_id,
-            key_package,
+            key_package: created.bytes,
+            signer_public_key: created.signer_public_key,
             group: None,
             state: None,
+            pending_transition: None,
+            media_generation: Rc::new(Cell::new(0)),
+            direct_roster_generation: Cell::new(None),
         })
     }
 
@@ -80,8 +92,269 @@ impl EndpointMlsState {
         self.key_package.clone()
     }
 
+    /// Seal a recipient's not-yet-admitted KeyPackage and private OpenMLS
+    /// provider state before publishing the signed offer. The recipient must
+    /// restore these exact bytes to process the eventual Welcome after reload.
+    /// This is endpoint-only encrypted persistence, never server custody.
+    pub fn seal_unjoined_key_package(&self, wrapping_key: &[u8]) -> Result<Vec<u8>, JsValue> {
+        if self.group.is_some() || self.state.is_some() || self.pending_transition.is_some() {
+            return Err(js_error(
+                "mls_state: cannot seal an already joined KeyPackage",
+            ));
+        }
+        let key = EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
+            .map_err(debug_error)?;
+        let storage = export_browser_memory_snapshot(&self.provider).map_err(debug_error)?;
+        let plaintext = encode_snapshot_plaintext(&self.key_package, &storage)?;
+        let aad = unjoined_key_package_aad(&self.scope, &self.group_id, &self.device_id)?;
+        let sealed = seal_endpoint_state(&key, &aad, &plaintext).map_err(debug_error)?;
+        encode_sealed_snapshot(&sealed)
+    }
+
+    /// Recover the same private KeyPackage provider after page reload.
+    /// The domain-separated AAD binds tenant, namespace, Group and Device;
+    /// an active epoch snapshot cannot be mistaken for a pending offer.
+    #[wasm_bindgen(js_name = restore_unjoined_key_package)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_unjoined_key_package(
+        tenant_id: String,
+        namespace_id: Option<String>,
+        group_id: String,
+        device_id: String,
+        wrapping_key: &[u8],
+        snapshot: &[u8],
+    ) -> Result<EndpointMlsState, JsValue> {
+        let scope = tenant_scope(tenant_id, namespace_id)?;
+        let group_id = GroupId::from_opaque(opaque(group_id, "group_id")?);
+        let device_id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
+        let key = EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
+            .map_err(debug_error)?;
+        let sealed = decode_sealed_snapshot(snapshot)?;
+        let aad = unjoined_key_package_aad(&scope, &group_id, &device_id)?;
+        let plaintext = open_endpoint_state(&key, &aad, &sealed).map_err(debug_error)?;
+        let (key_package, storage_snapshot) = decode_snapshot_plaintext(plaintext.as_slice())?;
+        let provider = import_browser_memory_snapshot(storage_snapshot).map_err(debug_error)?;
+        if load_group(&provider, &scope, &group_id)
+            .map_err(debug_error)?
+            .is_some()
+        {
+            return Err(js_error(
+                "mls_state: pending KeyPackage snapshot contains joined group",
+            ));
+        }
+        Ok(Self {
+            provider,
+            scope,
+            group_id,
+            device_id,
+            key_package: key_package.to_vec(),
+            signer_public_key: Vec::new(),
+            group: None,
+            state: None,
+            pending_transition: None,
+            media_generation: Rc::new(Cell::new(0)),
+            direct_roster_generation: Cell::new(None),
+        })
+    }
+
+    /// Seal an epoch-zero creator Group before publishing its signed descriptor.
+    /// This domain is separate from an admitted epoch snapshot, so an uncertain
+    /// HTTP create acknowledgement can be retried without minting a new Group.
+    pub fn seal_unpublished_group(&self, wrapping_key: &[u8]) -> Result<Vec<u8>, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error(
+                "mls_state: unpublished Group has pending transition",
+            ));
+        }
+        let group = self
+            .group
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: unpublished Group missing"))?;
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: unpublished Group state missing"))?;
+        if state.epoch != 0
+            || current_crypto_state(&self.scope, &self.group_id, group).map_err(debug_error)?
+                != *state
+            || own_device_id(group, &self.scope).map_err(debug_error)? != self.device_id
+        {
+            return Err(js_error(
+                "mls_state: only own verified epoch-zero Group may be staged",
+            ));
+        }
+        let key = EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
+            .map_err(debug_error)?;
+        let storage = export_browser_memory_snapshot(&self.provider).map_err(debug_error)?;
+        let plaintext = encode_snapshot_plaintext(&self.key_package, &storage)?;
+        let aad = unpublished_group_aad(&self.scope, &self.group_id, &self.device_id)?;
+        let sealed = seal_endpoint_state(&key, &aad, &plaintext).map_err(debug_error)?;
+        encode_sealed_snapshot(&sealed)
+    }
+
+    /// Recover only the exact creator's unpublished epoch-zero OpenMLS Group.
+    /// The locally verified authenticator supplies the public descriptor for
+    /// idempotent retry; no server-held seed or guessed epoch is introduced.
+    #[wasm_bindgen(js_name = restore_unpublished_group)]
+    pub fn restore_unpublished_group(
+        tenant_id: String,
+        namespace_id: Option<String>,
+        group_id: String,
+        device_id: String,
+        wrapping_key: &[u8],
+        snapshot: &[u8],
+    ) -> Result<EndpointMlsState, JsValue> {
+        let scope = tenant_scope(tenant_id, namespace_id)?;
+        let group_id = GroupId::from_opaque(opaque(group_id, "group_id")?);
+        let device_id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
+        let key = EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
+            .map_err(debug_error)?;
+        let sealed = decode_sealed_snapshot(snapshot)?;
+        let aad = unpublished_group_aad(&scope, &group_id, &device_id)?;
+        let plaintext = open_endpoint_state(&key, &aad, &sealed).map_err(debug_error)?;
+        let (key_package, storage_snapshot) = decode_snapshot_plaintext(plaintext.as_slice())?;
+        let provider = import_browser_memory_snapshot(storage_snapshot).map_err(debug_error)?;
+        let group = load_group(&provider, &scope, &group_id)
+            .map_err(debug_error)?
+            .ok_or_else(|| js_error("mls_state: unpublished Group missing from snapshot"))?;
+        let state = current_crypto_state(&scope, &group_id, &group).map_err(debug_error)?;
+        if state.epoch != 0 || own_device_id(&group, &scope).map_err(debug_error)? != device_id {
+            return Err(js_error(
+                "mls_state: unpublished Group owner or epoch mismatch",
+            ));
+        }
+        Ok(Self {
+            provider,
+            scope,
+            group_id,
+            device_id,
+            key_package: key_package.to_vec(),
+            signer_public_key: Vec::new(),
+            group: Some(group),
+            state: Some(state),
+            pending_transition: None,
+            media_generation: Rc::new(Cell::new(0)),
+            direct_roster_generation: Cell::new(None),
+        })
+    }
+
+    /// Creates the media MLS group entirely within this endpoint's OpenMLS provider.
+    /// `signer_public_key` must be the public signer generated with this endpoint's
+    /// KeyPackage; OpenMLS rejects a signer absent from local private storage.
+    /// Authorization and deterministic initiator selection remain server-side policy
+    /// decisions; calling this method never grants permission to join a UCR Call.
+    pub fn create_endpoint_group(&mut self) -> Result<(), JsValue> {
+        if self.group.is_some() || self.pending_transition.is_some() {
+            return Err(js_error("mls_state: group already initialized"));
+        }
+        let (group, state) = create_group(
+            &self.provider,
+            &self.scope,
+            &self.group_id,
+            &self.device_id,
+            &self.signer_public_key,
+        )
+        .map_err(debug_error)?;
+        self.group = Some(group);
+        self.state = Some(state);
+        Ok(())
+    }
+
+    /// Stage a device-bound MLS Add. Caller MUST publish this transition only
+    /// after canonical Call/Device/Trust authorization and peer-key verification.
+    pub fn stage_add_device(
+        &mut self,
+        device_id: String,
+        key_package: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
+        let input = MlsTransitionInput::Add(vec![MlsDeviceAdmission {
+            device_id: id,
+            key_package: key_package.to_vec(),
+        }]);
+        self.stage_endpoint_transition(input)
+    }
+
+    /// Stage MLS removal of the exact device leaf (not merely a UI-level flag).
+    pub fn stage_remove_device(&mut self, device_id: String) -> Result<Vec<u8>, JsValue> {
+        let id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
+        self.stage_endpoint_transition(MlsTransitionInput::Remove(vec![id]))
+    }
+
+    pub fn stage_rekey(&mut self) -> Result<Vec<u8>, JsValue> {
+        self.stage_endpoint_transition(MlsTransitionInput::Rekey)
+    }
+
+    /// The Welcome bytes are public encrypted MLS handoff material, not secrets.
+    /// Delivery MUST be bound to the authorized recipient's current device and Call.
+    pub fn pending_welcome(&self) -> Result<Vec<u8>, JsValue> {
+        let pending = self
+            .pending_transition
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: no pending transition"))?;
+        Ok(pending.welcome.clone().unwrap_or_default())
+    }
+
+    pub fn pending_epoch(&self) -> Result<u64, JsValue> {
+        let pending = self
+            .pending_transition
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: no pending transition"))?;
+        Ok(pending.next_crypto_state.epoch)
+    }
+
+    pub fn pending_state_ref(&self) -> Result<String, JsValue> {
+        let pending = self
+            .pending_transition
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: no pending transition"))?;
+        let state_ref = pending
+            .next_crypto_state
+            .state_ref
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: no pending state ref"))?;
+        Ok(String::from_utf8_lossy(state_ref.as_wire_bytes()).to_string())
+    }
+
+    /// Commit only after the canonical transition is durably accepted.
+    /// The peer must independently process the corresponding MLS commit before media resumes.
+    pub fn merge_endpoint_transition(
+        &mut self,
+        crypto_epoch: u64,
+        crypto_state_ref: String,
+    ) -> Result<(), JsValue> {
+        let expected = group_crypto_state(crypto_epoch, crypto_state_ref)?;
+        let pending = self
+            .pending_transition
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: no pending transition"))?;
+        if pending.next_crypto_state != expected {
+            return Err(js_error("mls_state: pending transition mismatch"));
+        }
+        let group = self
+            .group
+            .as_mut()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        merge_pending(
+            &self.provider,
+            group,
+            &self.scope,
+            &self.group_id,
+            &expected,
+        )
+        .map_err(debug_error)?;
+        self.state = Some(expected);
+        self.pending_transition = None;
+        self.media_generation
+            .set(self.media_generation.get().wrapping_add(1));
+        Ok(())
+    }
+
     /// Encrypts the complete endpoint-local OpenMLS state for durable browser persistence.
     pub fn seal_snapshot(&self, wrapping_key: &[u8]) -> Result<Vec<u8>, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: cannot snapshot pending transition"));
+        }
         let state = self
             .state
             .as_ref()
@@ -139,8 +412,12 @@ impl EndpointMlsState {
             group_id,
             device_id,
             key_package: key_package.to_vec(),
+            signer_public_key: Vec::new(), // Restored snapshots cannot create a new group.
             group: Some(group),
             state: Some(expected),
+            pending_transition: None,
+            media_generation: Rc::new(Cell::new(0)),
+            direct_roster_generation: Cell::new(None),
         })
     }
 
@@ -151,7 +428,7 @@ impl EndpointMlsState {
         crypto_epoch: u64,
         crypto_state_ref: String,
     ) -> Result<(), JsValue> {
-        if self.group.is_some() {
+        if self.group.is_some() || self.pending_transition.is_some() {
             return Err(js_error("mls_state: group already joined"));
         }
         let expected = group_crypto_state(crypto_epoch, crypto_state_ref)?;
@@ -175,6 +452,9 @@ impl EndpointMlsState {
         crypto_epoch: u64,
         crypto_state_ref: String,
     ) -> Result<(), JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: pending local transition"));
+        }
         let expected = group_crypto_state(crypto_epoch, crypto_state_ref)?;
         let group = self
             .group
@@ -190,6 +470,8 @@ impl EndpointMlsState {
         )
         .map_err(debug_error)?;
         self.state = Some(expected);
+        self.media_generation
+            .set(self.media_generation.get().wrapping_add(1));
         Ok(())
     }
 
@@ -198,6 +480,73 @@ impl EndpointMlsState {
             .as_ref()
             .map(|state| state.epoch)
             .ok_or_else(|| js_error("mls_state: group not joined"))
+    }
+
+    /// Public, epoch-bound digest of the locally verified MLS authenticator.
+    /// This is NOT an exporter or a private key. A newly created endpoint Group
+    /// needs this value to publish its signed epoch-zero canonical descriptor.
+    ///
+    /// # Errors
+    /// Refuses an unjoined, transitioning or inconsistent local MLS state.
+    pub fn crypto_state_ref(&self) -> Result<String, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: transition is not committed"));
+        }
+        let group = self
+            .group
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        if current_crypto_state(&self.scope, &self.group_id, group).map_err(debug_error)? != *state
+        {
+            return Err(js_error("mls_state: local epoch authenticator mismatch"));
+        }
+        state
+            .state_ref
+            .as_ref()
+            .map(|reference| reference.as_str().to_owned())
+            .ok_or_else(|| js_error("mls_state: local state reference missing"))
+    }
+
+    /// Authorizes exactly the two canonical Device leaves of a first-party
+    /// direct Call from this endpoint's locally verified MLS ratchet tree.
+    /// The peer Device must come from an independently authenticated canonical
+    /// Call/Device/Trust admission, never from the Welcome or an SFU frame.
+    ///
+    /// # Errors
+    /// Rejects extra, missing, duplicate or cross-scope MLS leaves, stale
+    /// crypto-state references, pending transitions and non-direct groups.
+    pub fn authorize_direct_call_roster(&self, peer_device_id: String) -> Result<(), JsValue> {
+        if !self.group_id.as_opaque().as_str().starts_with("fp-mg-")
+            || self.pending_transition.is_some()
+        {
+            return Err(js_error("mls_state: direct Call roster unavailable"));
+        }
+        let peer = DeviceId::from_opaque(opaque(peer_device_id, "peer_device_id")?);
+        if peer == self.device_id {
+            return Err(js_error("mls_state: direct Call peer is own Device"));
+        }
+        let group = self
+            .group
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        if current_crypto_state(&self.scope, &self.group_id, group).map_err(debug_error)? != *state
+            || own_device_id(group, &self.scope).map_err(debug_error)? != self.device_id
+        {
+            return Err(js_error("mls_state: direct Call owner or epoch mismatch"));
+        }
+        validate_direct_call_roster(group, &self.scope, &self.device_id, &peer)
+            .map_err(debug_error)?;
+        self.direct_roster_generation
+            .set(Some(self.media_generation.get()));
+        Ok(())
     }
 
     /// Build a media bridge from the endpoint-local MLS exporter secret.
@@ -215,6 +564,16 @@ impl EndpointMlsState {
         signing_key_id: String,
         signing_seed: &[u8],
     ) -> Result<EndpointGroupMediaBridge, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: media blocked during transition"));
+        }
+        if self.group_id.as_opaque().as_str().starts_with("fp-mg-")
+            && self.direct_roster_generation.get() != Some(self.media_generation.get())
+        {
+            return Err(js_error(
+                "mls_state: canonical direct Call MLS roster not authorized",
+            ));
+        }
         let state = self
             .state
             .as_ref()
@@ -257,7 +616,32 @@ impl EndpointMlsState {
             source,
             source_device_id: self.device_id.clone(),
             revoked: Cell::new(false),
+            owner_generation: Some(Rc::clone(&self.media_generation)),
+            issued_generation: self.media_generation.get(),
         })
+    }
+}
+
+impl EndpointMlsState {
+    fn stage_endpoint_transition(&mut self, input: MlsTransitionInput) -> Result<Vec<u8>, JsValue> {
+        if self.pending_transition.is_some() {
+            return Err(js_error("mls_state: transition already pending"));
+        }
+        let group = self
+            .group
+            .as_mut()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        let transition =
+            stage_transition(&self.provider, group, &self.scope, &self.group_id, &input)
+                .map_err(debug_error)?;
+        let wire = transition.commit.clone();
+        // The pending commit may rotate or revoke media authority. Invalidate every
+        // bridge issued under the old epoch BEFORE returning the commit to JS.
+        // A delayed transport send must not reuse an old key while MLS is pending.
+        self.media_generation
+            .set(self.media_generation.get().wrapping_add(1));
+        self.pending_transition = Some(transition);
+        Ok(wire)
     }
 }
 
@@ -270,6 +654,8 @@ pub struct EndpointGroupMediaBridge {
     source: PrincipalRef,
     source_device_id: DeviceId,
     revoked: Cell<bool>,
+    owner_generation: Option<Rc<Cell<u64>>>,
+    issued_generation: u64,
 }
 
 #[wasm_bindgen]
@@ -321,6 +707,8 @@ impl EndpointGroupMediaBridge {
             source,
             source_device_id,
             revoked: Cell::new(false),
+            owner_generation: None,
+            issued_generation: 0,
         })
     }
 
@@ -340,8 +728,13 @@ impl EndpointGroupMediaBridge {
         keyframe: bool,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, JsValue> {
-        if self.revoked.get() {
-            return Err(js_error("endpoint media bridge revoked"));
+        if self.revoked.get()
+            || self
+                .owner_generation
+                .as_ref()
+                .is_some_and(|generation| generation.get() != self.issued_generation)
+        {
+            return Err(js_error("endpoint media bridge revoked or stale MLS epoch"));
         }
         let media_kind = media_kind_from_code(media_kind)?;
         let video_source_kind = video_source_kind_from_code(media_kind, video_source_kind)?;
@@ -376,8 +769,13 @@ impl EndpointGroupMediaBridge {
     }
 
     pub fn open_wire(&self, wire: &[u8], source_verifying_key: &[u8]) -> Result<Vec<u8>, JsValue> {
-        if self.revoked.get() {
-            return Err(js_error("endpoint media bridge revoked"));
+        if self.revoked.get()
+            || self
+                .owner_generation
+                .as_ref()
+                .is_some_and(|generation| generation.get() != self.issued_generation)
+        {
+            return Err(js_error("endpoint media bridge revoked or stale MLS epoch"));
         }
         let source_verifying_key = fixed_32(source_verifying_key, "source_verifying_key")?;
         open_endpoint_group_media_wire(
@@ -418,6 +816,32 @@ fn endpoint_snapshot_aad(
         .as_ref()
         .ok_or_else(|| js_error("mls_state: missing crypto state reference"))?;
     push_snapshot_bytes(&mut aad, state_ref.as_wire_bytes())?;
+    Ok(aad)
+}
+
+/// A prepublication creator snapshot cannot be opened as an admitted Group
+/// or a recipient's pending KeyPackage, even for the same Device.
+fn unpublished_group_aad(
+    scope: &TenantScope,
+    group_id: &GroupId,
+    device_id: &DeviceId,
+) -> Result<Vec<u8>, JsValue> {
+    let marker = group_crypto_state(0, "ucr-unpublished-group-v1".to_owned())?;
+    let mut aad = endpoint_snapshot_aad(scope, group_id, device_id, &marker)?;
+    aad.extend_from_slice(b"\0creator-prepublication-only");
+    Ok(aad)
+}
+
+/// The pending-offer snapshot must not be decryptable as an active MLS epoch
+/// snapshot, even for the same canonical Device and Group.
+fn unjoined_key_package_aad(
+    scope: &TenantScope,
+    group_id: &GroupId,
+    device_id: &DeviceId,
+) -> Result<Vec<u8>, JsValue> {
+    let marker = group_crypto_state(0, "ucr-unjoined-key-package-v1".to_owned())?;
+    let mut aad = endpoint_snapshot_aad(scope, group_id, device_id, &marker)?;
+    aad.extend_from_slice(b"\0pending-key-package-only");
     Ok(aad)
 }
 

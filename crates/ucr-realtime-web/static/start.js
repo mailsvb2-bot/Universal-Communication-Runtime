@@ -320,6 +320,401 @@ function showActive() {
   else if (active.call.state === "terminated") setCallStage(1, "Вызов завершён. Выберите контакт для нового звонка.");
   else setCallStage(2, active.call.media === "video" ? "Видеовызов отправлен. Ожидается принятие вторым участником; камера пока выключена." : "Аудиовызов отправлен. Ожидается принятие вторым участником; микрофон пока выключен.");
 }
+// The first-party /start page is the only owner of PRE-Join MLS creation.
+// The existing canonical BFF authorizes every mutation; the browser keeps
+// OpenMLS private state in the SAME encrypted IndexedDB store as client.html.
+// A Join is never requested until both authenticated endpoints have converged.
+const MLS_DB="ucr-endpoint-state-v1",MLS_DB_VERSION=2;
+const MLS_SNAPSHOTS="sealed-snapshots",MLS_WRAPPING="wrapping-key-vault";
+const MLS_AAD="UCR-ENDPOINT-WRAPPING-KEY-V1\0";
+const MLS_MAX_SNAPSHOT=4*1024*1024;
+let mlsPreparation=null,mlsModulePromise=null;
+function mlsStateKey(user,descriptor){
+  const key="ucr-e2ee-state:fp-v1:"+JSON.stringify([
+    user.tenantId,user.namespaceId,descriptor.mediaCallId,
+    user.participantId,user.deviceId
+  ]);
+  if(key.length>512)throw Error("Endpoint MLS storage scope too large");
+  return key;
+}
+function mlsDb(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open(MLS_DB,MLS_DB_VERSION);
+    let settled=false;
+    req.onupgradeneeded=()=>{
+      if(settled){try{req.transaction?.abort();}catch{}return;}
+      if(!req.result.objectStoreNames.contains(MLS_SNAPSHOTS))
+        req.result.createObjectStore(MLS_SNAPSHOTS);
+      if(!req.result.objectStoreNames.contains(MLS_WRAPPING))
+        req.result.createObjectStore(MLS_WRAPPING);
+    };
+    req.onsuccess=()=>{if(settled){req.result.close();return;}settled=true;resolve(req.result);};
+    req.onerror=()=>{if(!settled){settled=true;reject(req.error||Error("MLS IndexedDB open failed"));}};
+    req.onblocked=()=>{if(!settled){settled=true;reject(Error("MLS IndexedDB upgrade blocked"));}};
+  });
+}
+async function mlsRecord(store,key,write,record,insertOnly=false){
+  const db=await mlsDb();
+  try{
+    return await new Promise((resolve,reject)=>{
+      const tx=db.transaction(store,write?"readwrite":"readonly");
+      const object=tx.objectStore(store);
+      const req=write?(insertOnly?object.add(record,key):object.put(record,key)):object.get(key);
+      let result;
+      req.onsuccess=()=>{result=req.result;};
+      req.onerror=()=>reject(req.error||Error("MLS IndexedDB request failed"));
+      tx.oncomplete=()=>resolve(write?undefined:result??null);
+      tx.onerror=()=>reject(req.error||tx.error||Error("MLS IndexedDB transaction failed"));
+      tx.onabort=()=>reject(req.error||tx.error||Error("MLS IndexedDB transaction aborted"));
+    });
+  }finally{db.close();}
+}
+function mlsBytes(bytes){
+  const value=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
+  if(!value.length||value.length>MLS_MAX_SNAPSHOT)throw Error("Invalid sealed MLS snapshot");
+  return value;
+}
+async function mlsSnapshot(key){
+  const record=await mlsRecord(MLS_SNAPSHOTS,key,false);
+  return record===null?null:mlsBytes(record).slice();
+}
+async function mlsSave(key,bytes,first=false){
+  await mlsRecord(MLS_SNAPSHOTS,key,true,Array.from(mlsBytes(bytes)),first);
+}
+// A write-ahead transition record uses the existing sealed-snapshots store.
+// No private MLS key is stored in plaintext: the next-epoch snapshot is sealed
+// by the same Device-held wrapping key and never sent to the BFF.
+async function mlsTransition(key,record){
+  const journalKey=key+":pending-commit-v1";
+  if(record===undefined)return mlsRecord(MLS_SNAPSHOTS,journalKey,false);
+  if(record===null)return mlsRecord(MLS_SNAPSHOTS,journalKey,true,null);
+  return mlsRecord(MLS_SNAPSHOTS,journalKey,true,record);
+}
+function checkedMlsTransition(journal,descriptor){
+  if(!journal||journal.version!==1||journal.groupId!==descriptor.groupId||
+     !Number.isSafeInteger(journal.epoch)||journal.epoch!==1||
+     !Number.isSafeInteger(journal.groupRevision)||journal.groupRevision!==0||
+     typeof journal.ref!=="string"||!journal.ref||
+     typeof journal.baseRef!=="string"||!journal.baseRef||
+     typeof journal.eventId!=="string"||!journal.eventId||
+     typeof journal.recipientDeviceId!=="string"||
+     typeof journal.recipientSignerKeyId!=="string"||
+     typeof journal.recipientKeyPackageBase64Url!=="string"||
+     typeof journal.recipientSignatureBase64Url!=="string"||
+     !Array.isArray(journal.commit)||!Array.isArray(journal.welcome)||
+     !Array.isArray(journal.sealed))
+    throw Error("Corrupt pending MLS Commit journal");
+  const bounded=(value,max)=>{
+    if(value.length===0||value.length>max||
+       value.some(byte=>!Number.isInteger(byte)||byte<0||byte>255))
+      throw Error("Invalid pending MLS Commit journal bytes");
+    return new Uint8Array(value);
+  };
+  return {
+    ...journal,commit:bounded(journal.commit,8192),
+    welcome:bounded(journal.welcome,8192),
+    sealed:bounded(journal.sealed,MLS_MAX_SNAPSHOT)
+  };
+}
+function mlsWrappingRecord(record){
+  if(!record||record.version!==1||record.kek?.type!=="secret"||
+     record.kek.extractable!==false||record.kek.algorithm?.name!=="AES-GCM")
+    throw Error("Invalid MLS wrapping-key record");
+  const iv=new Uint8Array(record.iv),wrapped=new Uint8Array(record.wrapped);
+  if(iv.length!==12||wrapped.length<=32)throw Error("Invalid MLS wrapping-key ciphertext");
+  return {...record,iv,wrapped};
+}
+async function mlsWrappingKey(key,{requireExisting=false}={}){
+  let record=await mlsRecord(MLS_WRAPPING,key,false);
+  if(record===null){
+    if(requireExisting)throw Error("Existing MLS snapshot has no wrapping key");
+    const kek=await crypto.subtle.generateKey({name:"AES-GCM",length:256},false,["encrypt","decrypt"]);
+    const candidate=crypto.getRandomValues(new Uint8Array(32));
+    const iv=crypto.getRandomValues(new Uint8Array(12));
+    try{
+      const wrapped=new Uint8Array(await crypto.subtle.encrypt({
+        name:"AES-GCM",iv,additionalData:new TextEncoder().encode(MLS_AAD+key)
+      },kek,candidate));
+      try{
+        await mlsRecord(MLS_WRAPPING,key,true,{
+          version:1,kek,iv:Array.from(iv),wrapped:Array.from(wrapped)
+        },true);
+        return candidate.slice();
+      }catch(error){
+        if(error?.name!=="ConstraintError")throw error;
+      }
+    }finally{candidate.fill(0);}
+    record=await mlsRecord(MLS_WRAPPING,key,false);
+    if(record===null)throw Error("Concurrent MLS key creation lost committed winner");
+  }
+  const saved=mlsWrappingRecord(record);
+  const result=new Uint8Array(await crypto.subtle.decrypt({
+    name:"AES-GCM",iv:saved.iv,additionalData:new TextEncoder().encode(MLS_AAD+key)
+  },saved.kek,saved.wrapped));
+  if(result.length!==32||result.every(byte=>byte===0))
+    throw Error("Invalid recovered MLS wrapping key");
+  return result;
+}
+async function mlsWasm(){
+  if(!mlsModulePromise)mlsModulePromise=(async()=>{
+    const module=await import("/endpoint-wasm/ucr_endpoint_wasm.js");
+    if(typeof module.default!=="function"||
+       typeof module.EndpointMlsState!=="function"||
+       typeof module.endpoint_wasm_contract_version!=="function")
+      throw Error("Endpoint-owned OpenMLS WASM package unavailable");
+    await module.default();
+    if(module.endpoint_wasm_contract_version()!=="ucr.endpoint-wasm.v1")
+      throw Error("Endpoint-owned OpenMLS WASM contract unavailable");
+    return module;
+  })().catch(error=>{mlsModulePromise=null;throw error;});
+  return mlsModulePromise;
+}
+async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
+  const selected=active;
+  const check=async()=>{
+    if(navigating||accountScope!==selectedScope||!active||
+       active.terminating||active.call.callId!==callId||
+       active.call.state!=="active"||activeCallLocator()!==locator)
+      throw Error("MLS preparation cancelled by Call withdrawal");
+    const user=await host.resumeAuthenticatedDevice();
+    if(principalScope(user)!==selectedScope)
+      throw Error("MLS preparation cancelled by Device change");
+    const call=await calls.inspect(callId);
+    if(call.state!=="active"||call.callId!==callId)
+      throw Error("MLS preparation cancelled by canonical Call");
+    return {user,call};
+  };
+  const initial=await check();
+  const user=initial.user,call=initial.call;
+  const request={callId,expectedRevision:call.revision};
+  const descriptor=await host.describeAcceptedCallMls(user,request);
+  await check();
+  if(descriptor.callId!==callId||descriptor.deviceId!==user.deviceId||
+     descriptor.requiresEndpointOwnedCommit!==true)
+    throw Error("Untrusted first-party MLS descriptor");
+  const creator=descriptor.creatorPrincipalId===user.participantId;
+  const key=mlsStateKey(user,descriptor);
+  const operation=async()=>{
+    const module=await mlsWasm();
+    let state=null;
+    let sealed=await mlsSnapshot(key);
+    let wrapping=null;
+    try{
+      wrapping=await mlsWrappingKey(key,{requireExisting:sealed!==null});
+      await check();
+      if(creator){
+        // Recover the exact already-staged wire after uncertain server ACK,
+        // crash, or failed local promotion. Never stage a second random Commit.
+        const rawJournal=await mlsTransition(key);
+        if(rawJournal!==null){
+          const journal=checkedMlsTransition(rawJournal,descriptor);
+          if(descriptor.cryptoEpoch===0 &&
+             descriptor.groupRevision===journal.groupRevision &&
+             descriptor.cryptoStateRef===journal.baseRef){
+            await check();
+            await host.addEndpointMlsPeer(user,{
+              ...request,groupRevision:journal.groupRevision,
+              eventId:journal.eventId,cryptoEpoch:journal.epoch,
+              cryptoStateRef:journal.ref,
+              recipientDeviceId:journal.recipientDeviceId,
+              recipientSignerKeyId:journal.recipientSignerKeyId,
+              recipientKeyPackageBase64Url:journal.recipientKeyPackageBase64Url,
+              recipientSignatureBase64Url:journal.recipientSignatureBase64Url,
+              commit:journal.commit,welcome:journal.welcome
+            });
+            await check();
+          }else if(descriptor.cryptoEpoch!==journal.epoch ||
+                   descriptor.cryptoStateRef!==journal.ref){
+            throw Error("Canonical MLS epoch conflicts with pending Commit; media fenced");
+          }
+          const canonical=await host.describeAcceptedCallMls(user,request);
+          await check();
+          if(canonical.cryptoEpoch!==journal.epoch||
+             canonical.cryptoStateRef!==journal.ref||
+             canonical.expectedPeerDeviceId!==journal.recipientDeviceId)
+            throw Error("Pending MLS Commit not canonically confirmed; media fenced");
+          // Validate sealed new epoch locally before replacing the old snapshot.
+          state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
+            descriptor.groupId,user.deviceId,wrapping,journal.sealed,
+            BigInt(journal.epoch),journal.ref);
+          state.authorize_direct_call_roster(journal.recipientDeviceId);
+          await mlsSave(key,journal.sealed);
+          await mlsTransition(key,null);
+          sealed=journal.sealed;
+          return true;
+        }
+        if(descriptor.cryptoEpoch===null){
+          if(sealed===null){
+            state=new module.EndpointMlsState(user.tenantId,user.namespaceId??undefined,
+              descriptor.groupId,user.deviceId);
+            state.create_endpoint_group();
+            // Seal the creator's epoch-zero Group in a distinct AAD domain
+            // BEFORE publishing. A lost HTTP acknowledgement must not mint
+            // another MLS identity or permanently strand the first Group.
+            await mlsSave(key,state.seal_unpublished_group(wrapping),true);
+          }else{
+            state=module.EndpointMlsState.restore_unpublished_group(
+              user.tenantId,user.namespaceId??undefined,descriptor.groupId,
+              user.deviceId,wrapping,sealed);
+          }
+          await check();
+          await host.publishEndpointMlsGroup(user,{
+            ...request,cryptoStateRef:state.crypto_state_ref()
+          });
+          await check();
+          // A recipient's independently signed offer may arrive later.
+          return false;
+        }
+        if(sealed===null)throw Error("Initiator's private OpenMLS snapshot is missing");
+        if(descriptor.cryptoEpoch===0){
+          // An accepted epoch-zero publication may have lost its HTTP reply
+          // or crashed before local promotion. Recover the SAME sealed Group,
+          // verify the canonical digest, then atomically promote the snapshot.
+          let unpublished=false;
+          try{
+            state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
+              descriptor.groupId,user.deviceId,wrapping,sealed,
+              0n,descriptor.cryptoStateRef);
+          }catch{
+            state=module.EndpointMlsState.restore_unpublished_group(
+              user.tenantId,user.namespaceId??undefined,descriptor.groupId,
+              user.deviceId,wrapping,sealed);
+            unpublished=true;
+          }
+          if(state.crypto_state_ref()!==descriptor.cryptoStateRef)
+            throw Error("Published MLS epoch-zero digest differs from local Group");
+          if(unpublished){
+            await mlsSave(key,state.seal_snapshot(wrapping));
+            await check();
+          }
+        }else{
+          state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
+            descriptor.groupId,user.deviceId,wrapping,sealed,
+            BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef);
+        }
+        if(descriptor.cryptoEpoch===0){
+          const offers=await host.listEndpointMlsOffers(user,request);
+          await check();
+          if(offers.length===0)return false;
+          if(offers.length!==1||offers[0].recipientDeviceId===user.deviceId)
+            throw Error("Ambiguous authenticated MLS recipient offer");
+          const offer=offers[0];
+          const packageBytes=Uint8Array.from(atob(
+            offer.recipientKeyPackageBase64Url.replace(/-/g,"+").replace(/_/g,"/")+
+            "=".repeat((4-offer.recipientKeyPackageBase64Url.length%4)%4)
+          ),ch=>ch.charCodeAt(0));
+          const commit=state.stage_add_device(offer.recipientDeviceId,packageBytes);
+          const epoch=Number(state.pending_epoch()),stateRef=state.pending_state_ref();
+          const welcome=state.pending_welcome();
+          // Merge locally only to prepare a sealed next-epoch checkpoint.
+          // Media remains fenced until the canonical server CAS is verified.
+          state.merge_endpoint_transition(BigInt(epoch),stateRef);
+          const journal=checkedMlsTransition({
+            version:1,groupId:descriptor.groupId,groupRevision:descriptor.groupRevision,
+            baseRef:descriptor.cryptoStateRef,eventId:crypto.randomUUID(),epoch,ref:stateRef,
+            recipientDeviceId:offer.recipientDeviceId,
+            recipientSignerKeyId:offer.recipientSignerKeyId,
+            recipientKeyPackageBase64Url:offer.recipientKeyPackageBase64Url,
+            recipientSignatureBase64Url:offer.recipientSignatureBase64Url,
+            commit:Array.from(commit),welcome:Array.from(welcome),
+            sealed:Array.from(state.seal_snapshot(wrapping))
+          },descriptor);
+          // Durable journal FIRST. If this fails, nothing is sent to server.
+          await mlsTransition(key,{...journal,
+            commit:Array.from(journal.commit),welcome:Array.from(journal.welcome),
+            sealed:Array.from(journal.sealed)});
+          await check();
+          await host.addEndpointMlsPeer(user,{
+            ...request,groupRevision:journal.groupRevision,
+            eventId:journal.eventId,cryptoEpoch:journal.epoch,cryptoStateRef:journal.ref,
+            recipientDeviceId:journal.recipientDeviceId,
+            recipientSignerKeyId:journal.recipientSignerKeyId,
+            recipientKeyPackageBase64Url:journal.recipientKeyPackageBase64Url,
+            recipientSignatureBase64Url:journal.recipientSignatureBase64Url,
+            commit:journal.commit,welcome:journal.welcome
+          });
+          const canonical=await host.describeAcceptedCallMls(user,request);
+          await check();
+          if(canonical.cryptoEpoch!==epoch||canonical.cryptoStateRef!==stateRef||
+             canonical.expectedPeerDeviceId!==offer.recipientDeviceId)
+            throw Error("Server did not confirm the staged MLS Commit");
+          await mlsSave(key,journal.sealed);
+          await mlsTransition(key,null);
+          await check();
+        }
+      }else{
+        // The durable public offer has a foreign key to the canonical Group:
+        // never publish before the initiator's signed epoch-zero creation.
+        if(descriptor.cryptoEpoch===null)return false;
+        if(sealed===null){
+          if(descriptor.cryptoEpoch!==0)
+            throw Error("Recipient KeyPackage missing after canonical MLS admission");
+          state=new module.EndpointMlsState(user.tenantId,user.namespaceId??undefined,
+            descriptor.groupId,user.deviceId);
+          await mlsSave(key,state.seal_unjoined_key_package(wrapping),true);
+          sealed=await mlsSnapshot(key);
+          await check();
+        }
+        if(descriptor.cryptoEpoch===0){
+          if(!state)state=module.EndpointMlsState.restore_unjoined_key_package(
+            user.tenantId,user.namespaceId??undefined,descriptor.groupId,
+            user.deviceId,wrapping,sealed);
+          // Idempotent retry of the EXACT SAME signed KeyPackage. A failed
+          // first HTTP response must not strand a durable pending offer.
+          await host.publishEndpointMlsOffer(user,{
+            ...request,keyPackage:new Uint8Array(state.key_package())
+          });
+          await check();
+          return false;
+        }
+        try{
+          state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
+            descriptor.groupId,user.deviceId,wrapping,sealed,
+            BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef);
+        }catch{
+          state=module.EndpointMlsState.restore_unjoined_key_package(
+            user.tenantId,user.namespaceId??undefined,descriptor.groupId,
+            user.deviceId,wrapping,sealed);
+          const bootstrap=await host.fetchEndpointMlsBootstrap(user,request);
+          await check();
+          if(bootstrap.groupId!==descriptor.groupId||
+             bootstrap.cryptoEpoch!==descriptor.cryptoEpoch||
+             bootstrap.cryptoStateRef!==descriptor.cryptoStateRef)
+            throw Error("Canonical MLS Welcome does not match accepted Call");
+          state.join_from_welcome(bootstrap.welcome,BigInt(bootstrap.welcomeEpoch),
+            bootstrap.welcomeStateRef);
+          for(const item of bootstrap.commits)
+            state.process_commit(item.commit,BigInt(item.cryptoEpoch),item.cryptoStateRef);
+          if(Number(state.crypto_epoch())!==descriptor.cryptoEpoch||
+             state.crypto_state_ref()!==descriptor.cryptoStateRef)
+            throw Error("Recipient OpenMLS epoch differs from canonical admission");
+          await mlsSave(key,state.seal_snapshot(wrapping));
+          await check();
+        }
+      }
+      const committed=await host.describeAcceptedCallMls(user,request);
+      await check();
+      if(committed.cryptoEpoch===null||committed.cryptoEpoch<1||
+         !committed.expectedPeerDeviceId||
+         committed.expectedPeerDeviceId===user.deviceId||
+         committed.groupId!==descriptor.groupId||
+         committed.cryptoEpoch!==Number(state.crypto_epoch())||
+         committed.cryptoStateRef!==state.crypto_state_ref())
+        return false;
+      state.authorize_direct_call_roster(committed.expectedPeerDeviceId);
+      return true;
+    }finally{
+      if(wrapping)wrapping.fill(0);
+      if(state&&typeof state.free==="function")state.free();
+    }
+  };
+  // Serialize competing same-origin tabs. No second Call, Identity or key
+  // authority: this lock only fences local encrypted MLS snapshot updates.
+  if(!navigator.locks?.request)
+    throw Error("Cross-tab MLS persistence lock unavailable; refusing unsafe Join");
+  return navigator.locks.request("ucr-first-party-mls:"+key,{mode:"exclusive"},operation);
+}
+
 async function beginMedia(callId) {
   if (navigating) return;
   // A signed Join is valid only for the still-selected accepted Call/Device.
@@ -331,6 +726,20 @@ async function beginMedia(callId) {
   const selectedLocator = activeCallLocator();
   // This coordinator permits Join ONLY after the recipient has accepted
   // and the canonical owner reports ACTIVE. It never creates trust or keys.
+  // A real endpoint-owned MLS group and the recipient's independently
+  // authenticated KeyPackage/Welcome MUST precede any signed Join.
+  if(mlsPreparation)return;
+  const preparation=prepareFirstPartyEndpointMls(callId,selectedScope,selectedLocator);
+  mlsPreparation=preparation;
+  let mlsReady;
+  try{mlsReady=await preparation;}
+  finally{if(mlsPreparation===preparation)mlsPreparation=null;}
+  if(!mlsReady)return;
+  // A slow MLS preflight can outlive Hangup or a Device switch. Revalidate
+  // immediately before the irreversible signed Join request.
+  if(navigating||accountScope!==selectedScope||!active||
+     active.terminating||active.call.callId!==callId||
+     active.call.state!=="active"||activeCallLocator()!==selectedLocator)return;
   const grant = await calls.join(callId);
   if (!grant || grant.callId !== callId) throw Error("Call admission mismatch");
   // Periodic inspection may replace the object for the SAME active Call.

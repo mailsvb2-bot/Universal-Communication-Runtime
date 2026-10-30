@@ -30,6 +30,10 @@ export interface UcrCanonicalBrowserMediaAdmission {
   readonly signingSeed: Uint8Array;
   /** The active trusted-key descriptor must match the signer's actual public key. */
   readonly trustedLocalVerifyingKey: Uint8Array;
+  /** For fp-mg- direct Calls only: independently authenticated peer Device ID.
+   * Never derive this from MLS Welcome, the join fragment or SFU metadata.
+   */
+  readonly expectedPeerDeviceId?: string;
   readonly trustedKeys: UcrTrustedSourceKeys;
   readonly audioContext: AudioContext;
   readonly remoteVideoCanvas?: HTMLCanvasElement | OffscreenCanvas;
@@ -107,6 +111,27 @@ export function createUcrCanonicalBrowserMediaFactory(
     const epoch = (bootstrap.state as {crypto_epoch(): bigint}).crypto_epoch();
     if (BigInt(epoch) !== binding.cryptoEpoch) {
       throw new Error("endpoint MLS epoch differs from canonical media binding");
+    }
+    // A direct Call is never allowed to export a media key merely because a
+    // server-signed state reference and Group projection claim two members.
+    // Check the *actual locally verified OpenMLS leaves* against the trusted
+    // peer Device supplied by the canonical admission owner. The WASM bridge
+    // additionally fences this authorization to its current MLS generation.
+    if (binding.groupId.startsWith("fp-mg-")) {
+      const peer = admission.expectedPeerDeviceId;
+      if (typeof peer !== "string" || peer.length < 1 || peer.length > 128 ||
+          !/^[A-Za-z0-9_.:@-]+$/.test(peer) || peer === admission.deviceId ||
+          typeof (bootstrap.state as {
+            authorize_direct_call_roster?: unknown;
+          }).authorize_direct_call_roster !== "function") {
+        throw new Error("canonical direct Call peer Device/MLS roster authority unavailable");
+      }
+      (bootstrap.state as {
+        authorize_direct_call_roster(peerDeviceId: string): void;
+      }).authorize_direct_call_roster(peer);
+      if (!admission.isCurrent()) {
+        throw new Error("canonical direct Call revoked during MLS roster validation");
+      }
     }
     // Rust owns MLS and derives the media exporter internally; copy and erase
     // only our temporary seed buffer, never mutate the device's key vault.

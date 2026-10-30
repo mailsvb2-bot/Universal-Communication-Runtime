@@ -1,5 +1,15 @@
 # Local Windows first-party HTTPS smoke launcher; does not prove a two-person E2EE call.
-param([string]$RepositoryRoot = '', [switch]$OpenSecondPersistentProfile, [switch]$DebugBuild)
+param(
+    [string]$RepositoryRoot = '',
+    [switch]$OpenSecondPersistentProfile,
+    [switch]$DebugBuild,
+    [string]$PublicOrigin = '',
+    [string]$PublicCertificate = '',
+    [string]$PublicPrivateKey = '',
+    [string]$PublicEdgeBind = '0.0.0.0:443',
+    [string]$TurnUrl = '',
+    [string]$TurnSecretFile = ''
+)
 # Keeps the existing canonical SQLite and in-process first-party BFF owner.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -18,7 +28,50 @@ $db = Join-Path $state 'runtime.sqlite'
 $keyFile = Join-Path $state 'join-signing.dpapi'
 $cert = Join-Path $state 'localhost.crt.pem'
 $privateKey = Join-Path $state 'localhost.key.pem'
+# Optional public ingress uses this SAME canonical runtime and no alternate owner.
+$remote = -not [string]::IsNullOrWhiteSpace($PublicOrigin)
 $origin = 'https://localhost:8443'
+if ($remote) {
+    $parsed = $null
+    if (-not [Uri]::TryCreate($PublicOrigin,[UriKind]::Absolute,[ref]$parsed) -or
+        $parsed.Scheme -ne 'https' -or $parsed.Port -ne 443 -or
+        $parsed.AbsolutePath -ne '/' -or $parsed.Query -or $parsed.Fragment -or
+        $parsed.UserInfo -or $parsed.Host -eq 'localhost' -or
+        $parsed.Host -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$') {
+        throw 'Public origin requires external HTTPS DNS on port 443, without path or credentials'
+    }
+    $ip = $null
+    if ([Net.IPAddress]::TryParse($parsed.Host,[ref]$ip)) {
+        throw 'Public origin must use DNS, not an IP literal'
+    }
+    if ($PublicEdgeBind -cnotmatch '^(0\.0\.0\.0|\[::\]):443$') {
+        throw 'Public edge must bind TCP 443; internal APIs remain loopback'
+    }
+    if (!$PublicCertificate -or !$PublicPrivateKey -or
+        !(Test-Path -LiteralPath $PublicCertificate -PathType Leaf) -or
+        !(Test-Path -LiteralPath $PublicPrivateKey -PathType Leaf)) {
+        throw 'Public TLS certificate and private key must already exist'
+    }
+    $turnMatch = [regex]::Match($TurnUrl, '^turns:([a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])(?::([0-9]{1,5}))?(\?transport=tcp)?$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (!$turnMatch.Success -or !$TurnSecretFile -or
+        !(Test-Path -LiteralPath $TurnSecretFile -PathType Leaf)) {
+        throw 'Public mode requires external TURNS and existing TURN REST secret'
+    }
+    $turnHost = $turnMatch.Groups[1].Value
+    if ($turnMatch.Groups[2].Success) {
+        $turnPort = [int]$turnMatch.Groups[2].Value
+        if ($turnPort -lt 1 -or $turnPort -gt 65535) { throw 'Invalid public TURN port' }
+    }
+    $turnIp = $null
+    if ($turnHost -eq 'localhost' -or [Net.IPAddress]::TryParse($turnHost,[ref]$turnIp)) {
+        throw 'Public TURN must use an external DNS hostname'
+    }
+    $origin = $parsed.AbsoluteUri.TrimEnd('/')
+    $cert = (Resolve-Path -LiteralPath $PublicCertificate).Path
+    $privateKey = (Resolve-Path -LiteralPath $PublicPrivateKey).Path
+} elseif ($PublicCertificate -or $PublicPrivateKey -or $TurnUrl -or $TurnSecretFile) {
+    throw 'External TLS/TURN parameters require -PublicOrigin'
+}
 $vc = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
 $opensslRoot = 'C:\UCR-OpenSSL'
 $logRoot = Join-Path $state 'logs'
@@ -56,11 +109,14 @@ if (!$curl) {
 }
 if (!$curl) { throw 'curl.exe with modern TLS support is required to verify the local HTTPS edge (Git for Windows includes one).' }
 function Https-Status([string]$uri) {
-    # --cacert pins the freshly generated localhost certificate; no -k/--insecure.
-    $status = & $curl '--cacert' $cert '--silent' '--show-error' '--max-time' '6' '--output' 'NUL' '--write-out' '%{http_code}' $uri
+    # Public: normal CA/hostname validation. Local: pin development cert.
+    # Never use -k/--insecure or install a public certificate as a local CA.
+    $args = @('--silent','--show-error','--max-time','6','--output','NUL','--write-out','%{http_code}')
+    if (!$remote) { $args = @('--cacert',$cert) + $args }
+    $status = & $curl @args $uri
     if ($LASTEXITCODE -ne 0) { return 0 }
     $code = 0
-    if ([int]::TryParse(($status | Out-String).Trim(), [ref]$code)) { return $code }
+    if ([int]::TryParse(($status | Out-String).Trim(),[ref]$code)) { return $code }
     return 0
 }
 function Start-Ucr([string]$exe,[string[]]$arguments,[string]$name) {
@@ -89,9 +145,24 @@ if (!$openssl) { throw 'OpenSSL executable not found; install OpenSSL CLI. No TL
 
 # An expired/mismatched certificate is never reused. Check before trusting it.
 # Rotate proactively with at least 24 hours remaining, to avoid dying mid-session.
-$renewCertificate = !(Test-Path -LiteralPath $cert -PathType Leaf) -or
+$renewCertificate = !$remote -and (
+    !(Test-Path -LiteralPath $cert -PathType Leaf) -or
     !(Test-Path -LiteralPath $privateKey -PathType Leaf)
-if (!$renewCertificate) {
+)
+if ($remote) {
+    & $openssl 'x509' '-in' $cert '-noout' '-checkend' '86400' 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Public TLS certificate expires within 24 hours or is invalid' }
+    $certPublic = (& $openssl 'x509' '-in' $cert '-pubkey' '-noout' | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or !$certPublic) { throw 'Public TLS certificate public key unavailable' }
+    $keyPublic = (& $openssl 'pkey' '-in' $privateKey '-pubout' | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or !$keyPublic -or $certPublic -cne $keyPublic) {
+        throw 'Public TLS certificate/private key mismatch'
+    }
+    $hostCheck = (& $openssl 'x509' '-in' $cert '-noout' '-checkhost' $parsed.Host | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $hostCheck -notmatch 'does match certificate') {
+        throw 'Public TLS certificate hostname mismatch'
+    }
+} elseif (!$renewCertificate) {
     & $openssl 'x509' '-in' $cert '-noout' '-checkend' '86400' 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) { $renewCertificate = $true }
     if (!$renewCertificate) {
@@ -135,8 +206,9 @@ if ($renewCertificate) {
 }
 # Trust changes require an explicit user decision. A trust failure halts, not falls back to HTTP.
 $thumbprint = (& $openssl x509 -in $cert -noout -fingerprint -sha256 | Out-String).Trim()
-Write-Host "Local development certificate: $thumbprint"
-$trusted = $false
+if ($remote) { Write-Host "Public certificate: $thumbprint" }
+else { Write-Host "Local development certificate: $thumbprint" }
+$trusted = $remote
 try {
     $x509 = New-Object Security.Cryptography.X509Certificates.X509Certificate2($cert)
     $store = New-Object Security.Cryptography.X509Certificates.X509Store('Root','CurrentUser')
@@ -170,7 +242,8 @@ foreach ($process in (Get-CimInstance Win32_Process | Where-Object { $_.Name -in
         Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
     }
 }
-foreach ($port in @(50051,50052,8080,8081,8443)) {
+$edgePort = if ($remote) { 443 } else { 8443 }
+foreach ($port in @(50051,50052,8080,8081,$edgePort)) {
     $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
     if ($listeners.Count -gt 0) { throw "Port $port already occupied; refusing to take over an unrelated service" }
 }
@@ -224,6 +297,29 @@ if ($secret.Length -ne 32) { throw 'Invalid existing DPAPI Join key' }
 $env:UCR_REALTIME_JOIN_KEY_HEX = -join ($secret | ForEach-Object { $_.ToString('x2') })
 [Array]::Clear($secret,0,$secret.Length)
 
+if ($remote) {
+    $turnBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $TurnSecretFile).Path)
+    try {
+        if ($turnBytes.Length -eq 32) {
+            $turnHex = -join ($turnBytes | ForEach-Object { $_.ToString('x2') })
+        } elseif ($turnBytes.Length -eq 64) {
+            $turnHex = [Text.Encoding]::ASCII.GetString($turnBytes)
+            if ($turnHex -cnotmatch '^[0-9a-fA-F]{64}$') {
+                throw 'TURN secret must be 32 raw bytes or 64 hexadecimal digits'
+            }
+        } else {
+            throw 'TURN secret must be 32 raw bytes or 64 hexadecimal digits'
+        }
+        $env:UCR_WEBRTC_TURN_URLS = $TurnUrl
+        $env:UCR_WEBRTC_TURN_SECRET_HEX = $turnHex
+        $env:UCR_WEBRTC_RELAY_ONLY = 'true'
+    } finally {
+        [Array]::Clear($turnBytes,0,$turnBytes.Length)
+    }
+} else {
+    Remove-Item Env:UCR_WEBRTC_TURN_URLS,Env:UCR_WEBRTC_TURN_SECRET_HEX,Env:UCR_WEBRTC_RELAY_ONLY -ErrorAction SilentlyContinue
+}
+
 $env:UCR_BROWSER_REALTIME_GATEWAY_ENABLED = 'true'
 $env:UCR_FIRST_PARTY_BIND = '127.0.0.1:8081'
 $env:UCR_FIRST_PARTY_PUBLIC_ORIGIN = $origin
@@ -231,7 +327,7 @@ $env:UCR_FIRST_PARTY_SELF_SERVICE_TENANT = 'ucr-local-test'
 $env:UCR_REALTIME_GRPC_UPSTREAM = 'http://127.0.0.1:50051'
 $env:UCR_FIRST_PARTY_UPSTREAM = '127.0.0.1:8081'
 $env:UCR_REALTIME_ALLOWED_ORIGINS = $origin
-$env:UCR_HTTPS_EDGE_BIND = '127.0.0.1:8443'
+$env:UCR_HTTPS_EDGE_BIND = if ($remote) { $PublicEdgeBind } else { '127.0.0.1:8443' }
 $env:UCR_HTTPS_EDGE_UPSTREAM = '127.0.0.1:8080'
 $env:UCR_HTTPS_EDGE_CERT_FILE = $cert
 $env:UCR_HTTPS_EDGE_KEY_FILE = $privateKey
@@ -248,12 +344,14 @@ try {
         Start-Sleep -Seconds 2
     }
     if (!$ready) { throw "Readiness failed. Check $logRoot and /readyz; not claiming a working video call." }
-    Write-Host 'UCR_LOCAL_HTTPS_FIRST_PARTY_READY'
+    if ($remote) { Write-Host 'UCR_PUBLIC_HTTPS_EDGE_STARTED_NOT_A_CALL_PROOF' }
+    else { Write-Host 'UCR_LOCAL_HTTPS_FIRST_PARTY_READY' }
     Write-Host "Open $origin/start"
-    Start-Process "$origin/start"
-    if ($OpenSecondPersistentProfile) {
+    if (!$remote) { Start-Process "$origin/start" }
+    if ($OpenSecondPersistentProfile -and !$remote) {
         & (Join-Path $root 'scripts\windows\open-second-persistent-chrome.ps1')
     }
+    if ($remote) { Write-Host 'TURNS relay reachability, coturn REST secret parity and Android admission remain unverified.' }
     Write-Host 'Next test: create two independent trusted identities, accept Call, and verify actual E2EE bidirectional A/V.'
 } catch {
     Write-Host "UCR local HTTPS startup failed: $_"

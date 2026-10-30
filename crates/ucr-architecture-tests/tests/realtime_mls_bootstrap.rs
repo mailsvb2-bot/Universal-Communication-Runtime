@@ -23,7 +23,34 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     assert!(!proto.contains("RealtimeGetMlsBootstrapRequest {\n  TenantScope scope = 1;\n  OpaqueId call_id = 2;\n  OpaqueId session_id = 3;\n  OpaqueId device_id"));
 
     assert!(service.contains("authenticated_claims(&token, &scope, &call_id, &session_id)"));
-    assert!(service.contains("self.registry\n                        .heartbeat(&claims"));
+    // MLS bootstrap must inspect the current Join without extending its lease.
+    // The sole presence-renewing RPC is Heartbeat, with a generation fence for
+    // first-party Calls. Keep this contract independent of rustfmt whitespace.
+    let bootstrap_handler = service
+        .split("async fn get_mls_bootstrap(")
+        .nth(1)
+        .expect("GetMlsBootstrap handler")
+        .split("async fn ")
+        .next()
+        .expect("GetMlsBootstrap body");
+    assert!(bootstrap_handler.contains(".require_active_session(&claims, self.now()?)"));
+    assert!(!bootstrap_handler.contains(".heartbeat(&claims"));
+
+    let heartbeat_handler = service
+        .split("async fn heartbeat_realtime(")
+        .nth(1)
+        .expect("Heartbeat handler")
+        .split("async fn ")
+        .next()
+        .expect("Heartbeat body");
+    assert!(heartbeat_handler.contains(".heartbeat_if_join_generation("));
+    assert!(heartbeat_handler.contains("if request.expected_session_sequence == 0"));
+    assert!(heartbeat_handler.contains("starts_with(\"fp-m-\")"));
+    assert!(
+        !service
+            .replace(heartbeat_handler, "")
+            .contains(".heartbeat(&claims")
+    );
     assert!(service.contains("self.device_bound_mls_bootstrap(&claims)"));
     assert!(service.contains(".device_id\n            .as_ref()"));
     assert!(
@@ -50,4 +77,40 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     assert!(grpc.contains(
         "GRPC_MAX_ENCODING_MESSAGE_SIZE >= REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES"
     ));
+}
+
+#[test]
+fn direct_media_requires_committed_endpoint_owned_epoch() {
+    let media = read("crates/ucr-runtime/src/first_party_media.rs");
+    let start = media
+        .split("pub(crate) fn prepare_direct_call_media<S>(")
+        .nth(1)
+        .expect("canonical direct media preparation");
+    let gate = start
+        .split("let media = ensure_media_call(")
+        .next()
+        .expect("media admission boundary");
+    assert!(gate.contains("group.crypto_state.epoch == 0"));
+    assert!(gate.contains("server_possesses_mls_group("));
+    assert!(gate.contains("GroupMemberState::Active"));
+}
+
+#[test]
+fn first_party_bootstrap_rejects_server_custody_before_welcome() {
+    let web = read("crates/ucr-runtime/src/first_party_web.rs");
+    let handler = web
+        .split("fn endpoint_mls_bootstrap(")
+        .nth(1)
+        .expect("first party endpoint bootstrap")
+        .split("fn issue_join(")
+        .next()
+        .expect("bootstrap boundary");
+    let custody_check = handler
+        .find("server_possesses_mls_group(")
+        .expect("server custody must fail closed");
+    let welcome_load = handler
+        .find(".mls_bootstrap_for_device(")
+        .expect("canonical device-bound Welcome retrieval");
+    assert!(custody_check < welcome_load);
+    assert!(handler.contains("return Err(StatusCode::CONFLICT)"));
 }

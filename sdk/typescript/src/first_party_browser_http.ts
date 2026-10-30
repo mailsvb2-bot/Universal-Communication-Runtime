@@ -20,7 +20,105 @@ import type {
  * No machine Service Principal credentials, private keys, MLS exporter or
  * permanent user/phone registry may be passed through these endpoints.
  */
+/** Metadata for endpoint-owned MLS initialization; NOT a Join grant. */
+export interface UcrEndpointMlsCallDescriptor {
+  readonly callId: string;
+  readonly expectedRevision: number;
+  /** Null until the canonical Group is created; never guess a CAS revision. */
+  readonly groupRevision: number | null;
+  /** Verified against the committed two-Device MLS transition and live Trust. */
+  readonly expectedPeerDeviceId: string | null;
+  readonly cryptoEpoch: number | null;
+  readonly cryptoStateRef: string | null;
+  readonly mediaCallId: string;
+  readonly groupId: string;
+  readonly conversationId: string;
+  readonly creatorPrincipalId: string;
+  readonly peerPrincipalId: string;
+  readonly deviceId: string;
+  readonly cryptoCapability: string;
+  readonly requiresEndpointOwnedCommit: true;
+}
+
+function parseEndpointMlsCallDescriptor(value: unknown): UcrEndpointMlsCallDescriptor {
+  if (!isObject(value)) throw new Error("missing endpoint MLS descriptor");
+  exactKeys(value, [
+    "callId", "expectedRevision", "groupRevision", "expectedPeerDeviceId", "cryptoEpoch",
+    "cryptoStateRef", "mediaCallId", "groupId", "conversationId",
+    "creatorPrincipalId", "peerPrincipalId", "deviceId", "cryptoCapability",
+    "requiresEndpointOwnedCommit",
+  ]);
+  if (!Number.isSafeInteger(value.expectedRevision) || Number(value.expectedRevision) < 0 ||
+      value.requiresEndpointOwnedCommit !== true) {
+    throw new Error("invalid or downgraded endpoint MLS descriptor");
+  }
+  const absent = value.groupRevision === null && value.cryptoEpoch === null &&
+    value.cryptoStateRef === null;
+  const created = Number.isSafeInteger(value.groupRevision) &&
+    Number(value.groupRevision) >= 0 && Number.isSafeInteger(value.cryptoEpoch) &&
+    Number(value.cryptoEpoch) >= 0 && typeof value.cryptoStateRef === "string" &&
+    value.cryptoStateRef.length > 0 && value.cryptoStateRef.length <= 128;
+  if (!absent && !created) {
+    throw new Error("inconsistent canonical MLS Group revision or crypto epoch");
+  }
+  const peer = value.expectedPeerDeviceId;
+  const peerRequired = created && Number(value.cryptoEpoch) > 0;
+  if ((peerRequired && (typeof peer !== "string" || peer === value.deviceId)) ||
+      (!peerRequired && peer !== null) ||
+      (typeof peer === "string" && !/^[A-Za-z0-9_.:@-]{1,128}$/.test(peer))) {
+    throw new Error("missing or untrusted committed MLS peer Device");
+  }
+  return Object.freeze({
+    callId: requiredId(value.callId, "Call"),
+    expectedRevision: Number(value.expectedRevision),
+    groupRevision: absent ? null : Number(value.groupRevision),
+    expectedPeerDeviceId: typeof peer === "string" ? peer : null,
+    cryptoEpoch: absent ? null : Number(value.cryptoEpoch),
+    cryptoStateRef: absent ? null : requiredId(value.cryptoStateRef, "MLS state ref"),
+    mediaCallId: requiredId(value.mediaCallId, "media Call"),
+    groupId: requiredId(value.groupId, "MLS Group"),
+    conversationId: requiredId(value.conversationId, "media Conversation"),
+    creatorPrincipalId: requiredId(value.creatorPrincipalId, "creator"),
+    peerPrincipalId: requiredId(value.peerPrincipalId, "peer"),
+    deviceId: requiredId(value.deviceId, "Device"),
+    cryptoCapability: requiredId(value.cryptoCapability, "crypto capability"),
+    requiresEndpointOwnedCommit: true,
+  });
+}
+
 export interface UcrManagedFirstPartyHost extends UcrDirectCallHost {
+  describeAcceptedCallMls(binding: UcrAuthenticatedFirstEntry, input: {callId: string; expectedRevision: number}): Promise<UcrEndpointMlsCallDescriptor>;
+  publishEndpointMlsGroup(binding: UcrAuthenticatedFirstEntry, input: {callId: string; expectedRevision: number; cryptoStateRef: string}): Promise<void>;
+  publishEndpointMlsOffer(binding: UcrAuthenticatedFirstEntry, input: {
+    callId: string; expectedRevision: number; keyPackage: Uint8Array;
+  }): Promise<void>;
+  listEndpointMlsOffers(binding: UcrAuthenticatedFirstEntry, input: {
+    callId: string; expectedRevision: number;
+  }): Promise<readonly {
+    recipientDeviceId: string; recipientSignerKeyId: string;
+    recipientKeyPackageBase64Url: string; recipientSignatureBase64Url: string;
+  }[]>;
+  prepareEndpointMlsKeyPackage(binding: UcrAuthenticatedFirstEntry, input: {callId: string; expectedRevision: number; keyPackage: Uint8Array}): Promise<{
+    recipientDeviceId: string;
+    recipientSignerKeyId: string;
+    recipientKeyPackageBase64Url: string;
+    recipientSignatureBase64Url: string;
+  }>;
+  addEndpointMlsPeer(binding: UcrAuthenticatedFirstEntry, input: {
+    callId: string; expectedRevision: number; groupRevision: number;
+    eventId: string; cryptoEpoch: number; cryptoStateRef: string;
+    recipientDeviceId: string; recipientSignerKeyId: string;
+    recipientKeyPackageBase64Url: string; recipientSignatureBase64Url: string;
+    commit: Uint8Array; welcome: Uint8Array;
+  }): Promise<void>;
+  fetchEndpointMlsBootstrap(binding: UcrAuthenticatedFirstEntry, input: {
+    callId: string; expectedRevision: number;
+  }): Promise<{
+    groupId: string; admissionEventId: string; welcome: Uint8Array;
+    welcomeEpoch: number; welcomeStateRef: string;
+    commits: readonly {commit: Uint8Array; cryptoEpoch: number; cryptoStateRef: string}[];
+    cryptoEpoch: number; cryptoStateRef: string;
+  }>;
   listDevices(): Promise<readonly {deviceId:string;state:string}[]>;
   revokeDevice(deviceId:string): Promise<void>;
   rotateRecoveryCode(): Promise<string>;
@@ -97,8 +195,13 @@ function snapshotBinding(binding: UcrDeviceEnrollmentBinding): UcrDeviceEnrollme
   });
 }
 
-function decodeBase64Url(value: unknown, length: number | null): Uint8Array {
-  if (typeof value !== "string" || value.length > 1024 ||
+function decodeBase64Url(
+  value: unknown, length: number | null, maxBytes = 768,
+): Uint8Array {
+  // The default remains deliberately small for Device signatures and keys.
+  // MLS public wires require an explicit, bounded larger allowance.
+  const maxEncodedLength = Math.ceil(maxBytes / 3) * 4;
+  if (typeof value !== "string" || value.length > maxEncodedLength ||
       !/^[A-Za-z0-9_-]+$/.test(value) || value.length % 4 === 1) {
     throw new Error("malformed first-party binary descriptor");
   }
@@ -511,6 +614,13 @@ export function createUcrFirstPartyHttpHost(
 
   const session = async (): Promise<UcrAuthenticatedFirstEntry> =>
     parseBinding(await request("GET", "/v1/first-party/session"));
+  // A response from a previously authenticated Device must not be consumed
+  // after the browser changes account or Device while the request is pending.
+  const requireSameSession = async (auth: UcrAuthenticatedFirstEntry): Promise<void> => {
+    if (!sameBinding(auth, await session())) {
+      throw new Error("first-party account or Device changed during MLS/Join operation");
+    }
+  };
   const inspect = async (binding: UcrDeviceEnrollmentBinding): Promise<UcrCanonicalDeviceTrust> => {
     const context = snapshotBinding(binding);
     const user = await session();
@@ -621,6 +731,280 @@ export function createUcrFirstPartyHttpHost(
         expectedRevision: input.expectedRevision, action: input.action,
       }) as Awaited<ReturnType<UcrDirectCallHost["signalDirectCall"]>>;
     },
+    async describeAcceptedCallMls(binding, input) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) {
+        throw new Error("first-party account changed before endpoint MLS bootstrap");
+      }
+      const descriptor = parseEndpointMlsCallDescriptor(await request(
+        "POST", "/v1/first-party/call/mls-descriptor", {
+          binding: auth, callId: requiredId(input.callId, "Call"),
+          expectedRevision: input.expectedRevision,
+        },
+      ));
+      await requireSameSession(auth);
+      if (descriptor.callId !== input.callId ||
+          descriptor.expectedRevision !== input.expectedRevision ||
+          descriptor.deviceId !== auth.deviceId ||
+          descriptor.peerPrincipalId === auth.participantId ||
+          !descriptor.mediaCallId.startsWith("fp-m-") ||
+          !descriptor.groupId.startsWith("fp-mg-") ||
+          !descriptor.conversationId.startsWith("fp-mc-")) {
+        throw new Error("endpoint MLS descriptor is not bound to the active Call/Device");
+      }
+      return descriptor;
+    },
+    async publishEndpointMlsGroup(binding, input) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) {
+        throw new Error("first-party account changed before signed MLS creation");
+      }
+      const descriptor = await this.describeAcceptedCallMls(auth, input);
+      if (descriptor.creatorPrincipalId !== auth.participantId) {
+        throw new Error("only the authorized Call initiator may create endpoint MLS");
+      }
+      const scope: UcrDeviceVaultScope = {
+        tenantId: auth.tenantId, namespaceId: auth.namespaceId, deviceId: auth.deviceId,
+      };
+      const signer = await vault.load(scope);
+      if (!signer || typeof signer.keyId !== "string" ||
+          !(signer.publicKey instanceof Uint8Array) || signer.publicKey.length !== 32) {
+        throw new Error("canonical protected Device signing key unavailable");
+      }
+      const cryptoStateRef = requiredId(input.cryptoStateRef, "endpoint MLS state");
+      const proof = new TextEncoder().encode(
+        "ucr-first-party-endpoint-mls-create.v1\u0000" + JSON.stringify([
+          auth.tenantId, auth.namespaceId, auth.participantId, auth.deviceId,
+          signer.keyId, input.callId, input.expectedRevision, descriptor.groupId,
+          0, cryptoStateRef,
+        ])
+      );
+      const signature = await vault.signChallenge(scope, proof);
+      if (!(signature instanceof Uint8Array) || signature.length !== 64 ||
+          !sameBinding(auth, await session())) {
+        throw new Error("endpoint MLS group creator signing failed");
+      }
+      const result = await request("POST", "/v1/first-party/call/mls-create", {
+        binding: auth, callId: input.callId,
+        expectedRevision: input.expectedRevision, cryptoStateRef,
+        signatureBase64Url: encodeBase64Url(signature),
+      });
+      await requireSameSession(auth);
+      if (!isObject(result) || result.callId !== input.callId ||
+          result.groupId !== descriptor.groupId ||
+          result.cryptoEpoch !== 0 ||
+          result.cryptoStateRef !== cryptoStateRef ||
+          result.requiresEndpointOwnedCommit !== true) {
+        throw new Error("server did not persist authorized endpoint MLS epoch zero");
+      }
+    },
+
+    async prepareEndpointMlsKeyPackage(binding, input) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) {
+        throw new Error("first-party session changed before MLS KeyPackage proof");
+      }
+      const descriptor = await this.describeAcceptedCallMls(auth, input);
+      if (descriptor.creatorPrincipalId === auth.participantId) {
+        throw new Error("MLS recipient KeyPackage must be signed by its own Device");
+      }
+      const scope: UcrDeviceVaultScope = {
+        tenantId: auth.tenantId, namespaceId: auth.namespaceId, deviceId: auth.deviceId,
+      };
+      const signer = await vault.load(scope);
+      if (!signer || typeof signer.keyId !== "string" ||
+          !(signer.publicKey instanceof Uint8Array) || signer.publicKey.length !== 32 ||
+          !(input.keyPackage instanceof Uint8Array) || input.keyPackage.length < 1 ||
+          input.keyPackage.length > 8192) {
+        throw new Error("protected recipient MLS signer or KeyPackage unavailable");
+      }
+      const hash = new Uint8Array(await globalThis.crypto.subtle.digest(
+        "SHA-256", input.keyPackage as Uint8Array<ArrayBuffer>,
+      ));
+      const proof = new TextEncoder().encode(
+        "ucr-first-party-endpoint-mls-key-package.v1\u0000" + JSON.stringify([
+          auth.tenantId, auth.namespaceId, auth.participantId, auth.deviceId,
+          signer.keyId, input.callId, descriptor.groupId, encodeBase64Url(hash),
+        ]),
+      );
+      const signature = await vault.signChallenge(scope, proof);
+      if (!(signature instanceof Uint8Array) || signature.length !== 64 ||
+          !sameBinding(auth, await session())) {
+        throw new Error("MLS KeyPackage signer failed or session rotated");
+      }
+      return {
+        recipientDeviceId: auth.deviceId,
+        recipientSignerKeyId: signer.keyId,
+        recipientKeyPackageBase64Url: encodeBase64Url(input.keyPackage),
+        recipientSignatureBase64Url: encodeBase64Url(signature),
+      };
+    },
+    async publishEndpointMlsOffer(binding, input) {
+      const auth = snapshotBinding(binding);
+      const descriptor = await this.describeAcceptedCallMls(auth, input);
+      if (descriptor.creatorPrincipalId === auth.participantId) {
+        throw new Error("initiator cannot publish peer MLS offer");
+      }
+      const offer = await this.prepareEndpointMlsKeyPackage(auth, input);
+      const result = await request("POST", "/v1/first-party/call/mls-offer", {
+        binding: auth, callId: input.callId, expectedRevision: input.expectedRevision,
+        recipientSignerKeyId: offer.recipientSignerKeyId,
+        recipientKeyPackageBase64Url: offer.recipientKeyPackageBase64Url,
+        recipientSignatureBase64Url: offer.recipientSignatureBase64Url,
+      });
+      await requireSameSession(auth);
+      if (!isObject(result) || result.callId !== input.callId ||
+          result.groupId !== descriptor.groupId || result.deviceId !== auth.deviceId ||
+          result.offerStored !== true) {
+        throw new Error("recipient MLS KeyPackage was not durably published");
+      }
+    },
+    async listEndpointMlsOffers(binding, input) {
+      const auth = snapshotBinding(binding);
+      const descriptor = await this.describeAcceptedCallMls(auth, input);
+      if (descriptor.creatorPrincipalId !== auth.participantId) {
+        throw new Error("only Call initiator can read recipient MLS offers");
+      }
+      const value = await request("POST", "/v1/first-party/call/mls-offers", {
+        binding: auth, callId: input.callId, expectedRevision: input.expectedRevision,
+      });
+      await requireSameSession(auth);
+      if (!isObject(value) || value.callId !== input.callId ||
+          value.groupId !== descriptor.groupId || !Array.isArray(value.offers) ||
+          value.offers.length > 8) {
+        throw new Error("untrusted endpoint MLS KeyPackage offer list");
+      }
+      return value.offers.map(offer => {
+        if (!isObject(offer)) throw new Error("invalid MLS offer");
+        exactKeys(offer, [
+          "recipientDeviceId", "recipientSignerKeyId",
+          "recipientKeyPackageBase64Url", "recipientSignatureBase64Url",
+        ]);
+        const recipientDeviceId = requiredId(offer.recipientDeviceId, "recipient Device");
+        const recipientSignerKeyId = requiredId(offer.recipientSignerKeyId, "recipient signer");
+        const recipientKeyPackageBase64Url = String(offer.recipientKeyPackageBase64Url);
+        const recipientSignatureBase64Url = String(offer.recipientSignatureBase64Url);
+        decodeBase64Url(recipientKeyPackageBase64Url, null, 8192);
+        if (decodeBase64Url(recipientSignatureBase64Url).length !== 64) {
+          throw new Error("invalid recipient MLS offer signature");
+        }
+        return Object.freeze({
+          recipientDeviceId, recipientSignerKeyId,
+          recipientKeyPackageBase64Url, recipientSignatureBase64Url,
+        });
+      });
+    },
+    async addEndpointMlsPeer(binding, input) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) throw new Error("first-party account changed");
+      const descriptor = await this.describeAcceptedCallMls(auth, input);
+      if (descriptor.creatorPrincipalId !== auth.participantId ||
+          descriptor.groupRevision === null ||
+          input.groupRevision !== descriptor.groupRevision ||
+          descriptor.cryptoEpoch === null ||
+          input.cryptoEpoch !== descriptor.cryptoEpoch + 1 ||
+          !Number.isSafeInteger(input.cryptoEpoch) || input.cryptoEpoch < 1) {
+        throw new Error("invalid or unauthorized endpoint-owned MLS Commit");
+      }
+      const scope: UcrDeviceVaultScope = {
+        tenantId: auth.tenantId, namespaceId: auth.namespaceId, deviceId: auth.deviceId,
+      };
+      const signer = await vault.load(scope);
+      if (!signer || !signer.keyId) throw new Error("canonical signing Device unavailable");
+      const digest = async (bytes: Uint8Array): Promise<string> => {
+        if (!(bytes instanceof Uint8Array) || bytes.length < 1 || bytes.length > 8192) {
+          throw new Error("endpoint MLS public wire bounds violated");
+        }
+        return encodeBase64Url(new Uint8Array(await globalThis.crypto.subtle.digest(
+          "SHA-256", bytes as Uint8Array<ArrayBuffer>,
+        )));
+      };
+      const recipientPackage = decodeBase64Url(input.recipientKeyPackageBase64Url, null, 8192);
+      const packageHash = await digest(recipientPackage);
+      const commitHash = await digest(input.commit);
+      const welcomeHash = await digest(input.welcome);
+      const proof = new TextEncoder().encode(
+        "ucr-first-party-endpoint-mls-add-peer.v1\u0000" + JSON.stringify([
+          auth.tenantId, auth.namespaceId, auth.participantId, auth.deviceId,
+          signer.keyId, input.callId, input.expectedRevision, descriptor.groupId,
+          input.groupRevision, input.eventId, input.cryptoEpoch, input.cryptoStateRef,
+          input.recipientDeviceId, input.recipientSignerKeyId,
+          packageHash, commitHash, welcomeHash,
+        ]),
+      );
+      const signature = await vault.signChallenge(scope, proof);
+      if (!(signature instanceof Uint8Array) || signature.length !== 64 ||
+          !sameBinding(auth, await session())) {
+        throw new Error("endpoint MLS Commit signing failed");
+      }
+      const result = await request("POST", "/v1/first-party/call/mls-add-peer", {
+        binding: auth, callId: input.callId, expectedRevision: input.expectedRevision,
+        groupRevision: input.groupRevision, eventId: input.eventId,
+        cryptoEpoch: input.cryptoEpoch, cryptoStateRef: input.cryptoStateRef,
+        recipientDeviceId: input.recipientDeviceId,
+        recipientSignerKeyId: input.recipientSignerKeyId,
+        recipientKeyPackageBase64Url: input.recipientKeyPackageBase64Url,
+        recipientSignatureBase64Url: input.recipientSignatureBase64Url,
+        commitBase64Url: encodeBase64Url(input.commit),
+        welcomeBase64Url: encodeBase64Url(input.welcome),
+        signatureBase64Url: encodeBase64Url(signature),
+      });
+      await requireSameSession(auth);
+      if (!isObject(result) || result.callId !== input.callId ||
+          result.groupId !== descriptor.groupId ||
+          result.cryptoEpoch !== input.cryptoEpoch ||
+          result.cryptoStateRef !== input.cryptoStateRef ||
+          result.recipientDeviceId !== input.recipientDeviceId ||
+          result.welcomeStored !== true) {
+        throw new Error("endpoint MLS Commit was not durably accepted");
+      }
+    },
+    async fetchEndpointMlsBootstrap(binding, input) {
+      const auth = snapshotBinding(binding);
+      if (!sameBinding(auth, await session())) throw new Error("first-party account changed");
+      const descriptor = await this.describeAcceptedCallMls(auth, input);
+      const value = await request("POST", "/v1/first-party/call/mls-bootstrap", {
+        binding: auth, callId: input.callId, expectedRevision: input.expectedRevision,
+      });
+      await requireSameSession(auth);
+      if (!isObject(value) || value.callId !== input.callId ||
+          value.groupId !== descriptor.groupId || value.deviceId !== auth.deviceId ||
+          !Array.isArray(value.commits) || value.commits.length > 128) {
+        throw new Error("invalid recipient-bound MLS Welcome");
+      }
+      const epoch = (value: unknown): number => {
+        if (!Number.isSafeInteger(value) || Number(value) < 0) {
+          throw new Error("invalid MLS epoch");
+        }
+        return Number(value);
+      };
+      const commits = value.commits.map(item => {
+        if (!isObject(item)) throw new Error("invalid MLS commit");
+        return {
+          commit: decodeBase64Url(String(item.commitBase64Url), null, 8192),
+          cryptoEpoch: epoch(item.cryptoEpoch),
+          cryptoStateRef: requiredId(item.cryptoStateRef, "MLS state ref"),
+        };
+      });
+      const welcomeEpoch = epoch(value.welcomeEpoch);
+      const cryptoEpoch = epoch(value.cryptoEpoch);
+      let lastEpoch = welcomeEpoch;
+      for (const item of commits) {
+        if (item.cryptoEpoch !== lastEpoch + 1) throw new Error("MLS commit chain gap/replay");
+        lastEpoch = item.cryptoEpoch;
+      }
+      if (lastEpoch !== cryptoEpoch) throw new Error("incomplete endpoint MLS chain");
+      return {
+        groupId: descriptor.groupId,
+        admissionEventId: requiredId(value.admissionEventId, "MLS admission"),
+        welcome: decodeBase64Url(String(value.welcomeBase64Url), null, 8192),
+        welcomeEpoch,
+        welcomeStateRef: requiredId(value.welcomeStateRef, "MLS state ref"),
+        commits,
+        cryptoEpoch,
+        cryptoStateRef: requiredId(value.cryptoStateRef, "MLS state ref"),
+      };
+    },
     async issueSignedJoinForAcceptedCall(binding, input: {
       callId: string; expectedRevision: number
     }) {
@@ -634,6 +1018,7 @@ export function createUcrFirstPartyHttpHost(
           expectedRevision: input.expectedRevision,
         },
       ));
+      await requireSameSession(auth);
       if (!sameBinding(auth,issued) || issued.callId !== input.callId) {
         throw new Error("first-party Join issuer returned a foreign Call/Device");
       }

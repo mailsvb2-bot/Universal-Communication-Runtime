@@ -910,10 +910,12 @@ preflightCtx.window.ucrInstallAuthorizedMediaEndpoint = () => ({});
 assert.doesNotThrow(() => preflightCtx.preflight(),
   "custom canonical host installer is permitted only under later strict E2EE checks");
 delete preflightCtx.window.ucrInstallAuthorizedMediaEndpoint;
-let unexpectedCapture = 0, unexpectedSignalling = 0;
+let unexpectedCapture = 0, unexpectedSignalling = 0, unexpectedGrantReads = 0;
 const earlyBlockedCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, navigator: {onLine: true},
   claims: {expires: Date.now() + 5000},
+  token: "untrusted-join-fragment",
+  body: () => {unexpectedGrantReads++;throw new Error("grant inspected before canonical trust");},
   ui: {privacyMode: {value: "secure"}},
   mediaCaptureGeneration: 1,
   installFirstPartyDeviceAuthority: async () => {},
@@ -929,6 +931,7 @@ assert.ok(preflightStartCode.startsWith("async function startWebRtc("));
 runInNewContext(preflightStartCode + "\nthis.start = startWebRtc;", earlyBlockedCtx);
 await assert.rejects(earlyBlockedCtx.start(),
   /Canonical Device signing\/trust integration is unavailable/);
+assert.equal(unexpectedGrantReads, 0, "no grant inspection before canonical trust preflight");
 assert.equal(unexpectedCapture, 0, "no microphone/camera prompt without trusted signer");
 assert.equal(unexpectedSignalling, 0, "no network offer without trusted signer");
 
@@ -1379,6 +1382,7 @@ let enterStartCapture: () => void = () => {};
 const startCaptureEntered = new Promise<void>(resolve => { enterStartCapture = resolve; });
 let serverOffers = 0, stalePeerCreates = 0, stalePeerCloses = 0;
 const startCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   peer: null,
   navigator: {onLine: true}, ui: {privacyMode: {value: "secure"}},
@@ -1403,27 +1407,43 @@ assert.equal(serverOffers, 1, "server offer is validated before device capture")
 assert.equal(stalePeerCreates, 0, "revoked admission cannot create a stale peer");
 assert.equal(stalePeerCloses, 1, "withdrawn admission retires its orphaned server offer");
 // A client peer newly owned by another path must never be closed by stale cleanup.
-let replacementPeerClosed = 0;
+// A replacement peer and grant may become current while the old offer is
+// awaiting local media. Retire only the old offer with its captured authority.
+const retiredClaims = {session_id: "retired-session"};
+const replacementClaims = {session_id: "replacement-session"};
+const replacementPeer = {connectionState: "connected"};
+const retiredOfferId = "A".repeat(43);
+const retiredOffers: Array<{offerId: string; claims: unknown; grant: string}> = [];
 const replacementCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   navigator: {onLine: true}, peer: null,
   ui: {privacyMode: {value: "secure"}},
-  requireCanonicalMediaHostReady() {}, body: () => ({}),
+  requireCanonicalMediaHostReady() {}, body: () => retiredClaims,
   rtcNetworkConfiguration: () => ({}),
-  api: async () => ({json: async () => ({ice_servers: [], offer_id: "A".repeat(43)})}),
+  api: async () => ({json: async () => ({ice_servers: [], offer_id: retiredOfferId})}),
   ensureLocalMedia: async () => {
-    replacementCtx.peer = {connectionState: "connected"};
+    replacementCtx.peer = replacementPeer;
+    replacementCtx.token = "replacement-grant";
+    replacementCtx.body = () => replacementClaims;
     replacementCtx.mediaCaptureGeneration++;
   },
-  closeServerPeer: async () => {replacementPeerClosed++;},
+  closeServerPeer: async (_keepalive: boolean, offerId: string, claims: unknown, grant: string) => {
+    retiredOffers.push({offerId, claims, grant});
+  },
 };
 runInNewContext(startCode + "\nthis.start = startWebRtc;", replacementCtx);
 await assert.rejects(replacementCtx.start(), /cancelled by conference media teardown/);
-assert.equal(replacementPeerClosed, 0, "stale cleanup cannot close newly owned peer");
+assert.equal(retiredOffers.length, 1, "stale offer must be retired exactly once");
+assert.equal(retiredOffers[0].offerId, retiredOfferId, "cleanup must target the retired offer");
+assert.equal(retiredOffers[0].claims, retiredClaims, "cleanup must retain the original session");
+assert.equal(retiredOffers[0].grant, "fixture-signed-join", "cleanup must not borrow a replacement grant");
+assert.equal(replacementCtx.peer, replacementPeer, "stale cleanup cannot close newly owned peer");
 
 // A missing TURN relay in private mode must fail before microphone/camera prompts.
 let privateCaptures = 0, privateServerCloses = 0;
 const privateCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   peer: null,
   navigator: {onLine: true}, ui: {privacyMode: {value: "private"}},
@@ -1443,6 +1463,7 @@ assert.equal(privateServerCloses, 1, "failed privacy negotiation closes the serv
 
 let rejectedCaptures = 0;
 const rejectedCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   navigator: {onLine: true}, ui: {privacyMode: {value: "secure"}},
   requireCanonicalMediaHostReady() {}, body: () => ({}),
@@ -1457,6 +1478,7 @@ assert.equal(rejectedCaptures, 0, "failed signaling cannot prompt for camera or 
 // the next attempt with a lingering server session.
 let constructorCloses = 0;
 const constructorCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   peer: null, navigator: {onLine: true},
   ui: {privacyMode: {value: "secure"}},
@@ -1478,6 +1500,7 @@ const orphanCloseGate = new Promise<void>(resolve => {releaseOrphanClose = resol
 const orphanCloseStarted = new Promise<void>(resolve => {orphanCloseEntered = resolve;});
 let serializedOffers = 0, serializedCloses = 0;
 const serializedCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   peer: null, navigator: {onLine: true},
   ui: {privacyMode: {value: "secure"}},
@@ -1515,11 +1538,22 @@ const fencedCloseGate = new Promise<void>(resolve => {releaseFencedClose = resol
 const fencedCloseEntered = new Promise<void>(resolve => {enteredFencedClose = resolve;});
 const observedFencedCloses: string[] = [];
 const fencedCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true,
-  startWebRtc: Object.assign(() => {}, {offerId: "A".repeat(43)}),
-  body: () => ({session_id: "session"}),
-  api: async (_route: string, payload: any) => {
-    observedFencedCloses.push(payload.offer_id);
+  startWebRtc: Object.assign(() => {}, {
+    offerId: "A".repeat(43),
+    offerOwner: Object.freeze({
+      offerId: "A".repeat(43), claims: Object.freeze({session_id: "session-a"}),
+      token: "grant-a",
+    }),
+  }),
+  // No mutable global grant is an acceptable fallback for an offer owner.
+  ucrRecordDiagnostic() {},
+  api: async (_route: string, payload: any, _signal: unknown,
+              _keepalive: boolean, bearerToken: string) => {
+    observedFencedCloses.push(JSON.stringify({
+      offerId: payload.offer_id, sessionId: payload.session_id, bearerToken,
+    }));
     if(observedFencedCloses.length===1){enteredFencedClose();await fencedCloseGate;}
   },
 };
@@ -1527,14 +1561,28 @@ runInNewContext(browserCloseCode + "\nthis.closeOffer = closeServerPeer;", fence
 const oldCloseInFlight = fencedCtx.closeOffer();
 await fencedCloseEntered;
 fencedCtx.startWebRtc.offerId = "B".repeat(43);
+fencedCtx.startWebRtc.offerOwner = Object.freeze({
+  offerId: "B".repeat(43), claims: Object.freeze({session_id: "session-b"}),
+  token: "grant-b",
+});
 releaseFencedClose();
 await oldCloseInFlight;
 assert.equal(fencedCtx.startWebRtc.offerId, "B".repeat(43), "stale response must preserve new offer");
 await fencedCtx.closeOffer();
-assert.deepEqual(observedFencedCloses, ["A".repeat(43), "B".repeat(43)]);
+assert.deepEqual(observedFencedCloses, [
+  JSON.stringify({offerId: "A".repeat(43), sessionId: "session-a", bearerToken: "grant-a"}),
+  JSON.stringify({offerId: "B".repeat(43), sessionId: "session-b", bearerToken: "grant-b"}),
+], "each close must retain the original offer's session and bearer");
 assert.equal(fencedCtx.startWebRtc.offerId, null, "owner clears only after its own close");
+assert.equal(fencedCtx.startWebRtc.offerOwner, null, "completed close retires its owner");
 await fencedCtx.closeOffer();
 assert.equal(observedFencedCloses.length, 2, "no unfenced session-wide close");
+// Missing original authority must fail closed even if a newer global grant exists.
+fencedCtx.startWebRtc.offerId = "C".repeat(43);
+fencedCtx.startWebRtc.offerOwner = null;
+await fencedCtx.closeOffer();
+assert.equal(observedFencedCloses.length, 2, "missing owner must never borrow global bearer");
+assert.equal(fencedCtx.startWebRtc.offerId, "C".repeat(43), "refused close preserves unowned offer");
 
 // Real browser conference admission withdrawal must turn OFF physical
 // camera/microphone capture, not only close the encrypted DataChannel.
@@ -1698,6 +1746,9 @@ const remoteDescriptionGate = new Promise<void>(resolve => {
 });
 let attemptedStaleAnswer = 0;
 let staleRemoteDescriptionPosts = 0;
+let negotiationPeerCloses = 0;
+const negotiationClaims = {session_id: "original-negotiation-session"};
+const negotiationOfferCloses: Array<{offerId: string; claims: unknown; grant: string}> = [];
 class NegotiationPeer {
   connectionState = "connecting";
   localDescription = {type: "answer", sdp: "local-answer"};
@@ -1707,8 +1758,10 @@ class NegotiationPeer {
   }
   async createAnswer() { attemptedStaleAnswer++; return this.localDescription; }
   async setLocalDescription() {}
+  close() {this.connectionState = "closed"; negotiationPeerCloses++;}
 }
 const negotiationCtx: Record<string, any> = {
+  token: "fixture-signed-join",
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 2,
   navigator: {onLine: true}, peer: null, remoteStream: null,
   ui: {privacyMode: {value: "secure"}, remoteVideo: {srcObject: null},
@@ -1723,10 +1776,16 @@ const negotiationCtx: Record<string, any> = {
     staleRemoteDescriptionPosts++;
     return {ok: true};
   },
-  body: () => ({}), rtcNetworkConfiguration: () => ({}),
+  body: () => negotiationClaims, rtcNetworkConfiguration: () => ({}),
   RTCPeerConnection: NegotiationPeer, MediaStream: class {},
   webrtcRetryTimer: null, e2eeChannel: null, scheduleWebRtcRetry() {},
-  closeServerPeer: async () => {throw new Error("unexpected orphan close during SDP test");},
+  teardownPeer() {
+    if (negotiationCtx.peer) negotiationCtx.peer.close();
+    negotiationCtx.peer = null;
+  },
+  closeServerPeer: async (_keepalive: boolean, offerId: string, claims: unknown, grant: string) => {
+    negotiationOfferCloses.push({offerId, claims, grant});
+  },
 };
 runInNewContext(startCode + "\nthis.start = startWebRtc;", negotiationCtx);
 const blockedNegotiation = negotiationCtx.start();
@@ -1737,6 +1796,15 @@ releaseRemoteDescription();
 await assert.rejects(blockedNegotiation, /cancelled by conference media teardown/);
 assert.equal(attemptedStaleAnswer, 0, "teardown must prevent stale SDP answer");
 assert.equal(staleRemoteDescriptionPosts, 0, "teardown must prevent server SDP write");
+assert.equal(negotiationPeerCloses, 1, "revoked SDP must close the local WebRTC peer");
+assert.equal(negotiationCtx.peer, null, "revoked SDP must clear retired peer ownership");
+assert.equal(negotiationOfferCloses.length, 1, "revoked SDP must retire the remote offer exactly once");
+assert.equal(negotiationOfferCloses[0].offerId, "A".repeat(43),
+  "revoked SDP cleanup must target its original transport attempt");
+assert.equal(negotiationOfferCloses[0].claims, negotiationClaims,
+  "revoked SDP cleanup must retain the original session binding");
+assert.equal(negotiationOfferCloses[0].grant, "fixture-signed-join",
+  "revoked SDP cleanup must not borrow a renewed grant");
 
 const restartCode = browser.slice(
   browser.indexOf("async function restartIce(){"),
@@ -1748,16 +1816,28 @@ const pendingRestartOffer = new Promise<any>(resolve => {
   releaseRestartOffer = resolve;
 });
 let staleRestartConfigWrites = 0;
+const restartOfferId = "A".repeat(43);
+const restartOwner = Object.freeze({
+  offerId: restartOfferId,
+  claims: Object.freeze({session_id: "original-ice-session"}),
+  token: "original-ice-grant",
+});
+const restartRequests: Array<{path: string; claims: unknown; grant: string}> = [];
 const iceCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 3,
   navigator: {onLine: true}, restarting: false,
+  startWebRtc: {offerId: restartOfferId, offerOwner: restartOwner},
   peer: {connectionState: "connected", setConfiguration() {
     staleRestartConfigWrites++;
   }},
   webrtcRetryTimer: null,
   ui: {privacyMode: {value: "secure"}, webrtcState: {textContent: ""},
     status: {textContent: ""}},
-  api: async () => pendingRestartOffer,
+  api: async (path: string, claims: unknown, _signal: unknown,
+              _keepalive: boolean, grant: string) => {
+    restartRequests.push({path, claims, grant});
+    return pendingRestartOffer;
+  },
   body: () => ({}), rtcNetworkConfiguration: () => ({}),
   clearTimeout() {},
 };
@@ -1766,12 +1846,19 @@ const staleIce = iceCtx.restart();
 iceCtx.mediaActive = false;
 iceCtx.mediaCaptureGeneration++;
 releaseRestartOffer?.({json: async () => ({
-  ice_servers: [], sdp_type: "offer", sdp: "stale-restart",
+  ice_servers: [], offer_id: restartOfferId,
+  sdp_type: "offer", sdp: "stale-restart",
 })});
 await assert.rejects(staleIce, /ICE restart cancelled by conference media teardown/);
 assert.equal(staleRestartConfigWrites, 0,
   "revoked conference must not install new ICE configuration");
 assert.equal(iceCtx.restarting, false, "aborted ICE restart must release restart guard");
+assert.equal(restartRequests.length, 1, "revoked ICE restart must not retry signaling");
+assert.equal(restartRequests[0].path, "/v1/realtime/webrtc/restart");
+assert.equal(restartRequests[0].claims, restartOwner.claims,
+  "ICE restart must use the original offer's session binding");
+assert.equal(restartRequests[0].grant, restartOwner.token,
+  "ICE restart must never borrow a refreshed bearer");
 
 // ICE restart may update SDP, but cannot silently switch the transport's
 // original close fence to an unrelated/replaced WebRTC peer.
@@ -1779,7 +1866,7 @@ let changedFenceConfigurationWrites = 0;
 const changedFenceCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 3,
   navigator: {onLine: true}, restarting: false,
-  startWebRtc: {offerId: "A".repeat(43)},
+  startWebRtc: {offerId: restartOfferId, offerOwner: restartOwner},
   peer: {connectionState: "connected", setConfiguration() {changedFenceConfigurationWrites++;}},
   webrtcRetryTimer: null,
   ui: {privacyMode: {value: "secure"}, webrtcState: {textContent: ""},
@@ -1794,6 +1881,23 @@ runInNewContext(restartCode + "\nthis.restart = restartIce;", changedFenceCtx);
 await assert.rejects(changedFenceCtx.restart(), /ICE restart changed immutable WebRTC transport offer identity/);
 assert.equal(changedFenceConfigurationWrites, 0, "wrong-owner ICE restart cannot alter network configuration");
 assert.equal(changedFenceCtx.restarting, false, "rejected ICE restart must release restart guard");
+
+// A replaced offer or absent original owner must fail before any ICE RPC.
+// A mutable global Join token is never an acceptable fallback.
+let missingOwnerRequests = 0;
+const missingOwnerCtx: Record<string, any> = {
+  ...changedFenceCtx,
+  restarting: false,
+  startWebRtc: {offerId: restartOfferId, offerOwner: null},
+  api: async () => {missingOwnerRequests++; throw new Error("unexpected ICE request");},
+};
+runInNewContext(restartCode + "\nthis.restart = restartIce;", missingOwnerCtx);
+await assert.rejects(missingOwnerCtx.restart(),
+  /ICE restart requires the original WebRTC offer authority/);
+assert.equal(missingOwnerRequests, 0,
+  "ICE restart without original authority must not contact the server");
+assert.equal(changedFenceConfigurationWrites, 0,
+  "missing authority must not reconfigure an unrelated peer");
 
 // Execute browser's canonical roster -> per-viewer SFU subscription journey.
 // The VM never supplies a parallel admission owner or a forged roster.
