@@ -492,18 +492,30 @@ fn current_login_generation(state: &State, binding: &Binding) -> Result<u64, Sta
     Ok(sessions.generation(binding))
 }
 
+// Explicitly bind the MAC to one purpose, signer descriptor and Logout epoch.
+#[derive(Clone, Copy)]
+struct ChallengeMacContext<'a> {
+    purpose: &'a str,
+    key_id: Option<&'a str>,
+    public_key: Option<&'a [u8; 32]>,
+    login_generation: Option<u64>,
+}
+
 /// MAC over the challenge core and EVERYTHING the challenge is bound to.
 fn challenge_mac(
     state: &State,
     label: &[u8],
     core: &[u8],
     binding: &Binding,
-    purpose: &str,
-    key_id: Option<&str>,
-    public_key: Option<&[u8; 32]>,
-    login_generation: Option<u64>,
+    context: ChallengeMacContext<'_>,
 ) -> Result<[u8; 32], StatusCode> {
     use hmac::Mac as _;
+    let ChallengeMacContext {
+        purpose,
+        key_id,
+        public_key,
+        login_generation,
+    } = context;
     let mut mac = <ChallengeMac as hmac::KeyInit>::new_from_slice(&state.challenge_key)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let bound = serde_json::to_vec(&json!([
@@ -553,25 +565,25 @@ fn challenge(
     core.push(CHALLENGE_VERSION);
     core.extend_from_slice(&expiry.to_be_bytes());
     core.extend_from_slice(&random_key()?[..16]);
+    let context = ChallengeMacContext {
+        purpose,
+        key_id,
+        public_key: public_key.as_ref(),
+        login_generation,
+    };
     let tag = challenge_mac(
         state,
         b"ucr-first-party-challenge-id.v1",
         &core,
         binding,
-        purpose,
-        key_id,
-        public_key.as_ref(),
-        login_generation,
+        context,
     )?;
     let nonce = challenge_mac(
         state,
         b"ucr-first-party-challenge-nonce.v1",
         &core,
         binding,
-        purpose,
-        key_id,
-        public_key.as_ref(),
-        login_generation,
+        context,
     )?;
     let mut id = core;
     id.extend_from_slice(&tag);
@@ -604,15 +616,18 @@ fn consume(
     let login_generation = (purpose == "login")
         .then(|| current_login_generation(state, binding))
         .transpose()?;
+    let context = ChallengeMacContext {
+        purpose,
+        key_id,
+        public_key: public_key.as_ref(),
+        login_generation,
+    };
     let expected = challenge_mac(
         state,
         b"ucr-first-party-challenge-id.v1",
         core,
         binding,
-        purpose,
-        key_id,
-        public_key.as_ref(),
-        login_generation,
+        context,
     )?;
     if !bool::from(expected.ct_eq(tag)) {
         return Err(StatusCode::UNAUTHORIZED);
@@ -631,10 +646,7 @@ fn consume(
         b"ucr-first-party-challenge-nonce.v1",
         core,
         binding,
-        purpose,
-        key_id,
-        public_key.as_ref(),
-        login_generation,
+        context,
     )?;
     Ok(Pending {
         purpose,
