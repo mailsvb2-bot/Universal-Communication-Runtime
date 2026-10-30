@@ -1184,16 +1184,30 @@ el("rotate-recovery").addEventListener("click",()=>void run(async()=>{
   const code=await host.rotateRecoveryCode();
   showRecovery(code);
 }));
-el("logout").addEventListener("click",()=>void run(async()=>{
-  // Immediately stop local Call/Join admission. Waiting for HTTP logout
-  // could let a previously requested signed Join open media after this click.
+// Logout is a security action, not a regular UI mutation. A slow dial,
+// incoming acceptance, or MLS preflight may hold the ordinary busy lock;
+// never discard the user's Logout click while that work is pending.
+let logoutInFlight=false;
+el("logout").addEventListener("click",()=>{
+  if(logoutInFlight)return;
+  logoutInFlight=true;
+  // Synchronously fence all old Call/Join continuations BEFORE any await.
   forgetBinding();
   forgetActiveCall();
   plClearAuthenticatedView();
-  await host.logout();
-  el("who").textContent="Вы вышли из учётной записи.";
-  message("Серверная сессия закрыта. Приватный ключ остаётся на устройстве для повторного входа.");
-}));
+  void (async()=>{
+    try{
+      await host.logout();
+      el("who").textContent="Вы вышли из учётной записи.";
+      message("Серверная сессия закрыта. Приватный ключ остаётся на устройстве для повторного входа.");
+    }catch(error){
+      // HttpOnly cookies cannot be cleared by client JavaScript. Never claim
+      // that server Logout succeeded after an ambiguous network failure.
+      message("Локальный доступ закрыт, но выход на сервере не подтверждён: "+
+        (error instanceof Error?error.message:String(error)));
+    }finally{logoutInFlight=false;}
+  })();
+});
 
 // Mobile tabs become hidden during permission prompts and app switching.
 // Catch up immediately on foreground instead of waiting for the next interval.
