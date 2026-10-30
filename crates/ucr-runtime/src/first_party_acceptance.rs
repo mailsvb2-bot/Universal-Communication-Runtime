@@ -170,27 +170,11 @@ fn signed_login(state: &State, binding: &Binding, signer: &SigningKey) {
         &serde_json::to_vec(binding).unwrap(),
     )
     .expect("login challenge");
-    let signed_payload = encoded_proof(
-        "ucr-first-party-device-login.v1",
-        &json!([
-            binding.tenant_id,
-            binding.namespace_id,
-            binding.participant_id,
-            binding.device,
-            issued["challengeId"].as_str().unwrap(),
-            issued["challengeBytesBase64Url"].as_str().unwrap(),
-        ]),
-    )
-    .unwrap();
-    let proof = json!({
-        "binding": binding,
-        "challengeId": issued["challengeId"],
-        "signatureBase64Url": URL_SAFE_NO_PAD.encode(signer.sign(signed_payload.as_bytes()).to_bytes())
-    });
+    let proof = signed_login_proof(binding, signer, &issued);
     let (response, cookie) = login_route(
         state,
         "/v1/first-party/login/verify",
-        &serde_json::to_vec(&proof).unwrap(),
+        &proof,
     )
     .expect("fresh independent canonical Device login");
     assert_eq!(
