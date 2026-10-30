@@ -400,6 +400,7 @@ async function beginMedia(callId) {
   if (!selected || selected.terminating || selected.call.callId !== callId ||
       selected.call.state !== "active") return;
   const selectedScope = accountScope;
+  const selectedGeneration = uiAuthGeneration;
   const selectedLocator = activeCallLocator();
   // This coordinator permits Join ONLY after the recipient has accepted
   // and the canonical owner reports ACTIVE. It never creates trust or keys.
@@ -407,7 +408,8 @@ async function beginMedia(callId) {
   if (!grant || grant.callId !== callId) throw Error("Call admission mismatch");
   // Periodic inspection may replace the object for the SAME active Call.
   // Fence by canonical Call/Device state, not mutable UI object identity.
-  if (navigating || accountScope !== selectedScope || !active ||
+  if (navigating || uiAuthGeneration !== selectedGeneration ||
+      accountScope !== selectedScope || !active ||
       active.terminating || active.call.callId !== callId ||
       active.call.state !== "active" ||
       activeCallLocator() !== selectedLocator) return;
@@ -465,10 +467,21 @@ function renderIncoming(items) {
     actions.className = "actions";
     actions.append(
       btn("Принять",async () => {
+        const scope=accountScope, generation=uiAuthGeneration;
+        const locator=activeCallLocator();
+        if(!scope)throw Error("Требуется подтверждённая Device-сессия");
         if (active && active.call.state !== "terminated") throw Error("вы уже участвуете в другом вызове");
-        if (activeCallLocator() !== null) throw Error("сначала дождитесь проверки незавершённого вызова");
+        if (locator !== null) throw Error("сначала дождитесь проверки незавершённого вызова");
         const result = await calls.signal(call.callId,"accept");
+        if (!result || result.callId !== call.callId) throw Error("Call acceptance mismatch");
+        // The server may have accepted this Call, but an old UI callback may
+        // never install it under a new (even same-Device) login generation.
+        if(accountScope!==scope || uiAuthGeneration!==generation ||
+           activeCallLocator()!==locator || (active && active.call.state!=="terminated"))return;
         const session = await host.resumeAuthenticatedDevice();
+        if(principalScope(session)!==scope)throw Error("Device changed during Call acceptance");
+        if(accountScope!==scope || uiAuthGeneration!==generation ||
+           activeCallLocator()!==locator || (active && active.call.state!=="terminated"))return;
         active = {call:result,identity:session.participantId};
         rememberActiveCall(result,session.participantId);
         showActive();
