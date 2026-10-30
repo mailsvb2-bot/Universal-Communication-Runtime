@@ -110,13 +110,13 @@ refresh = JS.split("async function refresh() {", 1)[1].split(
     "async function initialize()", 1
 )[0]
 assert re.search(
-    r"try\\s*\\{\\s*user\\s*=\\s*await restoreSession\\(\\);\\s*\\}"
-    r"\\s*catch\\s*\\(error\\)\\s*\\{[^}]*plClearAuthenticatedView\\(\\);",
+    r"try\s*\{\s*user\s*=\s*await restoreSession\(\);\s*\}"
+    r"\s*catch\s*\(error\)\s*\{[^}]*plClearAuthenticatedView\(\);",
     refresh, re.S
 ), "failed session revalidation must hide the former user's cabinet"
 assert re.search(
-    r"if\\s*\\(accountScope !== principalScope\\(user\\)\\)\\s*\\{"
-    r"[^}]*plClearAuthenticatedView\\(\\);",
+    r"if\s*\(accountScope !== principalScope\(user\)\)\s*\{"
+    r"[^}]*plClearAuthenticatedView\(\);",
     refresh, re.S
 ), "cross-tab Identity/Device change must clear the former user's cabinet"
 assert 'void run(initialize)' in JS
