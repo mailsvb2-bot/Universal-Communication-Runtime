@@ -106,7 +106,7 @@ for sensitive in (
     'el("devices").replaceChildren();', 'plSetSignedIn(null);',
     'el("recovery-code").value="";',
 ):
-    assert sensitive in JS.split("function plClearAuthenticatedView(){", 1)[1].split(
+    assert sensitive in JS.split("function plClearAuthenticatedView(preserveRecoveryCode=false){", 1)[1].split(
         "function plInviteUrl()", 1
     )[0], "stale identity UI cleanup missing: " + sensitive
 refresh = JS.split("async function refresh() {", 1)[1].split(
@@ -125,5 +125,23 @@ assert re.search(
     r"[^}]*plClearAuthenticatedView\(\);",
     refresh, re.S
 ), "cross-tab Identity/Device change must clear the former user's cabinet"
+# Delayed contact/Device reads must never repaint an old principal after
+# logout, self-revoke or a fresh sign-in with the same public Identity.
+assert 'let uiAuthGeneration = 0;' in JS
+assert 'uiAuthGeneration++;' in JS.split(
+    "function plClearAuthenticatedView(preserveRecoveryCode=false){", 1
+)[1].split("function plInviteUrl()", 1)[0]
+for function_name in ("updateDevices", "updateContacts"):
+    body = JS.split(f"async function {function_name}() {{", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert "generation=uiAuthGeneration" in body, f"{function_name} lacks read fence"
+    assert "generation!==uiAuthGeneration" in body, f"{function_name} paints stale data"
+assert 'if(own){\n          forgetBinding();forgetActiveCall();\n          plClearAuthenticatedView();' in JS, (
+    "self-revoked Device must hide its former authenticated cabinet"
+)
+assert 'uiAuthGeneration!==verifiedGeneration' in refresh, (
+    "late incoming-call response must not repaint a newer login"
+)
 assert 'void run(initialize)' in JS
 print(f"UCR first-party UI control wiring: PASS ({len(parser.controls)} static form/button controls; 6 dynamic actions)")
