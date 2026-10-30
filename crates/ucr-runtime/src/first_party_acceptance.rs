@@ -1210,7 +1210,10 @@ fn protected_action_gate_serializes_logout_and_rejects_stale_join() {
         )
     });
     started_rx.recv().unwrap();
-    assert!(!logout.is_finished(), "Logout cannot bypass the active Device gate");
+    assert!(
+        !logout.is_finished(),
+        "Logout cannot bypass the active Device gate"
+    );
     drop(in_flight);
     let (response, _) = logout.join().unwrap().unwrap();
     assert_eq!(response["signedOut"], true);
