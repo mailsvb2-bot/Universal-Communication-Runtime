@@ -1010,7 +1010,7 @@ fn anonymous_challenge_flood_cannot_lock_out_signup_or_login() {
 }
 
 fn signed_login_proof(binding: &Binding, signer: &SigningKey, issued: &Value) -> Vec<u8> {
-    let signed = encoded_proof(
+    let proof_bytes = encoded_proof(
         "ucr-first-party-device-login.v1",
         &json!([
             binding.tenant_id,
@@ -1026,7 +1026,7 @@ fn signed_login_proof(binding: &Binding, signer: &SigningKey, issued: &Value) ->
         "binding": binding,
         "challengeId": issued["challengeId"],
         "signatureBase64Url": URL_SAFE_NO_PAD.encode(
-            signer.sign(signed.as_bytes()).to_bytes()
+            signer.sign(proof_bytes.as_bytes()).to_bytes()
         ),
     }))
     .unwrap()
