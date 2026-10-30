@@ -94,6 +94,30 @@ for label in ("Аудиозвонок", "Видеозвонок", "Удалит�
     assert 'btn("' + label + '"' in JS, "missing dynamic control: " + label
 assert 'button.addEventListener("click", () => void run(callback))' in JS
 assert "const session = await restoreSession();\n  const call = await calls.start" in JS
-assert "const user = await restoreSession();\n    if (accountScope" in JS
+# A revoked cookie, logout in another tab, or changed canonical Device must
+# hide the old identity/invitation and clear sensitive UI before retry.
+assert "function plClearAuthenticatedView()" in JS
+for sensitive in (
+    'accountScope=null;', 'active=null;', 'knownContacts=[];',
+    'idempotency.clear();', 'renderContacts([]);', 'renderIncoming([]);',
+    'el("devices").replaceChildren();', 'plSetSignedIn(null);',
+    'el("recovery-code").value="";',
+):
+    assert sensitive in JS.split("function plClearAuthenticatedView(){", 1)[1].split(
+        "function plInviteUrl()", 1
+    )[0], "stale identity UI cleanup missing: " + sensitive
+refresh = JS.split("async function refresh() {", 1)[1].split(
+    "async function initialize()", 1
+)[0]
+assert re.search(
+    r"try\\s*\\{\\s*user\\s*=\\s*await restoreSession\\(\\);\\s*\\}"
+    r"\\s*catch\\s*\\(error\\)\\s*\\{[^}]*plClearAuthenticatedView\\(\\);",
+    refresh, re.S
+), "failed session revalidation must hide the former user's cabinet"
+assert re.search(
+    r"if\\s*\\(accountScope !== principalScope\\(user\\)\\)\\s*\\{"
+    r"[^}]*plClearAuthenticatedView\\(\\);",
+    refresh, re.S
+), "cross-tab Identity/Device change must clear the former user's cabinet"
 assert 'void run(initialize)' in JS
 print(f"UCR first-party UI control wiring: PASS ({len(parser.controls)} static form/button controls; 6 dynamic actions)")
