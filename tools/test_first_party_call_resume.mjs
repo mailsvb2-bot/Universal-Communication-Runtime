@@ -492,10 +492,95 @@ incomingContext.host.resumeAuthenticatedDevice=async()=>({...user,deviceId:"othe
 await assert.rejects(acceptIncoming(),/Device changed during Call acceptance/);
 assert.equal(incomingContext.active,null,"wrong Device must not adopt accepted Call");
 
+// A pending cookie check must not perform a fresh Device reauthentication
+// after explicit logout or a same-Device session replacement.
+const authBegin=source.indexOf("async function restoreSession() {");
+const authEnd=source.indexOf("function clearRetryKey(call) {",authBegin);
+assert.ok(authBegin>=0 && authEnd>authBegin);
+let reauthCount=0;
+const authContext={
+  uiAuthGeneration:0,
+  host:{},vault:{},location:{origin:"https://localhost"},
+  authTrace:async(_stage,op)=>op(),lastBinding:()=>user,
+  authDiagnostic(){},forgetBinding(){},
+  principalScope:identity=>JSON.stringify([
+    identity.tenantId,identity.namespaceId,identity.participantId,identity.deviceId]),
+  authenticateUcrFirstPartyDevice:async()=>{reauthCount++;return user;},
+};
+runInNewContext(source.slice(authBegin,authEnd)+"\\nthis.restoreSession=restoreSession;",authContext);
+let rejectPendingCookie;
+authContext.host.resumeAuthenticatedDevice=()=>new Promise((_resolve,reject)=>{
+  rejectPendingCookie=reject;
+});
+const staleCookie=authContext.restoreSession();
+authContext.uiAuthGeneration++;
+rejectPendingCookie(new Error("HTTP 401: old session expired"));
+await assert.rejects(staleCookie,/Device session changed during authentication/);
+assert.equal(reauthCount,0,"logout must block late automatic Device reauthentication");
+
+// Reauthentication itself may already be in flight when logout happens.
+let finishReauthentication;
+authContext.uiAuthGeneration=0;
+authContext.host.resumeAuthenticatedDevice=async()=>{throw Error("HTTP 401: expired");};
+authContext.authenticateUcrFirstPartyDevice=()=>{
+  reauthCount++;
+  return new Promise(resolve=>{finishReauthentication=resolve;});
+};
+const staleReauthentication=authContext.restoreSession();
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(typeof finishReauthentication,"function");
+authContext.uiAuthGeneration++;
+finishReauthentication(user);
+await assert.rejects(staleReauthentication,/Device session changed during authentication/);
+assert.equal(reauthCount,1);
+
+// The current generation must still recover with its original protected signer.
+authContext.uiAuthGeneration=0;
+authContext.authenticateUcrFirstPartyDevice=async()=>{reauthCount++;return user;};
+assert.equal((await authContext.restoreSession()).deviceId,user.deviceId);
+assert.equal(reauthCount,2);
+
+// Execute the actual logout listener with an intentionally delayed HTTP reply.
+// The sensitive UI and Call/Join fence must close before that reply exists.
+const logoutBegin=source.indexOf('el("logout").addEventListener("click"');
+const logoutEnd=source.indexOf("// Mobile tabs become hidden",logoutBegin);
+assert.ok(logoutBegin>=0 && logoutEnd>logoutBegin);
+let logoutClick,completeLogout,logoutPromise,forgotBinding=0,forgotCall=0;
+const who={textContent:""};
+const logoutContext={
+  uiAuthGeneration:0,accountScope:scope,active:{call:acceptedCall},
+  el:id=>id==="logout"?{addEventListener:(_event,handler)=>{logoutClick=handler;}}:who,
+  run:action=>{logoutPromise=action();return logoutPromise;},
+  forgetBinding:()=>{forgotBinding++;},
+  forgetActiveCall:()=>{forgotCall++;},
+  plClearAuthenticatedView:()=>{
+    logoutContext.uiAuthGeneration++;
+    logoutContext.accountScope=null;
+    logoutContext.active=null;
+  },
+  host:{logout:()=>{
+    assert.equal(logoutContext.active,null,"local Call must stop before HTTP logout");
+    assert.equal(logoutContext.uiAuthGeneration,1,"pending Join must be fenced");
+    return new Promise(resolve=>{completeLogout=resolve;});
+  }},
+  message(){},
+};
+runInNewContext(source.slice(logoutBegin,logoutEnd),logoutContext);
+assert.equal(typeof logoutClick,"function");
+logoutClick();
+assert.equal(forgotBinding,1);
+assert.equal(forgotCall,1);
+assert.equal(logoutContext.active,null);
+assert.equal(logoutContext.accountScope,null);
+assert.equal(typeof completeLogout,"function");
+completeLogout();
+await logoutPromise;
+assert.match(who.textContent,/вышли/);
+
 assert.match(source,/const call = await calls\.start\(contact\.id,media,requestId\);[\s\S]*?rememberActiveCall\(call,session\.participantId\);/);
 assert.match(source,/const result = await calls\.signal\(call\.callId,"accept"\);[\s\S]*?rememberActiveCall\(result,session\.participantId\);/);
 assert.match(source,/if \(!active\) await restoreActiveCall\(user\);/);
 assert.match(source,/if \(fresh\.state === "terminated"\) \{\s*forgetActiveCall\(inspectedLocator\);/);
-assert.match(source,/await host\.logout\(\);\s*forgetBinding\(\);\s*forgetActiveCall\(\);/);
+assert.match(source,/forgetBinding\(\);\s*forgetActiveCall\(\);\s*plClearAuthenticatedView\(\);\s*await host\.logout\(\);/);
 assert.doesNotMatch(snippet,/calls\.join\(/,"untrusted locator cannot mint a Join");
 console.log("PASS: canonical Call resume is scope-fenced, inspected, and cleared on terminal/denied state");
