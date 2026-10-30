@@ -485,7 +485,10 @@ fn random_key() -> Result<[u8; 32], StatusCode> {
 type ChallengeMac = hmac::Hmac<Sha256>;
 
 fn current_login_generation(state: &State, binding: &Binding) -> Result<u64, StatusCode> {
-    let sessions = state.sessions.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Ok(sessions.generation(binding))
 }
 
@@ -818,8 +821,11 @@ fn authenticated(state: &State, request: &Request<Incoming>) -> Result<Session, 
             .sessions
             .lock()
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        sessions.sessions.retain(|session| session.until > Instant::now());
-        sessions.sessions
+        sessions
+            .sessions
+            .retain(|session| session.until > Instant::now());
+        sessions
+            .sessions
             .iter()
             .find(|s| s.token == token)
             .cloned()
@@ -1215,7 +1221,11 @@ fn dispatch_post(
             .sessions
             .lock()
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        if !sessions.sessions.iter().any(|item| item.token == auth.token) {
+        if !sessions
+            .sessions
+            .iter()
+            .any(|item| item.token == auth.token)
+        {
             return Err(StatusCode::UNAUTHORIZED);
         }
         sessions.revoke_device(&auth.binding);
