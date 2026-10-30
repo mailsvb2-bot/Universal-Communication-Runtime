@@ -1083,6 +1083,7 @@ const done = arguments[arguments.length - 1];
     },
     error(error) { throw error; }
   });
+  let frameSource = "imagebitmap";
   try {
     encoder.configure(config);
     // Materialize a browser-backed frame for Safari's WebCodecs implementation.
@@ -1110,15 +1111,27 @@ const done = arguments[arguments.length - 1];
         try { frame = new VideoFrame(bitmap, {timestamp: 0}); }
         finally { bitmap.close(); }
       } catch (_) {
-        // HTMLCanvasElement is also a valid WebCodecs source. Do not
-        // report success unless the real encoder and decoder both work.
-        frame = new VideoFrame(canvas, {timestamp: 0});
+        try {
+          frame = new VideoFrame(canvas, {timestamp: 0});
+          frameSource = "canvas";
+        } catch (_) {
+          // Safari WebDriver can expose a canvas with no composited frame.
+          // A real, opaque RGBA pixel buffer avoids that browser compositor
+          // dependency while still requiring a full-HD VP8 encode AND decode.
+          // This is synthetic local codec evidence, never network A/B media.
+          const rgba = new Uint8Array(1920 * 1080 * 4);
+          rgba.fill(255);
+          frame = new VideoFrame(rgba, {
+            format: "RGBA", codedWidth: 1920, codedHeight: 1080, timestamp: 0
+          });
+          frameSource = "rgba-buffer";
+        }
       }
       try { encoder.encode(frame, {keyFrame: true}); } finally { frame.close(); }
     } finally { canvas.remove(); }
     await encoder.flush();
     await decoder.flush();
-    return {supported: true, codec: "vp8", sourceWidth: 1920,
+    return {supported: true, codec: "vp8", frameSource, sourceWidth: 1920,
       sourceHeight: 1080, decodedWidth, decodedHeight, decodedFrames,
       encodedBytes, localEncodeDecodeMs: Math.round(performance.now() - start),
       verified: decodedWidth === 1920 && decodedHeight === 1080 &&
