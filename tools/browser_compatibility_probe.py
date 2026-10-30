@@ -1104,15 +1104,27 @@ const done = arguments[arguments.length - 1];
     document.body.appendChild(canvas);
     try {
       canvas.getBoundingClientRect(); // Flush layout before WebKit reads pixels.
-      let frame;
+      let frame, frameSource = "imagebitmap";
       try {
         const bitmap = await createImageBitmap(canvas);
         try { frame = new VideoFrame(bitmap, {timestamp: 0}); }
         finally { bitmap.close(); }
       } catch (_) {
-        // HTMLCanvasElement is also a valid WebCodecs source. Do not
-        // report success unless the real encoder and decoder both work.
-        frame = new VideoFrame(canvas, {timestamp: 0});
+        try {
+          frame = new VideoFrame(canvas, {timestamp: 0});
+          frameSource = "canvas";
+        } catch (_) {
+          // Safari WebDriver can expose a canvas with no composited frame.
+          // A real, opaque RGBA pixel buffer avoids that browser compositor
+          // dependency while still requiring a full-HD VP8 encode AND decode.
+          // This is synthetic local codec evidence, never network A/B media.
+          const rgba = new Uint8Array(1920 * 1080 * 4);
+          rgba.fill(255);
+          frame = new VideoFrame(rgba, {
+            format: "RGBA", codedWidth: 1920, codedHeight: 1080, timestamp: 0
+          });
+          frameSource = "rgba-buffer";
+        }
       }
       try { encoder.encode(frame, {keyFrame: true}); } finally { frame.close(); }
     } finally { canvas.remove(); }
