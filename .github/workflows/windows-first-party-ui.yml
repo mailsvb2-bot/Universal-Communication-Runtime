@@ -6,6 +6,7 @@ on:
       - 'crates/ucr-realtime-web/static/start.js'
       - 'tools/check_first_party_start_controls.py'
       - 'tools/test_first_party_call_resume.mjs'
+      - 'tools/test_first_party_invite_onboarding.mjs'
       - 'tools/test_first_party_mls_coordinator.mjs'
       - 'tools/test_webrtc_late_start_cleanup.mjs'
       - 'tools/check_first_party_call_revision_contract.py'
@@ -50,6 +51,9 @@ jobs:
       - name: Exercise canonical Call reload recovery
         shell: pwsh
         run: node tools/test_first_party_call_resume.mjs
+      - name: Preserve anonymous invitation through signup and clear on logout
+        shell: pwsh
+        run: node tools/test_first_party_invite_onboarding.mjs
       - name: Exercise authenticated pre-Join A/B MLS coordination
         shell: pwsh
         run: node tools/test_first_party_mls_coordinator.mjs
