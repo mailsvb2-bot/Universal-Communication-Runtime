@@ -502,7 +502,7 @@ const authContext={
   uiAuthGeneration:0,
   host:{},vault:{},location:{origin:"https://localhost"},
   authTrace:async(_stage,op)=>op(),lastBinding:()=>user,
-  authHttpCode:error=>Number(String(error.message).match(/HTTP (\\d+)/)?.[1]??0),
+  authHttpCode:error=>Number(String(error.message).match(/HTTP (\d+)/)?.[1]??0),
   authDiagnostic(){},forgetBinding(){},
   principalScope:identity=>JSON.stringify([
     identity.tenantId,identity.namespaceId,identity.participantId,identity.deviceId]),
