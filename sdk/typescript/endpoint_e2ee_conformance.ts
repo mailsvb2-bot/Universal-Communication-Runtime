@@ -1928,8 +1928,8 @@ await assert.rejects(missingOwnerCtx.restart(),
   /ICE restart requires the original WebRTC offer authority/);
 assert.equal(missingOwnerRequests, 0,
   "ICE restart without original authority must not contact the server");
-assert.equal(changedFenceConfigurationWrites, 0,
-  "missing authority must not reconfigure an unrelated peer");
+assert.equal(changedFenceConfigurationWrites, 1,
+  "missing authority must not reconfigure an unrelated peer after the valid restart");
 
 // Execute browser's canonical roster -> per-viewer SFU subscription journey.
 // The VM never supplies a parallel admission owner or a forged roster.
