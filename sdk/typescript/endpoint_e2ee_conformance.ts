@@ -1823,6 +1823,7 @@ const restartOwner = Object.freeze({
   token: "original-ice-grant",
 });
 const restartRequests: Array<{path: string; claims: unknown; grant: string}> = [];
+const staleRestartCloses: Array<{offerId: string; claims: unknown; grant: string}> = [];
 const iceCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 3,
   navigator: {onLine: true}, restarting: false,
@@ -1839,6 +1840,9 @@ const iceCtx: Record<string, any> = {
     return pendingRestartOffer;
   },
   body: () => ({}), rtcNetworkConfiguration: () => ({}),
+  closeServerPeer: async (_keepalive: boolean, offerId: string, claims: unknown, grant: string) => {
+    staleRestartCloses.push({offerId, claims, grant});
+  },
   clearTimeout() {},
 };
 runInNewContext(restartCode + "\nthis.restart = restartIce;", iceCtx);
@@ -1859,28 +1863,56 @@ assert.equal(restartRequests[0].claims, restartOwner.claims,
   "ICE restart must use the original offer's session binding");
 assert.equal(restartRequests[0].grant, restartOwner.token,
   "ICE restart must never borrow a refreshed bearer");
+assert.equal(staleRestartCloses.length, 1,
+  "late ICE restart response must retire its server-side offer");
+assert.equal(staleRestartCloses[0].offerId, restartOfferId);
+assert.equal(staleRestartCloses[0].claims, restartOwner.claims);
+assert.equal(staleRestartCloses[0].grant, restartOwner.token);
 
-// ICE restart may update SDP, but cannot silently switch the transport's
-// original close fence to an unrelated/replaced WebRTC peer.
+// The server rotates the SDP-hash fence on ICE restart, but never the original
+// independently authorized Call/Join owner. Exercise the actual browser code.
 let changedFenceConfigurationWrites = 0;
+const rotatedFence = "B".repeat(43);
+const rotatedRequests: Array<{path: string; payload: any; grant: string}> = [];
 const changedFenceCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 3,
   navigator: {onLine: true}, restarting: false,
   startWebRtc: {offerId: restartOfferId, offerOwner: restartOwner},
-  peer: {connectionState: "connected", setConfiguration() {changedFenceConfigurationWrites++;}},
+  peer: {
+    connectionState: "connected",
+    localDescription: {type: "answer", sdp: "local-answer"},
+    setConfiguration() {changedFenceConfigurationWrites++;},
+    async setRemoteDescription() {},
+    async createAnswer() {return {type: "answer", sdp: "local-answer"};},
+    async setLocalDescription() {},
+  },
   webrtcRetryTimer: null,
   ui: {privacyMode: {value: "secure"}, webrtcState: {textContent: ""},
     status: {textContent: ""}},
-  api: async () => ({json: async () => ({
-    ice_servers: [], offer_id: "B".repeat(43), sdp_type: "offer", sdp: "unowned-restart",
-  })}),
+  api: async (path: string, payload: any, _signal: unknown,
+              _keepalive: boolean, grant: string) => {
+    rotatedRequests.push({path, payload, grant});
+    return path.endsWith("/webrtc/restart") ? {json: async () => ({
+      ice_servers: [], offer_id: rotatedFence, sdp_type: "offer", sdp: "rotated-restart",
+    })} : {ok: true};
+  },
   body: () => ({}), rtcNetworkConfiguration: () => ({}),
   clearTimeout() {},
 };
 runInNewContext(restartCode + "\nthis.restart = restartIce;", changedFenceCtx);
-await assert.rejects(changedFenceCtx.restart(), /ICE restart changed immutable WebRTC transport offer identity/);
-assert.equal(changedFenceConfigurationWrites, 0, "wrong-owner ICE restart cannot alter network configuration");
-assert.equal(changedFenceCtx.restarting, false, "rejected ICE restart must release restart guard");
+assert.equal(await changedFenceCtx.restart(), true);
+assert.equal(changedFenceConfigurationWrites, 1,
+  "valid rotated ICE fence must reconfigure the original peer");
+assert.equal(changedFenceCtx.startWebRtc.offerId, rotatedFence);
+assert.equal(changedFenceCtx.startWebRtc.offerOwner.offerId, rotatedFence);
+assert.equal(changedFenceCtx.startWebRtc.offerOwner.claims, restartOwner.claims);
+assert.equal(changedFenceCtx.startWebRtc.offerOwner.token, restartOwner.token);
+assert.equal(rotatedRequests.length, 2);
+assert.equal(rotatedRequests[1].path, "/v1/realtime/webrtc/remote-description");
+assert.equal(rotatedRequests[1].payload.offer_id, rotatedFence);
+assert.equal(rotatedRequests[1].grant, restartOwner.token);
+assert.equal(changedFenceCtx.restarting, false,
+  "completed ICE restart must release restart guard");
 
 // A replaced offer or absent original owner must fail before any ICE RPC.
 // A mutable global Join token is never an acceptable fallback.
