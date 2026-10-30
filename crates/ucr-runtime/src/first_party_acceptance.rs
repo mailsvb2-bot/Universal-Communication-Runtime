@@ -54,7 +54,7 @@ fn state(path: &PathBuf) -> State {
         untrusted_consumed: Mutex::new(Vec::new()),
         recovery_consumed: Mutex::new(Vec::new()),
         signup_admissions: Mutex::new(Vec::new()),
-        sessions: Mutex::new(Vec::new()),
+        sessions: Mutex::new(SessionLedger::default()),
     }
 }
 
@@ -392,12 +392,12 @@ fn recovery_returns_rotated_code_even_when_browser_session_capacity_is_exhausted
     // unrelated identity consumed the last browser-session slot.
     {
         let mut sessions = server.sessions.lock().unwrap();
-        let template = sessions[0].clone();
-        sessions.clear();
+        let template = sessions.sessions[0].clone();
+        sessions.sessions.clear();
         for n in 0..MAX_SESSIONS {
             let mut other = template.clone();
             other.binding.participant_id = format!("unrelated-{}", n / MAX_SESSIONS_PER_IDENTITY);
-            sessions.push(other);
+            sessions.sessions.push(other);
         }
     }
     let recovered = Binding {
@@ -437,7 +437,7 @@ fn recovery_returns_rotated_code_even_when_browser_session_capacity_is_exhausted
 
     // The endpoint owns the new signer; once session capacity is available it
     // can independently authenticate, and the returned code can recover again.
-    server.sessions.lock().unwrap().clear();
+    server.sessions.lock().unwrap().sessions.clear();
     signed_login(&server, &recovered, &signer);
     recover(&server, &alice, &next_code, "subsequent-recovery", 92)
         .expect("returned recovery code remains usable");
@@ -504,7 +504,7 @@ fn two_real_sqlite_accounts_two_devices_and_signed_login_after_server_restart() 
                 .is_some()
         );
     }
-    assert_eq!(restarted.sessions.lock().unwrap().len(), 4);
+    assert_eq!(restarted.sessions.lock().unwrap().sessions.len(), 4);
     // Revoke B's recovered Device via the canonical owner, then verify that
     // its old signer is rejected even after another complete server restart.
     verify_revoked_device_stays_revoked(
@@ -577,6 +577,7 @@ fn session_of(state: &State, binding: &Binding) -> Session {
         .sessions
         .lock()
         .unwrap()
+        .sessions
         .iter()
         .rev()
         .find(|session| session.binding == *binding)
@@ -1012,6 +1013,7 @@ fn anonymous_challenge_flood_cannot_lock_out_signup_or_login() {
     let sessions = server.sessions.lock().unwrap();
     assert_eq!(
         sessions
+            .sessions
             .iter()
             .filter(|s| s.binding.participant_id == alice.participant_id)
             .count(),
@@ -1019,9 +1021,111 @@ fn anonymous_challenge_flood_cannot_lock_out_signup_or_login() {
     );
     assert_eq!(
         sessions
+            .sessions
             .iter()
             .filter(|s| s.binding.participant_id == bob.participant_id)
             .count(),
         1
     );
+}
+
+#[test]
+fn logout_atomically_fences_old_login_verify_and_retires_all_device_cookies() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, alice_signer, _) = signup(&server, 101);
+    let (bob, bob_signer, _) = signup(&server, 102);
+    signed_login(&server, &alice, &alice_signer);
+    let old_session = session_of(&server, &alice);
+    assert!(
+        server.sessions.lock().unwrap().sessions.iter()
+            .filter(|session| session.binding == alice).count() >= 2
+    );
+
+    // Both challenges are issued BEFORE Alice logs out. A Device logout must
+    // invalidate Alice's pending signed proof without locking out Bob.
+    let (alice_challenge, _) = login_route(
+        &server, "/v1/first-party/login/challenge",
+        &serde_json::to_vec(&alice).unwrap(),
+    ).unwrap();
+    let (bob_challenge, _) = login_route(
+        &server, "/v1/first-party/login/challenge",
+        &serde_json::to_vec(&bob).unwrap(),
+    ).unwrap();
+    let make_proof = |binding: &Binding, signer: &SigningKey, issued: &Value| {
+        let signed = encoded_proof(
+            "ucr-first-party-device-login.v1",
+            &json!([
+                binding.tenant_id, binding.namespace_id,
+                binding.participant_id, binding.device,
+                issued["challengeId"], issued["challengeBytesBase64Url"],
+            ]),
+        ).unwrap();
+        serde_json::to_vec(&json!({
+            "binding": binding,
+            "challengeId": issued["challengeId"],
+            "signatureBase64Url": URL_SAFE_NO_PAD.encode(
+                signer.sign(signed.as_bytes()).to_bytes()
+            ),
+        })).unwrap()
+    };
+    let alice_proof = make_proof(&alice, &alice_signer, &alice_challenge);
+    let bob_proof = make_proof(&bob, &bob_signer, &bob_challenge);
+
+    // Deterministic concurrency interleaving: signature was verified and its
+    // challenge consumed, but the response/cookie has NOT been issued yet.
+    let parsed: LoginProof = parse(&alice_proof).unwrap();
+    let pending = consume(
+        &server, &alice, &parsed.challenge_id, "login", None
+    ).unwrap();
+    let subject = subject_for(&server, &alice).unwrap();
+    let (key_id, public_key) = trusted_key(&server, &alice).unwrap();
+    let signed = encoded_proof(
+        "ucr-first-party-device-login.v1",
+        &json!([
+            alice.tenant_id, alice.namespace_id,
+            alice.participant_id, alice.device, pending.id, pending.nonce,
+        ]),
+    ).unwrap();
+    verify_ed25519(public_key, &signed, &parsed.signature_base64_url).unwrap();
+    spend(&server, &pending).unwrap();
+
+    let (response, clear_cookie) = dispatch_post(
+        &server, "/v1/first-party/logout",
+        &serde_json::to_vec(&json!({"binding": alice})).unwrap(),
+        Some(&old_session),
+    ).unwrap();
+    assert_eq!(response["signedOut"], true);
+    assert!(clear_cookie.unwrap().contains("Max-Age=0"));
+    assert_eq!(
+        server.sessions.lock().unwrap().sessions.iter()
+            .filter(|session| session.binding == alice).count(), 0,
+        "Logout must retire even a newer cookie issued before its completion"
+    );
+
+    assert_eq!(
+        issue_session(
+            &server, alice.clone(), subject, key_id, public_key,
+            pending.login_generation,
+        ).err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "verified pre-Logout login must not issue a cookie after Logout"
+    );
+    assert_eq!(
+        login_route(&server, "/v1/first-party/login/verify", &alice_proof).err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a signed pre-Logout challenge must fail even if verification starts late"
+    );
+    assert_eq!(
+        dispatch_post(
+            &server, "/v1/first-party/logout",
+            &serde_json::to_vec(&json!({"binding": alice})).unwrap(),
+            Some(&old_session),
+        ).err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a retired cookie cannot execute a second Logout"
+    );
+    login_route(&server, "/v1/first-party/login/verify", &bob_proof)
+        .expect("another Device's pre-Logout challenge must remain valid");
+    signed_login(&server, &alice, &alice_signer);
 }
