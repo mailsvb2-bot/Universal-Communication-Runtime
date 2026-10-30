@@ -6,7 +6,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -247,6 +247,9 @@ struct State {
     recovery_consumed: Mutex<Vec<([u8; 32], Instant)>>,
     signup_admissions: Mutex<Vec<Instant>>,
     sessions: Mutex<SessionLedger>,
+    // One in-process serialization gate per canonical Device. Weak entries are
+    // pruned so anonymous/retired Devices cannot grow this map without bound.
+    protected_actions: Mutex<HashMap<Binding, Weak<Mutex<()>>>>,
 }
 
 #[derive(Debug)]
@@ -314,6 +317,7 @@ pub(super) async fn serve(
         recovery_consumed: Mutex::new(Vec::new()),
         signup_admissions: Mutex::new(Vec::new()),
         sessions: Mutex::new(SessionLedger::default()),
+        protected_actions: Mutex::new(HashMap::new()),
     });
     println!(
         "UCR_FIRST_PARTY_READY loopback={} https_edge=required",
@@ -759,6 +763,26 @@ fn encoded_proof(prefix: &str, context: &Value) -> Result<String, StatusCode> {
     ))
 }
 
+// A delayed POST body must not resurrect a session after Logout. Every
+// protected action, including Logout, acquires this same per-Device gate only
+// AFTER its body has been read; no mutex is held across a network await.
+fn protected_action_gate(
+    state: &State,
+    binding: &Binding,
+) -> Result<Arc<Mutex<()>>, StatusCode> {
+    let mut gates = state
+        .protected_actions
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    gates.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(gate) = gates.get(binding).and_then(Weak::upgrade) {
+        return Ok(gate);
+    }
+    let gate = Arc::new(Mutex::new(()));
+    gates.insert(binding.clone(), Arc::downgrade(&gate));
+    Ok(gate)
+}
+
 fn issue_session(
     state: &State,
     binding: Binding,
@@ -767,6 +791,8 @@ fn issue_session(
     signer_public_key: [u8; 32],
     login_generation: Option<u64>,
 ) -> Result<(Value, String), StatusCode> {
+    let gate = protected_action_gate(state, &binding)?;
+    let _action = gate.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let token = nonce()?;
     let mut ledger = state
         .sessions
@@ -1226,6 +1252,32 @@ fn dispatch_post(
         return account_route(state, path, body);
     }
     let auth = session.ok_or(StatusCode::UNAUTHORIZED)?;
+    // Revalidate the cookie AFTER the possibly slow request body, and hold
+    // the Device gate through the complete synchronous canonical operation.
+    // Logout waits for an earlier operation to finish, then revokes it; an
+    // operation queued behind Logout cannot mutate Call or issue signed Join.
+    let gate = protected_action_gate(state, &auth.binding)?;
+    let _action = gate.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    {
+        let ledger = state
+            .sessions
+            .lock()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        if !ledger.sessions.iter().any(|current| {
+            current.token == auth.token
+                && current.binding == auth.binding
+                && current.until > Instant::now()
+        }) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    if subject_for(state, &auth.binding)? != auth.subject {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let (key_id, public_key) = trusted_key(state, &auth.binding)?;
+    if key_id != auth.signer_key_id || public_key != auth.signer_public_key {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     if path == "/v1/first-party/logout" {
         let input: BoundRequest = parse(body)?;
         ensure_binding(&input.binding, auth)?;
