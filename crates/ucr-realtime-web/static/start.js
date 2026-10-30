@@ -172,8 +172,15 @@ function lastBinding() {
   }
 }
 async function restoreSession() {
-  try {return await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());}
-  catch(error) {
+  // Logout/revoke must fence an in-flight cookie check before it can
+  // silently reauthenticate and issue a new browser session.
+  const generation=uiAuthGeneration;
+  try {
+    const resumed=await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());
+    if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+    return resumed;
+  } catch(error) {
+    if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
     const hint=lastBinding();
     if(!hint){
       authDiagnostic("device_reauthentication","unavailable");
@@ -185,6 +192,7 @@ async function restoreSession() {
     // If the server revoked this Device, do not turn the hint into trust.
     const verified=await authTrace("device_reauthentication",()=>authenticateUcrFirstPartyDevice(
       vault,{origin:location.origin},hint));
+    if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
     if(principalScope(verified)!==principalScope(hint)){
       authDiagnostic("device_scope_verification","failed");
       forgetBinding();
@@ -754,10 +762,12 @@ el("rotate-recovery").addEventListener("click",()=>void run(async()=>{
   showRecovery(code);
 }));
 el("logout").addEventListener("click",()=>void run(async()=>{
-  await host.logout();
+  // Immediately stop local Call/Join admission. Waiting for HTTP logout
+  // could let a previously requested signed Join open media after this click.
   forgetBinding();
   forgetActiveCall();
   plClearAuthenticatedView();
+  await host.logout();
   el("who").textContent="Вы вышли из учётной записи.";
   message("Серверная сессия закрыта. Приватный ключ остаётся на устройстве для повторного входа.");
 }));
