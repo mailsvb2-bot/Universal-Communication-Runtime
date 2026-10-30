@@ -181,6 +181,10 @@ async function restoreSession() {
     return resumed;
   } catch(error) {
     if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+    // Only an expired/absent cookie (401) authorizes a fresh possession proof.
+    // A transient network/5xx failure, rate limit or 403 must not silently
+    // issue another session or turn a failed status check into a login attempt.
+    if(authHttpCode(error)!==401)throw error;
     const hint=lastBinding();
     if(!hint){
       authDiagnostic("device_reauthentication","unavailable");
