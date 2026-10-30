@@ -260,6 +260,22 @@ assert.equal(values.get("ucrFirstPartyDirectCall"),accepted.callId);
 context.navigating=false;
 navigatedTo=null;
 
+// A Join from a previous authentication generation must not navigate even if
+// the same Identity/Device and same Call locator were re-established.
+context.active={call:accepted,identity:"alice"};
+forgetActiveCall();
+rememberActiveCall(accepted,"alice");
+let finishOldGenerationJoin,signalOldGenerationJoin;
+const oldGenerationJoinStarted=new Promise(resolve=>{signalOldGenerationJoin=resolve;});
+context.calls.join=()=>new Promise(resolve=>{finishOldGenerationJoin=resolve;signalOldGenerationJoin();});
+const staleGenerationJoin=beginMedia(accepted.callId);
+await oldGenerationJoinStarted;
+context.uiAuthGeneration++;
+finishOldGenerationJoin({callId:accepted.callId,joinFragment:"#signed"});
+await staleGenerationJoin;
+assert.equal(context.navigating,false,"prior login generation must never navigate");
+assert.equal(navigatedTo,null,"old signed Join must not navigate after reauthentication");
+
 // A pending incoming-list response cannot repaint a former Device's Calls.
 forgetActiveCall();
 context.active=null;
@@ -377,6 +393,68 @@ finishBusyHangup({...acceptedCall,state:"terminated"});
 await new Promise(resolve=>setImmediate(resolve));
 assert.equal(context.active.call.state,"terminated");
 context.busy=false;
+
+// Execute the REAL incoming-accept handler with delayed canonical responses.
+// A cross-tab logout or same-Device reauthentication must fence the callback
+// both after acceptance and after the separate session verification.
+const incomingBegin=source.indexOf("function renderIncoming(items) {");
+const incomingEnd=source.indexOf("async function refresh() {",incomingBegin);
+assert.ok(incomingBegin>=0 && incomingEnd>incomingBegin);
+const handlers=new Map();
+const incomingContext={
+  accountScope:scope,uiAuthGeneration:0,active:null,
+  document:{createElement:()=>({append(){},textContent:"",className:""})},
+  el:id=>{assert.equal(id,"incoming");return {replaceChildren(){},append(){}};},
+  nameFor:id=>id,
+  btn:(label,callback)=>{handlers.set(label,callback);return {label};},
+  activeCallLocator:()=>null,
+  calls:{},
+  host:{},
+  principalScope:user=>JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]),
+  rememberActiveCall(){throw Error("stale accept cannot save Call locator");},
+  showActive(){throw Error("stale accept cannot paint Call");},
+  beginMedia(){throw Error("stale accept cannot join media");},
+  refresh(){},
+};
+runInNewContext(source.slice(incomingBegin,incomingEnd)+
+  "\nthis.renderIncoming=renderIncoming;",incomingContext);
+incomingContext.renderIncoming([call]);
+const acceptIncoming=handlers.get("Принять");
+assert.equal(typeof acceptIncoming,"function");
+let finishOldAccept;
+incomingContext.calls.signal=()=>new Promise(resolve=>{finishOldAccept=resolve;});
+incomingContext.host.resumeAuthenticatedDevice=async()=>user;
+const staleAccept=acceptIncoming();
+incomingContext.uiAuthGeneration++;
+finishOldAccept({...call,state:"active"});
+await staleAccept;
+assert.equal(incomingContext.active,null,"old generation must not paint accepted Call");
+
+let finishOldSession;
+incomingContext.calls.signal=async()=>({...call,state:"active"});
+incomingContext.host.resumeAuthenticatedDevice=()=>new Promise(resolve=>{finishOldSession=resolve;});
+const staleSessionAccept=acceptIncoming();
+await Promise.resolve();
+assert.equal(typeof finishOldSession,"function","accept must verify canonical Device");
+incomingContext.uiAuthGeneration++;
+finishOldSession(user);
+await staleSessionAccept;
+assert.equal(incomingContext.active,null,"late Device verification must not paint Call");
+
+let savedAccepts=0,mediaAccepts=0;
+incomingContext.host.resumeAuthenticatedDevice=async()=>user;
+incomingContext.rememberActiveCall=()=>{savedAccepts++;};
+incomingContext.showActive=()=>{};
+incomingContext.beginMedia=async()=>{mediaAccepts++;};
+await acceptIncoming();
+assert.equal(incomingContext.active.call.callId,call.callId);
+assert.equal(savedAccepts,1);
+assert.equal(mediaAccepts,1,"fresh accepted Call must still enter canonical media");
+
+incomingContext.active=null;
+incomingContext.host.resumeAuthenticatedDevice=async()=>({...user,deviceId:"other-device"});
+await assert.rejects(acceptIncoming(),/Device changed during Call acceptance/);
+assert.equal(incomingContext.active,null,"wrong Device must not adopt accepted Call");
 
 assert.match(source,/const call = await calls\.start\(contact\.id,media,requestId\);[\s\S]*?rememberActiveCall\(call,session\.participantId\);/);
 assert.match(source,/const result = await calls\.signal\(call\.callId,"accept"\);[\s\S]*?rememberActiveCall\(result,session\.participantId\);/);
