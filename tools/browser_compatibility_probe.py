@@ -1083,6 +1083,7 @@ const done = arguments[arguments.length - 1];
     },
     error(error) { throw error; }
   });
+  let frameSource = "imagebitmap";
   try {
     encoder.configure(config);
     // Materialize a browser-backed frame for Safari's WebCodecs implementation.
@@ -1104,7 +1105,7 @@ const done = arguments[arguments.length - 1];
     document.body.appendChild(canvas);
     try {
       canvas.getBoundingClientRect(); // Flush layout before WebKit reads pixels.
-      let frame, frameSource = "imagebitmap";
+      let frame;
       try {
         const bitmap = await createImageBitmap(canvas);
         try { frame = new VideoFrame(bitmap, {timestamp: 0}); }
@@ -1130,7 +1131,7 @@ const done = arguments[arguments.length - 1];
     } finally { canvas.remove(); }
     await encoder.flush();
     await decoder.flush();
-    return {supported: true, codec: "vp8", sourceWidth: 1920,
+    return {supported: true, codec: "vp8", frameSource, sourceWidth: 1920,
       sourceHeight: 1080, decodedWidth, decodedHeight, decodedFrames,
       encodedBytes, localEncodeDecodeMs: Math.round(performance.now() - start),
       verified: decodedWidth === 1920 && decodedHeight === 1080 &&
