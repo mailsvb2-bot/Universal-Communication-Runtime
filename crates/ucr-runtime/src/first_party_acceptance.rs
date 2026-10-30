@@ -55,6 +55,7 @@ fn state(path: &PathBuf) -> State {
         recovery_consumed: Mutex::new(Vec::new()),
         signup_admissions: Mutex::new(Vec::new()),
         sessions: Mutex::new(SessionLedger::default()),
+        protected_actions: Mutex::new(HashMap::new()),
     }
 }
 
@@ -1110,6 +1111,26 @@ fn logout_atomically_fences_old_login_verify_and_retires_all_device_cookies() {
     .unwrap();
     assert_eq!(response["signedOut"], true);
     assert!(clear_cookie.unwrap().contains("Max-Age=0"));
+    // Simulate a protected POST authenticated before its slow body completed.
+    // The previously cloned session must not issue a signed Join after Logout,
+    // even if its body arrives only after the cookie was revoked.
+    let delayed_join = serde_json::to_vec(&json!({
+        "binding": alice,
+        "callId": "stale-call",
+        "expectedRevision": 0,
+    }))
+    .unwrap();
+    assert_eq!(
+        dispatch_post(
+            &server,
+            "/v1/first-party/call/join-accepted",
+            &delayed_join,
+            Some(&old_session),
+        )
+        .err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a delayed protected POST must revalidate its session after Logout"
+    );
     assert_eq!(
         server
             .sessions
