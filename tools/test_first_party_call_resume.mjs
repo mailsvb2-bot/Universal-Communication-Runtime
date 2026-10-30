@@ -624,7 +624,7 @@ const logoutContext={
   }},
   message:value=>{logoutMessage=value;},
 };
-runInNewContext(source.slice(logoutBegin-25,logoutEnd)+
+runInNewContext(source.slice(source.indexOf("let logoutInFlight=false;",logoutBegin-200),logoutEnd)+
   "\\nthis.logoutState=()=>logoutInFlight;",logoutContext);
 assert.equal(typeof logoutClick,"function");
 logoutClick(); // A busy action MUST NOT swallow Logout.
