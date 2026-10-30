@@ -298,19 +298,160 @@ Promise.resolve()
       const isBytes = ArrayBuffer.isView(keyPackage) &&
         Object.prototype.toString.call(keyPackage) === "[object Uint8Array]";
       let preJoinEpochRejected = false;
+      let preJoinRefRejected = false;
       try {
         state.crypto_epoch();
       } catch (_) {
         preJoinEpochRejected = true;
       }
+      try {
+        state.crypto_state_ref();
+      } catch (_) {
+        preJoinRefRejected = true;
+      }
+      // Exercise the REAL browser WASM/OpenMLS epoch-zero creator. This is
+      // public authenticator metadata, not a server or JavaScript exporter.
+      state.create_endpoint_group();
+      const initialEpoch = state.crypto_epoch();
+      const initialRef = state.crypto_state_ref();
+      const verifiedEpochZero = initialEpoch === 0n &&
+        typeof initialRef === "string" && /^[0-9a-f]{64}$/.test(initialRef);
+      // Crash-safe prepublication snapshot: the creator must recover its
+      // EXACT same epoch-zero OpenMLS group after a lost HTTP acknowledgement.
+      // A different Device, wrapping key or snapshot domain must fail closed.
+      let creatorRecoveryVerified = false;
+      let creatorWrongDeviceRejected = false;
+      let creatorWrongKeyRejected = false;
+      let creatorDomainRejected = false;
+      const creatorWrapping = new Uint8Array(32).fill(31);
+      const unpublished = state.seal_unpublished_group(creatorWrapping);
+      let recoveredCreator = null;
+      try {
+        recoveredCreator = module.EndpointMlsState.restore_unpublished_group(
+          "wasm-probe-tenant", "wasm-probe-namespace",
+          "wasm-probe-group", "wasm-probe-device-" + browser,
+          creatorWrapping, unpublished
+        );
+        const canonicalSnapshot = recoveredCreator.seal_snapshot(creatorWrapping);
+        const admittedCreator = module.EndpointMlsState.restore(
+          "wasm-probe-tenant", "wasm-probe-namespace",
+          "wasm-probe-group", "wasm-probe-device-" + browser,
+          creatorWrapping, canonicalSnapshot, 0n, initialRef
+        );
+        creatorRecoveryVerified = recoveredCreator.crypto_epoch() === 0n &&
+          recoveredCreator.crypto_state_ref() === initialRef &&
+          admittedCreator.crypto_state_ref() === initialRef;
+        admittedCreator.free();
+        try {
+          module.EndpointMlsState.restore_unpublished_group(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", "wrong-device", creatorWrapping, unpublished
+          );
+        } catch (_) { creatorWrongDeviceRejected = true; }
+        try {
+          module.EndpointMlsState.restore_unpublished_group(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", "wasm-probe-device-" + browser,
+            new Uint8Array(32).fill(32), unpublished
+          );
+        } catch (_) { creatorWrongKeyRejected = true; }
+        try {
+          module.EndpointMlsState.restore_unjoined_key_package(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", "wasm-probe-device-" + browser,
+            creatorWrapping, unpublished
+          );
+        } catch (_) { creatorDomainRejected = true; }
+      } finally {
+        creatorWrapping.fill(0);
+        if (recoveredCreator) recoveredCreator.free();
+      }
+      // Actual browser OpenMLS KeyPackage -> encrypted unjoined snapshot ->
+      // reload/restore -> endpoint-owned Add/Welcome. No server-held seed.
+      const recipientDevice = "wasm-probe-recipient-" + browser;
+      const recipient = new module.EndpointMlsState(
+        "wasm-probe-tenant", "wasm-probe-namespace",
+        "wasm-probe-group", recipientDevice
+      );
+      let recovered = null;
+      let persistedRecipientWelcome = false;
+      let wrongDeviceRejected = false;
+      let wrongKeyRejected = false;
+      let activeAsUnjoinedRejected = false;
+      try {
+        const wrappingKey = new Uint8Array(32).fill(17);
+        const originalOffer = recipient.key_package();
+        const sealedOffer = recipient.seal_unjoined_key_package(wrappingKey);
+        recovered = module.EndpointMlsState.restore_unjoined_key_package(
+          "wasm-probe-tenant", "wasm-probe-namespace",
+          "wasm-probe-group", recipientDevice, wrappingKey, sealedOffer
+        );
+        try {
+          module.EndpointMlsState.restore_unjoined_key_package(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", "other-device", wrappingKey, sealedOffer
+          );
+        } catch (_) { wrongDeviceRejected = true; }
+        try {
+          module.EndpointMlsState.restore_unjoined_key_package(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", recipientDevice,
+            new Uint8Array(32).fill(18), sealedOffer
+          );
+        } catch (_) { wrongKeyRejected = true; }
+        const recoveredOffer = recovered.key_package();
+        const sameOffer = originalOffer.length === recoveredOffer.length &&
+          originalOffer.every((byte, index) => byte === recoveredOffer[index]);
+        const commit = state.stage_add_device(recipientDevice, recoveredOffer);
+        const welcome = state.pending_welcome();
+        const nextEpoch = state.pending_epoch();
+        const nextRef = state.pending_state_ref();
+        state.merge_endpoint_transition(nextEpoch, nextRef);
+        recovered.join_from_welcome(welcome, nextEpoch, nextRef);
+        persistedRecipientWelcome = sameOffer && commit.length > 0 &&
+          welcome.length > 0 && nextEpoch === 1n &&
+          recovered.crypto_epoch() === nextEpoch &&
+          recovered.crypto_state_ref() === nextRef;
+        const joinedSnapshot = recovered.seal_snapshot(wrappingKey);
+        try {
+          module.EndpointMlsState.restore_unjoined_key_package(
+            "wasm-probe-tenant", "wasm-probe-namespace",
+            "wasm-probe-group", recipientDevice, wrappingKey, joinedSnapshot
+          );
+        } catch (_) { activeAsUnjoinedRejected = true; }
+        wrappingKey.fill(0);
+      } finally {
+        if (recovered && typeof recovered.free === "function") recovered.free();
+        if (typeof recipient.free === "function") recipient.free();
+      }
       done({
         ok: contract === "ucr.endpoint-wasm.v1" &&
           isBytes &&
           keyPackage.length > 0 &&
-          preJoinEpochRejected,
+          preJoinEpochRejected &&
+          preJoinRefRejected &&
+          verifiedEpochZero &&
+          creatorRecoveryVerified &&
+          creatorWrongDeviceRejected &&
+          creatorWrongKeyRejected &&
+          creatorDomainRejected &&
+          persistedRecipientWelcome &&
+          wrongDeviceRejected &&
+          wrongKeyRejected &&
+          activeAsUnjoinedRejected,
         contract,
         keyPackageBytes: isBytes ? keyPackage.length : null,
         preJoinEpochRejected,
+        preJoinRefRejected,
+        verifiedEpochZero,
+        creatorRecoveryVerified,
+        creatorWrongDeviceRejected,
+        creatorWrongKeyRejected,
+        creatorDomainRejected,
+        persistedRecipientWelcome,
+        wrongDeviceRejected,
+        wrongKeyRejected,
+        activeAsUnjoinedRejected,
         endpointMlsStateConstructor: typeof module.EndpointMlsState === "function"
       });
     } finally {
@@ -803,6 +944,107 @@ Promise.resolve()
             and vault_after.get("ok") is True
         )
 
+        # Real browser race: simultaneous tabs/callers must recover the SAME
+        # atomically inserted MLS snapshot wrapping key, never last-writer-wins.
+        # A lost KEK would permanently strand an endpoint-owned MLS state.
+        wrapping_key_race = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+(async () => {
+  const key = "ucr-mls-wrapping-race:" + crypto.randomUUID();
+  const candidates = await Promise.all(Array.from({length: 16}, () =>
+    window.ucrEndpointWrappingKeyVault.getWrappingKey(key)));
+  const first = candidates[0];
+  const same = candidates.every(bytes =>
+    bytes.length === 32 && bytes.every((value, index) => value === first[index]));
+  const record = await readEndpointWrappingKeyRecord(key);
+  const persisted = await window.ucrEndpointWrappingKeyVault.getWrappingKey(key);
+  const restored = persisted.every((value, index) => value === first[index]);
+  // A missing KEK during restore must fail without silently minting another
+  // key that could never decrypt the old sealed MLS state.
+  const missingKey = "ucr-mls-missing-kek:" + crypto.randomUUID();
+  let missingRejected = false;
+  try {
+    await window.ucrEndpointWrappingKeyVault.getWrappingKey(
+      missingKey, {requireExisting:true});
+  } catch (_) { missingRejected = true; }
+  const missingWasNotCreated = (await readEndpointWrappingKeyRecord(missingKey)) === null;
+  for (const bytes of candidates) bytes.fill(0);
+  persisted.fill(0);
+  return {ok:same && restored && !!record && record.kek.extractable === false &&
+      missingRejected && missingWasNotCreated,
+    contenders:16, same, restored, missingRejected, missingWasNotCreated,
+    nonExtractable:record?.kek.extractable === false};
+})().then(done).catch(error => done({ok:false,error:String(error)}));
+""",
+        )
+        if not isinstance(wrapping_key_race, dict) or wrapping_key_race.get("ok") is not True:
+            raise RuntimeError(f"concurrent MLS wrapping-key creation failed: {wrapping_key_race!r}")
+
+        # Real IndexedDB CAS: two independently restored first-party MLS tabs
+        # must not overwrite each other's encrypted next-epoch snapshots.
+        # Also race a direct IndexedDB writer (the /start.js owner), which does
+        # not rely on client.html's Web Locks for the atomic transaction fence.
+        snapshot_cas_browser = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+(async () => {
+  if (!navigator.locks?.request)
+    return {ok:true,supported:false,reason:"Web Locks unavailable; first-party Join fails closed"};
+  const key = "ucr-e2ee-state:fp-v1:" + JSON.stringify([
+    "cas-tenant",null,"fp-m-cas","alice","device-a",crypto.randomUUID()
+  ]);
+  const initial = Uint8Array.of(10,11,12);
+  const winnerA = Uint8Array.of(20,21,22);
+  const winnerB = Uint8Array.of(30,31,32);
+  const fromStart = Uint8Array.of(40,41,42);
+  const equals = (a,b) => !!a && a.length===b.length &&
+    a.every((value,index)=>value===b[index]);
+  try {
+    await saveEndpointState(key,initial);
+    const observed = await loadEndpointState(key);
+    const competing = await Promise.allSettled([
+      saveEndpointState(key,winnerA,observed),
+      saveEndpointState(key,winnerB,observed)
+    ]);
+    const successes = competing.filter(result=>result.status==="fulfilled").length;
+    const rejections = competing.filter(result=>
+      result.status==="rejected" &&
+      String(result.reason).includes("snapshot changed during restore")).length;
+    const persisted = await loadEndpointState(key);
+    const singleWinner = (equals(persisted,winnerA)||equals(persisted,winnerB)) &&
+      successes===1 && rejections===1;
+    const stale = await loadEndpointState(key);
+    // Simulate a /start.js snapshot write after client.html read but before
+    // its conditional promotion. The IndexedDB CAS must still reject it.
+    const db = await openEndpointStateDb();
+    try {
+      await new Promise((resolve,reject)=>{
+        const tx=db.transaction("sealed-snapshots","readwrite");
+        tx.objectStore("sealed-snapshots").put(Array.from(fromStart),key);
+        tx.oncomplete=resolve;
+        tx.onerror=()=>reject(tx.error||Error("start writer failed"));
+        tx.onabort=()=>reject(tx.error||Error("start writer aborted"));
+      });
+    } finally { db.close(); }
+    let rollbackRejected = false;
+    try { await saveEndpointState(key,initial,stale); }
+    catch(error) {
+      rollbackRejected=String(error).includes("snapshot changed during restore");
+    }
+    const newest = await loadEndpointState(key);
+    const preserved = equals(newest,fromStart);
+    return {ok:singleWinner&&rollbackRejected&&preserved,supported:true,
+      successes,rejections,singleWinner,rollbackRejected,preserved};
+  } finally { await removeEndpointState(key); }
+})().then(done).catch(error=>done({ok:false,error:String(error)}));
+""",
+        )
+        if not isinstance(snapshot_cas_browser, dict) or snapshot_cas_browser.get("ok") is not True:
+            raise RuntimeError(f"first-party MLS snapshot CAS failed: {snapshot_cas_browser!r}")
+
         # Real browser codec execution, not a capability-name checkbox. This synthetic
         # local frame probe is intentionally NOT evidence of WAN/TURN or two-device QoE.
         full_hd_codec_probe = execute_async(
@@ -841,6 +1083,7 @@ const done = arguments[arguments.length - 1];
     },
     error(error) { throw error; }
   });
+  let frameSource = "imagebitmap";
   try {
     encoder.configure(config);
     // Materialize a browser-backed frame for Safari's WebCodecs implementation.
@@ -854,14 +1097,41 @@ const done = arguments[arguments.length - 1];
     pixels.addColorStop(1, "#f4c251");
     ctx.fillStyle = pixels;
     ctx.fillRect(0, 0, 1920, 1080);
-    const bitmap = await createImageBitmap(canvas);
+    // Safari WebDriver may reject ImageBitmap from a detached canvas even
+    // though its VP8 encoder works. Attach a real renderable source, then
+    // require a genuinely encoded and decoded Full HD frame as before.
+    canvas.style.cssText =
+      "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;pointer-events:none";
+    document.body.appendChild(canvas);
     try {
-      const frame = new VideoFrame(bitmap, {timestamp: 0});
+      canvas.getBoundingClientRect(); // Flush layout before WebKit reads pixels.
+      let frame;
+      try {
+        const bitmap = await createImageBitmap(canvas);
+        try { frame = new VideoFrame(bitmap, {timestamp: 0}); }
+        finally { bitmap.close(); }
+      } catch (_) {
+        try {
+          frame = new VideoFrame(canvas, {timestamp: 0});
+          frameSource = "canvas";
+        } catch (_) {
+          // Safari WebDriver can expose a canvas with no composited frame.
+          // A real, opaque RGBA pixel buffer avoids that browser compositor
+          // dependency while still requiring a full-HD VP8 encode AND decode.
+          // This is synthetic local codec evidence, never network A/B media.
+          const rgba = new Uint8Array(1920 * 1080 * 4);
+          rgba.fill(255);
+          frame = new VideoFrame(rgba, {
+            format: "RGBA", codedWidth: 1920, codedHeight: 1080, timestamp: 0
+          });
+          frameSource = "rgba-buffer";
+        }
+      }
       try { encoder.encode(frame, {keyFrame: true}); } finally { frame.close(); }
-    } finally { bitmap.close(); }
+    } finally { canvas.remove(); }
     await encoder.flush();
     await decoder.flush();
-    return {supported: true, codec: "vp8", sourceWidth: 1920,
+    return {supported: true, codec: "vp8", frameSource, sourceWidth: 1920,
       sourceHeight: 1080, decodedWidth, decodedHeight, decodedFrames,
       encodedBytes, localEncodeDecodeMs: Math.round(performance.now() - start),
       verified: decodedWidth === 1920 && decodedHeight === 1080 &&
@@ -920,6 +1190,9 @@ injected.remove();
   const previousApi = api;
   const previousSetTimeout = window.setTimeout;
   const previousClaims = claims;
+  const previousToken = token;
+  const previousOfferId = startWebRtc.offerId;
+  const previousOfferOwner = startWebRtc.offerOwner;
   const previousSignedGrantRetired = signedGrantRetired;
   const previousActiveSessionSequence = activeSessionSequence;
   const previousE2eeEndpoint = window.ucrE2eeEndpoint;
@@ -943,6 +1216,7 @@ injected.remove();
   try {
     claims = {tenant_id:"test-tenant",namespace_id:"test-namespace",
       call_id:"test-call",session_id:"test-session",not_before:0};
+    token = "fixture-old-grant";
     window.setTimeout = function(fn, delay, ...args) {
       if (delay === HEARTBEAT_AUTH_TIMEOUT_MS) {
         watchdog = {fire: () => fn(...args), delay};
@@ -972,6 +1246,10 @@ injected.remove();
     sessionActive = true;mediaActive = true;
     heartbeatInFlight = false;
     startWebRtc.offerId = "A".repeat(43);
+    startWebRtc.offerOwner = Object.freeze({
+      offerId: startWebRtc.offerId,
+      claims: Object.freeze({...claims}), token,
+    });
     ui.join.disabled = true;
     capture("watchdog");
     const pendingHeartbeat = heartbeat();
@@ -991,18 +1269,25 @@ injected.remove();
     }
     check(events.includes("peer:watchdog"), "watchdog left WebRTC peer open");
     check(closeOffer === "A".repeat(43), "old owned WebRTC offer not closed");
+    check(startWebRtc.offerOwner?.token === "fixture-old-grant",
+      "old close must retain original grant while HTTP is pending");
     check(oldLeaveSequence === 1, "retired Leave missing original server generation");
 
     // Emulate a separate, independently issued signed grant with a new
     // canonical session identity, not reuse of the retired grant.
     signedGrantRetired = false;
     claims = {...claims,session_id:"fresh-server-issued-session"};
+    token = "fixture-new-grant";
     activeSessionSequence = 2;
     // The old Leave and close requests remain pending during new admission.
     // They must not erase the new peer's identity or overwrite its UI.
     sessionLifecycleGeneration++;
     sessionActive = true;mediaActive = true;
     startWebRtc.offerId = "B".repeat(43);
+    startWebRtc.offerOwner = Object.freeze({
+      offerId: startWebRtc.offerId,
+      claims: Object.freeze({...claims}), token,
+    });
     ui.state.textContent = "New joined";
     ui.status.textContent = "New session active";
     ui.join.disabled = true;
@@ -1014,6 +1299,8 @@ injected.remove();
     await pendingHeartbeat;
     for (let i = 0; i < 6; i++) await Promise.resolve();
     check(startWebRtc.offerId === "B".repeat(43), "old close erased new offer");
+    check(startWebRtc.offerOwner?.token === "fixture-new-grant",
+      "old close erased replacement offer authority");
     check(sessionActive && mediaActive, "stale heartbeat revoked new session");
     check(ui.state.textContent === "New joined" &&
       ui.status.textContent === "New session active" && ui.join.disabled,
@@ -1041,6 +1328,8 @@ injected.remove();
       check(events.includes("stop:offline:" + name), "offline kept " + name + " capturing");
     }
     check(events.includes("peer:offline"), "offline left WebRTC peer open");
+    check(closeOffer === "B".repeat(43),
+      "offline must close the replacement session's own WebRTC offer");
     window.dispatchEvent(new Event("online"));
     check(!sessionActive, "online silently reauthorized revoked session");
     check(signedGrantRetired && ui.join.disabled,
@@ -1080,13 +1369,15 @@ injected.remove();
     api = previousApi;
     window.setTimeout = previousSetTimeout;
     claims = previousClaims;
+    token = previousToken;
     signedGrantRetired = previousSignedGrantRetired;
     activeSessionSequence = previousActiveSessionSequence;
     if (previousE2eeEndpoint === undefined) delete window.ucrE2eeEndpoint;
     else window.ucrE2eeEndpoint = previousE2eeEndpoint;
     screenShareBusy = false;
     sessionActive = false;mediaActive = false;
-    startWebRtc.offerId = null;
+    startWebRtc.offerId = previousOfferId;
+    startWebRtc.offerOwner = previousOfferOwner;
   }
 })().then(result => {
   document.getElementById("__ucr_regression_result").setAttribute(
@@ -1165,7 +1456,40 @@ const done = arguments[arguments.length - 1];
   ]);
   upgraded.close();
   await deleteDb();
-  done({ok:true,blockedRejected:rejected,lateConnectionDidNotBlockNextUpgrade:true});
+  // Repeat against client.html's own MLS snapshot database opener. It shares
+  // the same DB but has a separate blocked-upgrade/late-onsuccess lifecycle.
+  const oldClient = await Promise.race([
+    new Promise((resolve, reject) => {
+      const request = indexedDB.open(name, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("sealed-snapshots");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("client v1 open failed"));
+    }),
+    timeout("client version 1 open")
+  ]);
+  let clientRejected = false;
+  try {
+    try {
+      await Promise.race([openEndpointStateDb(), timeout("blocked client MLS open")]);
+    } catch (error) {
+      clientRejected = String(error).includes("IndexedDB upgrade blocked");
+    }
+  } finally {
+    oldClient.close();
+  }
+  if (!clientRejected) throw new Error("blocked client MLS open did not fail closed");
+  const upgradedClient = await Promise.race([
+    new Promise((resolve, reject) => {
+      const request = indexedDB.open(name, 3);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("client v3 open failed"));
+    }),
+    timeout("client late-open orphan blocked version 3")
+  ]);
+  upgradedClient.close();
+  await deleteDb();
+  done({ok:true,blockedRejected:rejected,clientBlockedRejected:clientRejected,
+    lateConnectionDidNotBlockNextUpgrade:true,clientLateConnectionClosed:true});
 })().catch(error => done({ok:false,error:String(error)}));
 """,
             )
@@ -1247,6 +1571,8 @@ const done = arguments[arguments.length - 1];
             "schema": "ucr.browser-compatibility.v1",
             "heartbeat_revocation_browser": heartbeat_revocation_browser,
             "indexeddb_blocked_upgrade_browser": blocked_upgrade_browser,
+            "endpoint_wrapping_key_concurrency": wrapping_key_race,
+            "endpoint_mls_snapshot_cas_browser": snapshot_cas_browser,
             "browser_requested": args.browser,
             "browser_name": reported.get("browserName"),
             "browser_version": reported.get("browserVersion"),
@@ -1280,6 +1606,7 @@ const done = arguments[arguments.length - 1];
                 "raw_export_rejected": vault_before.get("exportRejected") is True and vault_after.get("exportRejected") is True,
                 "wrapped_not_raw": vault_before.get("wrappedEqualsRaw") is False,
                 "reload_same_dek": vault_reload_verified,
+                "atomic_first_writer_wins": wrapping_key_race.get("ok") is True,
                 "before_refresh": vault_before,
                 "after_refresh": vault_after,
             },
