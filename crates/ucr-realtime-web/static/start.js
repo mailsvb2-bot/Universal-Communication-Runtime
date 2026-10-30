@@ -473,10 +473,13 @@ async function refresh() {
     try {
       user = await restoreSession();
     } catch (error) {
-      // A missing/revoked cookie or failed trust recheck must not leave a
-      // previously authenticated cabinet and invitation visible. Transient
-      // errors also fail closed; manual retry performs fresh authentication.
-      plClearAuthenticatedView();
+      // Only an authorization/trust failure invalidates the visible identity.
+      // Temporary network, rate-limit and 5xx failures keep the periodic
+      // retry alive; no new Call/Join can succeed without server admission.
+      const code=authHttpCode(error);
+      if(!(error instanceof TypeError || [429,500,502,503].includes(code))){
+        plClearAuthenticatedView();
+      }
       throw error;
     }
     if (accountScope !== principalScope(user)) {
