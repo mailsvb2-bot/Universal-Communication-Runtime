@@ -49,6 +49,24 @@ function plSetSignedIn(identity){
     }
   }
 }
+// One fail-closed UI reset for logout, revoked sessions and cross-tab account changes.
+// It clears previously authenticated contact, Device, Call and recovery views.
+function plClearAuthenticatedView(){
+  clearInterval(timer);
+  accountScope=null;
+  active=null;
+  knownContacts=[];
+  idempotency.clear();
+  renderContacts([]);
+  renderIncoming([]);
+  el("devices").replaceChildren();
+  showActive();
+  plSetSignedIn(null);
+  el("new-contact").reset();
+  el("pl-invite-help").hidden=true;
+  el("recovery-output").hidden=true;
+  el("recovery-code").value="";
+}
 function plInviteUrl(){
   if(!plOwnIdentity)return null;
   const url=new URL("/start",location.origin);
@@ -447,19 +465,20 @@ async function refresh() {
   if (refreshing || navigating) return;
   refreshing = true;
   try {
-    const user = await restoreSession();
+    let user;
+    try {
+      user = await restoreSession();
+    } catch (error) {
+      // A missing/revoked cookie or failed trust recheck must not leave a
+      // previously authenticated cabinet and invitation visible. Transient
+      // errors also fail closed; manual retry performs fresh authentication.
+      plClearAuthenticatedView();
+      throw error;
+    }
     if (accountScope !== principalScope(user)) {
-      // Fail closed immediately if the user logs out or changes Device in
-      // another tab. Never keep the former user's contacts/Call on screen.
-      clearInterval(timer);
+      // Another tab may have changed Identity/Device while the UI was open.
       forgetActiveCall();
-      accountScope = null;
-      active = null;
-      knownContacts = [];
-      idempotency.clear();
-      renderContacts([]);
-      renderIncoming([]);
-      showActive();
+      plClearAuthenticatedView();
       throw Error("учётная запись сменилась — требуется повторная проверка");
     }
     if (!active) await restoreActiveCall(user);
@@ -687,16 +706,8 @@ el("logout").addEventListener("click",()=>void run(async()=>{
   await host.logout();
   forgetBinding();
   forgetActiveCall();
-  clearInterval(timer);
-  active=null;accountScope=null;knownContacts=[];idempotency.clear();
-  renderContacts([]);renderIncoming([]);el("devices").replaceChildren();
-  plSetSignedIn(null);
-  el("new-contact").reset();
-  el("pl-invite-help").hidden=true;
+  plClearAuthenticatedView();
   el("who").textContent="Вы вышли из учётной записи.";
-  showActive();
-  el("recovery-output").hidden=true;
-  el("recovery-code").value="";
   message("Серверная сессия закрыта. Приватный ключ остаётся на устройстве для повторного входа.");
 }));
 
@@ -713,15 +724,7 @@ window.addEventListener("pagehide", () => clearInterval(timer));
 function explainEntryFailure(error) {
   // Do not leave an earlier principal's contacts or call metadata on screen
   // after reauthentication has failed.
-  clearInterval(timer);
-  accountScope=null;
-  active=null;
-  knownContacts=[];
-  idempotency.clear();
-  renderContacts([]);
-  renderIncoming([]);
-  showActive();
-  plSetSignedIn(null);
+  plClearAuthenticatedView();
   const detail = error instanceof Error ? error.message : String(error);
   let hint = "Войдите с доверенного устройства, создайте учётную запись или восстановите доступ.";
   if (/HTTP 503/.test(detail)) hint = "Сервер входа не подключён: запустите first-party BFF.";
