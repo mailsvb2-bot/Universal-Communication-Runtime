@@ -32,7 +32,7 @@ function makeView({code="alice.device-1",invited=true,scope=null,identity=null}=
     el(id){assert.ok(nodes[id],"unexpected UI node "+id);return nodes[id];},
   };
   runInNewContext(resetSource+"\nthis.resetView=plClearAuthenticatedView;",state);
-  return {state,peer,recovery,recoveryCode,reset:()=>state.resetView()};
+  return {state,peer,recovery,recoveryCode,reset:(...args)=>state.resetView(...args)};
 }
 
 const anonymous=makeView();
