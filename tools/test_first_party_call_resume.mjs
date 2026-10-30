@@ -203,7 +203,7 @@ finishStaleDial(newer);
 await assert.rejects(staleDial,/Device changed during Call creation/);
 assert.equal(context.active,null,"late Call creation must not repaint another Device");
 assert.equal(values.has(hintKey),false);
-assert.match(source,/if \(activeCallLocator\(\) !== null\) throw Error\("сначала дождитесь проверки незавершённого вызова"\);/);
+assert.match(source,/if \(locator !== null\) throw Error\("сначала дождитесь проверки незавершённого вызова"\);/);
 
 // A periodic inspect begun for an old Call must not overwrite a newly dialed Call.
 context.active={call,identity:"alice"};
