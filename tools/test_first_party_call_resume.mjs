@@ -293,6 +293,41 @@ assert.equal(incomingRendered,previousIncomingCount,
   "late incoming list must not display after logout or Device switch");
 context.accountScope=scope;
 
+// A delayed 401 from the PREVIOUS authentication generation must not erase
+// a fresh login. This is distinct from a current-generation 401, which must
+// still fail closed. A transient 503 must preserve the visible session.
+let denyOldSession, signalOldSession;
+const oldSessionStarted=new Promise(resolve=>{signalOldSession=resolve;});
+context.restoreSession=()=>new Promise((_resolve,reject)=>{
+  denyOldSession=reject;
+  signalOldSession();
+});
+let authViewResets=0;
+context.plClearAuthenticatedView=()=>{
+  authViewResets++;
+  context.accountScope=null;
+  context.uiAuthGeneration++;
+};
+const oldAuthRefresh=refresh();
+await oldSessionStarted;
+context.uiAuthGeneration++; // another tab or explicit reauthentication won
+denyOldSession(new Error("HTTP 401: retired browser session"));
+await oldAuthRefresh;
+assert.equal(authViewResets,0,"old 401 cannot clear newly authenticated Device");
+assert.equal(context.accountScope,scope,"new authenticated scope must survive old denial");
+
+context.restoreSession=async()=>{throw Error("HTTP 401: current session revoked");};
+await assert.rejects(refresh(),/HTTP 401/);
+assert.equal(authViewResets,1,"current-generation 401 must clear revoked Device");
+
+context.accountScope=scope;
+context.restoreSession=async()=>{throw Error("HTTP 503: temporary outage");};
+await assert.rejects(refresh(),/HTTP 503/);
+assert.equal(authViewResets,1,"transient network outage must not clear authenticated Device");
+context.restoreSession=async()=>user;
+context.accountScope=scope;
+context.uiAuthGeneration=0;
+
 // A user-requested hangup must fence BOTH a fresh Join and a Join already
 // waiting on the canonical server, even when a periodic inspect races.
 const acceptedCall={...call,state:"active"};
