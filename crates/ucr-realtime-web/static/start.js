@@ -65,6 +65,7 @@ function plClearAuthenticatedView(preserveRecoveryCode=false){
   el("devices").replaceChildren();
   showActive();
   plSetSignedIn(null);
+  el("who").textContent="Нет подтверждённой сессии.";
   el("new-contact").reset();
   el("pl-invite-help").hidden=true;
   // An account signup/recovery may have committed before session issuance.
@@ -247,6 +248,7 @@ async function restoreActiveCall(user) {
   try {hint=JSON.parse(locator);}
   catch {forgetActiveCall(locator);return;}
   const scope=principalScope(user);
+  const generation=uiAuthGeneration;
   if (!hint || typeof hint!=="object" || hint.scope!==scope ||
       accountScope!==scope || typeof hint.callId!=="string" ||
       !/^[A-Za-z0-9_.:@-]{1,128}$/.test(hint.callId)) {
@@ -256,7 +258,9 @@ async function restoreActiveCall(user) {
     const call=await calls.inspect(hint.callId);
     // Inspect checks current canonical participant, Device and Call membership.
     // A delayed response cannot restore a Call after account/Device switch.
-    if (accountScope!==scope) {forgetActiveCall(locator);return;}
+    if (accountScope!==scope || generation!==uiAuthGeneration) {
+      forgetActiveCall(locator);return;
+    }
     // A new Call (or a newer locator) wins over this in-flight inspection.
     if (active || activeCallLocator()!==locator) return;
     if (call.state==="terminated") {forgetActiveCall(locator);return;}
@@ -432,8 +436,15 @@ async function dial(contact,media) {
   message("Соединяем с собеседником…");
   // Re-establish device authority before making an irreversible canonical Call.
   // A stale cookie must not create a Call which the UI then fails to display.
+  const scope=accountScope, generation=uiAuthGeneration;
   const session = await restoreSession();
+  if(!scope || scope!==accountScope || generation!==uiAuthGeneration ||
+     principalScope(session)!==scope)throw Error("Device changed before Call creation");
   const call = await calls.start(contact.id,media,requestId);
+  // The Call owner may have committed before a concurrent logout/revocation.
+  // Never repaint that stale Call under a new or unauthenticated Device.
+  if(scope!==accountScope || generation!==uiAuthGeneration)
+    throw Error("Device changed during Call creation; inspect the prior Call before retry");
   active = {call,identity:session.participantId};
   rememberActiveCall(call,session.participantId);
   showActive();
