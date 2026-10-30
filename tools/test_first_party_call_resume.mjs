@@ -434,7 +434,8 @@ let finishOldSession;
 incomingContext.calls.signal=async()=>({...call,state:"active"});
 incomingContext.host.resumeAuthenticatedDevice=()=>new Promise(resolve=>{finishOldSession=resolve;});
 const staleSessionAccept=acceptIncoming();
-await Promise.resolve();
+// Flush the separate VM context's promise jobs before checking the verifier.
+await new Promise(resolve=>setImmediate(resolve));
 assert.equal(typeof finishOldSession,"function","accept must verify canonical Device");
 incomingContext.uiAuthGeneration++;
 finishOldSession(user);
