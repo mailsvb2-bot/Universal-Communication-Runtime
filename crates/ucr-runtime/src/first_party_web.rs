@@ -766,10 +766,7 @@ fn encoded_proof(prefix: &str, context: &Value) -> Result<String, StatusCode> {
 // A delayed POST body must not resurrect a session after Logout. Every
 // protected action, including Logout, acquires this same per-Device gate only
 // AFTER its body has been read; no mutex is held across a network await.
-fn protected_action_gate(
-    state: &State,
-    binding: &Binding,
-) -> Result<Arc<Mutex<()>>, StatusCode> {
+fn protected_action_gate(state: &State, binding: &Binding) -> Result<Arc<Mutex<()>>, StatusCode> {
     let mut gates = state
         .protected_actions
         .lock()
