@@ -678,6 +678,9 @@ impl fmt::Debug for SessionEntry {
 pub struct RealtimeSessionRegistry {
     entries: Mutex<Vec<SessionEntry>>,
     expired_call_cleanup: Mutex<Vec<(TenantScope, CallId)>>,
+    // Shutdown-only coordinates for revoked WebRTC peers. No credentials,
+    // private media keys or duplicate session admission state live here.
+    pending_webrtc_closes: Mutex<Vec<(TenantScope, CallId, SessionId)>>,
     track_expired_call_cleanup: bool,
     bandwidth_usage: Mutex<Vec<BandwidthWindow>>,
     // Monotonic within one running registry: Leave+Join cannot reuse a lease
@@ -716,6 +719,7 @@ impl RealtimeSessionRegistry {
         Self {
             entries: Mutex::new(Vec::new()),
             expired_call_cleanup: Mutex::new(Vec::new()),
+            pending_webrtc_closes: Mutex::new(Vec::new()),
             track_expired_call_cleanup: false,
             bandwidth_usage: Mutex::new(Vec::new()),
             last_join_generation: AtomicU64::new(0),
@@ -734,12 +738,70 @@ impl RealtimeSessionRegistry {
         Self {
             entries: Mutex::new(Vec::new()),
             expired_call_cleanup: Mutex::new(Vec::new()),
+            pending_webrtc_closes: Mutex::new(Vec::new()),
             track_expired_call_cleanup: true,
             bandwidth_usage: Mutex::new(Vec::new()),
             last_join_generation: AtomicU64::new(0),
             max_sessions,
             queue_capacity,
         }
+    }
+
+    /// Records a revoked WebRTC transport shutdown before retiring its live
+    /// downlink. This queue contains only cleanup coordinates; the canonical
+    /// Join grant remains the sole admission/revocation authority.
+    ///
+    /// # Errors
+    /// Fails if node-local cleanup state is unavailable.
+    pub fn queue_webrtc_close(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), RealtimeRegistryError> {
+        let mut pending = self
+            .pending_webrtc_closes
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        let item = (
+            claims.scope.clone(),
+            claims.call_id.clone(),
+            claims.session_id.clone(),
+        );
+        if !pending.contains(&item) {
+            pending.push(item);
+        }
+        Ok(())
+    }
+
+    /// Returns a snapshot of pending WebRTC shutdown coordinates. A successful
+    /// provider close must be acknowledged separately; a failed close remains
+    /// retryable even after the live registry entry was removed.
+    ///
+    /// # Errors
+    /// Fails if node-local cleanup state is unavailable.
+    pub fn pending_webrtc_closes(
+        &self,
+    ) -> Result<Vec<(TenantScope, CallId, SessionId)>, RealtimeRegistryError> {
+        self.pending_webrtc_closes
+            .lock()
+            .map(|pending| pending.clone())
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)
+    }
+
+    /// Acknowledges only the exact provider session whose shutdown succeeded.
+    ///
+    /// # Errors
+    /// Fails if node-local cleanup state is unavailable.
+    pub fn acknowledge_webrtc_close(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        session_id: &SessionId,
+    ) -> Result<(), RealtimeRegistryError> {
+        self.pending_webrtc_closes
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?
+            .retain(|item| &item.0 != scope || &item.1 != call_id || &item.2 != session_id);
+        Ok(())
     }
 
     /// Returns Calls whose SFU placement cleanup has not yet been acknowledged.
@@ -1278,6 +1340,38 @@ impl RealtimeSessionRegistry {
         claims: &RealtimeSessionClaims,
         now_unix_ms: i64,
     ) -> Result<u64, RealtimeRegistryError> {
+        self.heartbeat_with_generation(claims, None, now_unix_ms)
+            .map(|(sequence, _)| sequence)
+    }
+
+    /// Refreshes liveness ONLY for the exact current Join lease. An old tab may
+    /// still hold a valid reusable signed grant after another tab reconnects
+    /// the same Session, but it must not keep the replacement on the live roster.
+    /// Compare the generation and mutate `last_seen` under ONE registry mutex.
+    ///
+    /// Returns None on an obsolete/zero generation without changing liveness.
+    ///
+    /// # Errors
+    /// Fails for expiry, claim mismatch, missing session, or unavailable state.
+    pub fn heartbeat_if_join_generation(
+        &self,
+        claims: &RealtimeSessionClaims,
+        expected_join_generation: u64,
+        now_unix_ms: i64,
+    ) -> Result<Option<u64>, RealtimeRegistryError> {
+        if expected_join_generation == 0 {
+            return Ok(None);
+        }
+        self.heartbeat_with_generation(claims, Some(expected_join_generation), now_unix_ms)
+            .map(|(sequence, matched)| matched.then_some(sequence))
+    }
+
+    fn heartbeat_with_generation(
+        &self,
+        claims: &RealtimeSessionClaims,
+        expected_join_generation: Option<u64>,
+        now_unix_ms: i64,
+    ) -> Result<(u64, bool), RealtimeRegistryError> {
         if now_unix_ms >= claims.expires_at_unix_ms {
             return Err(RealtimeRegistryError::Expired);
         }
@@ -1293,8 +1387,28 @@ impl RealtimeSessionRegistry {
         if entry.claims != *claims {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
+        if expected_join_generation.is_some_and(|expected| expected != entry.join_generation) {
+            return Ok((entry.sequence, false));
+        }
         entry.last_seen_unix_ms = now_unix_ms;
-        Ok(entry.sequence)
+        Ok((entry.sequence, true))
+    }
+
+    /// Checks that a signed session is still joined WITHOUT renewing its presence.
+    ///
+    /// Only the explicit, generation-fenced Heartbeat RPC may refresh a
+    /// first-party participant's connected roster lease. Transport activity
+    /// from an obsolete browser tab must not extend a replacement Join.
+    ///
+    /// # Errors
+    /// Fails for expiry, claim mismatch, missing session or unavailable state.
+    pub fn require_active_session(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<(), RealtimeRegistryError> {
+        self.current_join_generation(claims, now_unix_ms)
+            .map(|_| ())
     }
 
     /// Stable generation of the current Join, not the mutable attendance
@@ -2137,6 +2251,105 @@ mod tests {
         registry
             .leave_if_sequence(&claims, second.join_generation, 18_005)
             .expect("new owner can leave");
+    }
+
+    #[test]
+    fn transport_validation_never_renews_reconnected_presence() {
+        let registry = RealtimeSessionRegistry::new(8, 4);
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("transport-presence-fence-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("transport-presence-fence-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let old = registry.join(claims.clone(), 18_001).expect("old Join");
+        let current = registry.join(claims.clone(), 18_002).expect("new Join");
+        assert_ne!(old.join_generation, current.join_generation);
+        let late = 18_002 + CONNECTED_HEARTBEAT_GRACE_MS + 1;
+        for _ in 0..16 {
+            registry
+                .require_active_session(&claims, late)
+                .expect("transport validation must remain read-only");
+        }
+        assert!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, late)
+                .expect("connected roster")
+                .is_empty(),
+            "transport requests must not refresh the replacement Join"
+        );
+        assert_eq!(
+            registry.heartbeat_if_join_generation(&claims, old.join_generation, late),
+            Ok(None),
+            "obsolete Join cannot renew the replacement"
+        );
+        assert_eq!(
+            registry.heartbeat_if_join_generation(&claims, current.join_generation, late),
+            Ok(Some(current.transition.session_sequence)),
+            "only the current generation may renew presence"
+        );
+        assert_eq!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, late)
+                .expect("renewed roster")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn obsolete_join_heartbeat_cannot_revive_reconnected_participant() {
+        let registry = RealtimeSessionRegistry::new(8, 4);
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("heartbeat-generation-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("heartbeat-generation-device"))),
+                300,
+                18_000,
+            )
+            .expect("issue")
+            .claims;
+        let old = registry.join(claims.clone(), 18_001).expect("old Join");
+        let current = registry.join(claims.clone(), 18_002).expect("new Join");
+        assert_ne!(old.join_generation, current.join_generation);
+
+        // A delayed heartbeat from the previous browser tab arrives after the
+        // new tab's two-minute liveness grace. It must NOT keep the new tab
+        // visible or extend its media-receive eligibility.
+        let late = 18_002 + CONNECTED_HEARTBEAT_GRACE_MS + 1;
+        assert_eq!(
+            registry.heartbeat_if_join_generation(&claims, old.join_generation, late),
+            Ok(None)
+        );
+        assert_eq!(
+            registry.heartbeat_if_join_generation(&claims, 0, late),
+            Ok(None)
+        );
+        assert!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, late)
+                .expect("current roster")
+                .is_empty()
+        );
+
+        assert_eq!(
+            registry.heartbeat_if_join_generation(&claims, current.join_generation, late + 1),
+            Ok(Some(current.transition.session_sequence))
+        );
+        assert_eq!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, late + 1)
+                .expect("fresh roster")
+                .len(),
+            1
+        );
     }
 
     #[test]

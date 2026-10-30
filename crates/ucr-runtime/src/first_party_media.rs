@@ -12,8 +12,7 @@
 //! Call from a Universal Conference profile, this module derives, for one ACTIVE
 //! direct Call whose two participants have both accepted:
 //!
-//! * one private MLS Group whose members are exactly the two Call participants
-//!   (plus the tenant's media host leaf that commits endpoint admissions), and
+//! * one endpoint-owned private MLS Group with the two Call participants, and
 //! * one media Call on that Group with exactly the same two principals.
 //!
 //! Identifiers are derived from the direct Call identity with a domain-separated
@@ -22,32 +21,26 @@
 //! endpoint admission and SFU authorization then apply unchanged to the media
 //! Call. The media Call ends as soon as its direct Call is hung up.
 //!
-//! Security note: like every current Conference, the MLS Group is created and
-//! administered by a server-held committer leaf (the media host). Endpoint keys
-//! stay in the browser, but the host leaf is a cryptographic Group member.
+//! Security: no server-held media-host MLS leaf is admitted by this path.
+//! Without a published endpoint-owned Group the media preparation fails closed.
 
 use sha2::{Digest, Sha256};
 use ucr_core::{
-    CallStore, DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, GroupStore,
-    IdentityStore, PermissionGrantStore, PrincipalIdentityBindingStore,
+    CallStore, DurableRecordStatus, DurableStoreError, GroupStore, PermissionGrantStore,
 };
-use ucr_group_mls::GroupMlsAtomicStore;
+use ucr_group_mls::GroupMlsServerCustodyProbe;
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
-    CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRecord, ConversationRef, DeliveryPolicy, DeviceDescriptor, DeviceId,
-    DeviceLifecycleState, EventId, GroupChange, GroupChangeKind, GroupCryptoState,
-    GroupHistoryPolicy, GroupId, GroupMediaState, GroupMemberState, GroupOwnership, GroupRecord,
-    GroupRole, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, OpaqueId,
-    PermissionGrant, PermissionScope, PrincipalId, PrincipalIdentityBinding, PrincipalKind,
-    PrincipalRef, ScopedPrincipal, TenantScope,
+    CallSignallingState, CallTerminationReason, ConversationId, ConversationKind, ConversationRef,
+    DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, IdentityId, OpaqueId,
+    PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+    TenantScope,
 };
 use ucr_protocol::GROUP_MLS_CAPABILITY;
 
-/// Bounded retries for compare-and-swap races between the two participants.
 const MAX_CAS_ATTEMPTS: usize = 6;
-/// Opaque, non-loginable tenant media host. It never has a trusted signing key,
-/// a recovery verifier or permission grants, so it cannot authenticate to the BFF.
+
+/// Reserved legacy host identity. Recognized only to reject it from endpoint-owned media.
 pub(crate) const MEDIA_HOST_IDENTITY: &str = "fp-media-host";
 const MEDIA_HOST_DEVICE: &str = "fp-media-host-device";
 const MEDIA_CALL_PREFIX: &str = "fp-m-";
@@ -177,6 +170,15 @@ pub(crate) fn is_media_host_identity(identity: &IdentityId) -> bool {
 
 /// The direct Call is admissible for media iff it is ACTIVE, two-person,
 /// both participants Accepted and the subject is one of them.
+/// Reuse the exact Call/Join eligibility boundary for endpoint MLS bootstrap.
+/// This is read-only: no server-held MLS key is created or admitted.
+pub(crate) fn admissible_participants_for_descriptor(
+    direct: &CallSession,
+    subject: &ScopedPrincipal,
+) -> Result<[PrincipalRef; 2], MediaRuntimeError> {
+    admissible_participants(direct, subject)
+}
+
 fn admissible_participants(
     direct: &CallSession,
     subject: &ScopedPrincipal,
@@ -208,205 +210,8 @@ fn admissible_participants(
     Ok([direct.initiated_by.clone(), callee.principal.clone()])
 }
 
-fn ensure_media_host<S>(
-    store: &S,
-    scope: &TenantScope,
-) -> Result<(ScopedPrincipal, DeviceId), MediaRuntimeError>
-where
-    S: IdentityStore + PrincipalIdentityBindingStore + DeviceLifecycleStore,
-{
-    let (host, device_id) = media_host(scope)?;
-    let identity_id = IdentityId::from_opaque(host.principal.principal_id.as_opaque().clone());
-    store.persist_identity(&IdentityRecord {
-        scope: scope.clone(),
-        identity_id: identity_id.clone(),
-        ownership: IdentityOwnership::PlatformManaged,
-        evidence: IdentityEvidence::Unverified,
-        expires_at_unix_ms: None,
-    })?;
-    store.persist_principal_identity_binding(&PrincipalIdentityBinding {
-        scope: scope.clone(),
-        principal: host.principal.clone(),
-        identity_id: identity_id.clone(),
-    })?;
-    match store.device(scope, &device_id)? {
-        Some(device)
-            if device.identity_id == identity_id
-                && device.state == DeviceLifecycleState::Active => {}
-        Some(_) => return Err(MediaRuntimeError::Conflict),
-        None => {
-            match store.register_device(
-                scope,
-                &DeviceDescriptor {
-                    device_id: device_id.clone(),
-                    identity_id,
-                    state: DeviceLifecycleState::Active,
-                },
-            ) {
-                Ok(()) | Err(DurableStoreError::Conflict) => {}
-                Err(error) => return Err(error.into()),
-            }
-            let stored = store
-                .device(scope, &device_id)?
-                .ok_or(MediaRuntimeError::Unavailable)?;
-            if stored.state != DeviceLifecycleState::Active {
-                return Err(MediaRuntimeError::Conflict);
-            }
-        }
-    }
-    Ok((host, device_id))
-}
-
-fn validate_media_group(
-    group: &GroupRecord,
-    ids: &MediaRuntimeIds,
-    host: &ScopedPrincipal,
-) -> Result<(), MediaRuntimeError> {
-    if group.scope != host.scope
-        || group.group_id != ids.group_id
-        || group.conversation
-            != (ConversationRef {
-                conversation_id: ids.conversation_id.clone(),
-                kind: ConversationKind::PrivateGroup,
-            })
-        || group.ownership != GroupOwnership::PersonOwned(host.principal.clone())
-        || group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
-        || group.crypto_state.state_ref.is_none()
-        || group.public_policy.is_some()
-    {
-        return Err(MediaRuntimeError::Conflict);
-    }
-    Ok(())
-}
-
-fn ensure_media_group<S>(
-    store: &S,
-    ids: &MediaRuntimeIds,
-    host: &ScopedPrincipal,
-    host_device: &DeviceId,
-) -> Result<GroupRecord, MediaRuntimeError>
-where
-    S: GroupStore + GroupMlsAtomicStore,
-{
-    if let Some(group) = store.group(&host.scope, &ids.group_id)? {
-        validate_media_group(&group, ids, host)?;
-        return Ok(group);
-    }
-    let conversation = ConversationRecord {
-        scope: host.scope.clone(),
-        conversation: ConversationRef {
-            conversation_id: ids.conversation_id.clone(),
-            kind: ConversationKind::PrivateGroup,
-        },
-        parent_conversation_id: None,
-    };
-    let template = GroupRecord {
-        scope: host.scope.clone(),
-        group_id: ids.group_id.clone(),
-        conversation: conversation.conversation.clone(),
-        ownership: GroupOwnership::PersonOwned(host.principal.clone()),
-        history_policy: GroupHistoryPolicy::NoHistory,
-        delivery_policy: DeliveryPolicy::NoExternalBridge,
-        crypto_state: GroupCryptoState {
-            capability_id: None,
-            epoch: 0,
-            state_ref: None,
-        },
-        public_policy: None,
-        media_state: GroupMediaState::Idle,
-        bridge_mappings: Vec::new(),
-        replication_generation: 0,
-        revision: 0,
-    };
-    let key_package = store
-        .create_mls_device_key_package(&host.scope, host_device)
-        .map_err(|_| MediaRuntimeError::Unavailable)?;
-    // The other participant may create the same Group concurrently; the
-    // durable owner serialises creation, so re-read and validate on a loss.
-    let _ =
-        store.create_mls_backed_group(&conversation, &template, host, host_device, &key_package);
-    let group = store
-        .group(&host.scope, &ids.group_id)?
-        .ok_or(MediaRuntimeError::Unavailable)?;
-    validate_media_group(&group, ids, host)?;
-    Ok(group)
-}
-
 /// Retry the canonical membership CAS and re-read after the *last* attempt.
 /// A successful final write must not be misreported as a conflict.
-fn bounded_membership_admission<IsActive, TryAdmit>(
-    mut is_active: IsActive,
-    mut try_admit: TryAdmit,
-) -> Result<(), MediaRuntimeError>
-where
-    IsActive: FnMut() -> Result<bool, MediaRuntimeError>,
-    TryAdmit: FnMut() -> Result<(), MediaRuntimeError>,
-{
-    for _ in 0..MAX_CAS_ATTEMPTS {
-        if is_active()? {
-            return Ok(());
-        }
-        try_admit()?;
-    }
-    if is_active()? {
-        Ok(())
-    } else {
-        Err(MediaRuntimeError::Conflict)
-    }
-}
-
-fn ensure_exact_membership<S>(
-    store: &S,
-    ids: &MediaRuntimeIds,
-    host: &ScopedPrincipal,
-    host_device: &DeviceId,
-    participants: &[PrincipalRef; 2],
-) -> Result<(), MediaRuntimeError>
-where
-    S: GroupStore + GroupMlsAtomicStore,
-{
-    for participant in participants {
-        bounded_membership_admission(
-            || {
-                Ok(store
-                    .group_membership(&host.scope, &ids.group_id, participant)?
-                    .is_some_and(|membership| membership.state == GroupMemberState::Active))
-            },
-            || {
-                let group = store
-                    .group(&host.scope, &ids.group_id)?
-                    .ok_or(MediaRuntimeError::Unavailable)?;
-                let change = GroupChange {
-                    event_id: derived_event(ids, "add-member", participant)?,
-                    scope: host.scope.clone(),
-                    group_id: ids.group_id.clone(),
-                    expected_revision: group.revision,
-                    kind: GroupChangeKind::AddMember {
-                        member: participant.clone(),
-                        role: GroupRole::Member,
-                    },
-                    next_crypto_state: None,
-                };
-                // A stale revision loses to a concurrent writer; retry and
-                // re-read canonical membership. Fatal errors still fail closed.
-                let _ = store.apply_mls_backed_group_change(host, host_device, &change, &[]);
-                Ok(())
-            },
-        )?;
-    }
-    // Defence in depth: the media Group must never contain anyone else.
-    let memberships = store.group_memberships(&host.scope, &ids.group_id, 8)?;
-    let foreign = memberships.iter().any(|membership| {
-        membership.state == GroupMemberState::Active
-            && membership.member != host.principal
-            && !participants.contains(&membership.member)
-    });
-    if foreign {
-        return Err(MediaRuntimeError::Conflict);
-    }
-    Ok(())
-}
-
 fn validate_media_call(
     call: &CallSession,
     ids: &MediaRuntimeIds,
@@ -507,7 +312,7 @@ where
     Ok(())
 }
 
-/// Prepares (idempotently) the media runtime of one ACTIVE direct Call for the
+/// Resolves the endpoint-owned media runtime of one ACTIVE direct Call for the
 /// authenticated `subject` and returns the media Call the Join grant must name.
 ///
 /// # Errors
@@ -520,21 +325,54 @@ pub(crate) fn prepare_direct_call_media<S>(
     subject: &ScopedPrincipal,
 ) -> Result<CallSession, MediaRuntimeError>
 where
-    S: CallStore
-        + GroupMlsAtomicStore
-        + IdentityStore
-        + PrincipalIdentityBindingStore
-        + DeviceLifecycleStore
-        + PermissionGrantStore,
+    S: CallStore + GroupStore + GroupMlsServerCustodyProbe + PermissionGrantStore,
 {
     let participants = admissible_participants(direct, subject)?;
     let ids = media_runtime_ids(&direct.scope, &direct.call_id)?;
-    let (host, host_device) = ensure_media_host(store, &direct.scope)?;
-    if participants.contains(&host.principal) {
-        return Err(MediaRuntimeError::NotAdmissible);
+    // Endpoint-only confidentiality gate. The old server-held MLS committer
+    // must never be created, admitted or asked to sign a media transition.
+    // Endpoint publication/admission must durably populate this group first;
+    // while that flow is absent, deny media instead of silently downgrading E2EE.
+    let group = store
+        .group(&direct.scope, &ids.group_id)?
+        .ok_or(MediaRuntimeError::Unavailable)?;
+    if group.scope != direct.scope
+        || group.group_id != ids.group_id
+        || group.conversation.conversation_id != ids.conversation_id
+        || group.conversation.kind != ConversationKind::PrivateGroup
+        || group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
+        || group.crypto_state.state_ref.is_none()
+        // Epoch zero means only the creator exists: the recipient has not
+        // joined via a committed endpoint-owned Welcome. No media yet.
+        || group.crypto_state.epoch == 0
+        || group.ownership != GroupOwnership::PersonOwned(participants[0].clone())
+        || group.public_policy.is_some()
+    {
+        return Err(MediaRuntimeError::Conflict);
     }
-    ensure_media_group(store, &ids, &host, &host_device)?;
-    ensure_exact_membership(store, &ids, &host, &host_device, &participants)?;
+    // A canonical Group can look endpoint-owned while the server still has
+    // the OpenMLS private state. Do not authorize media for such a group.
+    if store
+        .server_possesses_mls_group(&direct.scope, &ids.group_id)
+        .map_err(|_| MediaRuntimeError::Unavailable)?
+    {
+        return Err(MediaRuntimeError::Conflict);
+    }
+    let (legacy_host, _) = media_host(&direct.scope)?;
+    let members = store.group_memberships(&direct.scope, &ids.group_id, 8)?;
+    if members.iter().any(|member| {
+        member.state == GroupMemberState::Active
+            && (member.member == legacy_host.principal || !participants.contains(&member.member))
+    }) {
+        return Err(MediaRuntimeError::Conflict);
+    }
+    if !participants.iter().all(|participant| {
+        members.iter().any(|membership| {
+            membership.state == GroupMemberState::Active && membership.member == *participant
+        })
+    }) {
+        return Err(MediaRuntimeError::Unavailable);
+    }
     let media = ensure_media_call(store, &ids, &direct.scope, &participants)?;
     if media.signalling_state == CallSignallingState::Terminated {
         return Err(MediaRuntimeError::Conflict);
@@ -658,47 +496,6 @@ mod tests {
             scope: scope("t", None),
             principal: person(id),
         }
-    }
-
-    #[test]
-    fn final_membership_cas_success_is_rechecked_and_failure_remains_closed() {
-        use std::cell::Cell;
-
-        let attempts = Cell::new(0);
-        let active = Cell::new(false);
-        assert_eq!(
-            bounded_membership_admission(
-                || Ok(active.get()),
-                || {
-                    let next = attempts.get() + 1;
-                    attempts.set(next);
-                    if next == MAX_CAS_ATTEMPTS {
-                        active.set(true);
-                    }
-                    Ok(())
-                },
-            ),
-            Ok(())
-        );
-        assert_eq!(attempts.get(), MAX_CAS_ATTEMPTS);
-
-        let reads = Cell::new(0);
-        let failed_attempts = Cell::new(0);
-        assert_eq!(
-            bounded_membership_admission(
-                || {
-                    reads.set(reads.get() + 1);
-                    Ok(false)
-                },
-                || {
-                    failed_attempts.set(failed_attempts.get() + 1);
-                    Ok(())
-                },
-            ),
-            Err(MediaRuntimeError::Conflict)
-        );
-        assert_eq!(failed_attempts.get(), MAX_CAS_ATTEMPTS);
-        assert_eq!(reads.get(), MAX_CAS_ATTEMPTS + 1);
     }
 
     #[test]

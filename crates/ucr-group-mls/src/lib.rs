@@ -496,6 +496,44 @@ pub trait GroupMlsBootstrapStore {
     ) -> Result<Option<MlsDeviceBootstrap>, GroupMlsStoreError>;
 }
 
+/// Proof-of-custody guard for endpoint-only media. A server that can load
+/// an `OpenMLS` `Group` from its own provider may derive the group's exporter.
+/// Canonical participant metadata alone cannot prove server-blind E2EE.
+/// Atomically persists an endpoint-produced MLS `Commit`/`Welcome` alongside the
+/// canonical Group membership CAS. The server receives only signed opaque
+/// MLS delivery bytes and MUST NOT stage or merge an `OpenMLS` transition.
+pub trait EndpointMlsCommitStore {
+    /// The caller MUST cryptographically authenticate `artifacts` and bind them
+    /// to the exact enrolled signing Device and authorized Call before invoking.
+    /// Storage checks active Device identity, Group authorization, epoch
+    /// monotonicity, recipient identity, durable idempotency and replay.
+    ///
+    /// # Errors
+    /// Rejects stale, invalid, replayed, unauthorized or corrupt transitions.
+    fn persist_endpoint_mls_commit(
+        &self,
+        actor: &ScopedPrincipal,
+        actor_device_id: &DeviceId,
+        requested_change: &GroupChange,
+        recipient_device: &MlsDeviceAdmission,
+        artifacts: &MlsCommitArtifacts,
+        signed_fingerprint: [u8; 32],
+    ) -> Result<DurableRecordStatus, GroupMlsStoreError>;
+}
+
+pub trait GroupMlsServerCustodyProbe {
+    /// Returns true if the server `OpenMLS` provider possesses the exact `Group`.
+    /// Errors MUST fail closed; they must never be interpreted as no custody.
+    ///
+    /// # Errors
+    /// Returns a durable/provider failure when custody cannot be established.
+    fn server_possesses_mls_group(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<bool, GroupMlsStoreError>;
+}
+
 pub trait GroupMlsAtomicStore {
     /// Creates endpoint-local public `KeyPackage` material for one already Active canonical Device.
     /// Private MLS signing/HPKE material remains in the implementation-owned protected store.
@@ -700,6 +738,19 @@ pub fn stage_add_members<P: OpenMlsProvider>(
 ) -> Result<MlsCommitArtifacts, GroupMlsError> {
     if key_packages.is_empty() {
         return Err(GroupMlsError::MemberNotFound);
+    }
+    // OpenMLS verifies cryptographic KeyPackages, but UCR additionally requires
+    // one canonical Device credential per leaf. Different MLS signing keys must
+    // never let a second leaf impersonate an already admitted Device.
+    let mut devices = member_device_ids(group, scope)?;
+    for package in key_packages {
+        let credential = BasicCredential::try_from(package.leaf_node().credential().clone())
+            .map_err(|_| GroupMlsError::DeviceIdentityMismatch)?;
+        let device = parse_device_identity(scope, credential.identity())?;
+        if devices.contains(&device) {
+            return Err(GroupMlsError::DeviceIdentityMismatch);
+        }
+        devices.push(device);
     }
     let signer = current_group_signer(provider, group)?;
     let (commit, welcome, _) = group
@@ -932,6 +983,9 @@ pub fn export_group_media_secret<P: OpenMlsProvider>(
     if crypto_state_for_group(scope, group_id, group)? != *expected {
         return Err(GroupMlsError::GroupStateMismatch);
     }
+    // The MLS exporter is never available to an endpoint whose ratchet tree
+    // contains malformed, cross-scope or duplicate canonical Device leaves.
+    member_device_ids(group, scope)?;
     let context = state_ref_bytes(expected)?;
     let secret = group
         .export_secret(provider.crypto(), GROUP_MEDIA_EXPORT_LABEL, &context, 32)
@@ -1091,10 +1145,39 @@ pub fn member_device_ids(
     group: &MlsGroup,
     scope: &TenantScope,
 ) -> Result<Vec<DeviceId>, GroupMlsError> {
-    group
-        .members()
-        .map(|member| parse_device_identity(scope, member.credential.serialized_content()))
-        .collect()
+    let mut devices = Vec::new();
+    for member in group.members() {
+        let device = parse_device_identity(scope, member.credential.serialized_content())?;
+        if devices.contains(&device) {
+            return Err(GroupMlsError::DeviceIdentityMismatch);
+        }
+        devices.push(device);
+    }
+    Ok(devices)
+}
+
+/// Verifies the *actual cryptographic MLS roster* of a two-device direct Call.
+/// A server-maintained membership projection or a signed state-ref alone is
+/// insufficient: every live MLS leaf must map to exactly one expected Device.
+///
+/// # Errors
+/// Rejects a foreign own leaf, a missing/extra/duplicate Device, or a
+/// cross-scope credential. Canonical Call/Device/Trust ownership of the peer
+/// must still be checked independently by the caller.
+pub fn validate_direct_call_roster(
+    group: &MlsGroup,
+    scope: &TenantScope,
+    own_device: &DeviceId,
+    peer_device: &DeviceId,
+) -> Result<(), GroupMlsError> {
+    if own_device == peer_device || own_device_id(group, scope)? != *own_device {
+        return Err(GroupMlsError::DeviceIdentityMismatch);
+    }
+    let devices = member_device_ids(group, scope)?;
+    if devices.len() != 2 || !devices.contains(own_device) || !devices.contains(peer_device) {
+        return Err(GroupMlsError::DeviceIdentityMismatch);
+    }
+    Ok(())
 }
 
 /// Returns the exact canonical UCR Device represented by this endpoint's own MLS leaf.
@@ -1499,6 +1582,471 @@ mod tests {
         assert_eq!(
             import_browser_memory_snapshot(&corrupted).unwrap_err(),
             GroupMlsError::InvalidSnapshot
+        );
+    }
+
+    /// Re-key under an endpoint committer and prove the removed host cannot
+    /// export the resulting epoch. The fixture remains available to test
+    /// authenticated frame delivery and retained old-key rejection.
+    fn remove_server_host_by_endpoint_commit(fixture: &mut ThreeMemberMls) -> GroupCryptoState {
+        // Bob is an endpoint and is the committer. The server-held Alice
+        // leaf is removed BEFORE the media epoch used below is created.
+        let remove_host = stage_remove_member(
+            &fixture.bob_provider,
+            &mut fixture.bob_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &fixture.scope,
+            &device("alice"),
+        )
+        .unwrap();
+        merge_pending(
+            &fixture.bob_provider,
+            &mut fixture.bob_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &remove_host.next_crypto_state,
+        )
+        .unwrap();
+        process_commit(
+            &fixture.charlie_provider,
+            &mut fixture.charlie_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &remove_host.commit,
+            &remove_host.next_crypto_state,
+        )
+        .unwrap();
+        assert!(
+            process_commit(
+                &fixture.alice_provider,
+                &mut fixture.alice_group,
+                &fixture.scope,
+                &fixture.group_id,
+                &remove_host.commit,
+                &remove_host.next_crypto_state,
+            )
+            .is_err()
+        );
+
+        let next_state = &remove_host.next_crypto_state;
+        assert!(next_state.epoch > fixture.state.epoch);
+        assert!(
+            export_group_media_secret(
+                &fixture.alice_provider,
+                &fixture.alice_group,
+                &fixture.scope,
+                &fixture.group_id,
+                next_state,
+            )
+            .is_err()
+        );
+
+        remove_host.next_crypto_state
+    }
+
+    /// Feasibility evidence for a future endpoint-owned committer: after an
+    /// independently authorized endpoint removes the server host and commits
+    /// a fresh MLS epoch, the recipient can decrypt, but the former host
+    /// cannot export that epoch or decrypt the signed SFU wire with old keys.
+    ///
+    /// This is an isolated endpoint-committed removal regression. It does NOT
+    /// prove the first-party Join/media runtime is wired or production-safe.
+    #[test]
+    fn endpoint_committer_removing_host_isolates_new_signed_video_epoch() {
+        use ucr_crypto::{
+            SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+        };
+        use ucr_model::{GroupMediaFrameHeader, KeyId, VideoSourceKind};
+
+        let mut fixture = three_member_group();
+        let old_host_secret = export_group_media_secret(
+            &fixture.alice_provider,
+            &fixture.alice_group,
+            &fixture.scope,
+            &fixture.group_id,
+            &fixture.state,
+        )
+        .unwrap();
+
+        let next_state = remove_server_host_by_endpoint_commit(&mut fixture);
+        let next_state = &next_state;
+
+        let media_context = context(&fixture, next_state);
+        let sender_secret = export_group_media_secret(
+            &fixture.bob_provider,
+            &fixture.bob_group,
+            &fixture.scope,
+            &fixture.group_id,
+            next_state,
+        )
+        .unwrap();
+        let receiver_secret = export_group_media_secret(
+            &fixture.charlie_provider,
+            &fixture.charlie_group,
+            &fixture.scope,
+            &fixture.group_id,
+            next_state,
+        )
+        .unwrap();
+        let signer = SigningKeyMaterial::from_seed([19; 32]);
+        let header = GroupMediaFrameHeader {
+            scope: fixture.scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: fixture.group_id.clone(),
+            stream_id: oid("camera"),
+            source: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("bob")),
+                kind: PrincipalKind::Person,
+            },
+            source_device_id: device("bob"),
+            negotiation_ref: media_context.negotiation_ref.clone(),
+            negotiation_generation: media_context.negotiation_generation,
+            crypto_epoch: media_context.crypto_epoch,
+            crypto_state_ref: media_context.crypto_state_ref.clone(),
+            crypto_suite: media_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 1,
+            media_timestamp: 90_000,
+            keyframe: true,
+        };
+        let payload = b"endpoint-only epoch video: no server media decryption";
+        let wire = seal_endpoint_group_media_wire(
+            &sender_secret,
+            &media_context,
+            header,
+            payload,
+            KeyId::from_opaque(oid("bob-trusted-key")),
+            &signer,
+        )
+        .unwrap();
+        assert_eq!(
+            open_endpoint_group_media_wire(
+                &receiver_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .unwrap(),
+            payload
+        );
+        // The server retained its entire old epoch secret, not just public
+        // metadata. Even that key must fail against the endpoint-only epoch.
+        assert!(
+            open_endpoint_group_media_wire(
+                &old_host_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .is_err()
+        );
+    }
+
+    // Shared cryptographic fixture helpers keep the confidentiality assertions
+    // independent and auditable rather than suppressing Clippy on a long test.
+    fn endpoint_alice_video_header(
+        media_context: &GroupMediaE2eeContext,
+    ) -> ucr_model::GroupMediaFrameHeader {
+        use ucr_model::VideoSourceKind;
+
+        ucr_model::GroupMediaFrameHeader {
+            scope: media_context.scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: media_context.group_id.clone(),
+            stream_id: oid("camera"),
+            source: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("alice")),
+                kind: PrincipalKind::Person,
+            },
+            source_device_id: device("alice"),
+            negotiation_ref: media_context.negotiation_ref.clone(),
+            negotiation_generation: media_context.negotiation_generation,
+            crypto_epoch: media_context.crypto_epoch,
+            crypto_state_ref: media_context.crypto_state_ref.clone(),
+            crypto_suite: media_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 1,
+            media_timestamp: 90_000,
+            keyframe: true,
+        }
+    }
+
+    fn assert_unadmitted_relay_blind_to_video(
+        scope: &TenantScope,
+        group_id: &GroupId,
+        added: &MlsCommitArtifacts,
+        media_context: &GroupMediaE2eeContext,
+        wire: &[u8],
+        signer: &ucr_crypto::SigningKeyMaterial,
+    ) {
+        use ucr_crypto::open_endpoint_group_media_wire;
+
+        // Even an independently fabricated same-ID group cannot process
+        // the endpoint-only Add Commit or decrypt the signed media wire.
+        let relay_provider = OpenMlsRustCrypto::default();
+        assert!(
+            load_group(&relay_provider, scope, group_id)
+                .unwrap()
+                .is_none()
+        );
+        let relay =
+            create_device_key_package(&relay_provider, scope, &device("fp-media-host-device"))
+                .unwrap();
+        let (mut relay_group, relay_state) = create_group(
+            &relay_provider,
+            scope,
+            group_id,
+            &device("fp-media-host-device"),
+            &relay.signer_public_key,
+        )
+        .unwrap();
+        let relay_secret =
+            export_group_media_secret(&relay_provider, &relay_group, scope, group_id, &relay_state)
+                .unwrap();
+        assert!(
+            process_commit(
+                &relay_provider,
+                &mut relay_group,
+                scope,
+                group_id,
+                &added.commit,
+                &added.next_crypto_state,
+            )
+            .is_err()
+        );
+        assert!(
+            open_endpoint_group_media_wire(
+                &relay_secret,
+                media_context,
+                wire,
+                signer.verifying_key(),
+            )
+            .is_err()
+        );
+    }
+
+    /// An endpoint-created two-Device group never grants the relay a media leaf.
+    /// Unlike host-removal tests, the server is not a member in any epoch.
+    /// This is cryptographic fixture evidence, not a live browser/SFU call.
+    #[test]
+    fn endpoint_created_two_device_group_keeps_unadmitted_server_blind_to_video() {
+        use ucr_crypto::{
+            SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+        };
+        use ucr_model::KeyId;
+
+        let scope = scope();
+        let group_id = GroupId::from_opaque(oid("fp-mg-endpoint-only"));
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let alice = create_device_key_package(&alice_provider, &scope, &device("alice")).unwrap();
+        let bob = create_device_key_package(&bob_provider, &scope, &device("bob")).unwrap();
+        let (mut alice_group, _) = create_group(
+            &alice_provider,
+            &scope,
+            &group_id,
+            &device("alice"),
+            &alice.signer_public_key,
+        )
+        .unwrap();
+        let bob_package =
+            decode_key_package(&alice_provider, &scope, &device("bob"), &bob.bytes).unwrap();
+        let added = stage_add_member(
+            &alice_provider,
+            &mut alice_group,
+            &scope,
+            &group_id,
+            &bob_package,
+        )
+        .unwrap();
+        merge_pending(
+            &alice_provider,
+            &mut alice_group,
+            &scope,
+            &group_id,
+            &added.next_crypto_state,
+        )
+        .unwrap();
+        let bob_group = join_from_welcome(
+            &bob_provider,
+            &scope,
+            &group_id,
+            added.welcome.as_deref().unwrap(),
+            &added.next_crypto_state,
+        )
+        .unwrap();
+        validate_direct_call_roster(&alice_group, &scope, &device("alice"), &device("bob"))
+            .unwrap();
+        validate_direct_call_roster(&bob_group, &scope, &device("bob"), &device("alice")).unwrap();
+        let state = &added.next_crypto_state;
+        let sender_secret =
+            export_group_media_secret(&alice_provider, &alice_group, &scope, &group_id, state)
+                .unwrap();
+        let receiver_secret =
+            export_group_media_secret(&bob_provider, &bob_group, &scope, &group_id, state).unwrap();
+        let media_context = GroupMediaE2eeContext {
+            scope: scope.clone(),
+            call_id: CallId::from_opaque(oid("fp-m-call")),
+            group_id: group_id.clone(),
+            negotiation_ref: oid("neg"),
+            negotiation_generation: 1,
+            crypto_epoch: state.epoch,
+            crypto_state_ref: state.state_ref.clone().unwrap(),
+            crypto_suite: CryptoSuite::UcrV1,
+        };
+        let signer = SigningKeyMaterial::from_seed([23; 32]);
+        let wire = seal_endpoint_group_media_wire(
+            &sender_secret,
+            &media_context,
+            endpoint_alice_video_header(&media_context),
+            b"endpoint A to endpoint B only",
+            KeyId::from_opaque(oid("alice-trusted-key")),
+            &signer,
+        )
+        .unwrap();
+        assert_eq!(
+            open_endpoint_group_media_wire(
+                &receiver_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .unwrap(),
+            b"endpoint A to endpoint B only",
+        );
+        assert_unadmitted_relay_blind_to_video(
+            &scope,
+            &group_id,
+            &added,
+            &media_context,
+            &wire,
+            &signer,
+        );
+    }
+
+    #[test]
+    fn direct_call_roster_uses_real_openmls_leaves_and_rejects_third_devices() {
+        let scope = scope();
+        let group_id = GroupId::from_opaque(oid("fp-mg-test-direct"));
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let alice = create_device_key_package(&alice_provider, &scope, &device("alice")).unwrap();
+        let bob = create_device_key_package(&bob_provider, &scope, &device("bob")).unwrap();
+        let (mut group, _) = create_group(
+            &alice_provider,
+            &scope,
+            &group_id,
+            &device("alice"),
+            &alice.signer_public_key,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_direct_call_roster(&group, &scope, &device("alice"), &device("bob")),
+            Err(GroupMlsError::DeviceIdentityMismatch)
+        );
+        let package =
+            decode_key_package(&alice_provider, &scope, &device("bob"), &bob.bytes).unwrap();
+        let added =
+            stage_add_member(&alice_provider, &mut group, &scope, &group_id, &package).unwrap();
+        merge_pending(
+            &alice_provider,
+            &mut group,
+            &scope,
+            &group_id,
+            &added.next_crypto_state,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_direct_call_roster(&group, &scope, &device("alice"), &device("bob")),
+            Ok(())
+        );
+        assert_eq!(
+            validate_direct_call_roster(&group, &scope, &device("bob"), &device("alice")),
+            Err(GroupMlsError::DeviceIdentityMismatch)
+        );
+        assert_eq!(
+            validate_direct_call_roster(&group, &scope, &device("alice"), &device("charlie")),
+            Err(GroupMlsError::DeviceIdentityMismatch)
+        );
+        let fixture = three_member_group();
+        assert_eq!(
+            validate_direct_call_roster(
+                &fixture.alice_group,
+                &fixture.scope,
+                &device("alice"),
+                &device("bob"),
+            ),
+            Err(GroupMlsError::DeviceIdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn canonical_mls_roster_rejects_duplicate_device_admissions_before_commit() {
+        let mut fixture = three_member_group();
+        assert_eq!(
+            member_device_ids(&fixture.alice_group, &fixture.scope).unwrap(),
+            vec![device("alice"), device("bob"), device("charlie")]
+        );
+        let original =
+            current_crypto_state(&fixture.scope, &fixture.group_id, &fixture.alice_group).unwrap();
+
+        // A new valid MLS KeyPackage with a fresh signature key still cannot
+        // add another leaf under Bob's already-admitted canonical Device ID.
+        let duplicate_provider = OpenMlsRustCrypto::default();
+        let duplicate =
+            create_device_key_package(&duplicate_provider, &fixture.scope, &device("bob")).unwrap();
+        let validated = decode_key_package(
+            &fixture.alice_provider,
+            &fixture.scope,
+            &device("bob"),
+            &duplicate.bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            stage_add_member(
+                &fixture.alice_provider,
+                &mut fixture.alice_group,
+                &fixture.scope,
+                &fixture.group_id,
+                &validated,
+            )
+            .unwrap_err(),
+            GroupMlsError::DeviceIdentityMismatch
+        );
+
+        // The public endpoint transition entry point must reject duplicates
+        // even when both packages are otherwise individually valid.
+        let dave = create_device_key_package(&duplicate_provider, &fixture.scope, &device("dave"))
+            .unwrap();
+        assert_eq!(
+            stage_transition(
+                &fixture.alice_provider,
+                &mut fixture.alice_group,
+                &fixture.scope,
+                &fixture.group_id,
+                &MlsTransitionInput::Add(vec![
+                    MlsDeviceAdmission {
+                        device_id: device("dave"),
+                        key_package: dave.bytes.clone(),
+                    },
+                    MlsDeviceAdmission {
+                        device_id: device("dave"),
+                        key_package: dave.bytes,
+                    },
+                ]),
+            )
+            .unwrap_err(),
+            GroupMlsError::DeviceIdentityMismatch
+        );
+        assert!(fixture.alice_group.pending_commit().is_none());
+        assert_eq!(
+            current_crypto_state(&fixture.scope, &fixture.group_id, &fixture.alice_group,).unwrap(),
+            original
         );
     }
 

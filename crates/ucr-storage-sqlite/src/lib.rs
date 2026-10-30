@@ -8,6 +8,7 @@ mod command_store;
 mod conference_join_grant_store;
 mod delivery_store;
 mod device_store;
+mod endpoint_mls_offer_store;
 mod event_journal;
 mod event_subscription_store;
 mod federation_store;
@@ -35,6 +36,8 @@ mod store_forward_store;
 mod sync_store;
 mod trusted_key_store;
 mod universal_conference_store;
+
+pub use endpoint_mls_offer_store::EndpointMlsKeyPackageOffer;
 
 pub use runtime_worker_store::{
     RECORDING_PROVIDER_WORKER_KIND, RECORDING_RETENTION_WORKER_KIND, RuntimeWorkerLease,
@@ -108,7 +111,8 @@ const SQLITE_SCHEMA_V48: u32 = 48;
 const SQLITE_SCHEMA_V49: u32 = 49;
 const SQLITE_SCHEMA_V50: u32 = 50;
 const SQLITE_SCHEMA_V51: u32 = 51;
-pub const SQLITE_SCHEMA_VERSION: u32 = 52;
+const SQLITE_SCHEMA_V52: u32 = 52;
+pub const SQLITE_SCHEMA_VERSION: u32 = 53;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -686,7 +690,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v52(connection);
+        return verify_schema_v53(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -748,11 +752,27 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V49 => migrate_v49_to_v50(connection)?,
             SQLITE_SCHEMA_V50 => migrate_v50_to_v51(connection)?,
             SQLITE_SCHEMA_V51 => migrate_v51_to_v52(connection)?,
+            SQLITE_SCHEMA_V52 => migrate_v52_to_v53(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v52(connection)
+    verify_schema_v53(connection)
+}
+
+fn migrate_v52_to_v53(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v52(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    endpoint_mls_offer_store::create_v53_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v53(connection)
 }
 
 fn migrate_v51_to_v52(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -762,7 +782,7 @@ fn migrate_v51_to_v52(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     first_party_account_store::create_v52_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V52)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
@@ -843,6 +863,11 @@ fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreErr
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v47(connection)
+}
+
+fn verify_schema_v53(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v52(connection)?;
+    endpoint_mls_offer_store::verify_v53_objects(connection)
 }
 
 fn verify_schema_v52(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1015,6 +1040,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     group_mls_store::create_v50_objects(&transaction)?;
     conference_join_grant_store::create_v51_objects(&transaction)?;
     first_party_account_store::create_v52_objects(&transaction)?;
+    endpoint_mls_offer_store::create_v53_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1023,7 +1049,8 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
-        .map_err(|error| map_sqlite_error(&error))
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v53(connection)
 }
 
 fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -2097,7 +2124,13 @@ fn test_restore_v49_mls_transition_shape(connection: &Connection) -> Result<(), 
 }
 
 #[cfg(test)]
+fn test_remove_v53_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch("DROP TABLE IF EXISTS endpoint_mls_key_package_offers;")
+}
+
+#[cfg(test)]
 fn test_remove_v52_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v53_objects(connection)?;
     // Synthetic historical databases start from a fresh current schema.
     // Remove the recovery credential table before stamping them as v51 or
     // older. Production migrations must NEVER silently ignore this table.
@@ -2949,9 +2982,53 @@ mod tests {
     }
 
     #[test]
+    fn fresh_v53_endpoint_mls_schema_reopens_without_false_corruption() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create fresh v53 store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+            let connection = store.lock_connection().expect("lock fresh store");
+            assert_eq!(
+                super::endpoint_mls_offer_store::verify_v53_objects(&connection),
+                Ok(())
+            );
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen fresh v53 store");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        assert_eq!(reopened.health(), Ok(StorageHealth::Healthy));
+    }
+
+    #[test]
+    fn v52_to_v53_endpoint_mls_schema_migration_is_atomic_and_reopens() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open v52 fixture");
+            super::test_remove_v53_objects(&connection).expect("restore v52 table shape");
+            connection
+                .pragma_update(None, "user_version", super::SQLITE_SCHEMA_V52)
+                .expect("stamp v52 fixture");
+        }
+        {
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v52 to v53");
+            assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+            let connection = migrated.lock_connection().expect("lock migrated store");
+            assert_eq!(
+                super::endpoint_mls_offer_store::verify_v53_objects(&connection),
+                Ok(())
+            );
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen migrated v53 store");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+    }
+
+    #[test]
     fn v51_to_v52_recovery_schema_migration_is_exact_and_starts_without_accounts() {
         let db = TestDbPath::new();
-        let original = SqliteLocalStore::open(db.path()).expect("create canonical v52");
+        let original = SqliteLocalStore::open(db.path()).expect("create canonical current schema");
         assert_eq!(original.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         drop(original);
         {
@@ -2990,10 +3067,10 @@ mod tests {
         // migration may ONLY add the index; authorization rows are untouched.
         {
             let connection = rusqlite::Connection::open(db.path()).expect("open old schema");
+            super::test_remove_v52_objects(&connection).expect("restore v50 fixture tables");
             connection
                 .execute_batch(
-                    "DROP TABLE first_party_recovery_credentials;
-                     DROP INDEX conference_join_grants_expiry;
+                    "DROP INDEX conference_join_grants_expiry;
                      DROP INDEX conference_join_grants_pending_redaction;
                      ALTER TABLE conference_join_grants DROP COLUMN metadata_redacted;
                      PRAGMA user_version=50;",

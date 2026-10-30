@@ -29,19 +29,24 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, DeviceLifecycleStore, IdentityDeviceLookupStore, IdentityStore,
-    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, TrustedSigningKeyStore,
-    generate_opaque_id,
+    AuthorizedDurableRuntime, DeviceLifecycleStore, GroupStore, IdentityDeviceLookupStore,
+    IdentityStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
+    TrustedSigningKeyStore, generate_opaque_id,
+};
+use ucr_group_mls::{
+    EndpointMlsCommitStore, GroupMlsBootstrapStore, MlsCommitArtifacts, MlsDeviceAdmission,
 };
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRecord, ConversationRef, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventId,
+    ConversationRecord, ConversationRef, DeliveryPolicy, DeviceDescriptor, DeviceId,
+    DeviceLifecycleState, EventId, GroupChange, GroupChangeKind, GroupCryptoState,
+    GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord, GroupRole,
     IdentityId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor,
     ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
-use ucr_storage_sqlite::SqliteLocalStore;
+use ucr_storage_sqlite::{EndpointMlsKeyPackageOffer, SqliteLocalStore};
 
 use crate::first_party_media;
 
@@ -120,6 +125,46 @@ struct AccountFinish {
     public_key_base64_url: String,
     signature_base64_url: String,
     recovery_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EndpointMlsOfferRequest {
+    binding: Binding,
+    call_id: String,
+    expected_revision: u64,
+    recipient_signer_key_id: String,
+    recipient_key_package_base64_url: String,
+    recipient_signature_base64_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EndpointMlsAddPeerRequest {
+    binding: Binding,
+    call_id: String,
+    expected_revision: u64,
+    group_revision: u64,
+    event_id: String,
+    crypto_epoch: u64,
+    crypto_state_ref: String,
+    recipient_device_id: String,
+    recipient_signer_key_id: String,
+    recipient_key_package_base64_url: String,
+    recipient_signature_base64_url: String,
+    commit_base64_url: String,
+    welcome_base64_url: String,
+    signature_base64_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EndpointMlsCreateRequest {
+    binding: Binding,
+    call_id: String,
+    expected_revision: u64,
+    crypto_state_ref: String,
+    signature_base64_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1077,6 +1122,721 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
     to_call(state, &current)
 }
 
+/// Resolve the *committed* endpoint MLS Device pair under current canonical
+/// Identity/Device/Trust, not from an offer, browser hint or SFU frame.
+fn authenticated_endpoint_mls_devices(
+    state: &State,
+    call: &CallSession,
+    participants: &[ucr_model::PrincipalRef; 2],
+    group_id: &GroupId,
+) -> Result<Option<(String, String)>, StatusCode> {
+    let pair = state
+        .store
+        .endpoint_mls_direct_call_device_pair(&call.scope, group_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    if let Some((creator, recipient)) = &pair {
+        for (principal, device_id) in participants.iter().zip([creator, recipient]) {
+            let identity = state
+                .store
+                .principal_identity_binding(&call.scope, principal)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .ok_or(StatusCode::FORBIDDEN)?;
+            let device_id = DeviceId::from_opaque(opaque(device_id)?);
+            let record = state
+                .store
+                .device(&call.scope, &device_id)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .ok_or(StatusCode::FORBIDDEN)?;
+            if record.identity_id != identity.identity_id
+                || !ucr_protocol::device_allows_protected_access(&record)
+            {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            let trusted = state
+                .store
+                .active_trusted_signing_key(&call.scope, &device_id)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .ok_or(StatusCode::FORBIDDEN)?;
+            if trusted.public_key.len() != 32 {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+    }
+    Ok(pair)
+}
+
+/// Return a canonical, scope-bound MLS bootstrap descriptor to an ACTIVE Call
+/// participant. This contains NO key material and grants NO media authority.
+/// The caller device must independently create and sign its `OpenMLS` state.
+fn endpoint_mls_descriptor(
+    state: &State,
+    session: &Session,
+    req: &JoinRequest,
+) -> Result<Value, StatusCode> {
+    let call = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject,
+            &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?),
+            req.expected_revision,
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants =
+        first_party_media::admissible_participants_for_descriptor(&call, &session.subject)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+    let ids = first_party_media::media_runtime_ids(&call.scope, &call.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    // Read the existing canonical Group, never infer its CAS revision from
+    // the accepted Call revision. The two counters evolve independently.
+    // An absent Group is an explicit pre-creation state, not revision zero.
+    let group = state
+        .store
+        .group(&call.scope, &ids.group_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let (group_revision, crypto_epoch, crypto_state_ref) = if let Some(group) = group {
+        if group.scope != call.scope
+            || group.group_id != ids.group_id
+            || group.conversation.conversation_id != ids.conversation_id
+            || group.conversation.kind != ConversationKind::PrivateGroup
+            || group.ownership != GroupOwnership::PersonOwned(participants[0].clone())
+            || group.crypto_state.capability_id.as_deref()
+                != Some(ucr_protocol::GROUP_MLS_CAPABILITY)
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+        let state_ref = group
+            .crypto_state
+            .state_ref
+            .as_ref()
+            .ok_or(StatusCode::CONFLICT)?;
+        if ucr_group_mls::GroupMlsServerCustodyProbe::server_possesses_mls_group(
+            state.store.as_ref(),
+            &call.scope,
+            &ids.group_id,
+        )
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+        (
+            Some(group.revision),
+            Some(group.crypto_state.epoch),
+            Some(state_ref.as_str().to_owned()),
+        )
+    } else {
+        (None, None, None)
+    };
+    let committed = authenticated_endpoint_mls_devices(state, &call, &participants, &ids.group_id)?;
+    let expected_peer_device_id = match committed {
+        Some((creator, recipient)) if crypto_epoch.is_some_and(|epoch| epoch > 0) => {
+            if session.subject.principal == participants[0] {
+                if session.binding.device != creator {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+                Some(recipient)
+            } else {
+                if session.binding.device != recipient {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+                Some(creator)
+            }
+        }
+        Some(_) => return Err(StatusCode::CONFLICT),
+        None if crypto_epoch.is_some_and(|epoch| epoch > 0) => {
+            return Err(StatusCode::CONFLICT);
+        }
+        None => None,
+    };
+    Ok(json!({
+        "callId": req.call_id,
+        "expectedRevision": call.revision,
+        "expectedPeerDeviceId": expected_peer_device_id,
+        "groupRevision": group_revision,
+        "cryptoEpoch": crypto_epoch,
+        "cryptoStateRef": crypto_state_ref,
+        "mediaCallId": ids.call_id.as_opaque().as_str(),
+        "groupId": ids.group_id.as_opaque().as_str(),
+        "conversationId": ids.conversation_id.as_opaque().as_str(),
+        "creatorPrincipalId": participants[0].principal_id.as_opaque().as_str(),
+        "peerPrincipalId": participants
+            .iter()
+            .find(|principal| **principal != session.subject.principal)
+            .ok_or(StatusCode::FORBIDDEN)?
+            .principal_id.as_opaque().as_str(),
+        "deviceId": session.binding.device,
+        "cryptoCapability": ucr_protocol::GROUP_MLS_CAPABILITY,
+        "requiresEndpointOwnedCommit": true,
+    }))
+}
+
+/// Accepts ONLY a signed endpoint-produced public MLS epoch-0 descriptor.
+/// A server-hosted `OpenMLS` key, `KeyPackage` or exporter is never generated.
+fn publish_endpoint_mls_group(
+    state: &State,
+    session: &Session,
+    req: &EndpointMlsCreateRequest,
+) -> Result<Value, StatusCode> {
+    let direct = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject,
+            &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?),
+            req.expected_revision,
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants =
+        first_party_media::admissible_participants_for_descriptor(&direct, &session.subject)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+    if participants[0] != session.subject.principal {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let state_ref = opaque(&req.crypto_state_ref)?;
+    let proof = encoded_proof(
+        "ucr-first-party-endpoint-mls-create.v1",
+        &json!([
+            session.binding.tenant_id,
+            session.binding.namespace_id,
+            session.binding.participant_id,
+            session.binding.device,
+            session.signer_key_id,
+            req.call_id,
+            req.expected_revision,
+            ids.group_id.as_opaque().as_str(),
+            0,
+            req.crypto_state_ref,
+        ]),
+    )?;
+    verify_ed25519(session.signer_public_key, &proof, &req.signature_base64_url)?;
+    // Canonical Group creation is transactionally idempotent and assigns
+    // initial membership only to the authenticated initiating principal.
+    let conversation = ConversationRecord {
+        scope: direct.scope.clone(),
+        conversation: ConversationRef {
+            conversation_id: ids.conversation_id.clone(),
+            kind: ConversationKind::PrivateGroup,
+        },
+        parent_conversation_id: None,
+    };
+    let group = GroupRecord {
+        scope: direct.scope.clone(),
+        group_id: ids.group_id.clone(),
+        conversation: conversation.conversation.clone(),
+        ownership: GroupOwnership::PersonOwned(participants[0].clone()),
+        history_policy: GroupHistoryPolicy::NoHistory,
+        delivery_policy: DeliveryPolicy::NoExternalBridge,
+        crypto_state: GroupCryptoState {
+            capability_id: Some(ucr_protocol::GROUP_MLS_CAPABILITY.to_owned()),
+            epoch: 0,
+            state_ref: Some(state_ref),
+        },
+        public_policy: None,
+        media_state: GroupMediaState::Idle,
+        bridge_mappings: Vec::new(),
+        replication_generation: 0,
+        revision: 0,
+    };
+    // Do not silently reuse an earlier server-hosted media MLS group.
+    if ucr_group_mls::GroupMlsServerCustodyProbe::server_possesses_mls_group(
+        state.store.as_ref(),
+        &direct.scope,
+        &ids.group_id,
+    )
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    state
+        .store
+        .create_group(&conversation, &group, &session.subject)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    confirm_endpoint_mls_group_publication(state, &group)?;
+    Ok(json!({
+        "callId": req.call_id,
+        "groupId": ids.group_id.as_opaque().as_str(),
+        "cryptoEpoch": 0,
+        "cryptoStateRef": req.crypto_state_ref,
+        "requiresEndpointOwnedCommit": true,
+    }))
+}
+
+// A successful or duplicate Group insert must acknowledge only the exact
+// canonical epoch-zero fingerprint. A competing endpoint Commit may have
+// advanced the Group before this HTTP response; never return a false ACK.
+fn confirm_endpoint_mls_group_publication(
+    state: &State,
+    expected: &GroupRecord,
+) -> Result<(), StatusCode> {
+    let committed = state
+        .store
+        .group(&expected.scope, &expected.group_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::CONFLICT)?;
+    if committed.scope != expected.scope
+        || committed.group_id != expected.group_id
+        || committed.conversation != expected.conversation
+        || committed.ownership != expected.ownership
+        || committed.crypto_state.capability_id != expected.crypto_state.capability_id
+        || committed.crypto_state.epoch != 0
+        || committed.crypto_state.state_ref != expected.crypto_state.state_ref
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    Ok(())
+}
+
+fn decode_mls_public_wire(encoded: &str) -> Result<Vec<u8>, StatusCode> {
+    if encoded.is_empty() || encoded.len() > 10_000 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if bytes.is_empty() || bytes.len() > 8192 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    Ok(bytes)
+}
+
+fn sha256_b64(bytes: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(bytes))
+}
+
+fn publish_endpoint_mls_offer(
+    state: &State,
+    session: &Session,
+    req: &EndpointMlsOfferRequest,
+) -> Result<Value, StatusCode> {
+    let direct = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject,
+            &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?),
+            req.expected_revision,
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants =
+        first_party_media::admissible_participants_for_descriptor(&direct, &session.subject)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+    if participants[1] != session.subject.principal
+        || req.recipient_signer_key_id != session.signer_key_id
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let package = decode_mls_public_wire(&req.recipient_key_package_base64_url)?;
+    let proof = encoded_proof(
+        "ucr-first-party-endpoint-mls-key-package.v1",
+        &json!([
+            session.binding.tenant_id,
+            session.binding.namespace_id,
+            session.binding.participant_id,
+            session.binding.device,
+            session.signer_key_id,
+            req.call_id,
+            ids.group_id.as_opaque().as_str(),
+            sha256_b64(&package),
+        ]),
+    )?;
+    verify_ed25519(
+        session.signer_public_key,
+        &proof,
+        &req.recipient_signature_base64_url,
+    )?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(&req.recipient_signature_base64_url)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    state
+        .store
+        .put_endpoint_mls_offer(
+            &direct.scope,
+            &ids.group_id,
+            &device(&session.binding)?,
+            &EndpointMlsKeyPackageOffer {
+                signer_key_id: req.recipient_signer_key_id.clone(),
+                package,
+                signature,
+            },
+        )
+        .map_err(|_| StatusCode::CONFLICT)?;
+    Ok(json!({
+        "callId": req.call_id,
+        "groupId": ids.group_id.as_opaque().as_str(),
+        "deviceId": session.binding.device,
+        "offerStored": true,
+    }))
+}
+
+fn load_endpoint_mls_offers(
+    state: &State,
+    session: &Session,
+    req: &JoinRequest,
+) -> Result<Value, StatusCode> {
+    let direct = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject,
+            &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?),
+            req.expected_revision,
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants =
+        first_party_media::admissible_participants_for_descriptor(&direct, &session.subject)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+    if participants[0] != session.subject.principal {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let peer_binding = state
+        .store
+        .principal_identity_binding(&direct.scope, &participants[1])
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    let candidate_ids = state
+        .store
+        .endpoint_mls_offer_device_ids(&direct.scope, &ids.group_id, 8)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut offers = Vec::new();
+    for candidate in candidate_ids {
+        let target_device = DeviceId::from_opaque(opaque(&candidate)?);
+        let Some(descriptor) = state
+            .store
+            .device(&direct.scope, &target_device)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        else {
+            return Err(StatusCode::CONFLICT);
+        };
+        if descriptor.identity_id != peer_binding.identity_id
+            || !ucr_protocol::device_allows_protected_access(&descriptor)
+        {
+            continue;
+        }
+        let Some(current_signer) = state
+            .store
+            .active_trusted_signing_key(&direct.scope, &target_device)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        else {
+            continue;
+        };
+        let Some(offer) = state
+            .store
+            .endpoint_mls_offer(&direct.scope, &ids.group_id, &target_device)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        else {
+            return Err(StatusCode::CONFLICT);
+        };
+        if offer.signer_key_id != current_signer.key_id.as_opaque().as_str() {
+            continue;
+        }
+        let key: [u8; 32] = current_signer
+            .public_key
+            .try_into()
+            .map_err(|_| StatusCode::CONFLICT)?;
+        let proof = encoded_proof(
+            "ucr-first-party-endpoint-mls-key-package.v1",
+            &json!([
+                session.binding.tenant_id,
+                session.binding.namespace_id,
+                participants[1].principal_id.as_opaque().as_str(),
+                candidate,
+                offer.signer_key_id,
+                req.call_id,
+                ids.group_id.as_opaque().as_str(),
+                sha256_b64(&offer.package),
+            ]),
+        )?;
+        verify_ed25519(key, &proof, &URL_SAFE_NO_PAD.encode(&offer.signature))?;
+        offers.push(json!({
+            "recipientDeviceId": candidate,
+            "recipientSignerKeyId": offer.signer_key_id,
+            "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&offer.package),
+            "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(&offer.signature),
+        }));
+    }
+    Ok(json!({
+        "callId": req.call_id,
+        "groupId": ids.group_id.as_opaque().as_str(),
+        "offers": offers,
+    }))
+}
+
+struct VerifiedEndpointMlsAddPeer {
+    recipient_device: DeviceId,
+    package: Vec<u8>,
+    commit: Vec<u8>,
+    welcome: Vec<u8>,
+    fingerprint: [u8; 32],
+}
+
+fn verify_endpoint_mls_recipient_device(
+    state: &State,
+    req: &EndpointMlsAddPeerRequest,
+    direct: &CallSession,
+    recipient: &ucr_model::PrincipalRef,
+    recipient_device: &DeviceId,
+) -> Result<[u8; 32], StatusCode> {
+    // Verify the offered Device still belongs to the accepted recipient Identity.
+    let peer_binding = state
+        .store
+        .principal_identity_binding(&direct.scope, recipient)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    let recipient_descriptor = state
+        .store
+        .device(&direct.scope, recipient_device)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if recipient_descriptor.identity_id != peer_binding.identity_id
+        || !ucr_protocol::device_allows_protected_access(&recipient_descriptor)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let recipient_key = state
+        .store
+        .active_trusted_signing_key(&direct.scope, recipient_device)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if recipient_key.key_id.as_opaque().as_str() != req.recipient_signer_key_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let recipient_verifier: [u8; 32] = recipient_key
+        .public_key
+        .try_into()
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    Ok(recipient_verifier)
+}
+
+fn verify_endpoint_mls_add_peer_material(
+    state: &State,
+    session: &Session,
+    req: &EndpointMlsAddPeerRequest,
+    direct: &CallSession,
+    participants: &[ucr_model::PrincipalRef; 2],
+    ids: &first_party_media::MediaRuntimeIds,
+) -> Result<VerifiedEndpointMlsAddPeer, StatusCode> {
+    let recipient_device = DeviceId::from_opaque(opaque(&req.recipient_device_id)?);
+    let recipient_verifier = verify_endpoint_mls_recipient_device(
+        state,
+        req,
+        direct,
+        &participants[1],
+        &recipient_device,
+    )?;
+    let stored_offer = state
+        .store
+        .endpoint_mls_offer(&direct.scope, &ids.group_id, &recipient_device)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if stored_offer.signer_key_id != req.recipient_signer_key_id
+        || URL_SAFE_NO_PAD.encode(&stored_offer.signature) != req.recipient_signature_base64_url
+        || URL_SAFE_NO_PAD.encode(&stored_offer.package) != req.recipient_key_package_base64_url
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let package = decode_mls_public_wire(&req.recipient_key_package_base64_url)?;
+    let commit = decode_mls_public_wire(&req.commit_base64_url)?;
+    let welcome = decode_mls_public_wire(&req.welcome_base64_url)?;
+    let package_digest = sha256_b64(&package);
+    let commit_digest = sha256_b64(&commit);
+    let welcome_digest = sha256_b64(&welcome);
+    let target_proof = encoded_proof(
+        "ucr-first-party-endpoint-mls-key-package.v1",
+        &json!([
+            session.binding.tenant_id,
+            session.binding.namespace_id,
+            participants[1].principal_id.as_opaque().as_str(),
+            req.recipient_device_id,
+            req.recipient_signer_key_id,
+            req.call_id,
+            ids.group_id.as_opaque().as_str(),
+            package_digest,
+        ]),
+    )?;
+    verify_ed25519(
+        recipient_verifier,
+        &target_proof,
+        &req.recipient_signature_base64_url,
+    )?;
+    let initiator_proof = encoded_proof(
+        "ucr-first-party-endpoint-mls-add-peer.v1",
+        &json!([
+            session.binding.tenant_id,
+            session.binding.namespace_id,
+            session.binding.participant_id,
+            session.binding.device,
+            session.signer_key_id,
+            req.call_id,
+            req.expected_revision,
+            ids.group_id.as_opaque().as_str(),
+            req.group_revision,
+            req.event_id,
+            req.crypto_epoch,
+            req.crypto_state_ref,
+            req.recipient_device_id,
+            req.recipient_signer_key_id,
+            package_digest,
+            commit_digest,
+            welcome_digest,
+        ]),
+    )?;
+    verify_ed25519(
+        session.signer_public_key,
+        &initiator_proof,
+        &req.signature_base64_url,
+    )?;
+    let fingerprint: [u8; 32] = Sha256::digest(initiator_proof.as_bytes()).into();
+    Ok(VerifiedEndpointMlsAddPeer {
+        recipient_device,
+        package,
+        commit,
+        welcome,
+        fingerprint,
+    })
+}
+
+/// A device-owner-signed endpoint Commit, cross-signed by the specific
+/// intended recipient over its PUBLIC `KeyPackage`. No server `OpenMLS` keys.
+fn publish_endpoint_mls_add_peer(
+    state: &State,
+    session: &Session,
+    req: &EndpointMlsAddPeerRequest,
+) -> Result<Value, StatusCode> {
+    let direct = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject,
+            &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?),
+            req.expected_revision,
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let participants =
+        first_party_media::admissible_participants_for_descriptor(&direct, &session.subject)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+    if participants[0] != session.subject.principal {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let verified =
+        verify_endpoint_mls_add_peer_material(state, session, req, &direct, &participants, &ids)?;
+    let group = state
+        .store
+        .group(&direct.scope, &ids.group_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::CONFLICT)?;
+    // Do not reject an exact signed retry after the original Commit advanced
+    // the Group revision. The transactional EndpointMlsCommitStore checks the
+    // current epoch/revision for NEW events and authenticates an existing
+    // event's full signed fingerprint before returning Duplicate. Performing
+    // the mutable revision check here would strand an accepted Commit when
+    // its HTTP acknowledgement is lost.
+    if group.ownership != GroupOwnership::PersonOwned(participants[0].clone()) {
+        return Err(StatusCode::CONFLICT);
+    }
+    let changed = GroupChange {
+        event_id: EventId::from_opaque(opaque(&req.event_id)?),
+        scope: direct.scope.clone(),
+        group_id: ids.group_id.clone(),
+        expected_revision: req.group_revision,
+        kind: GroupChangeKind::AddMember {
+            member: participants[1].clone(),
+            role: GroupRole::Member,
+        },
+        next_crypto_state: None,
+    };
+    let artifacts = MlsCommitArtifacts {
+        commit: verified.commit,
+        welcome: Some(verified.welcome),
+        next_crypto_state: GroupCryptoState {
+            capability_id: Some(ucr_protocol::GROUP_MLS_CAPABILITY.to_owned()),
+            epoch: req.crypto_epoch,
+            state_ref: Some(opaque(&req.crypto_state_ref)?),
+        },
+    };
+    let admitted = MlsDeviceAdmission {
+        device_id: verified.recipient_device,
+        key_package: verified.package,
+    };
+    state
+        .store
+        .persist_endpoint_mls_commit(
+            &session.subject,
+            &device(&session.binding)?,
+            &changed,
+            &admitted,
+            &artifacts,
+            verified.fingerprint,
+        )
+        .map_err(|_| StatusCode::CONFLICT)?;
+    Ok(json!({
+        "callId": req.call_id,
+        "groupId": ids.group_id.as_opaque().as_str(),
+        "cryptoEpoch": req.crypto_epoch,
+        "cryptoStateRef": req.crypto_state_ref,
+        "recipientDeviceId": req.recipient_device_id,
+        "welcomeStored": true,
+    }))
+}
+
+/// Existing durable device-bound MLS bootstrap projection. Welcome is encrypted
+/// to the admitted Device by `OpenMLS`; it is never a plaintext exporter secret.
+fn endpoint_mls_bootstrap(
+    state: &State,
+    session: &Session,
+    req: &JoinRequest,
+) -> Result<Value, StatusCode> {
+    let direct = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
+        .first_party_call_join_admission(
+            &session.subject,
+            &device(&session.binding)?,
+            &CallId::from_opaque(opaque(&req.call_id)?),
+            req.expected_revision,
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    first_party_media::admissible_participants_for_descriptor(&direct, &session.subject)
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let ids = first_party_media::media_runtime_ids(&direct.scope, &direct.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    // Never hand out an endpoint bootstrap for a legacy server-custodied
+    // MLS group. The server may relay public Welcome/Commit bytes, but may
+    // not possess the Group private state on this first-party media path.
+    if ucr_group_mls::GroupMlsServerCustodyProbe::server_possesses_mls_group(
+        state.store.as_ref(),
+        &direct.scope,
+        &ids.group_id,
+    )
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let bootstrap = state
+        .store
+        .mls_bootstrap_for_device(&direct.scope, &ids.group_id, &device(&session.binding)?)
+        .map_err(|_| StatusCode::CONFLICT)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(json!({
+        "callId": req.call_id,
+        "groupId": ids.group_id.as_opaque().as_str(),
+        "deviceId": session.binding.device,
+        "admissionEventId": bootstrap.admission_event_id.as_opaque().as_str(),
+        "welcomeBase64Url": URL_SAFE_NO_PAD.encode(bootstrap.welcome),
+        "welcomeEpoch": bootstrap.welcome_crypto_state.epoch,
+        "welcomeStateRef": bootstrap.welcome_crypto_state.state_ref.as_ref()
+            .ok_or(StatusCode::CONFLICT)?.as_str(),
+        "commits": bootstrap.subsequent_commits.iter().map(|item| json!({
+            "commitBase64Url": URL_SAFE_NO_PAD.encode(&item.commit),
+            "cryptoEpoch": item.next_crypto_state.epoch,
+            "cryptoStateRef": item.next_crypto_state.state_ref.as_ref().map(OpaqueId::as_str),
+        })).collect::<Vec<_>>(),
+        "cryptoEpoch": bootstrap.current_crypto_state.epoch,
+        "cryptoStateRef": bootstrap.current_crypto_state.state_ref.as_ref()
+            .ok_or(StatusCode::CONFLICT)?.as_str(),
+    }))
+}
+
 fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Value, StatusCode> {
     let call = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
         .first_party_call_join_admission(
@@ -1086,6 +1846,24 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
             req.expected_revision,
         )
         .map_err(|_| StatusCode::FORBIDDEN)?;
+    // A Call principal can own multiple Devices. Only the exact two Devices
+    // admitted by the signed endpoint MLS Commit may receive media Joins.
+    let participants =
+        first_party_media::admissible_participants_for_descriptor(&call, &session.subject)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+    let ids = first_party_media::media_runtime_ids(&call.scope, &call.call_id)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let (creator, recipient) =
+        authenticated_endpoint_mls_devices(state, &call, &participants, &ids.group_id)?
+            .ok_or(StatusCode::CONFLICT)?;
+    let own_device = if session.subject.principal == participants[0] {
+        creator
+    } else {
+        recipient
+    };
+    if session.binding.device != own_device {
+        return Err(StatusCode::FORBIDDEN);
+    }
     // Realtime media is owned by the Conference/SFU + Group-MLS stack, which
     // admits only Group Calls. Bind this ACTIVE direct Call to its derived
     // two-member media Group Call and name THAT Call in the Join grant.
@@ -1733,6 +2511,36 @@ fn call_route(state: &State, auth: &Session, path: &str, body: &[u8]) -> Result<
             let input: SignalRequest = parse(body)?;
             ensure_binding(&input.binding, auth)?;
             signal_call(state, auth, &input)?
+        }
+        "/v1/first-party/call/mls-offer" => {
+            let input: EndpointMlsOfferRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            publish_endpoint_mls_offer(state, auth, &input)?
+        }
+        "/v1/first-party/call/mls-offers" => {
+            let input: JoinRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            load_endpoint_mls_offers(state, auth, &input)?
+        }
+        "/v1/first-party/call/mls-add-peer" => {
+            let input: EndpointMlsAddPeerRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            publish_endpoint_mls_add_peer(state, auth, &input)?
+        }
+        "/v1/first-party/call/mls-bootstrap" => {
+            let input: JoinRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            endpoint_mls_bootstrap(state, auth, &input)?
+        }
+        "/v1/first-party/call/mls-create" => {
+            let input: EndpointMlsCreateRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            publish_endpoint_mls_group(state, auth, &input)?
+        }
+        "/v1/first-party/call/mls-descriptor" => {
+            let input: JoinRequest = parse(body)?;
+            ensure_binding(&input.binding, auth)?;
+            endpoint_mls_descriptor(state, auth, &input)?
         }
         "/v1/first-party/call/join-accepted" => {
             let input: JoinRequest = parse(body)?;

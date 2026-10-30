@@ -310,4 +310,134 @@ for (const route of [
 }
 
 assert.ok(!authenticatedRoutes.includes("/v1/first-party/call/join"));
+// A signed Join or MLS descriptor issued to the previous Device is stale when
+// the browser switches Identity/Device before the HTTP response completes.
+// A matching binding inside the delayed response alone is not sufficient.
+async function expectLateDeviceResponseRefused(
+  route: string,
+  payload: unknown,
+  invoke: (host: ReturnType<typeof createUcrFirstPartyHttpHost>) => Promise<unknown>,
+): Promise<void> {
+  let active = binding;
+  const requested = deferred<void>();
+  const delayed = deferred<Response>();
+  const host = createUcrFirstPartyHttpHost(first.vault, {
+    origin,
+    fetchImpl: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/v1/first-party/session") return reply(active);
+      if (path === "/v1/first-party/call/mls-descriptor" && path !== route) {
+        return reply(acceptedMlsDescriptor);
+      }
+      if (path === route) {
+        requested.release(undefined);
+        return delayed.promise;
+      }
+      throw new Error("unexpected first-party route: " + path);
+    },
+  });
+  const pending = invoke(host);
+  await requested.promise;
+  active = second;
+  delayed.release(reply(payload));
+  await assert.rejects(pending, new RegExp("account or Device changed during MLS/Join operation"));
+}
+
+const acceptedMlsDescriptor = {
+  callId: direct.callId, expectedRevision: 7,
+  groupRevision: null, expectedPeerDeviceId: null, cryptoEpoch: null, cryptoStateRef: null,
+  mediaCallId: "fp-m-call-42", groupId: "fp-mg-group-42",
+  conversationId: "fp-mc-conversation-42",
+  creatorPrincipalId: binding.participantId, peerPrincipalId: "peer-other",
+  deviceId: binding.deviceId, cryptoCapability: "ucr.group-mls.v1",
+  requiresEndpointOwnedCommit: true,
+};
+// The Group's CAS revision is independent of the direct Call revision.
+// The descriptor must distinguish absence from the real initial revision 0,
+// and reject a partially initialized or downgraded crypto-state projection.
+let groupDescriptor: unknown = acceptedMlsDescriptor;
+const descriptorHost = createUcrFirstPartyHttpHost(first.vault, {
+  origin,
+  fetchImpl: async url => {
+    const path = new URL(String(url)).pathname;
+    if (path === "/v1/first-party/session") return reply(binding);
+    if (path === "/v1/first-party/call/mls-descriptor") return reply(groupDescriptor);
+    throw new Error("unexpected descriptor route: " + path);
+  },
+});
+const descriptorRequest = {callId: direct.callId, expectedRevision: 7};
+assert.equal((await descriptorHost.describeAcceptedCallMls(binding, descriptorRequest)).groupRevision, null);
+groupDescriptor = {...acceptedMlsDescriptor, groupRevision: 0, cryptoEpoch: 0,
+  cryptoStateRef: "local-epoch-zero"};
+const initialGroup = await descriptorHost.describeAcceptedCallMls(binding, descriptorRequest);
+assert.equal(initialGroup.groupRevision, 0);
+assert.equal(initialGroup.cryptoEpoch, 0);
+assert.equal(initialGroup.cryptoStateRef, "local-epoch-zero");
+groupDescriptor = {...acceptedMlsDescriptor, groupRevision: 1, cryptoEpoch: 1,
+  cryptoStateRef: "endpoint-committed-epoch-one", expectedPeerDeviceId: "peer-device"};
+const admittedGroup = await descriptorHost.describeAcceptedCallMls(binding, descriptorRequest);
+assert.equal(admittedGroup.groupRevision, 1);
+assert.equal(admittedGroup.expectedPeerDeviceId, "peer-device");
+for (const invalid of [
+  {...acceptedMlsDescriptor, groupRevision: 1, cryptoEpoch: 1,
+    cryptoStateRef: "state", expectedPeerDeviceId: null},
+  {...acceptedMlsDescriptor, groupRevision: 1, cryptoEpoch: 1,
+    cryptoStateRef: "state", expectedPeerDeviceId: binding.deviceId},
+  {...acceptedMlsDescriptor, groupRevision: 1, cryptoEpoch: 1,
+    cryptoStateRef: "state", expectedPeerDeviceId: "peer device"},
+]) {
+  groupDescriptor = invalid;
+  await assert.rejects(
+    descriptorHost.describeAcceptedCallMls(binding, descriptorRequest),
+    /missing or untrusted committed MLS peer Device/,
+  );
+}
+for (const invalid of [
+  {...acceptedMlsDescriptor, groupRevision: 0},
+  {...acceptedMlsDescriptor, groupRevision: 0, cryptoEpoch: 0, cryptoStateRef: null},
+  {...acceptedMlsDescriptor, groupRevision: -1, cryptoEpoch: 0, cryptoStateRef: "state"},
+  {...acceptedMlsDescriptor, groupRevision: 0, cryptoEpoch: -1, cryptoStateRef: "state"},
+  {...acceptedMlsDescriptor, groupRevision: 0, cryptoEpoch: 0, cryptoStateRef: ""},
+  {...acceptedMlsDescriptor, groupRevision: Number.MAX_SAFE_INTEGER + 1,
+    cryptoEpoch: 0, cryptoStateRef: "state"},
+]) {
+  groupDescriptor = invalid;
+  await assert.rejects(
+    descriptorHost.describeAcceptedCallMls(binding, descriptorRequest),
+    /inconsistent canonical MLS Group revision or crypto epoch/,
+  );
+}
+
+await expectLateDeviceResponseRefused(
+  "/v1/first-party/call/mls-descriptor", acceptedMlsDescriptor,
+  host => host.describeAcceptedCallMls(binding, {callId: direct.callId, expectedRevision: 7}),
+);
+await expectLateDeviceResponseRefused(
+  "/v1/first-party/call/join-accepted", {
+    ...binding, callId: direct.callId, sessionId: "session-42",
+    joinFragment: "#ucr_join=" + encode(new TextEncoder().encode("fake-claims")) +
+      "." + encode(new TextEncoder().encode("fake-signature")),
+  },
+  host => host.issueSignedJoinForAcceptedCall(binding, {
+    callId: direct.callId, expectedRevision: 7,
+  }),
+);
+
+await expectLateDeviceResponseRefused(
+  "/v1/first-party/call/mls-offers", {
+    callId: direct.callId, groupId: acceptedMlsDescriptor.groupId, offers: [],
+  },
+  host => host.listEndpointMlsOffers(binding, {callId: direct.callId, expectedRevision: 7}),
+);
+await expectLateDeviceResponseRefused(
+  "/v1/first-party/call/mls-bootstrap", {
+    callId: direct.callId, groupId: acceptedMlsDescriptor.groupId,
+    deviceId: binding.deviceId, admissionEventId: "event-42",
+    welcomeBase64Url: encode(new Uint8Array([1])), welcomeEpoch: 1,
+    welcomeStateRef: "state-42", commits: [], cryptoEpoch: 1,
+    cryptoStateRef: "state-42",
+  },
+  host => host.fetchEndpointMlsBootstrap(binding, {callId: direct.callId, expectedRevision: 7}),
+);
+
 console.log("RT0 HTTP: existing Device proof, canonical Call routes, and unscoped Join denial passed");
