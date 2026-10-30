@@ -42,7 +42,7 @@ const storage={
 const hintKey="ucr.first-party.active-call.v1";
 let inspections=0,rendered=0,incomingRendered=0,navigatedTo=null;
 const context={
-  accountScope:scope,active:null,sessionStorage:storage,
+  accountScope:scope,active:null,uiAuthGeneration:0,sessionStorage:storage,
   idempotency:new Map(),crypto:{randomUUID:()=>"retry-id"},
   restoreSession:async()=>user,message(){},
   refreshing:false,navigating:false,timer:null,knownContacts:[],
@@ -135,6 +135,21 @@ await stale;
 assert.equal(context.active.call.callId,newer.callId);
 assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
 
+// Same Identity/Device after logout is still a NEW authentication generation.
+// The old in-flight inspection must not restore its previous Call.
+context.active=null;
+forgetActiveCall();
+rememberActiveCall(call,"alice");
+let releaseOldGeneration;
+context.calls.inspect=()=>new Promise(resolve=>{releaseOldGeneration=resolve;});
+const oldGenerationResume=restoreActiveCall(user);
+context.uiAuthGeneration++;
+releaseOldGeneration(call);
+await oldGenerationResume;
+assert.equal(context.active,null,"old auth generation cannot restore a Call");
+assert.equal(values.has(hintKey),false);
+context.uiAuthGeneration=0;
+
 // Even a late canonical denial must not delete the replacement locator.
 let rejectOld;
 context.active=null;
@@ -173,7 +188,22 @@ await dial({id:"contact-b"},"video");
 assert.equal(starts,1);
 assert.equal(context.active.call.callId,newer.callId);
 assert.equal(JSON.parse(values.get(hintKey)).callId,newer.callId);
-assert.match(source,/if \(activeCallLocator\(\) !== null\) throw Error\("сначала дождитесь проверки незавершённого вызова"\);/);
+
+// A Call creation that finishes after a Device session change may exist on
+// the canonical owner, but must not be painted under the replacement login.
+context.active=null;
+forgetActiveCall();
+let finishStaleDial,signalStaleDial;
+const staleDialStarted=new Promise(resolve=>{signalStaleDial=resolve;});
+context.calls.start=()=>new Promise(resolve=>{finishStaleDial=resolve;signalStaleDial();});
+const staleDial=dial({id:"contact-b"},"audio");
+await staleDialStarted;
+context.uiAuthGeneration++;
+finishStaleDial(newer);
+await assert.rejects(staleDial,/Device changed during Call creation/);
+assert.equal(context.active,null,"late Call creation must not repaint another Device");
+assert.equal(values.has(hintKey),false);
+assert.match(source,/if (activeCallLocator\(\) !== null\) throw Error\("сначала дождитесь проверки незавершённого вызова"\);/);
 
 // A periodic inspect begun for an old Call must not overwrite a newly dialed Call.
 context.active={call,identity:"alice"};
