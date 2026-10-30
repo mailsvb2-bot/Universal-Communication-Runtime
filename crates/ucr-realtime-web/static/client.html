@@ -1951,7 +1951,7 @@ async function startWebRtcOnce(forceMedia=false){
     }
   };
   // Network/privacy validation precedes browser device permissions.
-  let offer,rtcConfig,serverPeerOpened=false;
+  let offer,rtcConfig,serverPeerOpened=false,startingOwner=null;
   try{
     const response=await api("/v1/realtime/webrtc/start",startingClaims,undefined,false,startingToken);
     serverPeerOpened=true;
@@ -1966,7 +1966,7 @@ async function startWebRtcOnce(forceMedia=false){
     startWebRtc.offerOwner=Object.freeze({
       offerId:offer.offer_id,claims:Object.freeze({...startingClaims}),token:startingToken
     });
-    const startingOwner=startWebRtc.offerOwner;
+    startingOwner=startWebRtc.offerOwner;
     rtcConfig=rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value);
     await ensureLocalMedia(forceMedia);
     ensureCurrent();
