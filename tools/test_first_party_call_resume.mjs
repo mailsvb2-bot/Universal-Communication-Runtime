@@ -502,6 +502,7 @@ const authContext={
   uiAuthGeneration:0,
   host:{},vault:{},location:{origin:"https://localhost"},
   authTrace:async(_stage,op)=>op(),lastBinding:()=>user,
+  authHttpCode:error=>Number(String(error.message).match(/HTTP (\\d+)/)?.[1]??0),
   authDiagnostic(){},forgetBinding(){},
   principalScope:identity=>JSON.stringify([
     identity.tenantId,identity.namespaceId,identity.participantId,identity.deviceId]),
@@ -534,7 +535,23 @@ finishReauthentication(user);
 await assert.rejects(staleReauthentication,/Device session changed during authentication/);
 assert.equal(reauthCount,1);
 
+// An unavailable session endpoint is not proof of an expired cookie. It must
+// NEVER initiate a new login/Set-Cookie behind the user's back. Only 401 may
+// invoke the protected existing-Device possession flow.
+authContext.uiAuthGeneration=0;
+for (const error of [
+  new Error("HTTP 503: session endpoint unavailable"),
+  new Error("HTTP 429: rate limited"),
+  new Error("HTTP 403: trust denied"),
+  new TypeError("network offline"),
+]) {
+  authContext.host.resumeAuthenticatedDevice=async()=>{throw error;};
+  await assert.rejects(authContext.restoreSession(),rejected=>rejected===error);
+  assert.equal(reauthCount,1,"non-401 session failure must not mint another cookie");
+}
+
 // The current generation must still recover with its original protected signer.
+authContext.host.resumeAuthenticatedDevice=async()=>{throw Error("HTTP 401: expired");};
 authContext.uiAuthGeneration=0;
 authContext.authenticateUcrFirstPartyDevice=async()=>{reauthCount++;return user;};
 assert.equal((await authContext.restoreSession()).deviceId,user.deviceId);
