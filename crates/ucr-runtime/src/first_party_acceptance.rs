@@ -1240,7 +1240,6 @@ fn protected_action_gate_serializes_logout_and_rejects_stale_join() {
     );
 }
 
-
 #[test]
 fn cross_device_revoke_waits_for_target_protected_action_gate() {
     let db = TestDb::new();
