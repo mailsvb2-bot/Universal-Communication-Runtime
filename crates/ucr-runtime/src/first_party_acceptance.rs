@@ -1029,6 +1029,55 @@ fn anonymous_challenge_flood_cannot_lock_out_signup_or_login() {
     );
 }
 
+fn signed_login_proof(binding: &Binding, signer: &SigningKey, issued: &Value) -> Vec<u8> {
+    let signed = encoded_proof(
+        "ucr-first-party-device-login.v1",
+        &json!([
+            binding.tenant_id,
+            binding.namespace_id,
+            binding.participant_id,
+            binding.device,
+            issued["challengeId"],
+            issued["challengeBytesBase64Url"],
+        ]),
+    )
+    .unwrap();
+    serde_json::to_vec(&json!({
+        "binding": binding,
+        "challengeId": issued["challengeId"],
+        "signatureBase64Url": URL_SAFE_NO_PAD.encode(
+            signer.sign(signed.as_bytes()).to_bytes()
+        ),
+    }))
+    .unwrap()
+}
+
+fn verified_login_pending(
+    state: &State,
+    binding: &Binding,
+    body: &[u8],
+) -> (Pending, ScopedPrincipal, String, [u8; 32]) {
+    let parsed: LoginProof = parse(body).unwrap();
+    let pending = consume(state, binding, &parsed.challenge_id, "login", None).unwrap();
+    let subject = subject_for(state, binding).unwrap();
+    let (key_id, public_key) = trusted_key(state, binding).unwrap();
+    let signed = encoded_proof(
+        "ucr-first-party-device-login.v1",
+        &json!([
+            binding.tenant_id,
+            binding.namespace_id,
+            binding.participant_id,
+            binding.device,
+            pending.id,
+            pending.nonce,
+        ]),
+    )
+    .unwrap();
+    verify_ed25519(public_key, &signed, &parsed.signature_base64_url).unwrap();
+    spend(state, &pending).unwrap();
+    (pending, subject, key_id, public_key)
+}
+
 #[test]
 fn logout_atomically_fences_old_login_verify_and_retires_all_device_cookies() {
     let db = TestDb::new();
@@ -1063,51 +1112,14 @@ fn logout_atomically_fences_old_login_verify_and_retires_all_device_cookies() {
         &serde_json::to_vec(&bob).unwrap(),
     )
     .unwrap();
-    let make_proof = |binding: &Binding, signer: &SigningKey, issued: &Value| {
-        let signed = encoded_proof(
-            "ucr-first-party-device-login.v1",
-            &json!([
-                binding.tenant_id,
-                binding.namespace_id,
-                binding.participant_id,
-                binding.device,
-                issued["challengeId"],
-                issued["challengeBytesBase64Url"],
-            ]),
-        )
-        .unwrap();
-        serde_json::to_vec(&json!({
-            "binding": binding,
-            "challengeId": issued["challengeId"],
-            "signatureBase64Url": URL_SAFE_NO_PAD.encode(
-                signer.sign(signed.as_bytes()).to_bytes()
-            ),
-        }))
-        .unwrap()
-    };
-    let alice_proof = make_proof(&alice, &alice_signer, &alice_challenge);
-    let bob_proof = make_proof(&bob, &bob_signer, &bob_challenge);
+    // Use a real Device signature, not a synthetic successful login response.
+    let alice_proof = signed_login_proof(&alice, &alice_signer, &alice_challenge);
+    let bob_proof = signed_login_proof(&bob, &bob_signer, &bob_challenge);
 
     // Deterministic concurrency interleaving: signature was verified and its
     // challenge consumed, but the response/cookie has NOT been issued yet.
-    let parsed: LoginProof = parse(&alice_proof).unwrap();
-    let pending = consume(&server, &alice, &parsed.challenge_id, "login", None).unwrap();
-    let subject = subject_for(&server, &alice).unwrap();
-    let (key_id, public_key) = trusted_key(&server, &alice).unwrap();
-    let signed = encoded_proof(
-        "ucr-first-party-device-login.v1",
-        &json!([
-            alice.tenant_id,
-            alice.namespace_id,
-            alice.participant_id,
-            alice.device,
-            pending.id,
-            pending.nonce,
-        ]),
-    )
-    .unwrap();
-    verify_ed25519(public_key, &signed, &parsed.signature_base64_url).unwrap();
-    spend(&server, &pending).unwrap();
+    let (pending, subject, key_id, public_key) =
+        verified_login_pending(&server, &alice, &alice_proof);
 
     let (response, clear_cookie) = dispatch_post(
         &server,
