@@ -1278,7 +1278,9 @@ fn dispatch_post(
         .is_some_and(|target| target.device < auth.binding.device)
     {
         (
-            target_gate.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
+            target_gate
+                .as_ref()
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
             Some(&own_gate),
         )
     } else {
