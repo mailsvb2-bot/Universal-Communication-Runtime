@@ -909,6 +909,37 @@ where
         self.prepare_forward_from_validated_impl(validated, selected_recipients)
     }
 
+    // Do not cache authorization in a validated frame: Hangup or revoke may
+    // occur between source validation and the recipient fan-out.
+    fn recheck_source_before_fanout(
+        &self,
+        source: &ScopedPrincipal,
+        call_id: &ucr_model::CallId,
+        send_permission: &str,
+    ) -> Result<(), SfuError> {
+        let live_call = self
+            .store
+            .call_for_participant(source, &source.scope, call_id)?
+            .ok_or(SfuError::SourceMismatch)?;
+        if live_call.signalling_state != ucr_model::CallSignallingState::Active
+            || !live_call.participants.iter().any(|participant| {
+                participant.principal == source.principal
+                    && participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            })
+        {
+            return Err(SfuError::SourceMismatch);
+        }
+        self.authorization
+            .authorize(&AuthorizationRequest {
+                subject: source.clone(),
+                permission: send_permission.to_owned(),
+                resource_scope: source.scope.clone(),
+            })
+            .map_err(SfuError::Authorization)?;
+        Ok(())
+    }
+
     fn prepare_forward_from_validated_impl(
         &self,
         validated: SfuValidatedSourceFrame,
@@ -927,36 +958,11 @@ where
             canonical.frame.header.video_source_kind,
         );
 
-        // The source validation token may have been produced before a
-        // concurrent Leave/Hangup. Recheck live source authority on the
-        // canonical Call before routing any already-validated ciphertext.
-        let live_source_call = self
-            .store
-            .call_for_participant(
-                &authenticated_source,
-                &canonical.frame.header.scope,
-                &call.call_id,
-            )?
-            .ok_or(SfuError::SourceMismatch)?;
-        if live_source_call.signalling_state != ucr_model::CallSignallingState::Active
-            || !live_source_call.participants.iter().any(|participant| {
-                participant.principal == authenticated_source.principal
-                    && participant.state == CallParticipantState::Accepted
-                    && participant.left_revision.is_none()
-            })
-        {
-            return Err(SfuError::SourceMismatch);
-        }
-        // A previously validated source token is not a durable permission.
-        // Revoke may commit after source validation but before fan-out; consult
-        // the canonical evaluator again before preparing any recipient batch.
-        self.authorization
-            .authorize(&AuthorizationRequest {
-                subject: authenticated_source.clone(),
-                permission: send.to_owned(),
-                resource_scope: canonical.frame.header.scope.clone(),
-            })
-            .map_err(SfuError::Authorization)?;
+        self.recheck_source_before_fanout(
+            &authenticated_source,
+            &call.call_id,
+            send,
+        )?;
 
         let recipients = if let Some(selected) = selected_recipients {
             validate_selected_recipients(&call, &authenticated_source.principal, selected)?;
