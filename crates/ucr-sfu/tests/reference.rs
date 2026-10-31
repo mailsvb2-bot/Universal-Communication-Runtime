@@ -894,7 +894,10 @@ fn revoked_send_permission_after_source_validation_denies_prepared_fanout() {
         Err(SfuError::Authorization(error))
             if error.code == CanonicalErrorCode::PermissionDenied
     ));
-    assert!(sink.forwarded().is_empty(), "revoked source cannot reach a sink");
+    assert!(
+        sink.forwarded().is_empty(),
+        "revoked source cannot reach a sink"
+    );
 }
 
 #[test]
