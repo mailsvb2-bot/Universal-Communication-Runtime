@@ -927,6 +927,27 @@ where
             canonical.frame.header.video_source_kind,
         );
 
+        // The source validation token may have been produced before a
+        // concurrent Leave/Hangup. Recheck live source authority on the
+        // canonical Call before routing any already-validated ciphertext.
+        let live_source_call = self
+            .store
+            .call_for_participant(
+                &authenticated_source,
+                &canonical.frame.header.scope,
+                &call.call_id,
+            )?
+            .ok_or(SfuError::SourceMismatch)?;
+        if live_source_call.signalling_state != ucr_model::CallSignallingState::Active
+            || !live_source_call.participants.iter().any(|participant| {
+                participant.principal == authenticated_source.principal
+                    && participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            })
+        {
+            return Err(SfuError::SourceMismatch);
+        }
+
         let recipients = if let Some(selected) = selected_recipients {
             validate_selected_recipients(&call, &authenticated_source.principal, selected)?;
             selected.to_vec()
