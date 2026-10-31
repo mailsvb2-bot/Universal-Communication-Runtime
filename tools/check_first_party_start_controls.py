@@ -61,6 +61,21 @@ assert 'if(signup&&slot)slot.appendChild(signup)' in JS, (
 assert 'document.readyState === "loading"' in JS and (
     'initializeLanguagePicker();' in JS
 ), "language picker is lost when the async module loads after DOMContentLoaded"
+# Switching to English must also translate dynamic incoming/contacts/call actions,
+# status guidance and accessible field labels, not only initial headings.
+for label in ("Аудиозвонок", "Видеозвонок", "Принять", "Отклонить", "Отозвать устройство"):
+    assert f'"{label}":' in JS, f"missing English dynamic action translation: {label}"
+assert 'button.textContent = localize(text);' in JS, "dynamic Call buttons remain Russian"
+assert 'function message(value) { status.textContent = localize(value); }' in JS, (
+    "dynamic status messages ignore the selected language"
+)
+assert 'el("video-guide").textContent = localize(guide);' in JS, (
+    "live call guidance ignores the selected language"
+)
+assert 'lang=next;' in JS and 'data-pl-original-' in JS, (
+    "language selection does not update current language and accessible labels"
+)
+
 assert parser.controls, "no visible forms/buttons found"
 
 for tag, element in parser.controls:
