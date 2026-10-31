@@ -102,7 +102,7 @@ const KEY="petrellink.language.v1";
     document.documentElement.lang=next;
     // Never replace nested markup, recovery secrets or user-entered values.
     document.querySelectorAll("h1,h2,summary,button,.call-steps span,#pl-onboard p,section > p,section > small,#pl-invite-help,#incoming li,#video-guide,#status").forEach(el=>{
-      if(el.children.length || el.id==="pl-friendly-identity")return;
+      if(el.children.length)return;
       if(!el.dataset.plOriginalText)el.dataset.plOriginalText=el.textContent.trim();
       const source=el.dataset.plOriginalText;
       if(translations[source])el.textContent=english?translations[source]:source;
