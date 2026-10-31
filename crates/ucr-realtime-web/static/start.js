@@ -1020,7 +1020,12 @@ async function dial(contact,media) {
   showActive();
   message("Вызов создан. Ожидается реальное принятие другим участником.");
 }
+// Incoming alerts reflect only the authenticated Call owner's verified list.
+// A tab title remains visible without prompting for browser notification grants.
+const ordinaryPageTitle = typeof document === "undefined" ? "PetrelLink" : document.title;
 function renderIncoming(items) {
+  if (typeof document !== "undefined") document.title = items.length > 0 && accountScope
+    ? "Входящий вызов · PetrelLink" : ordinaryPageTitle;
   const list = el("incoming");
   list.replaceChildren();
   for (const call of items) {
@@ -1170,7 +1175,10 @@ async function initialize() {
       (error instanceof Error ? error.message : String(error)));
   }
   timer = setInterval(() => {
-    if (busy || navigating || document.hidden) return;
+    // Poll while the page is hidden, too: a remote peer must be able to ring
+    // without the recipient watching the foreground tab. Browser suspension
+    // still requires a separate platform push delivery mechanism.
+    if (busy || navigating) return;
     void refresh().catch(err => {
       authDiagnostic("periodic_refresh","failed",err);
       // Retain the authenticated device and keep polling rather than requiring
