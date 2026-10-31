@@ -101,8 +101,8 @@ const KEY="petrellink.language.v1";
     const english=next==="en";
     document.documentElement.lang=next;
     // Never replace nested markup, recovery secrets or user-entered values.
-    document.querySelectorAll("h1,h2,summary,button,.call-steps span,#pl-onboard p,section > p,section > small,#pl-invite-help,#call-state,#video-guide,#who,#status").forEach(el=>{
-      if(el.children.length)return;
+    document.querySelectorAll("h1,h2,summary,button,.call-steps span,#pl-onboard p,section > p,section > small,#pl-invite-help,#incoming li,#video-guide,#status").forEach(el=>{
+      if(el.children.length || el.id==="pl-friendly-identity")return;
       if(!el.dataset.plOriginalText)el.dataset.plOriginalText=el.textContent.trim();
       const source=el.dataset.plOriginalText;
       if(translations[source])el.textContent=english?translations[source]:source;
@@ -129,6 +129,8 @@ const KEY="petrellink.language.v1";
       if(!allowed.includes(next))return;
       try{localStorage.setItem(KEY,next)}catch(_){}
       applyLanguage(next);
+      // Re-render the current canonical Call view; never translate peer IDs.
+      showActive();
       // Dynamic call state and administrative diagnostics retain canonical terms.
     });
   }
@@ -173,6 +175,7 @@ function plSetSignedIn(identity){
   el("pl-user-cabinet").hidden=!logged;
   for(const id of ["pl-contacts","pl-incoming","pl-current-call"])el(id).hidden=!logged;
   if(logged){
+    el("pl-friendly-identity").dataset.plOriginalText="Профиль активен. Пригласите знакомого или выберите контакт для звонка.";
     el("pl-friendly-identity").textContent=localize("Профиль активен. Пригласите знакомого или выберите контакт для звонка.");
     const invited=el("contact-peer").dataset.invitedContact==="true";
     if(invited) {
@@ -427,13 +430,14 @@ async function restoreActiveCall(user) {
   }
 }
 
-function message(value) { status.textContent = localize(value); }
+function message(value) { status.dataset.plOriginalText=value; status.textContent = localize(value); }
 function setCallStage(step, guide) {
   for (const [index, name] of ["device","contact","accepted","media"].entries()) {
     const element = el("stage-" + name);
     if (index === step) element.setAttribute("aria-current","step");
     else element.removeAttribute("aria-current");
   }
+  el("video-guide").dataset.plOriginalText=guide;
   el("video-guide").textContent = localize(guide);
 }
 function showRecovery(code) {
@@ -478,6 +482,7 @@ function textNode(value) {return document.createTextNode(value);}
 function btn(text, callback, style = "") {
   const button = document.createElement("button");
   button.type = "button";
+  button.dataset.plOriginalText = text;
   button.textContent = localize(text);
   if (style) button.className = style;
   button.addEventListener("click", () => void run(callback));
