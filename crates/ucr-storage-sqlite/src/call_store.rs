@@ -375,62 +375,61 @@ fn create_call_with_parent_guard(
     session: &CallSession,
     parent: Option<&CallSession>,
 ) -> Result<DurableRecordStatus, DurableStoreError> {
-
-        let session = canonical_call_creation(session, &creator.scope, &creator.principal)
-            .map_err(map_call_error)?;
-        let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
-        let mut connection = store.lock_connection()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| map_sqlite_error(&error))?;
-        if let Some(parent) = parent {
-            // The parent snapshot and child creation are serialized with every
-            // canonical Call signal by this SQLite IMMEDIATE transaction.
-            if parent.scope != session.scope
-                || parent.call_id == session.call_id
-                || parent.conversation.kind != ConversationKind::Direct
-                || parent.signalling_state != CallSignallingState::Active
-                || parent.participants.len() != 2
-                || !parent.participants.iter().all(|participant| {
-                    participant.state == CallParticipantState::Accepted
-                        && participant.left_revision.is_none()
-                })
-                || load_call_from(&transaction, &parent.scope, &parent.call_id)?.as_ref()
-                    != Some(parent)
-            {
-                return Err(DurableStoreError::PermissionDenied);
-            }
+    let session = canonical_call_creation(session, &creator.scope, &creator.principal)
+        .map_err(map_call_error)?;
+    let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
+    let mut connection = store.lock_connection()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    if let Some(parent) = parent {
+        // The parent snapshot and child creation are serialized with every
+        // canonical Call signal by this SQLite IMMEDIATE transaction.
+        if parent.scope != session.scope
+            || parent.call_id == session.call_id
+            || parent.conversation.kind != ConversationKind::Direct
+            || parent.signalling_state != CallSignallingState::Active
+            || parent.participants.len() != 2
+            || !parent.participants.iter().all(|participant| {
+                participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            })
+            || load_call_from(&transaction, &parent.scope, &parent.call_id)?.as_ref()
+                != Some(parent)
+        {
+            return Err(DurableStoreError::PermissionDenied);
         }
-        let conversation = message_store::load_conversation_from(
-            &transaction,
-            &session.scope,
-            &session.conversation.conversation_id,
-        )?
-        .ok_or(DurableStoreError::InvalidRecord)?;
-        if conversation.conversation != session.conversation {
-            return Err(DurableStoreError::InvalidRecord);
+    }
+    let conversation = message_store::load_conversation_from(
+        &transaction,
+        &session.scope,
+        &session.conversation.conversation_id,
+    )?
+    .ok_or(DurableStoreError::InvalidRecord)?;
+    if conversation.conversation != session.conversation {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    if let Some(existing) = load_call_from(&transaction, &session.scope, &session.call_id)? {
+        if !group_actor_current_if_needed(&transaction, &existing, &creator.principal)? {
+            return Err(DurableStoreError::PermissionDenied);
         }
-        if let Some(existing) = load_call_from(&transaction, &session.scope, &session.call_id)? {
-            if !group_actor_current_if_needed(&transaction, &existing, &creator.principal)? {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            let recorded =
-                load_creation_fingerprint(&transaction, &session.scope, &session.call_id)?
-                    .ok_or(DurableStoreError::Corrupt)?;
-            return if recorded == creation_fingerprint && creator.principal == existing.initiated_by
-            {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        require_group_participants_if_needed(&transaction, &session)?;
-        insert_call(&transaction, &session, &creation_fingerprint)?;
-        replace_participants(&transaction, &session)?;
-        transaction
-            .commit()
-            .map_err(|error| map_sqlite_error(&error))?;
-        Ok(DurableRecordStatus::Persisted)
+        let recorded =
+            load_creation_fingerprint(&transaction, &session.scope, &session.call_id)?
+                .ok_or(DurableStoreError::Corrupt)?;
+        return if recorded == creation_fingerprint && creator.principal == existing.initiated_by
+        {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    require_group_participants_if_needed(&transaction, &session)?;
+    insert_call(&transaction, &session, &creation_fingerprint)?;
+    replace_participants(&transaction, &session)?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    Ok(DurableRecordStatus::Persisted)
 }
 
 impl CallStore for SqliteLocalStore {
