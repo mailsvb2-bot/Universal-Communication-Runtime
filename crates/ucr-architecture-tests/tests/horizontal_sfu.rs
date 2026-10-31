@@ -164,7 +164,7 @@ fn horizontal_sfu_async_handoff_separates_validation_from_transport_acceptance()
     assert!(conference.contains("pub fn prepare_forward"));
     assert!(conference.contains("Result<Option<SfuValidatedForwardBatch>, ConferenceError>"));
     assert!(conference.contains("self.subscribers_for_source"));
-    assert!(conference.contains("dispatch_validated_forward_batch(&batch, sink)"));
+    assert!(conference.contains("dispatch_validated_forward_batch(&sfu, &batch, sink)"));
     assert!(spec.contains("immutable validated forward batch"));
     assert!(spec.contains("canonical Conference subscription selection"));
     assert!(spec.contains("local queue admission"));
