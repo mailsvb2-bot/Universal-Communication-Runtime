@@ -65,6 +65,26 @@ pub trait CallStore: StorageProvider + ConversationStore + GroupStore {
         session: &CallSession,
     ) -> Result<DurableRecordStatus, DurableStoreError>;
 
+    /// Creates or observes a derived Call only while the *exact* canonical parent
+    /// direct Call snapshot remains active. The parent check and child creation
+    /// (including duplicate handling) MUST share the same durable transaction
+    /// or storage lock as `apply_call_signal`. A stale parent must fail closed
+    /// even when the derived Call already exists. This is a canonical `CallStore`
+    /// lifecycle fence, not a second media/identity/authorization owner.
+    ///
+    /// Providers that cannot enforce the atomic fence MUST reject the request.
+    ///
+    /// # Errors
+    /// Rejects stale, terminated, cross-scope or conflicting parent/child state.
+    fn create_call_if_parent_current(
+        &self,
+        _creator: &ScopedPrincipal,
+        _session: &CallSession,
+        _parent: &CallSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        Err(DurableStoreError::PermissionDenied)
+    }
+
     /// Loads one exact raw `CallSession` for internal durable workflows. External/runtime reads must
     /// use [`CallStore::call_for_participant`] so existence is not disclosed to non-participants.
     ///

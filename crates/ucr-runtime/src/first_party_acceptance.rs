@@ -655,8 +655,8 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     use ucr_api_grpc::{
         GrpcRealtimeService, pb, pb::realtime_service_server::RealtimeService as _,
     };
-    use ucr_core::{CallStore, GroupStore};
-    use ucr_model::{GroupMemberState, PrincipalRef};
+    use ucr_core::{CallStore, GroupStore, PermissionGrantStore};
+    use ucr_model::{GroupMemberState, PermissionGrant, PermissionScope, PrincipalRef};
 
     let db = TestDb::new();
     let server = state(&db.0);
@@ -1200,6 +1200,72 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "media ciphertext must remain bound to the admitted MLS epoch"
     );
 
+    // A successful endpoint-owned MLS exchange is NOT authority to mint
+    // permanent tenant-wide media permissions. Without independently
+    // provisioned grants, even a fully accepted Call fails closed, and the
+    // denied Join cannot create a media Call or permission side effects.
+    let subjects = [&alice, &bob].map(|binding| session_of(&server, binding).subject);
+    let no_grants = subjects
+        .iter()
+        .map(|subject| server.store.permission_grants_for(subject).unwrap())
+        .collect::<Vec<_>>();
+    // Self-service signup legitimately provisions canonical Call permissions,
+    // but never any of the five durable media permissions.
+    assert!(no_grants.iter().all(|grants| {
+        grants.iter().all(|grant| {
+            !first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS.contains(&grant.permission.as_str())
+        })
+    }));
+    assert_eq!(
+        join_accepted(&server, &alice, &call_id, revision).err(),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(
+        server
+            .store
+            .call(
+                &scope,
+                &first_party_media::media_runtime_ids(
+                    &scope,
+                    &CallId::from_opaque(opaque(&call_id).unwrap()),
+                )
+                .unwrap()
+                .call_id,
+            )
+            .unwrap(),
+        None,
+        "permission-denied Join must not create the derived media Call"
+    );
+    for (index, subject) in subjects.iter().enumerate() {
+        assert_eq!(
+            server.store.permission_grants_for(subject).unwrap(),
+            no_grants[index]
+        );
+        for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
+            server
+                .store
+                .grant_permission(&PermissionGrant {
+                    grantee: subject.clone(),
+                    permission: permission.to_owned(),
+                    scope: PermissionScope::Exact(scope.clone()),
+                })
+                .expect("explicit canonical media authorization");
+        }
+    }
+    // A separate explicit grant must survive the entire Call lifecycle.
+    server
+        .store
+        .grant_permission(&PermissionGrant {
+            grantee: subjects[0].clone(),
+            permission: ucr_protocol::CALL_OBSERVE_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope.clone()),
+        })
+        .unwrap();
+    let grants_before_join = subjects
+        .iter()
+        .map(|subject| server.store.permission_grants_for(subject).unwrap())
+        .collect::<Vec<_>>();
+
     // A third person never sees nor joins the Call.
     assert!(join_accepted(&server, &carol, &call_id, revision).is_err());
 
@@ -1364,6 +1430,13 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .unwrap()
         .unwrap();
     assert_eq!(media.signalling_state, CallSignallingState::Terminated);
+    for (index, subject) in subjects.iter().enumerate() {
+        assert_eq!(
+            server.store.permission_grants_for(subject).unwrap(),
+            grants_before_join[index],
+            "Join and Hangup must neither mint nor revoke durable media grants"
+        );
+    }
     assert!(
         join_accepted(
             &server,

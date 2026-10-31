@@ -26,17 +26,16 @@
 
 use sha2::{Digest, Sha256};
 use ucr_core::{
-    CallStore, DurableRecordStatus, DurableStoreError, GroupStore, PermissionGrantStore,
+    AuthorizationEvaluator, CallStore, DurableRecordStatus, DurableStoreError, GroupStore,
 };
 use ucr_group_mls::GroupMlsServerCustodyProbe;
 use ucr_model::{
-    CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
-    CallSignallingState, CallTerminationReason, ConversationId, ConversationKind, ConversationRef,
-    DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, IdentityId, OpaqueId,
-    PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
-    TenantScope,
+    AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallSession, CallSignal,
+    CallSignalKind, CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
+    ConversationRef, DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, IdentityId,
+    OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
 };
-use ucr_protocol::GROUP_MLS_CAPABILITY;
+use ucr_protocol::{CanonicalErrorCode, GROUP_MLS_CAPABILITY};
 
 const MAX_CAS_ATTEMPTS: usize = 6;
 
@@ -238,6 +237,7 @@ fn validate_media_call(
 
 fn ensure_media_call<S>(
     store: &S,
+    direct: &CallSession,
     ids: &MediaRuntimeIds,
     scope: &TenantScope,
     participants: &[PrincipalRef; 2],
@@ -245,10 +245,9 @@ fn ensure_media_call<S>(
 where
     S: CallStore,
 {
-    if let Some(call) = store.call(scope, &ids.call_id)? {
-        validate_media_call(&call, ids, participants)?;
-        return Ok(call);
-    }
+    // Even a preexisting derived Call requires a live parent. The canonical
+    // CallStore checks the exact parent snapshot and creates/deduplicates the
+    // media Call in one transaction shared with Hangup across BFF processes.
     let caller = ScopedPrincipal {
         scope: scope.clone(),
         principal: participants[0].clone(),
@@ -283,9 +282,11 @@ where
         revision: 0,
         termination_reason: None,
     };
-    match store.create_call(&caller, &draft) {
-        Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate)
-        | Err(DurableStoreError::Conflict) => {}
+    match store.create_call_if_parent_current(&caller, &draft, direct) {
+        Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => {}
+        // A Conflict can mean that a concurrent Hangup made the parent
+        // snapshot stale. Do NOT reinterpret that error as a successful
+        // deduplication and issue a Join for a previously created child.
         Err(error) => return Err(error.into()),
     }
     let call = store
@@ -295,19 +296,30 @@ where
     Ok(call)
 }
 
-fn ensure_media_permissions<S>(
+/// First-party media must never mint durable tenant-wide permissions as a side
+/// effect of joining one Call. Reuse the canonical permission evaluator and
+/// require independently provisioned explicit grants. SFU/Conference recheck
+/// these grants for each media operation, so a later revoke still fails closed.
+fn require_media_permissions<S>(
     store: &S,
     subject: &ScopedPrincipal,
 ) -> Result<(), MediaRuntimeError>
 where
-    S: PermissionGrantStore,
+    S: AuthorizationEvaluator,
 {
     for permission in FIRST_PARTY_MEDIA_PERMISSIONS {
-        store.grant_permission(&PermissionGrant {
-            grantee: subject.clone(),
-            permission: permission.to_owned(),
-            scope: PermissionScope::Exact(subject.scope.clone()),
-        })?;
+        store
+            .authorize(&AuthorizationRequest {
+                subject: subject.clone(),
+                permission: permission.to_owned(),
+                resource_scope: subject.scope.clone(),
+            })
+            .map_err(|error| match error.code {
+                CanonicalErrorCode::PermissionDenied
+                | CanonicalErrorCode::Unauthenticated
+                | CanonicalErrorCode::PolicyDenied => MediaRuntimeError::NotAdmissible,
+                _ => MediaRuntimeError::Unavailable,
+            })?;
     }
     Ok(())
 }
@@ -325,7 +337,7 @@ pub(crate) fn prepare_direct_call_media<S>(
     subject: &ScopedPrincipal,
 ) -> Result<CallSession, MediaRuntimeError>
 where
-    S: CallStore + GroupStore + GroupMlsServerCustodyProbe + PermissionGrantStore,
+    S: CallStore + GroupStore + GroupMlsServerCustodyProbe + AuthorizationEvaluator,
 {
     let participants = admissible_participants(direct, subject)?;
     let ids = media_runtime_ids(&direct.scope, &direct.call_id)?;
@@ -373,11 +385,14 @@ where
     }) {
         return Err(MediaRuntimeError::Unavailable);
     }
-    let media = ensure_media_call(store, &ids, &direct.scope, &participants)?;
+    // Permission denial must happen before creating even the derived media
+    // Call. This check is read-only: no Join or Hangup can leave an orphan
+    // permission grant behind, including under concurrent termination.
+    require_media_permissions(store, subject)?;
+    let media = ensure_media_call(store, direct, &ids, &direct.scope, &participants)?;
     if media.signalling_state == CallSignallingState::Terminated {
         return Err(MediaRuntimeError::Conflict);
     }
-    ensure_media_permissions(store, subject)?;
     Ok(media)
 }
 
