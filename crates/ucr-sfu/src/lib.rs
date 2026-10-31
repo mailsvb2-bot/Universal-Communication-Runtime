@@ -751,7 +751,7 @@ where
             authenticated_source_device_id,
             envelope,
         )?;
-        dispatch_validated_forward_batch(&batch, sink)
+        dispatch_validated_forward_batch(self, &batch, sink)
     }
 
     /// Validates and canonicalizes one encrypted frame for current accepted Call participants
@@ -838,7 +838,7 @@ where
             envelope,
             recipients,
         )?;
-        dispatch_validated_forward_batch(&batch, sink)
+        dispatch_validated_forward_batch(self, &batch, sink)
     }
 
     /// Validates and canonicalizes one encrypted frame for an explicitly selected current
@@ -1036,18 +1036,53 @@ where
     }
 }
 
-/// Executes one already-validated canonical routing batch against a synchronous infrastructure sink.
+/// Dispatches an encrypted batch only through the canonical live SFU runtime.
 ///
-/// This preserves the existing local SFU semantics. Async horizontal transports should instead
-/// consume the validated batch and await their own concrete per-target acceptance evidence.
+/// A prepared batch is NOT a durable permission grant. Before each sink side effect,
+/// the current Call, Group/MLS, source Device/signature and send/receive authority
+/// are revalidated for that exact target. This also fences a batch that was prepared
+/// before Hangup, Device revocation, key rotation or a permission revoke.
+///
+/// An asynchronous transport MUST recheck through this boundary at its actual send
+/// point; queueing a batch or receiving an earlier validation is not send authority.
+/// An in-flight sink operation is not cancelled by this synchronous check: provider
+/// close and physical remote-capture stop require separate lifecycle enforcement.
 ///
 /// # Errors
-/// Returns the exact partial-acceptance count and bounded sink error from the first failed target.
-pub fn dispatch_validated_forward_batch(
+/// Rejects stale/revoked authority before the next sink call, or returns the exact
+/// partial-acceptance count and bounded sink error from the first failed target.
+pub fn dispatch_validated_forward_batch<A, S, E, C>(
+    runtime: &SfuRuntime<'_, A, S, E, C>,
     batch: &SfuValidatedForwardBatch,
     sink: &dyn SfuForwardSink,
-) -> Result<SfuForwardOutcome, SfuError> {
+) -> Result<SfuForwardOutcome, SfuError>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+    E: GroupMediaE2eeCapabilityProvider,
+    C: SfuCapabilityProvider,
+{
+    let source = ScopedPrincipal {
+        scope: batch.envelope.frame.header.scope.clone(),
+        principal: batch.envelope.frame.header.source.clone(),
+    };
+    let device_id = &batch.envelope.frame.header.source_device_id;
     for (accepted, target) in batch.targets.iter().enumerate() {
+        let current = runtime.prepare_forward_selected(
+            &source,
+            device_id,
+            &batch.envelope,
+            std::slice::from_ref(&target.recipient),
+        )?;
+        if current.targets.as_slice() != std::slice::from_ref(target)
+            || current.envelope != batch.envelope
+        {
+            return Err(SfuError::SourceMismatch);
+        }
         if let Err(error) = sink.forward_encrypted(target, &batch.envelope) {
             return Err(SfuError::Sink {
                 accepted_before_failure: accepted,
