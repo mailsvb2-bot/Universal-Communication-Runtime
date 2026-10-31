@@ -923,7 +923,10 @@ fn prepared_batch_cannot_dispatch_after_source_permission_revocation() {
         Err(SfuError::Authorization(error))
             if error.code == CanonicalErrorCode::PermissionDenied
     ));
-    assert!(sink.forwarded().is_empty(), "no ciphertext after permission revoke");
+    assert!(
+        sink.forwarded().is_empty(),
+        "no ciphertext after permission revoke"
+    );
 }
 
 #[test]
