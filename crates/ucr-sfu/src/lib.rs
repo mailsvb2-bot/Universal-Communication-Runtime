@@ -922,7 +922,7 @@ where
             scope: canonical.frame.header.scope.clone(),
             principal: canonical.frame.header.source.clone(),
         };
-        let (_, receive) = permissions(
+        let (send, receive) = permissions(
             canonical.frame.header.media_kind,
             canonical.frame.header.video_source_kind,
         );
@@ -947,6 +947,16 @@ where
         {
             return Err(SfuError::SourceMismatch);
         }
+        // A previously validated source token is not a durable permission.
+        // Revoke may commit after source validation but before fan-out; consult
+        // the canonical evaluator again before preparing any recipient batch.
+        self.authorization
+            .authorize(&AuthorizationRequest {
+                subject: authenticated_source.clone(),
+                permission: send.to_owned(),
+                resource_scope: canonical.frame.header.scope.clone(),
+            })
+            .map_err(SfuError::Authorization)?;
 
         let recipients = if let Some(selected) = selected_recipients {
             validate_selected_recipients(&call, &authenticated_source.principal, selected)?;
