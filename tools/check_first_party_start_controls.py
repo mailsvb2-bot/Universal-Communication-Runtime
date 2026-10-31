@@ -39,13 +39,13 @@ assert r"\n const recovery" not in HTML and r"\n if(recovery" not in HTML, (
 )
 # A newly registered user must still see their one-time recovery code after
 # the signed-in state hides the new-user registration panel.
-assert 'document.getElementById("pl-onboard").after(recovery)' in HTML, (
+assert 'document.getElementById("pl-onboard").after(recovery)' in JS, (
     "recovery code must be moved outside the hidden registration panel"
 )
-assert 'id="pl-invite-help"' in HTML and 'data-invited-contact' in HTML, (
+assert 'id="pl-invite-help"' in HTML and 'data-invited-contact' in JS, (
     "invitation must have an understandable contact-add path"
 )
-assert parser.controls, "no visible forms/buttons found"
+# CSP must not silently block the onboarding actions: all executable page\n# behavior lives in the same-origin module, not inline script elements.\nassert '<script type="module" src="/start.js"></script>' in HTML, (\n    "first-party onboarding module is not loaded"\n)\nassert not re.search(r'<script\\b(?![^>]*\\bsrc\\s*=)[^>]*>', HTML, re.I), (\n    "inline scripts violate the first-party script-src self CSP"\n)\nassert 'if(signup&&slot)slot.appendChild(signup)' in JS, (\n    "signup action is not moved into the visible onboarding card"\n)\nassert parser.controls, "no visible forms/buttons found"
 for tag, element in parser.controls:
     ident = element.get("id")
     if tag == "form":
