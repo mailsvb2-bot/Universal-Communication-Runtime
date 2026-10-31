@@ -2218,6 +2218,14 @@ where
             return Ok(0);
         };
 
+        // Dispatch is an authorization boundary: revalidate each target at
+        // actual sink emission, not only when the immutable batch was prepared.
+        let sfu = ucr_sfu::SfuRuntime::new(
+            &*self.authorization,
+            &*self.store,
+            &PreparedGroupMediaE2eeCapabilities,
+            &PreparedSfuCapabilities,
+        );
         let outcome = if let (Some((owner, max_aggregate_bandwidth_bps)), Some(wire_bytes)) =
             (bandwidth_quota, encoded_wire_bytes)
         {
@@ -2230,7 +2238,7 @@ where
                 now_unix_ms,
                 quota_error: Mutex::new(None),
             };
-            match dispatch_validated_forward_batch(&batch, &quota_sink) {
+            match dispatch_validated_forward_batch(&sfu, &batch, &quota_sink) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     if let Some(quota_error) = quota_sink.quota_error()? {
@@ -2240,7 +2248,7 @@ where
                 }
             }
         } else {
-            dispatch_validated_forward_batch(&batch, sink)
+            dispatch_validated_forward_batch(&sfu, &batch, sink)
                 .map_err(|error| map_conference_error(&ConferenceError::Sfu(error)))?
         };
         if outcome.accepted_recipients > 0
