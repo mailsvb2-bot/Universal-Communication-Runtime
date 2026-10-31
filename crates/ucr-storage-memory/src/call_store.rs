@@ -119,9 +119,11 @@ fn create_call_with_parent_guard(
         .map_err(map_call_error)?;
     let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
     let key = call_key(&session.scope, &session.call_id);
-    let conversation_key =
-        conversation_key(&session.scope, &session.conversation.conversation_id);
-    let state = &mut *store.state.lock().map_err(|_| DurableStoreError::Internal)?;
+    let conversation_key = conversation_key(&session.scope, &session.conversation.conversation_id);
+    let state = &mut *store
+        .state
+        .lock()
+        .map_err(|_| DurableStoreError::Internal)?;
     if let Some(parent) = parent {
         if parent.scope != session.scope
             || parent.call_id == session.call_id
@@ -129,9 +131,10 @@ fn create_call_with_parent_guard(
             || session.initiated_by != parent.initiated_by
             || session.participants.len() != 2
             || !session.participants.iter().all(|participant| {
-                parent.participants.iter().any(|member| {
-                    member.principal == participant.principal
-                })
+                parent
+                    .participants
+                    .iter()
+                    .any(|member| member.principal == participant.principal)
             })
             || parent.conversation.kind != ConversationKind::Direct
             || parent.signalling_state != CallSignallingState::Active
@@ -153,8 +156,7 @@ fn create_call_with_parent_guard(
     if conversation.conversation != session.conversation {
         return Err(DurableStoreError::InvalidRecord);
     }
-    if let Some(existing) = validated_call_from_state(state, &session.scope, &session.call_id)?
-    {
+    if let Some(existing) = validated_call_from_state(state, &session.scope, &session.call_id)? {
         if !group_actor_current_if_needed(state, &existing, &creator.principal) {
             return Err(DurableStoreError::PermissionDenied);
         }
@@ -162,9 +164,7 @@ fn create_call_with_parent_guard(
             .call_creation_fingerprints
             .get(&key)
             .ok_or(DurableStoreError::Corrupt)?;
-        return if recorded == &creation_fingerprint
-            && creator.principal == existing.initiated_by
-        {
+        return if recorded == &creation_fingerprint && creator.principal == existing.initiated_by {
             Ok(DurableRecordStatus::Duplicate)
         } else {
             Err(DurableStoreError::Conflict)
@@ -983,7 +983,10 @@ mod tests {
         store.persist_conversation(&conversation).unwrap();
         store.create_call(&alice, &direct).unwrap();
         store
-            .apply_call_signal(&bob, &signal(&direct, "memory-fence-accept", CallSignalKind::Accept))
+            .apply_call_signal(
+                &bob,
+                &signal(&direct, "memory-fence-accept", CallSignalKind::Accept),
+            )
             .unwrap();
         let accepted = store.call(&scope(), &direct.call_id).unwrap().unwrap();
         let mut child = direct.clone();
@@ -1016,5 +1019,4 @@ mod tests {
             Err(DurableStoreError::PermissionDenied)
         );
     }
-
 }
