@@ -387,6 +387,14 @@ fn create_call_with_parent_guard(
         // canonical Call signal by this SQLite IMMEDIATE transaction.
         if parent.scope != session.scope
             || parent.call_id == session.call_id
+            || parent.initiated_by != creator.principal
+            || session.initiated_by != parent.initiated_by
+            || session.participants.len() != 2
+            || !session.participants.iter().all(|participant| {
+                parent.participants.iter().any(|member| {
+                    member.principal == participant.principal
+                })
+            })
             || parent.conversation.kind != ConversationKind::Direct
             || parent.signalling_state != CallSignallingState::Active
             || parent.participants.len() != 2
