@@ -885,9 +885,9 @@ async function dial(contact,media) {
 }
 // Incoming alerts reflect only the authenticated Call owner's verified list.
 // A tab title remains visible without prompting for browser notification grants.
-const ordinaryPageTitle = document.title;
+const ordinaryPageTitle = typeof document === "undefined" ? "PetrelLink" : document.title;
 function renderIncoming(items) {
-  document.title = items.length > 0 && accountScope
+  if (typeof document !== "undefined") document.title = items.length > 0 && accountScope
     ? "Входящий вызов · PetrelLink" : ordinaryPageTitle;
   const list = el("incoming");
   list.replaceChildren();
