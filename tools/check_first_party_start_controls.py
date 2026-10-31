@@ -56,6 +56,11 @@ assert not re.search(r'<script\b(?![^>]*\bsrc\s*=)[^>]*>', HTML, re.I), (
 assert 'if(signup&&slot)slot.appendChild(signup)' in JS, (
     "signup action is not moved into the visible onboarding card"
 )
+# The module awaits its browser media import, so DOMContentLoaded can have
+# fired before the locale handler is registered. Both paths must initialize.
+assert 'document.readyState === "loading"' in JS and (
+    'initializeLanguagePicker();' in JS
+), "language picker is lost when the async module loads after DOMContentLoaded"
 assert parser.controls, "no visible forms/buttons found"
 
 for tag, element in parser.controls:
