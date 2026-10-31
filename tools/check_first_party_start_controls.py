@@ -66,8 +66,10 @@ assert 'document.readyState === "loading"' in JS and (
 for label in ("Аудиозвонок", "Видеозвонок", "Принять", "Отклонить", "Отозвать устройство"):
     assert f'"{label}":' in JS, f"missing English dynamic action translation: {label}"
 assert 'button.textContent = localize(text);' in JS, "dynamic Call buttons remain Russian"
-assert 'function message(value) { status.textContent = localize(value); }' in JS, (
-    "dynamic status messages ignore the selected language"
+assert 'function message(value) {' in JS and (
+    'status.dataset.plOriginalText=value;' in JS
+) and 'status.textContent = localize(value);' in JS, (
+    "dynamic status messages must preserve original text for RU/EN toggling"
 )
 assert 'el("video-guide").textContent = localize(guide);' in JS, (
     "live call guidance ignores the selected language"
