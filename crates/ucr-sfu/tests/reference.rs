@@ -561,7 +561,7 @@ fn rt0_alice_sfu_bob_decrypts_authorized_media_and_rejects_replay() {
         .expect("Bob authorized recipient");
     assert_eq!(batch.target_count(), 1);
     assert_eq!(
-        dispatch_validated_forward_batch(&batch, &sink),
+        dispatch_validated_forward_batch(&runtime, &batch, &sink),
         Ok(SfuForwardOutcome {
             accepted_recipients: 1,
         }),
@@ -901,6 +901,73 @@ fn revoked_send_permission_after_source_validation_denies_prepared_fanout() {
 }
 
 #[test]
+fn prepared_batch_cannot_dispatch_after_source_permission_revocation() {
+    let fixture = build_fixture();
+    let authorization = RevocableSendAuthorization::default();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&authorization, &fixture.store, &e2ee, &sfu);
+    let batch = runtime
+        .prepare_forward_selected(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            std::slice::from_ref(&fixture.bob.principal),
+        )
+        .expect("initially authorized batch");
+
+    authorization.revoked.store(true, Ordering::SeqCst);
+    let sink = CaptureSink::default();
+    assert!(matches!(
+        dispatch_validated_forward_batch(&runtime, &batch, &sink),
+        Err(SfuError::Authorization(error))
+            if error.code == CanonicalErrorCode::PermissionDenied
+    ));
+    assert!(sink.forwarded().is_empty(), "no ciphertext after permission revoke");
+}
+
+#[test]
+fn prepared_batch_cannot_dispatch_after_canonical_call_termination() {
+    let fixture = build_fixture();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &e2ee, &sfu);
+    let batch = runtime
+        .prepare_forward_selected(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            std::slice::from_ref(&fixture.bob.principal),
+        )
+        .expect("initially authorized batch");
+    let current = fixture
+        .store
+        .call(&scope(), &fixture.call.call_id)
+        .expect("read current Call")
+        .expect("existing Call");
+    fixture
+        .store
+        .apply_call_signal(
+            &fixture.alice,
+            &signal(
+                &current,
+                "terminate-after-batch-preparation",
+                CallSignalKind::Terminate {
+                    reason: CallTerminationReason::Completed,
+                },
+            ),
+        )
+        .expect("canonical Hangup");
+
+    let sink = CaptureSink::default();
+    assert!(
+        dispatch_validated_forward_batch(&runtime, &batch, &sink).is_err(),
+        "stale batch must not authorize dispatch after Hangup"
+    );
+    assert!(sink.forwarded().is_empty(), "no ciphertext after Hangup");
+}
+
+#[test]
 fn validated_source_frame_rejects_spoofed_device_and_tampered_ciphertext() {
     let fixture = build_fixture();
     let e2ee = PreparedGroupMediaE2eeCapabilities;
@@ -1130,7 +1197,7 @@ fn prepared_selected_forwarding_has_no_side_effect_until_explicit_dispatch() {
     assert!(sink.forwarded().is_empty());
 
     assert_eq!(
-        dispatch_validated_forward_batch(&batch, &sink),
+        dispatch_validated_forward_batch(&runtime, &batch, &sink),
         Ok(SfuForwardOutcome {
             accepted_recipients: 1
         })
