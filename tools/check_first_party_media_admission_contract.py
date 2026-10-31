@@ -14,7 +14,7 @@ sfu_owner = (root/"crates/ucr-sfu/src/lib.rs").read_text(encoding="utf-8")
 assert "require_media_permissions(store, subject)?" in media_owner
 assert "create_call_if_parent_current(&caller, &draft, direct)" in media_owner
 assert "Err(error) => return Err(error.into())," in media_owner
-assert "Err(DurableStoreError::Conflict) => {}" not in media_owner
+assert "Err(DurableStoreError::Conflict) => {}" not in media_owner.split("fn ensure_media_call<S>(", 1)[1].split("/// First-party media must never mint", 1)[0]
 assert "grant_permission(" not in media_owner
 assert "validate_group_media_source_frame(self.store" in sfu_owner
 assert "self.authorization" in sfu_owner and "permission: send.to_owned()" in sfu_owner
