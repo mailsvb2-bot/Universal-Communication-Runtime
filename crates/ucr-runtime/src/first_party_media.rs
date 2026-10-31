@@ -283,8 +283,10 @@ where
         termination_reason: None,
     };
     match store.create_call_if_parent_current(&caller, &draft, direct) {
-        Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate)
-        | Err(DurableStoreError::Conflict) => {}
+        Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => {}
+        // A Conflict can mean that a concurrent Hangup made the parent
+        // snapshot stale. Do NOT reinterpret that error as a successful
+        // deduplication and issue a Join for a previously created child.
         Err(error) => return Err(error.into()),
     }
     let call = store
