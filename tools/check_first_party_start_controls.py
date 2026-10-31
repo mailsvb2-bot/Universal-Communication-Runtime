@@ -78,6 +78,25 @@ assert 'lang=next;' in JS and 'data-pl-original-' in JS, (
     "language selection does not update current language and accessible labels"
 )
 
+# The signed-in empty contact state is a dynamic row, not an initial heading.
+# Preserve its original translation key and update only that tagged row when
+# switching RU <-> EN; never rewrite real contact names or identity IDs.
+locale_body = JS.split("function applyLanguage(next){", 1)[1].split(
+    "function initializeLanguagePicker()", 1
+)[0]
+empty_contacts_body = JS.split("if (!contacts.length) {", 1)[1].split(
+    "\n  }", 1
+)[0]
+assert '#contacts > li[data-pl-original-text]' in locale_body, (
+    "locale switch must refresh the signed-in empty contacts state"
+)
+assert 'li.dataset.plOriginalText = "Контактов пока нет.' in empty_contacts_body and (
+    "li.textContent = localize(li.dataset.plOriginalText);" in empty_contacts_body
+), "empty contacts must retain a stable source translation key"
+assert '#contacts li' not in locale_body, (
+    "language changes must not rewrite user-provided contact names"
+)
+
 assert parser.controls, "no visible forms/buttons found"
 
 for tag, element in parser.controls:
