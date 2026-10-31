@@ -101,7 +101,7 @@ const KEY="petrellink.language.v1";
     const english=next==="en";
     document.documentElement.lang=next;
     // Never replace nested markup, recovery secrets or user-entered values.
-    document.querySelectorAll("h1,h2,summary,button,.call-steps span,#pl-onboard p,section > p,section > small,#pl-invite-help,#incoming li,#video-guide,#status").forEach(el=>{
+    document.querySelectorAll("h1,h2,summary,button,.call-steps span,#pl-onboard p,section > p,section > small,#pl-invite-help,#incoming li,#contacts > li[data-pl-original-text],#video-guide,#status").forEach(el=>{
       if(el.children.length)return;
       if(!el.dataset.plOriginalText)el.dataset.plOriginalText=el.textContent.trim();
       const source=el.dataset.plOriginalText;
@@ -521,7 +521,8 @@ function renderContacts(contacts) {
   }
   if (!contacts.length) {
     const li = document.createElement("li");
-    li.textContent = localize("Контактов пока нет. Пригласите знакомого по ссылке или добавьте его код.");
+    li.dataset.plOriginalText = "Контактов пока нет. Пригласите знакомого по ссылке или добавьте его код.";
+    li.textContent = localize(li.dataset.plOriginalText);
     list.append(li);
   }
 }
