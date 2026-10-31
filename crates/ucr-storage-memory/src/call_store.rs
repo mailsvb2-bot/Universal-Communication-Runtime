@@ -125,7 +125,7 @@ fn create_call_with_parent_guard(
         .lock()
         .map_err(|_| DurableStoreError::Internal)?;
     if let Some(parent) = parent {
-        if parent.scope != session.scope
+        let parent_invalid = parent.scope != session.scope
             || parent.call_id == session.call_id
             || parent.initiated_by != creator.principal
             || session.initiated_by != parent.initiated_by
@@ -144,8 +144,8 @@ fn create_call_with_parent_guard(
                     && participant.left_revision.is_none()
             })
             || validated_call_from_state(state, &parent.scope, &parent.call_id)?.as_ref()
-                != Some(parent)
-        {
+                != Some(parent);
+        if parent_invalid {
             return Err(DurableStoreError::PermissionDenied);
         }
     }
