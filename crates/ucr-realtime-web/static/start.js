@@ -20,6 +20,75 @@ const {
 } = media;
 
 const el = (id) => document.getElementById(id);
+// Externalized from start.html: the server CSP intentionally forbids inline scripts.
+const KEY="petrellink.language.v1";
+  const allowed=["ru","en"];
+  const query=new URLSearchParams(location.search).get("lang");
+  let lang=query && allowed.includes(query) ? query : null;
+  if(!lang){try{lang=localStorage.getItem(KEY)}catch(_){}}
+  if(!allowed.includes(lang))lang="ru";
+  document.documentElement.lang=lang;
+  const translations={
+    "Общайтесь с близкими":"Stay close, wherever you are",
+    "Защищённые аудио- и видеозвонки. Создайте профиль, пригласите знакомого и нажмите «Позвонить».":"Secure audio and video calls. Create a profile, invite someone and call.",
+    "Начать общение":"Get started",
+    "Первое устройство будет зарегистрировано автоматически.":"Your first device will be registered automatically.",
+    "Ваш профиль готов":"Your profile is ready",
+    "Добавьте контакт для первого звонка.":"Add a contact to make your first call.",
+    "Создать профиль":"Create profile",
+    "Скопировать приглашение":"Copy invitation",
+    "Поделиться приглашением":"Share invitation",
+    "Контакты":"Contacts",
+    "Добавить":"Add contact",
+    "Входящие звонки":"Incoming calls",
+    "Текущий вызов":"Current call",
+    "Настройки безопасности и восстановление доступа":"Security settings and account recovery",
+    "Экран видеозвонка":"Video call",
+    "1. Моё устройство":"1. My device",
+    "2. Контакт и вызов":"2. Contact",
+    "3. Принятие вызова":"3. Accepted",
+    "4. Камера и видео":"4. Video",
+    "Состояние защиты":"Security status",
+    "Отменить / завершить":"End call",
+    "Повторить проверку входа":"Retry sign-in",
+    "Копировать код":"Copy recovery code",
+    "Выйти":"Sign out"
+  };
+  function applyLanguage(next){
+    const english=next==="en";
+    document.documentElement.lang=next;
+    document.querySelectorAll("h1,h2,summary,button,.call-steps span,#pl-onboard p").forEach(el=>{
+      if(!el.dataset.plOriginalText)el.dataset.plOriginalText=el.textContent.trim();
+      const source=el.dataset.plOriginalText;
+      if(translations[source])el.textContent=english?translations[source]:source;
+    });
+  }
+  document.addEventListener("DOMContentLoaded",()=>{
+    const select=document.getElementById("pl-language");
+    if(!select)return;
+    select.value=lang;
+    applyLanguage(lang);
+    select.addEventListener("change",()=>{
+      const next=select.value;
+      if(!allowed.includes(next))return;
+      try{localStorage.setItem(KEY,next)}catch(_){}
+      applyLanguage(next);
+      // Dynamic call state and administrative diagnostics retain canonical terms.
+    });
+  });
+const signup=document.getElementById("signup");
+ const slot=document.getElementById("pl-signup-slot");
+ if(signup&&slot)slot.appendChild(signup);
+ const recovery=document.getElementById("recovery-output");
+ if(recovery){document.getElementById("pl-onboard").after(recovery);}
+ const field=document.getElementById("contact-peer");
+ const code=new URLSearchParams(location.search).get("contact");
+ if(field&&code&&/^[A-Za-z0-9_.:@-]{1,128}$/.test(code)){
+   field.value=code;
+   field.setAttribute("data-invited-contact","true");
+   document.getElementById("pl-invite-help").hidden=false;
+ }
+
 const status = el("status");
 const vault = createUcrBrowserProtectedDeviceVault();
 const host = createUcrFirstPartyHttpHost(vault, {origin:location.origin});
