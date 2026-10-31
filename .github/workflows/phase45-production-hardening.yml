@@ -169,6 +169,18 @@ jobs:
       - name: Compile canonical public contract
         run: protoc --proto_path=proto --descriptor_set_out=/tmp/ucr-phase45.pb proto/ucr/v1/*.proto
 
+      - name: Reclaim completed build artifacts before staging candidate
+        run: |
+          set -euo pipefail
+          # All earlier unit, runtime, performance and Chaos gates are finished.
+          # The hosted runner cannot retain debug, production and staging
+          # workspaces simultaneously: the full staging build otherwise fails
+          # with ENOSPC before it can provide candidate evidence.
+          df -h .
+          cargo clean
+          cargo clean --manifest-path crates/ucr-chaos-lab/Cargo.toml
+          df -h .
+
       - name: Build release-like workspace candidate
         run: cargo build --locked --workspace --profile staging
 
