@@ -958,11 +958,7 @@ where
             canonical.frame.header.video_source_kind,
         );
 
-        self.recheck_source_before_fanout(
-            &authenticated_source,
-            &call.call_id,
-            send,
-        )?;
+        self.recheck_source_before_fanout(&authenticated_source, &call.call_id, send)?;
 
         let recipients = if let Some(selected) = selected_recipients {
             validate_selected_recipients(&call, &authenticated_source.principal, selected)?;
