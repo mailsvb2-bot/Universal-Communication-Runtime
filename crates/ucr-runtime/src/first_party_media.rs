@@ -388,7 +388,18 @@ where
     // Permission denial must happen before creating even the derived media
     // Call. This check is read-only: no Join or Hangup can leave an orphan
     // permission grant behind, including under concurrent termination.
-    require_media_permissions(store, subject)?;
+    // Require independent media authorization for BOTH accepted endpoints.
+    // A caller's grant cannot confer media capability on an unprovisioned
+    // recipient. Run both checks before creating the derived Call.
+    for principal in &participants {
+        require_media_permissions(
+            store,
+            &ScopedPrincipal {
+                scope: direct.scope.clone(),
+                principal: principal.clone(),
+            },
+        )?;
+    }
     let media = ensure_media_call(store, direct, &ids, &direct.scope, &participants)?;
     if media.signalling_state == CallSignallingState::Terminated {
         return Err(MediaRuntimeError::Conflict);
