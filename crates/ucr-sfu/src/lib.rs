@@ -966,6 +966,26 @@ where
                 scope: canonical.frame.header.scope.clone(),
                 principal: recipient.clone(),
             };
+            // Recipient Call authority can change between source validation
+            // and fan-out. Recheck the canonical recipient-scoped Call before
+            // accepting a ciphertext target; never rely on a stale snapshot.
+            let recipient_call = self
+                .store
+                .call_for_participant(
+                    &target_principal,
+                    &canonical.frame.header.scope,
+                    &call.call_id,
+                )?
+                .ok_or(SfuError::RecipientMembershipUnavailable)?;
+            if recipient_call.signalling_state != ucr_model::CallSignallingState::Active
+                || !recipient_call.participants.iter().any(|participant| {
+                    participant.principal == recipient
+                        && participant.state == CallParticipantState::Accepted
+                        && participant.left_revision.is_none()
+                })
+            {
+                return Err(SfuError::RecipientMembershipUnavailable);
+            }
             self.authorization
                 .authorize(&AuthorizationRequest {
                     subject: target_principal,
