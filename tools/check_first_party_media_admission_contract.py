@@ -6,6 +6,20 @@ This is a security/UX regression guard, not a proof of bidirectional E2EE A/V.
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
+# First-party calls must never silently mint broad grants or treat a stale
+# parent-Call CAS conflict as authorization. This contract is intentionally
+# insufficient to claim successful two-device media without call-scoped policy.
+media_owner = (root/"crates/ucr-runtime/src/first_party_media.rs").read_text(encoding="utf-8")
+sfu_owner = (root/"crates/ucr-sfu/src/lib.rs").read_text(encoding="utf-8")
+assert "require_media_permissions(store, subject)?" in media_owner
+assert "create_call_if_parent_current(&caller, &draft, direct)" in media_owner
+assert "Err(error) => return Err(error.into())," in media_owner
+assert "Err(DurableStoreError::Conflict) => {}" not in media_owner
+assert "grant_permission(" not in media_owner
+assert "validate_group_media_source_frame(self.store" in sfu_owner
+assert "self.authorization" in sfu_owner and "permission: send.to_owned()" in sfu_owner
+assert "permission: receive.to_owned()" in sfu_owner
+
 client = (root/"crates/ucr-realtime-web/static/client.html").read_text(encoding="utf-8")
 sdk = (root/"sdk/typescript/src/reference_browser_media_installer.ts").read_text(encoding="utf-8")
 factory = (root/"sdk/typescript/src/canonical_browser_media_factory.ts").read_text(encoding="utf-8")
