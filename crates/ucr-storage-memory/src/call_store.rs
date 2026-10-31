@@ -968,4 +968,45 @@ mod tests {
             Some(CallTerminationReason::Rejected)
         );
     }
+    #[test]
+    fn parent_fence_is_atomic_with_memory_call_signals() {
+        let store = MemoryLocalStore::default();
+        let (conversation, direct, alice, bob) = fixture();
+        store.persist_conversation(&conversation).unwrap();
+        store.create_call(&alice, &direct).unwrap();
+        store
+            .apply_call_signal(&bob, &signal(&direct, "memory-fence-accept", CallSignalKind::Accept))
+            .unwrap();
+        let accepted = store.call(&scope(), &direct.call_id).unwrap().unwrap();
+        let mut child = direct.clone();
+        child.call_id = CallId::from_opaque(oid("memory-fence-child"));
+        assert_eq!(
+            store.create_call_if_parent_current(&alice, &child, &accepted),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(
+                    &accepted,
+                    "memory-fence-hangup",
+                    CallSignalKind::Terminate {
+                        reason: CallTerminationReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        let mut late_child = child.clone();
+        late_child.call_id = CallId::from_opaque(oid("memory-fence-late-child"));
+        assert_eq!(
+            store.create_call_if_parent_current(&alice, &late_child, &accepted),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(store.call(&scope(), &late_child.call_id), Ok(None));
+        assert_eq!(
+            store.create_call_if_parent_current(&alice, &child, &accepted),
+            Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
 }
