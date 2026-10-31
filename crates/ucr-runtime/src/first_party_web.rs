@@ -29,9 +29,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, CallStore, DeviceLifecycleStore, GroupStore, IdentityDeviceLookupStore,
-    IdentityStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
-    TrustedSigningKeyStore, generate_opaque_id,
+    AuthorizedDurableRuntime, CallStore, DeviceLifecycleStore, GroupStore,
+    IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
+    PrincipalIdentityLookupStore, TrustedSigningKeyStore, generate_opaque_id,
 };
 use ucr_group_mls::{
     EndpointMlsCommitStore, GroupMlsBootstrapStore, MlsCommitArtifacts, MlsDeviceAdmission,
@@ -1880,8 +1880,8 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
     let grant = state
         .issuer
         .issue(
-            media.scope,
-            media.call_id,
+            media.scope.clone(),
+            media.call_id.clone(),
             session.subject.principal.clone(),
             Some(device(&session.binding)?),
             DEFAULT_JOIN_TTL_SECONDS,
