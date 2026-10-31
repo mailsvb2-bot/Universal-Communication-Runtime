@@ -1174,7 +1174,13 @@ where
                 accepted_recipients: 0,
             });
         };
-        dispatch_validated_forward_batch(&batch, sink).map_err(ConferenceError::Sfu)
+        let sfu = SfuRuntime::new(
+            self.authorization,
+            self.store,
+            self.group_e2ee_capabilities,
+            self.sfu_capabilities,
+        );
+        dispatch_validated_forward_batch(&sfu, &batch, sink).map_err(ConferenceError::Sfu)
     }
 
     /// Resolves current Conference subscriptions and performs all canonical SFU validation without
