@@ -367,19 +367,40 @@ impl GroupCallLookupStore for SqliteLocalStore {
     }
 }
 
-impl CallStore for SqliteLocalStore {
-    fn create_call(
-        &self,
-        creator: &ScopedPrincipal,
-        session: &CallSession,
-    ) -> Result<DurableRecordStatus, DurableStoreError> {
+/// One canonical creation path: optional parent Call CAS is checked under the
+/// same SQLite write transaction as the derived Call's durable insert.
+fn create_call_with_parent_guard(
+    store: &SqliteLocalStore,
+    creator: &ScopedPrincipal,
+    session: &CallSession,
+    parent: Option<&CallSession>,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+
         let session = canonical_call_creation(session, &creator.scope, &creator.principal)
             .map_err(map_call_error)?;
         let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
-        let mut connection = self.lock_connection()?;
+        let mut connection = store.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
+        if let Some(parent) = parent {
+            // The parent snapshot and child creation are serialized with every
+            // canonical Call signal by this SQLite IMMEDIATE transaction.
+            if parent.scope != session.scope
+                || parent.call_id == session.call_id
+                || parent.conversation.kind != ConversationKind::Direct
+                || parent.signalling_state != CallSignallingState::Active
+                || parent.participants.len() != 2
+                || !parent.participants.iter().all(|participant| {
+                    participant.state == CallParticipantState::Accepted
+                        && participant.left_revision.is_none()
+                })
+                || load_call_from(&transaction, &parent.scope, &parent.call_id)?.as_ref()
+                    != Some(parent)
+            {
+                return Err(DurableStoreError::PermissionDenied);
+            }
+        }
         let conversation = message_store::load_conversation_from(
             &transaction,
             &session.scope,
@@ -410,6 +431,24 @@ impl CallStore for SqliteLocalStore {
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(DurableRecordStatus::Persisted)
+}
+
+impl CallStore for SqliteLocalStore {
+    fn create_call(
+        &self,
+        creator: &ScopedPrincipal,
+        session: &CallSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        create_call_with_parent_guard(self, creator, session, None)
+    }
+
+    fn create_call_if_parent_current(
+        &self,
+        creator: &ScopedPrincipal,
+        session: &CallSession,
+        parent: &CallSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        create_call_with_parent_guard(self, creator, session, Some(parent))
     }
 
     fn call(
