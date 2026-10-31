@@ -1209,7 +1209,13 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .iter()
         .map(|subject| server.store.permission_grants_for(subject).unwrap())
         .collect::<Vec<_>>();
-    assert!(no_grants.iter().all(Vec::is_empty));
+    // Self-service signup legitimately provisions canonical Call permissions,
+    // but never any of the five durable media permissions.
+    assert!(no_grants.iter().all(|grants| {
+        grants.iter().all(|grant| {
+            !first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS.contains(&grant.permission.as_str())
+        })
+    }));
     assert_eq!(
         join_accepted(&server, &alice, &call_id, revision).err(),
         Some(StatusCode::FORBIDDEN)
