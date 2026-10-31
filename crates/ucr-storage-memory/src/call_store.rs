@@ -108,19 +108,37 @@ impl GroupCallLookupStore for MemoryLocalStore {
     }
 }
 
-impl CallStore for MemoryLocalStore {
-    fn create_call(
-        &self,
-        creator: &ScopedPrincipal,
-        session: &CallSession,
-    ) -> Result<DurableRecordStatus, DurableStoreError> {
+/// One in-memory canonical creation path under the same mutex as Call signals.
+fn create_call_with_parent_guard(
+    store: &MemoryLocalStore,
+    creator: &ScopedPrincipal,
+    session: &CallSession,
+    parent: Option<&CallSession>,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+
         let session = canonical_call_creation(session, &creator.scope, &creator.principal)
             .map_err(map_call_error)?;
         let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
         let key = call_key(&session.scope, &session.call_id);
         let conversation_key =
             conversation_key(&session.scope, &session.conversation.conversation_id);
-        let state = &mut *self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let state = &mut *store.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(parent) = parent {
+            if parent.scope != session.scope
+                || parent.call_id == session.call_id
+                || parent.conversation.kind != ConversationKind::Direct
+                || parent.signalling_state != CallSignallingState::Active
+                || parent.participants.len() != 2
+                || !parent.participants.iter().all(|participant| {
+                    participant.state == CallParticipantState::Accepted
+                        && participant.left_revision.is_none()
+                })
+                || validated_call_from_state(state, &parent.scope, &parent.call_id)?.as_ref()
+                    != Some(parent)
+            {
+                return Err(DurableStoreError::PermissionDenied);
+            }
+        }
         let conversation = state
             .conversations
             .get(&conversation_key)
@@ -151,6 +169,24 @@ impl CallStore for MemoryLocalStore {
             .insert(key.clone(), creation_fingerprint);
         state.calls.insert(key, session);
         Ok(DurableRecordStatus::Persisted)
+}
+
+impl CallStore for MemoryLocalStore {
+    fn create_call(
+        &self,
+        creator: &ScopedPrincipal,
+        session: &CallSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        create_call_with_parent_guard(self, creator, session, None)
+    }
+
+    fn create_call_if_parent_current(
+        &self,
+        creator: &ScopedPrincipal,
+        session: &CallSession,
+        parent: &CallSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        create_call_with_parent_guard(self, creator, session, Some(parent))
     }
 
     fn call(
