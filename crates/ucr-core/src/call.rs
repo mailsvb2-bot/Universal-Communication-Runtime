@@ -69,7 +69,7 @@ pub trait CallStore: StorageProvider + ConversationStore + GroupStore {
     /// direct Call snapshot remains active. The parent check and child creation
     /// (including duplicate handling) MUST share the same durable transaction
     /// or storage lock as `apply_call_signal`. A stale parent must fail closed
-    /// even when the derived Call already exists. This is a canonical CallStore
+    /// even when the derived Call already exists. This is a canonical `CallStore`
     /// lifecycle fence, not a second media/identity/authorization owner.
     ///
     /// Providers that cannot enforce the atomic fence MUST reject the request.
