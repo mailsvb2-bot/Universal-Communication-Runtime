@@ -63,7 +63,7 @@ const KEY="petrellink.language.v1";
       if(translations[source])el.textContent=english?translations[source]:source;
     });
   }
-  document.addEventListener("DOMContentLoaded",()=>{
+  function initializeLanguagePicker(){
     const select=document.getElementById("pl-language");
     if(!select)return;
     select.value=lang;
@@ -75,7 +75,14 @@ const KEY="petrellink.language.v1";
       applyLanguage(next);
       // Dynamic call state and administrative diagnostics retain canonical terms.
     });
-  });
+  }
+  // The module awaits a dynamic media import above. DOMContentLoaded may have
+  // fired before this code executes; initialize immediately in that case.
+  if(document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded",initializeLanguagePicker,{once:true});
+  } else {
+    initializeLanguagePicker();
+  }
 const signup=document.getElementById("signup");
  const slot=document.getElementById("pl-signup-slot");
  if(signup&&slot)slot.appendChild(signup);
