@@ -115,60 +115,59 @@ fn create_call_with_parent_guard(
     session: &CallSession,
     parent: Option<&CallSession>,
 ) -> Result<DurableRecordStatus, DurableStoreError> {
-
-        let session = canonical_call_creation(session, &creator.scope, &creator.principal)
-            .map_err(map_call_error)?;
-        let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
-        let key = call_key(&session.scope, &session.call_id);
-        let conversation_key =
-            conversation_key(&session.scope, &session.conversation.conversation_id);
-        let state = &mut *store.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        if let Some(parent) = parent {
-            if parent.scope != session.scope
-                || parent.call_id == session.call_id
-                || parent.conversation.kind != ConversationKind::Direct
-                || parent.signalling_state != CallSignallingState::Active
-                || parent.participants.len() != 2
-                || !parent.participants.iter().all(|participant| {
-                    participant.state == CallParticipantState::Accepted
-                        && participant.left_revision.is_none()
-                })
-                || validated_call_from_state(state, &parent.scope, &parent.call_id)?.as_ref()
-                    != Some(parent)
-            {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-        }
-        let conversation = state
-            .conversations
-            .get(&conversation_key)
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        if conversation.conversation != session.conversation {
-            return Err(DurableStoreError::InvalidRecord);
-        }
-        if let Some(existing) = validated_call_from_state(state, &session.scope, &session.call_id)?
+    let session = canonical_call_creation(session, &creator.scope, &creator.principal)
+        .map_err(map_call_error)?;
+    let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
+    let key = call_key(&session.scope, &session.call_id);
+    let conversation_key =
+        conversation_key(&session.scope, &session.conversation.conversation_id);
+    let state = &mut *store.state.lock().map_err(|_| DurableStoreError::Internal)?;
+    if let Some(parent) = parent {
+        if parent.scope != session.scope
+            || parent.call_id == session.call_id
+            || parent.conversation.kind != ConversationKind::Direct
+            || parent.signalling_state != CallSignallingState::Active
+            || parent.participants.len() != 2
+            || !parent.participants.iter().all(|participant| {
+                participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            })
+            || validated_call_from_state(state, &parent.scope, &parent.call_id)?.as_ref()
+                != Some(parent)
         {
-            if !group_actor_current_if_needed(state, &existing, &creator.principal) {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            let recorded = state
-                .call_creation_fingerprints
-                .get(&key)
-                .ok_or(DurableStoreError::Corrupt)?;
-            return if recorded == &creation_fingerprint
-                && creator.principal == existing.initiated_by
-            {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
+            return Err(DurableStoreError::PermissionDenied);
         }
-        require_group_participants_if_needed(state, &session)?;
-        state
+    }
+    let conversation = state
+        .conversations
+        .get(&conversation_key)
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    if conversation.conversation != session.conversation {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    if let Some(existing) = validated_call_from_state(state, &session.scope, &session.call_id)?
+    {
+        if !group_actor_current_if_needed(state, &existing, &creator.principal) {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let recorded = state
             .call_creation_fingerprints
-            .insert(key.clone(), creation_fingerprint);
-        state.calls.insert(key, session);
-        Ok(DurableRecordStatus::Persisted)
+            .get(&key)
+            .ok_or(DurableStoreError::Corrupt)?;
+        return if recorded == &creation_fingerprint
+            && creator.principal == existing.initiated_by
+        {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    require_group_participants_if_needed(state, &session)?;
+    state
+        .call_creation_fingerprints
+        .insert(key.clone(), creation_fingerprint);
+    state.calls.insert(key, session);
+    Ok(DurableRecordStatus::Persisted)
 }
 
 impl CallStore for MemoryLocalStore {
