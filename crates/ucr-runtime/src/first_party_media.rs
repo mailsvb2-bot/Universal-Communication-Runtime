@@ -237,6 +237,7 @@ fn validate_media_call(
 
 fn ensure_media_call<S>(
     store: &S,
+    direct: &CallSession,
     ids: &MediaRuntimeIds,
     scope: &TenantScope,
     participants: &[PrincipalRef; 2],
@@ -244,10 +245,9 @@ fn ensure_media_call<S>(
 where
     S: CallStore,
 {
-    if let Some(call) = store.call(scope, &ids.call_id)? {
-        validate_media_call(&call, ids, participants)?;
-        return Ok(call);
-    }
+    // Even a preexisting derived Call requires a live parent. The canonical
+    // CallStore checks the exact parent snapshot and creates/deduplicates the
+    // media Call in one transaction shared with Hangup across BFF processes.
     let caller = ScopedPrincipal {
         scope: scope.clone(),
         principal: participants[0].clone(),
@@ -282,7 +282,7 @@ where
         revision: 0,
         termination_reason: None,
     };
-    match store.create_call(&caller, &draft) {
+    match store.create_call_if_parent_current(&caller, &draft, direct) {
         Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate)
         | Err(DurableStoreError::Conflict) => {}
         Err(error) => return Err(error.into()),
@@ -387,7 +387,7 @@ where
     // Call. This check is read-only: no Join or Hangup can leave an orphan
     // permission grant behind, including under concurrent termination.
     require_media_permissions(store, subject)?;
-    let media = ensure_media_call(store, &ids, &direct.scope, &participants)?;
+    let media = ensure_media_call(store, direct, &ids, &direct.scope, &participants)?;
     if media.signalling_state == CallSignallingState::Terminated {
         return Err(MediaRuntimeError::Conflict);
     }
