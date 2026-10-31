@@ -1672,4 +1672,70 @@ mod tests {
             Ok(DurableRecordStatus::Duplicate)
         );
     }
+    #[test]
+    fn parent_fence_rejects_stale_media_creation_across_sqlite_connections() {
+        // Two independently opened SQLite handles model separate BFF workers.
+        // The CallStore fence is transport-neutral; the production child is
+        // a derived Group Call, while this fixture uses an existing conversation.
+        let db = TestDb::new();
+        let joining = SqliteLocalStore::open(db.path()).expect("joining worker");
+        let hanging_up = SqliteLocalStore::open(db.path()).expect("hangup worker");
+        let (direct, alice, bob) = session();
+        joining
+            .persist_conversation(&conversation())
+            .expect("canonical conversation");
+        joining.create_call(&alice, &direct).expect("direct Call");
+        hanging_up
+            .apply_call_signal(&bob, &signal(&direct, "fence-accept", CallSignalKind::Accept))
+            .expect("accepted Call");
+        let active = joining
+            .call(&scope(), &direct.call_id)
+            .unwrap()
+            .expect("accepted snapshot");
+        assert_eq!(active.signalling_state, CallSignallingState::Active);
+
+        let mut child = direct.clone();
+        child.call_id = CallId::from_opaque(oid("fence-derived-before-hangup"));
+        assert_eq!(
+            joining.create_call_if_parent_current(&alice, &child, &active),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            joining.create_call_if_parent_current(&alice, &child, &active),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+
+        // A has already read the active parent; B commits Hangup through a
+        // separate connection before A tries to create its next media Call.
+        hanging_up
+            .apply_call_signal(
+                &bob,
+                &signal(
+                    &active,
+                    "fence-hangup",
+                    CallSignalKind::Terminate {
+                        reason: CallTerminationReason::Completed,
+                    },
+                ),
+            )
+            .expect("committed Hangup");
+        let mut stale_child = child.clone();
+        stale_child.call_id = CallId::from_opaque(oid("fence-derived-after-hangup"));
+        assert_eq!(
+            joining.create_call_if_parent_current(&alice, &stale_child, &active),
+            Err(DurableStoreError::PermissionDenied),
+            "stale A snapshot must not create a child after B Hangup"
+        );
+        assert_eq!(
+            joining.call(&scope(), &stale_child.call_id),
+            Ok(None),
+            "no orphan media Call may persist after terminal parent"
+        );
+        assert_eq!(
+            joining.create_call_if_parent_current(&alice, &child, &active),
+            Err(DurableStoreError::PermissionDenied),
+            "even an existing child cannot be returned from a stale parent"
+        );
+    }
+
 }
