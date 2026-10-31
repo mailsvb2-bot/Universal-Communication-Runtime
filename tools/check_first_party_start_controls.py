@@ -39,13 +39,47 @@ assert r"\n const recovery" not in HTML and r"\n if(recovery" not in HTML, (
 )
 # A newly registered user must still see their one-time recovery code after
 # the signed-in state hides the new-user registration panel.
-assert 'document.getElementById("pl-onboard").after(recovery)' in HTML, (
+assert 'document.getElementById("pl-onboard").after(recovery)' in JS, (
     "recovery code must be moved outside the hidden registration panel"
 )
-assert 'id="pl-invite-help"' in HTML and 'data-invited-contact' in HTML, (
+assert 'id="pl-invite-help"' in HTML and 'data-invited-contact' in JS, (
     "invitation must have an understandable contact-add path"
 )
+# CSP must not silently block the onboarding actions: all executable page
+# behavior lives in the same-origin module, not inline script elements.
+assert '<script type="module" src="/start.js"></script>' in HTML, (
+    "first-party onboarding module is not loaded"
+)
+assert not re.search(r'<script\b(?![^>]*\bsrc\s*=)[^>]*>', HTML, re.I), (
+    "inline scripts violate the first-party script-src self CSP"
+)
+assert 'if(signup&&slot)slot.appendChild(signup)' in JS, (
+    "signup action is not moved into the visible onboarding card"
+)
+# The module awaits its browser media import, so DOMContentLoaded can have
+# fired before the locale handler is registered. Both paths must initialize.
+assert 'document.readyState === "loading"' in JS and (
+    'initializeLanguagePicker();' in JS
+), "language picker is lost when the async module loads after DOMContentLoaded"
+# Switching to English must also translate dynamic incoming/contacts/call actions,
+# status guidance and accessible field labels, not only initial headings.
+for label in ("Аудиозвонок", "Видеозвонок", "Принять", "Отклонить", "Отозвать устройство"):
+    assert f'"{label}":' in JS, f"missing English dynamic action translation: {label}"
+assert 'button.textContent = localize(text);' in JS, "dynamic Call buttons remain Russian"
+assert 'function message(value) {' in JS and (
+    'status.dataset.plOriginalText=value;' in JS
+) and 'status.textContent = localize(value);' in JS, (
+    "dynamic status messages must preserve original text for RU/EN toggling"
+)
+assert 'el("video-guide").textContent = localize(guide);' in JS, (
+    "live call guidance ignores the selected language"
+)
+assert 'lang=next;' in JS and 'data-pl-original-' in JS, (
+    "language selection does not update current language and accessible labels"
+)
+
 assert parser.controls, "no visible forms/buttons found"
+
 for tag, element in parser.controls:
     ident = element.get("id")
     if tag == "form":
