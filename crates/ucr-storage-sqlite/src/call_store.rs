@@ -368,7 +368,7 @@ impl GroupCallLookupStore for SqliteLocalStore {
 }
 
 /// One canonical creation path: optional parent Call CAS is checked under the
-/// same SQLite write transaction as the derived Call's durable insert.
+/// same `SQLite` write transaction as the derived Call's durable insert.
 fn create_call_with_parent_guard(
     store: &SqliteLocalStore,
     creator: &ScopedPrincipal,
