@@ -1241,16 +1241,37 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             server.store.permission_grants_for(subject).unwrap(),
             no_grants[index]
         );
-        for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
-            server
-                .store
-                .grant_permission(&PermissionGrant {
-                    grantee: subject.clone(),
-                    permission: permission.to_owned(),
-                    scope: PermissionScope::Exact(scope.clone()),
-                })
-                .expect("explicit canonical media authorization");
-        }
+    }
+    // Provision only the caller: this must NOT authorize a two-person media
+    // Call or mint its durable child while the recipient lacks media rights.
+    for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
+        server.store.grant_permission(&PermissionGrant {
+            grantee: subjects[0].clone(),
+            permission: permission.to_owned(),
+            scope: PermissionScope::Exact(scope.clone()),
+        }).expect("caller-only explicit grant");
+    }
+    assert_eq!(
+        join_accepted(&server, &alice, &call_id, revision).err(),
+        Some(StatusCode::FORBIDDEN),
+        "caller permissions must not confer rights on recipient"
+    );
+    assert_eq!(
+        server.store.call(
+            &scope,
+            &first_party_media::media_runtime_ids(
+                &scope, &CallId::from_opaque(opaque(&call_id).unwrap())
+            ).unwrap().call_id,
+        ).unwrap(),
+        None,
+        "denied recipient cannot leave a derived Call behind"
+    );
+    for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
+        server.store.grant_permission(&PermissionGrant {
+            grantee: subjects[1].clone(),
+            permission: permission.to_owned(),
+            scope: PermissionScope::Exact(scope.clone()),
+        }).expect("recipient explicit grant");
     }
     // A separate explicit grant must survive the entire Call lifecycle.
     server
