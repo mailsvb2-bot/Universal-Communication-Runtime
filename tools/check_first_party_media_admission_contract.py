@@ -11,7 +11,7 @@ root = Path(__file__).resolve().parents[1]
 # insufficient to claim successful two-device media without call-scoped policy.
 media_owner = (root/"crates/ucr-runtime/src/first_party_media.rs").read_text(encoding="utf-8")
 sfu_owner = (root/"crates/ucr-sfu/src/lib.rs").read_text(encoding="utf-8")
-assert "require_media_permissions(store, subject)?" in media_owner
+assert "require_media_permissions(" in media_owner and "for principal in &participants {" in media_owner
 assert "create_call_if_parent_current(&caller, &draft, direct)" in media_owner
 assert "Err(error) => return Err(error.into())," in media_owner
 assert "Err(DurableStoreError::Conflict) => {}" not in media_owner.split("fn ensure_media_call<S>(", 1)[1].split("/// First-party media must never mint", 1)[0]
