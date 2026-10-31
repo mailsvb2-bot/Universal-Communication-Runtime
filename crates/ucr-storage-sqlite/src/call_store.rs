@@ -391,9 +391,10 @@ fn create_call_with_parent_guard(
             || session.initiated_by != parent.initiated_by
             || session.participants.len() != 2
             || !session.participants.iter().all(|participant| {
-                parent.participants.iter().any(|member| {
-                    member.principal == participant.principal
-                })
+                parent
+                    .participants
+                    .iter()
+                    .any(|member| member.principal == participant.principal)
             })
             || parent.conversation.kind != ConversationKind::Direct
             || parent.signalling_state != CallSignallingState::Active
@@ -421,11 +422,9 @@ fn create_call_with_parent_guard(
         if !group_actor_current_if_needed(&transaction, &existing, &creator.principal)? {
             return Err(DurableStoreError::PermissionDenied);
         }
-        let recorded =
-            load_creation_fingerprint(&transaction, &session.scope, &session.call_id)?
-                .ok_or(DurableStoreError::Corrupt)?;
-        return if recorded == creation_fingerprint && creator.principal == existing.initiated_by
-        {
+        let recorded = load_creation_fingerprint(&transaction, &session.scope, &session.call_id)?
+            .ok_or(DurableStoreError::Corrupt)?;
+        return if recorded == creation_fingerprint && creator.principal == existing.initiated_by {
             Ok(DurableRecordStatus::Duplicate)
         } else {
             Err(DurableStoreError::Conflict)
@@ -1694,7 +1693,10 @@ mod tests {
             .expect("canonical conversation");
         joining.create_call(&alice, &direct).expect("direct Call");
         hanging_up
-            .apply_call_signal(&bob, &signal(&direct, "fence-accept", CallSignalKind::Accept))
+            .apply_call_signal(
+                &bob,
+                &signal(&direct, "fence-accept", CallSignalKind::Accept),
+            )
             .expect("accepted Call");
         let active = joining
             .call(&scope(), &direct.call_id)
@@ -1745,5 +1747,4 @@ mod tests {
             "even an existing child cannot be returned from a stale parent"
         );
     }
-
 }
