@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, DeviceLifecycleStore, GroupStore, IdentityDeviceLookupStore,
+    AuthorizedDurableRuntime, CallStore, DeviceLifecycleStore, GroupStore, IdentityDeviceLookupStore,
     IdentityStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     TrustedSigningKeyStore, generate_opaque_id,
 };
@@ -1888,6 +1888,26 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
             now_unix_ms()?,
         )
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    // A different authenticated Device may Hangup while MLS checks and Join
+    // signing are in progress. Suppress a stale response if either canonical
+    // Call changed. A later Hangup is fenced by the media Call's termination
+    // at realtime admission; this read alone is not the durable CAS.
+    if state
+        .store
+        .call(&call.scope, &call.call_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .as_ref()
+        != Some(&call)
+        || !matches!(
+            state
+                .store
+                .call(&media.scope, &media.call_id)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+            Some(current) if current.signalling_state != CallSignallingState::Terminated
+        )
+    {
+        return Err(StatusCode::CONFLICT);
+    }
     let fragment = grant
         .join_url
         .split_once('#')
