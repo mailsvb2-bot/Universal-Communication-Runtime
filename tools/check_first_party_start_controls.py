@@ -45,7 +45,19 @@ assert 'document.getElementById("pl-onboard").after(recovery)' in JS, (
 assert 'id="pl-invite-help"' in HTML and 'data-invited-contact' in JS, (
     "invitation must have an understandable contact-add path"
 )
-# CSP must not silently block the onboarding actions: all executable page\n# behavior lives in the same-origin module, not inline script elements.\nassert '<script type="module" src="/start.js"></script>' in HTML, (\n    "first-party onboarding module is not loaded"\n)\nassert not re.search(r'<script\\b(?![^>]*\\bsrc\\s*=)[^>]*>', HTML, re.I), (\n    "inline scripts violate the first-party script-src self CSP"\n)\nassert 'if(signup&&slot)slot.appendChild(signup)' in JS, (\n    "signup action is not moved into the visible onboarding card"\n)\nassert parser.controls, "no visible forms/buttons found"
+# CSP must not silently block the onboarding actions: all executable page
+# behavior lives in the same-origin module, not inline script elements.
+assert '<script type="module" src="/start.js"></script>' in HTML, (
+    "first-party onboarding module is not loaded"
+)
+assert not re.search(r'<script\b(?![^>]*\bsrc\s*=)[^>]*>', HTML, re.I), (
+    "inline scripts violate the first-party script-src self CSP"
+)
+assert 'if(signup&&slot)slot.appendChild(signup)' in JS, (
+    "signup action is not moved into the visible onboarding card"
+)
+assert parser.controls, "no visible forms/buttons found"
+
 for tag, element in parser.controls:
     ident = element.get("id")
     if tag == "form":
