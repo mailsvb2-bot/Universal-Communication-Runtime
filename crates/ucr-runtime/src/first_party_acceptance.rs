@@ -1215,34 +1215,46 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         Some(StatusCode::FORBIDDEN)
     );
     assert_eq!(
-        server.store.call(
-            &scope,
-            &first_party_media::media_runtime_ids(
+        server
+            .store
+            .call(
                 &scope,
-                &CallId::from_opaque(opaque(&call_id).unwrap()),
+                &first_party_media::media_runtime_ids(
+                    &scope,
+                    &CallId::from_opaque(opaque(&call_id).unwrap()),
+                )
+                .unwrap()
+                .call_id,
             )
-            .unwrap()
-            .call_id,
-        ).unwrap(),
+            .unwrap(),
         None,
         "permission-denied Join must not create the derived media Call"
     );
     for (index, subject) in subjects.iter().enumerate() {
-        assert_eq!(server.store.permission_grants_for(subject).unwrap(), no_grants[index]);
+        assert_eq!(
+            server.store.permission_grants_for(subject).unwrap(),
+            no_grants[index]
+        );
         for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
-            server.store.grant_permission(&PermissionGrant {
-                grantee: subject.clone(),
-                permission: permission.to_owned(),
-                scope: PermissionScope::Exact(scope.clone()),
-            }).expect("explicit canonical media authorization");
+            server
+                .store
+                .grant_permission(&PermissionGrant {
+                    grantee: subject.clone(),
+                    permission: permission.to_owned(),
+                    scope: PermissionScope::Exact(scope.clone()),
+                })
+                .expect("explicit canonical media authorization");
         }
     }
     // A separate explicit grant must survive the entire Call lifecycle.
-    server.store.grant_permission(&PermissionGrant {
-        grantee: subjects[0].clone(),
-        permission: ucr_protocol::CALL_OBSERVE_PERMISSION.to_owned(),
-        scope: PermissionScope::Exact(scope.clone()),
-    }).unwrap();
+    server
+        .store
+        .grant_permission(&PermissionGrant {
+            grantee: subjects[0].clone(),
+            permission: ucr_protocol::CALL_OBSERVE_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope.clone()),
+        })
+        .unwrap();
     let grants_before_join = subjects
         .iter()
         .map(|subject| server.store.permission_grants_for(subject).unwrap())
