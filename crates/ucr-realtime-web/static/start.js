@@ -52,16 +52,72 @@ const KEY="petrellink.language.v1";
     "Отменить / завершить":"End call",
     "Повторить проверку входа":"Retry sign-in",
     "Копировать код":"Copy recovery code",
-    "Выйти":"Sign out"
+    "Выйти":"Sign out",
+    "Аудиозвонок":"Audio call",
+    "Видеозвонок":"Video call",
+    "Удалить":"Remove",
+    "Отозвать устройство":"Revoke device",
+    "Принять":"Answer",
+    "Отклонить":"Decline",
+    "Контактов пока нет. Пригласите знакомого по ссылке или добавьте его код.":"No contacts yet. Invite someone or add their contact code.",
+    "Нет подтверждённых входящих вызовов.":"No verified incoming calls.",
+    "Нет активного вызова.":"No active call.",
+    "Выберите контакт и нажмите «Видеозвонок».":"Select a contact and choose Video call.",
+    "Зарегистрируйте первое доверенное устройство.":"Register your first trusted device.",
+    "Вызов завершён. Выберите контакт для нового звонка.":"Call ended. Select a contact to call again.",
+    "Вызов принят. Проверяем криптографический допуск и открываем видеоэкран…":"Call answered. Verifying encrypted-media admission…",
+    "Аудиовызов принят. Проверяем криптографический допуск и открываем экран аудиосвязи…":"Audio call answered. Verifying encrypted-media admission…",
+    "Видеовызов отправлен. Ожидается принятие вторым участником; камера пока выключена.":"Video call sent. Waiting for the other person; camera is off.",
+    "Аудиовызов отправлен. Ожидается принятие вторым участником; микрофон пока выключен.":"Audio call sent. Waiting for the other person; microphone is off.",
+    "Соединяем с собеседником…":"Connecting…",
+    "Вызов создан. Ожидается реальное принятие другим участником.":"Call created. Waiting for the other person to answer.",
+    "Профиль активен. Пригласите знакомого или выберите контакт для звонка.":"Your profile is active. Invite someone or choose a contact to call.",
+    "Приглашение скопировано.":"Invitation copied.",
+    "Проверяем защищённый вход…":"Checking secure sign-in…",
+    "Моё устройство":"My device",
+    "Язык интерфейса":"Interface language",
+    "Имя":"Name",
+    "Код контакта из приглашения":"Contact code from invitation",
+    "Войти с доверенного устройства":"Sign in with trusted device",
+    "Привязать это устройство":"Link this device",
+    "Заменить код восстановления":"Replace recovery code",
+    "Диагностика входа и авторизации":"Sign-in and authorization diagnostics",
+    "Создание профиля и восстановление":"Profile creation and recovery",
+    "Второе устройство и восстановление":"Second device and recovery",
+    "Управление устройствами":"Manage devices",
+    "Скопировать отчёт":"Copy report",
+    "Сохранить JSON":"Save JSON",
+    "До подтверждения учётной записи и Device камера и микрофон не включаются.":"Camera and microphone remain off until account and device verification.",
+    "Сначала зарегистрируйте устройство. Экран с камерой откроется автоматически после принятия вызова собеседником.":"Register your device first. The camera screen opens after your contact answers.",
+    "Проверка готовности браузерного медиашлюза…":"Checking browser media readiness…",
+    "Приглашение получено. Укажите, как зовут человека, и нажмите «Добавить». Проверьте его личность через доверенный канал.":"Invitation received. Enter a name and select Add. Verify their identity through a trusted channel.",
+    "В этом браузерном варианте входящие проверяются только при открытом приложении. Фоновые мобильные уведомления ещё требуют отдельного провайдера.":"Incoming calls are checked while this page is open. Mobile push notifications are not available yet."
   };
+  function localize(value){
+    return lang==="en" && typeof value==="string" ? (translations[value] ?? value) : value;
+  }
   function applyLanguage(next){
+    lang=next;
     const english=next==="en";
     document.documentElement.lang=next;
-    document.querySelectorAll("h1,h2,summary,button,.call-steps span,#pl-onboard p").forEach(el=>{
+    // Never replace nested markup, recovery secrets or user-entered values.
+    document.querySelectorAll("h1,h2,summary,button,.call-steps span,#pl-onboard p,section > p,section > small,#pl-invite-help,#call-state,#video-guide,#who,#status").forEach(el=>{
+      if(el.children.length)return;
       if(!el.dataset.plOriginalText)el.dataset.plOriginalText=el.textContent.trim();
       const source=el.dataset.plOriginalText;
       if(translations[source])el.textContent=english?translations[source]:source;
     });
+    document.querySelectorAll("[placeholder],[aria-label]").forEach(el=>{
+      for(const attribute of ["placeholder","aria-label"]){
+        const original="data-pl-original-"+attribute;
+        const source=el.getAttribute(original)??el.getAttribute(attribute);
+        if(!source||!translations[source])continue;
+        el.setAttribute(original,source);
+        el.setAttribute(attribute,english?translations[source]:source);
+      }
+    });
+    const label=document.querySelector('label[for="pl-language"]');
+    if(label?.firstChild?.nodeType===3)label.firstChild.textContent=english?"Language ":"Язык ";
   }
   function initializeLanguagePicker(){
     const select=document.getElementById("pl-language");
@@ -117,7 +173,7 @@ function plSetSignedIn(identity){
   el("pl-user-cabinet").hidden=!logged;
   for(const id of ["pl-contacts","pl-incoming","pl-current-call"])el(id).hidden=!logged;
   if(logged){
-    el("pl-friendly-identity").textContent="Профиль активен. Пригласите знакомого или выберите контакт для звонка.";
+    el("pl-friendly-identity").textContent=localize("Профиль активен. Пригласите знакомого или выберите контакт для звонка.");
     const invited=el("contact-peer").dataset.invitedContact==="true";
     if(invited) {
       el("pl-invite-help").hidden=false;
@@ -371,14 +427,14 @@ async function restoreActiveCall(user) {
   }
 }
 
-function message(value) { status.textContent = value; }
+function message(value) { status.textContent = localize(value); }
 function setCallStage(step, guide) {
   for (const [index, name] of ["device","contact","accepted","media"].entries()) {
     const element = el("stage-" + name);
     if (index === step) element.setAttribute("aria-current","step");
     else element.removeAttribute("aria-current");
   }
-  el("video-guide").textContent = guide;
+  el("video-guide").textContent = localize(guide);
 }
 function showRecovery(code) {
   const element = el("recovery-output");
@@ -422,7 +478,7 @@ function textNode(value) {return document.createTextNode(value);}
 function btn(text, callback, style = "") {
   const button = document.createElement("button");
   button.type = "button";
-  button.textContent = text;
+  button.textContent = localize(text);
   if (style) button.className = style;
   button.addEventListener("click", () => void run(callback));
   return button;
@@ -460,7 +516,7 @@ function renderContacts(contacts) {
   }
   if (!contacts.length) {
     const li = document.createElement("li");
-    li.textContent = "Контактов пока нет. Пригласите знакомого по ссылке или добавьте его код.";
+    li.textContent = localize("Контактов пока нет. Пригласите знакомого по ссылке или добавьте его код.");
     list.append(li);
   }
 }
@@ -476,7 +532,7 @@ function nameFor(identity) {
 function showActive() {
   const state = el("call-state");
   if (!active) {
-    state.textContent = "Нет активного вызова.";
+    state.textContent = localize("Нет активного вызова.");
     el("cancel").hidden = true;
     setCallStage(accountScope ? 1 : 0, accountScope ? "Выберите контакт и нажмите «Видеозвонок»." : "Зарегистрируйте первое доверенное устройство.");
     return;
@@ -1004,7 +1060,7 @@ function renderIncoming(items) {
   }
   if (!items.length) {
     const li = document.createElement("li");
-    li.textContent = "Нет подтверждённых входящих вызовов.";
+    li.textContent = localize("Нет подтверждённых входящих вызовов.");
     list.append(li);
   }
 }
