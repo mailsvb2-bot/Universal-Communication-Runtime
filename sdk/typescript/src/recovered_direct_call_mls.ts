@@ -65,7 +65,7 @@ export async function establishRecoveredDirectCall(
       caller.creatorPrincipalId!==initiator.auth.participantId ||
       caller.peerPrincipalId!==recipient.auth.participantId ||
       callee.creatorPrincipalId!==caller.creatorPrincipalId ||
-      callee.peerPrincipalId!==caller.peerPrincipalId ||
+      callee.peerPrincipalId!==initiator.auth.participantId ||
       caller.groupRevision!==null || callee.groupRevision!==null ||
       caller.expectedPeerDeviceId!==null || callee.expectedPeerDeviceId!==null ||
       caller.cryptoStateRef!==null || callee.cryptoStateRef!==null ||
