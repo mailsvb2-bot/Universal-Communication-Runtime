@@ -383,9 +383,12 @@ where
     }
     let (legacy_host, _) = media_host(&direct.scope)?;
     let members = store.group_memberships(&direct.scope, &ids.group_id, 8)?;
+    // A removed legacy server committer may have retained older epoch secrets.
+    // Never reuse its Group ID, even after membership changes.
     if members.iter().any(|member| {
-        member.state == GroupMemberState::Active
-            && (member.member == legacy_host.principal || !participants.contains(&member.member))
+        member.member == legacy_host.principal
+            || (member.state == GroupMemberState::Active
+                && !participants.contains(&member.member))
     }) {
         return Err(MediaRuntimeError::Conflict);
     }
