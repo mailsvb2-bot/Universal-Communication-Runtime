@@ -548,6 +548,36 @@ function showActive() {
   state.textContent = nameFor(remote) + " — " + active.call.state
     + " (" + (active.call.media === "video" ? "видео" : "аудио") + ")";
   el("cancel").hidden = active.call.state === "terminated";
+  if (active.call.state === "terminated" &&
+      active.identity === active.call.callerIdentityId) {
+    // A compromised MLS Group is never reused. Re-entry creates an entirely
+    // new canonical Call (hence a different derived endpoint-owned Group).
+    // The ordinary accepted-Call path below then performs Device-owned
+    // KeyPackage, Commit, Welcome and signed Join automatically.
+    state.append(" ",btn("Новый защищённый звонок",async()=>{
+      const previous=active?.call;
+      if(!previous || previous.state!=="terminated" ||
+         previous.callerIdentityId!==active.identity ||
+         activeCallLocator()!==null)throw Error("Старый звонок ещё не завершён");
+      const scope=accountScope,generation=uiAuthGeneration;
+      const user=await restoreSession();
+      if(!scope || scope!==accountScope || generation!==uiAuthGeneration ||
+         principalScope(user)!==scope ||
+         user.participantId!==previous.callerIdentityId)
+        throw Error("Смена устройства во время восстановления");
+      const key="recover:"+previous.callId;
+      const attempt=idempotency.get(key)??crypto.randomUUID();
+      idempotency.set(key,attempt);
+      const fresh=await calls.restartCompromisedCall(previous.callId,attempt);
+      if(accountScope!==scope || generation!==uiAuthGeneration ||
+         !active || active.call.callId!==previous.callId)
+        throw Error("Восстановленный Call создан, но пользовательская сессия изменилась");
+      active={call:fresh,identity:user.participantId};
+      rememberActiveCall(fresh,user.participantId);
+      showActive();
+      message("Создан новый независимый вызов. Ожидаем принятия и новых MLS-ключей.");
+    },"secondary"));
+  }
   if (active.call.state === "active") setCallStage(3, active.call.media === "video" ? "Вызов принят. Проверяем криптографический допуск и открываем видеоэкран…" : "Аудиовызов принят. Проверяем криптографический допуск и открываем экран аудиосвязи…");
   else if (active.call.state === "terminated") setCallStage(1, "Вызов завершён. Выберите контакт для нового звонка.");
   else setCallStage(2, active.call.media === "video" ? "Видеовызов отправлен. Ожидается принятие вторым участником; камера пока выключена." : "Аудиовызов отправлен. Ожидается принятие вторым участником; микрофон пока выключен.");
