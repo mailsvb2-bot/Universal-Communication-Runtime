@@ -1709,12 +1709,7 @@ where
         self.require_current_first_party_device(subject, device_id)?;
         let status = self
             .store
-            .terminate_direct_call_with_derived(
-                subject,
-                signal,
-                derived_call_id,
-                derived_event_id,
-            )
+            .terminate_direct_call_with_derived(subject, signal, derived_call_id, derived_event_id)
             .map_err(AuthorizedMutationError::Store)?;
         self.require_current_first_party_device(subject, device_id)?;
         Ok(status)
