@@ -5549,7 +5549,7 @@ mod sfu_placement_lifecycle_tests {
             .expect("second signed grant")
             .claims;
         let provider = Arc::new(BlockingCloseProvider {
-            blocked_session: first.session_id.clone(),
+            blocked_session: first_grant.session_id.clone(),
             entered: Notify::new(),
             release: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
         });
