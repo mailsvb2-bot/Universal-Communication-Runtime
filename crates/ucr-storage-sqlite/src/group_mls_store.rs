@@ -2159,6 +2159,10 @@ CREATE TRIGGER IF NOT EXISTS quarantine_identity_update_denied
 BEFORE UPDATE OF tenant_id,namespace_present,namespace_id,group_id
 ON server_mls_custody_quarantine
 BEGIN SELECT RAISE(ABORT,'quarantine identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS quarantine_metadata_update_denied
+BEFORE UPDATE OF reason,incident_ref,detected_at_unix_ms
+ON server_mls_custody_quarantine
+BEGIN SELECT RAISE(ABORT,'security quarantine evidence is immutable'); END;
 ";
 
 pub(super) fn create_v54_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
@@ -2187,6 +2191,7 @@ pub(super) fn verify_v54_objects(connection: &Connection) -> Result<(), DurableS
     for trigger in [
         "quarantine_delete_denied",
         "quarantine_identity_update_denied",
+        "quarantine_metadata_update_denied",
     ] {
         let exists: i64 = connection
             .query_row(
@@ -2234,6 +2239,22 @@ mod custody_quarantine_v54_tests {
             )
             .is_err(),
             "historic quarantine cannot be moved"
+        );
+        assert!(
+            db.execute(
+                "UPDATE server_mls_custody_quarantine SET incident_ref='altered' WHERE group_id='media-a'",
+                [],
+            )
+            .is_err(),
+            "quarantine incident evidence cannot be rewritten"
+        );
+        assert!(
+            db.execute(
+                "UPDATE server_mls_custody_quarantine SET reason='operator_hold' WHERE group_id='media-a'",
+                [],
+            )
+            .is_err(),
+            "quarantine reason cannot be rewritten"
         );
         assert_eq!(
             db.query_row(
