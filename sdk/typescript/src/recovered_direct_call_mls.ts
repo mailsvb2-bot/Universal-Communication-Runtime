@@ -76,7 +76,6 @@ export async function establishRecoveredDirectCall(
   if (!offer || offers.filter(x=>x.recipientDeviceId===recipient.auth.deviceId).length!==1) {
     throw new Error("missing unique authenticated recipient MLS offer");
   }
-  const encoded=offer.recipientKeyPackageBase64Url.replace(/-/g,"+").replace(/_/g,"/");
   // Decode using the platform-independent Base64URL decoder supplied by the
   // endpoint runtime (not an unauthenticated browser Join fragment).
   const decode=(value:string):Uint8Array=>{
@@ -88,7 +87,6 @@ export async function establishRecoveredDirectCall(
     if(bits>0 && (carry&((1<<bits)-1))!==0) throw new Error("noncanonical KeyPackage");
     return Uint8Array.from(out);
   };
-  void encoded;
   const staged=await initiator.endpoint.addPeer(caller.groupId,decode(offer.recipientKeyPackageBase64Url));
   const updated=await initiator.host.describeAcceptedCallMls(initiator.auth,ctx);
   if (!same(caller,updated) || updated.groupRevision===null ||
