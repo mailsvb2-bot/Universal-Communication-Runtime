@@ -5480,10 +5480,21 @@ mod sfu_placement_lifecycle_tests {
             active_at_block, 0,
             "a hung prior provider close must not delay another terminated Call's SFU revocation"
         );
-        cleanup
-            .await
-            .expect("cleanup task")
-            .expect("provider eventually closed");
+        // This fixture intentionally has no registered canonical Device, so
+        // attendance validation denies its journal event. That error must not
+        // undo SFU retirement or prevent physical provider shutdown.
+        assert_eq!(
+            cleanup.await.expect("cleanup task"),
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated))
+        );
+        assert_eq!(registry.active_session_count(), 0);
+        assert!(
+            registry
+                .pending_webrtc_closes()
+                .expect("provider shutdown acknowledgements")
+                .is_empty(),
+            "the unblocked provider must close even when attendance is denied"
+        );
     }
 
     #[tokio::test]
