@@ -218,6 +218,47 @@ export function createUcrContactCallJourney(
       await stillSame(auth);
       return call;
     },
+    /**
+     * Recovery always starts a NEW canonical Call, therefore a different
+     * first-party media Group ID. Never reuse a Call whose MLS membership,
+     * epoch or server-custody history could be compromised.
+     *
+     * The caller must provide a fresh idempotency key scoped to this recovery
+     * attempt. A repeated key may only replay the exact same StartCall.
+     * MLS creation, signed KeyPackage exchange and Welcome delivery continue
+     * through the existing accepted-Call endpoint workflow, not here.
+     */
+    async restartCompromisedCall(
+      compromisedCallId:string,
+      recoveryIdempotencyKey:string,
+    ):Promise<UcrDirectCall> {
+      const auth=await session();
+      identifier(compromisedCallId,"compromised Call");
+      identifier(recoveryIdempotencyKey,"recovery idempotency key");
+      const previous=await retrieve(auth,compromisedCallId);
+      if (previous.callerIdentityId!==auth.participantId) {
+        throw new Error("only the previous Call initiator can restart its media Group");
+      }
+      if (previous.state!=="terminated") {
+        throw new Error("compromised Call must be canonically terminated before restart");
+      }
+      await prepare(auth);
+      await stillSame(auth);
+      const fresh=checkedCall(await host.startDirectCall(auth,{
+        peerIdentityId:previous.calleeIdentityId,
+        media:previous.media,
+        idempotencyKey:recoveryIdempotencyKey,
+      }),auth);
+      if (fresh.callId===previous.callId ||
+          fresh.callerIdentityId!==previous.callerIdentityId ||
+          fresh.calleeIdentityId!==previous.calleeIdentityId ||
+          fresh.media!==previous.media ||
+          !["inviting","ringing"].includes(fresh.state)) {
+        throw new Error("MLS recovery requires an independently created canonical Call");
+      }
+      await stillSame(auth);
+      return fresh;
+    },
     async incoming():Promise<readonly UcrDirectCall[]> {
       const auth=await session();
       const response=await host.listIncomingDirectCalls(auth);
