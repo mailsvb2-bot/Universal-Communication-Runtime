@@ -293,6 +293,17 @@ where
         .call(scope, &ids.call_id)?
         .ok_or(MediaRuntimeError::Unavailable)?;
     validate_media_call(&call, ids, participants)?;
+    if call.scope != *scope
+        || call.participants.iter().any(|participant| {
+            participant.left_revision.is_some()
+                || !matches!(
+                    participant.state,
+                    CallParticipantState::Accepted | CallParticipantState::Invited
+                )
+        })
+    {
+        return Err(MediaRuntimeError::Conflict);
+    }
     Ok(call)
 }
 
