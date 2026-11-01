@@ -157,10 +157,18 @@ export async function establishRecoveredDirectCall(
     initiator.host.issueSignedJoinForAcceptedCall(initiator.auth,ctx),
     recipient.host.issueSignedJoinForAcceptedCall(recipient.auth,ctx),
   ]);
-  if (callerJoin.callId!==call.callId || recipientJoin.callId!==call.callId ||
-      callerJoin.deviceId!==initiator.auth.deviceId ||
-      recipientJoin.deviceId!==recipient.auth.deviceId) {
-    throw new Error("recovered Call Join grant not bound to endpoint Device");
+  const boundJoin=(join:UcrCanonicalJoinIssuance,auth:UcrAuthenticatedFirstEntry)=>
+    join.tenantId===auth.tenantId && join.namespaceId===auth.namespaceId &&
+    join.participantId===auth.participantId && join.deviceId===auth.deviceId &&
+    join.callId===call.callId &&
+    typeof join.sessionId==="string" &&
+    /^[A-Za-z0-9_.:@-]{1,128}$/.test(join.sessionId) &&
+    typeof join.joinFragment==="string" &&
+    join.joinFragment.startsWith("#ucr_join=") &&
+    join.joinFragment.length>"#ucr_join=".length && join.joinFragment.length<=16384;
+  if (!boundJoin(callerJoin,initiator.auth) || !boundJoin(recipientJoin,recipient.auth) ||
+      callerJoin.sessionId===recipientJoin.sessionId) {
+    throw new Error("recovered Call Join grant not bound to authenticated endpoint Identity/Device");
   }
   return {groupId:caller.groupId,mediaCallId:caller.mediaCallId,callerJoin,recipientJoin};
 }
