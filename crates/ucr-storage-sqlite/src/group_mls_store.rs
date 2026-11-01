@@ -2315,6 +2315,44 @@ mod custody_quarantine_v54_tests {
     use super::*;
 
     #[test]
+    fn restored_legacy_host_history_backfills_idempotent_quarantine() {
+        let mut db = Connection::open_in_memory().expect("SQLite");
+        let tx = db.transaction().expect("migration");
+        create_v54_objects(&tx).expect("canonical quarantine");
+        tx.commit().expect("commit");
+        db.execute_batch(
+            "CREATE TABLE group_memberships (
+              tenant_id TEXT NOT NULL, namespace_present INTEGER NOT NULL,
+              namespace_id TEXT NOT NULL, group_id TEXT NOT NULL,
+              principal_id TEXT NOT NULL);
+             INSERT INTO group_memberships VALUES
+             ('tenant-a',0,'','legacy-media','fp-media-host'),
+             ('tenant-a',0,'','safe-media','ordinary-person');",
+        )
+        .expect("simulate historical membership after backup restore");
+        backfill_legacy_host_quarantine(&db).expect("restore barrier");
+        backfill_legacy_host_quarantine(&db).expect("idempotent restart");
+        let held: i64 = db
+            .query_row(
+                "SELECT count(*) FROM server_mls_custody_quarantine
+                 WHERE group_id='legacy-media' AND reason='legacy_host'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy hold");
+        assert_eq!(held, 1);
+        let safe: i64 = db
+            .query_row(
+                "SELECT count(*) FROM server_mls_custody_quarantine
+                 WHERE group_id='safe-media'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("safe group not quarantined");
+        assert_eq!(safe, 0);
+    }
+
+    #[test]
     fn v54_quarantine_is_persistent_and_cannot_be_deleted_or_reidentified() {
         let mut db = Connection::open_in_memory().expect("in-memory SQLite");
         let tx = db.transaction().expect("migration transaction");
