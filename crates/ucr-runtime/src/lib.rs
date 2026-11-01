@@ -95,7 +95,7 @@ pub const MIN_RECORDING_PROVIDER_POLL_INTERVAL: Duration = Duration::from_millis
 pub const MAX_RECORDING_PROVIDER_POLL_INTERVAL: Duration = Duration::from_mins(1);
 const RECORDING_PROVIDER_WORKER_LEASE_DURATION_MS: i64 = 120_000;
 const DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
-pub const DEFAULT_REALTIME_CLEANUP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub const DEFAULT_REALTIME_CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct WebhookWorkerSweep {
@@ -3205,7 +3205,8 @@ async fn run_realtime_cleanup_worker(
 ) {
     let mut ticker = tokio::time::interval(DEFAULT_REALTIME_CLEANUP_POLL_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    ticker.tick().await;
+    // The first interval tick is immediate. Run the durable Call cleanup on
+    // startup too: a terminated Call may predate this realtime process.
     let mut last_grant_sweep: Option<std::time::Instant> = None;
     loop {
         ticker.tick().await;
