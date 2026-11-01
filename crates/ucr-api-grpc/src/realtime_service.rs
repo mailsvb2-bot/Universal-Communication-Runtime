@@ -611,18 +611,27 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         Ok((transition, placement_cleanup))
     }
 
-    async fn rollback_realtime_join(
+    // A failed Join response must not leave a reusable grant or a live
+    // WebRTC/downlink lease behind. Retire it through the SAME canonical Leave
+    // owner as an explicit user Leave; never just delete the registry entry.
+    // The generation fence prevents a late failure from evicting a newer Join.
+    async fn retire_failed_realtime_join(
         &self,
         claims: &RealtimeSessionClaims,
         expected_join_generation: u64,
         now_unix_ms: i64,
-    ) -> Result<(), CanonicalError> {
-        let _guard = self.sfu_placement_transition_guard().await;
-        self.registry
-            .leave_if_sequence(claims, expected_join_generation, now_unix_ms)
-            .map_err(map_registry_error)?;
-        self.release_sfu_call_placement_if_inactive(claims, now_unix_ms)
-            .await
+    ) -> Result<(), CanonicalError>
+    where
+        S: ConferenceJoinGrantStore,
+    {
+        let (_, placement_cleanup) = self
+            .leave_realtime_session_with_sfu_placement(
+                claims,
+                now_unix_ms,
+                expected_join_generation,
+            )
+            .await?;
+        placement_cleanup
     }
 
     /// Sanitizes expired participant/Device/Call associations but retains the
@@ -815,17 +824,16 @@ where
                     // A failed close stays pending for the normal retry sweep.
                     if let Err(error) = self.require_accepted_conference_participant(&claims) {
                         let _ = self
-                            .leave_realtime_session_with_sfu_placement(
-                                &claims,
-                                now,
-                                outcome.join_generation,
-                            )
+                            .retire_failed_realtime_join(&claims, outcome.join_generation, now)
                             .await;
                         return Err(error);
                     }
                     if let Err(error) = self.append_attendance(&outcome.transition) {
+                        // The journal failed AFTER registry admission. Merely
+                        // rolling back the registry leaves the signed Join grant
+                        // reusable and can orphan a WebRTC provider/downlink.
                         let _ = self
-                            .rollback_realtime_join(&claims, outcome.join_generation, now)
+                            .retire_failed_realtime_join(&claims, outcome.join_generation, now)
                             .await;
                         return Err(error);
                     }
@@ -5773,55 +5781,63 @@ mod sfu_placement_lifecycle_tests {
     }
 
     #[tokio::test]
-    async fn stale_attendance_failure_rollback_does_not_evict_new_join() {
+    async fn failed_join_retirement_revokes_grant_without_evicting_newer_join() {
         let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
         let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
         let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
-        let claims = claims("stale-rollback-session", "stale-rollback-device");
-
-        service
-            .ensure_sfu_call_placement(&claims)
+        let binding = claims("unused-session", "failed-join-device");
+        let granted = service
+            .join_issuer
+            .issue(
+                binding.scope.clone(),
+                binding.call_id.clone(),
+                binding.participant.clone(),
+                binding.device_id.clone(),
+                300,
+                1_000,
+            )
+            .expect("canonical reusable Join grant");
+        let active = granted.claims;
+        let first = service
+            .admit_realtime_session_with_sfu_placement(active.clone(), 1_001)
             .await
-            .expect("placement");
-        let earlier = registry.join(claims.clone(), 1_001).expect("first Join");
-        let current = registry.join(claims.clone(), 1_002).expect("new Join");
-        assert_ne!(earlier.join_generation, current.join_generation);
+            .expect("first Join");
+        let newer = service
+            .admit_realtime_session_with_sfu_placement(active.clone(), 1_002)
+            .await
+            .expect("newer Join");
+        assert_ne!(first.join_generation, newer.join_generation);
 
-        assert!(
+        assert_eq!(
             service
-                .rollback_realtime_join(&claims, earlier.join_generation, 1_003)
-                .await
-                .is_err()
+                .retire_failed_realtime_join(&active, first.join_generation, 1_003)
+                .await,
+            Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+            "stale journal failure must not revoke a newer Join"
         );
+        assert!(service.join_issuer.validate_live_claims(&active, 1_003).is_ok());
         assert_eq!(registry.active_session_count(), 1);
         assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 0);
-        service
-            .rollback_realtime_join(&claims, current.join_generation, 1_004)
-            .await
-            .expect("current owner can roll back");
-        assert_eq!(registry.active_session_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn fresh_join_rollback_removes_session_and_releases_call_placement() {
-        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
-        let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
-        let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
-        let claims = claims("placement-rollback-session", "placement-rollback-device");
 
         service
-            .ensure_sfu_call_placement(&claims)
+            .retire_failed_realtime_join(&active, newer.join_generation, 1_004)
             .await
-            .expect("placement");
-        let joined = registry.join(claims.clone(), 1_001).expect("join");
-        service
-            .rollback_realtime_join(&claims, joined.join_generation, 1_002)
-            .await
-            .expect("rollback");
-
+            .expect("failed Join must revoke grant and close provider");
         assert_eq!(registry.active_session_count(), 0);
         assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            service.join_issuer.validate_live_claims(&active, 1_005),
+            Err(JoinTokenError::Revoked)
+        );
+        assert!(
+            service
+                .admit_realtime_session_with_sfu_placement(active, 1_006)
+                .await
+                .is_err(),
+            "failed Join's signed grant must not be replayable"
+        );
     }
+
 }
 
 #[cfg(test)]
