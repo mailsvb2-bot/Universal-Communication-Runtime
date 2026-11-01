@@ -59,7 +59,7 @@ export async function establishRecoveredDirectCall(
   if (!same(caller,callee) || caller.callId!==call.callId ||
       caller.expectedRevision!==call.revision || callee.expectedRevision!==call.revision ||
       caller.deviceId!==initiator.auth.deviceId || callee.deviceId!==recipient.auth.deviceId ||
-      caller.cryptoCapability!=="group_mls" || callee.cryptoCapability!=="group_mls" ||
+      caller.cryptoCapability!=="ucr.group.mls" || callee.cryptoCapability!=="ucr.group.mls" ||
       caller.requiresEndpointOwnedCommit!==true || callee.requiresEndpointOwnedCommit!==true ||
       !caller.groupId.startsWith("fp-mg-") ||
       caller.creatorPrincipalId!==initiator.auth.participantId ||
