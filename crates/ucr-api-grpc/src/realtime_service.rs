@@ -2155,6 +2155,13 @@ where
         }
 
         let outcome = router.forward_validated_batch(&batch).await?;
+        // A destination receipt may arrive after a concurrent Hangup, Device revoke,
+        // or session Leave. Remote ingress independently validates the media frame,
+        // but a stale receipt must not restore media-ready state or report success.
+        self.require_live_transport_claims(claims)?;
+        self.registry
+            .require_active_session(claims, self.now()?)
+            .map_err(map_registry_error)?;
         if outcome.accepted_recipients > 0
             && let Some(transition) = self
                 .registry
