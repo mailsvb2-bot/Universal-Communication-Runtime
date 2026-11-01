@@ -540,7 +540,11 @@ impl GroupMlsServerCustodyProbe for SqliteLocalStore {
                     namespace.present,
                     namespace.value,
                     group_id.as_opaque().as_str(),
-                    if legacy_member != 0 { "legacy_host" } else { "server_private_group" },
+                    if legacy_member != 0 {
+                        "legacy_host"
+                    } else {
+                        "server_private_group"
+                    },
                     if legacy_member != 0 {
                         "auto-v54-legacy-membership"
                     } else {
