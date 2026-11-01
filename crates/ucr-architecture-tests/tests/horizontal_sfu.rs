@@ -315,8 +315,8 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
         "failed Join cleanup must use the existing Leave and provider-close owner"
     );
     assert!(
-        realtime.contains("leave_if_sequence(claims, expected_join_generation, now_unix_ms)"),
-        "rollback must atomically check the canonical registry Join fence"
+        realtime.contains("leave_if_sequence(claims, expected_session_sequence, now_unix_ms)"),
+        "canonical Leave must atomically check the registry Join-generation fence"
     );
     assert!(
         registry.contains("pub fn current_join_generation(")
