@@ -364,48 +364,49 @@ impl CallStore for MemoryLocalStore {
         let media_event_before = state.call_signals.get(&media_event_key).cloned();
         let outcome = (|| {
             let result = apply_call_signal_in_state(&mut state, actor, direct_signal)?;
-            if result != DurableRecordStatus::Duplicate {
-                if let Some(media) =
-                    validated_call_from_state(&state, &direct.scope, derived_call_id)?
+            if result == DurableRecordStatus::Duplicate {
+                return Ok(result);
+            }
+            if let Some(media) =
+                validated_call_from_state(&state, &direct.scope, derived_call_id)?
+            {
+                if media.scope != direct.scope
+                    || media.conversation.kind != ConversationKind::PrivateGroup
+                    || media.initiated_by != direct.initiated_by
+                    || media.participants.len() != direct.participants.len()
+                    || !media.participants.iter().all(|member| {
+                        direct
+                            .participants
+                            .iter()
+                            .any(|p| p.principal == member.principal)
+                    })
                 {
-                    if media.scope != direct.scope
-                        || media.conversation.kind != ConversationKind::PrivateGroup
-                        || media.initiated_by != direct.initiated_by
-                        || media.participants.len() != direct.participants.len()
-                        || !media.participants.iter().all(|member| {
-                            direct
-                                .participants
-                                .iter()
-                                .any(|p| p.principal == member.principal)
+                    return Err(DurableStoreError::PermissionDenied);
+                }
+                let kind = match media.signalling_state {
+                    CallSignallingState::Terminated => None,
+                    CallSignallingState::Inviting | CallSignallingState::Ringing => {
+                        Some(CallSignalKind::Cancel)
+                    }
+                    CallSignallingState::Active | CallSignallingState::Reconnecting => {
+                        Some(CallSignalKind::Terminate {
+                            reason: CallTerminationReason::Completed,
                         })
-                    {
-                        return Err(DurableStoreError::PermissionDenied);
                     }
-                    let kind = match media.signalling_state {
-                        CallSignallingState::Terminated => None,
-                        CallSignallingState::Inviting | CallSignallingState::Ringing => {
-                            Some(CallSignalKind::Cancel)
-                        }
-                        CallSignallingState::Active | CallSignallingState::Reconnecting => {
-                            Some(CallSignalKind::Terminate {
-                                reason: CallTerminationReason::Completed,
-                            })
-                        }
+                };
+                if let Some(kind) = kind {
+                    let media_actor = ScopedPrincipal {
+                        scope: direct.scope.clone(),
+                        principal: direct.initiated_by.clone(),
                     };
-                    if let Some(kind) = kind {
-                        let media_actor = ScopedPrincipal {
-                            scope: direct.scope.clone(),
-                            principal: direct.initiated_by.clone(),
-                        };
-                        let media_signal = CallSignal {
-                            event_id: derived_event_id.clone(),
-                            scope: direct.scope.clone(),
-                            call_id: derived_call_id.clone(),
-                            expected_revision: media.revision,
-                            kind,
-                        };
-                        apply_call_signal_in_state(&mut state, &media_actor, &media_signal)?;
-                    }
+                    let media_signal = CallSignal {
+                        event_id: derived_event_id.clone(),
+                        scope: direct.scope.clone(),
+                        call_id: derived_call_id.clone(),
+                        expected_revision: media.revision,
+                        kind,
+                    };
+                    apply_call_signal_in_state(&mut state, &media_actor, &media_signal)?;
                 }
             }
             Ok(result)
