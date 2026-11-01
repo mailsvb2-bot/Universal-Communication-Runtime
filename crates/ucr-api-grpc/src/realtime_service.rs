@@ -5451,6 +5451,26 @@ mod sfu_placement_lifecycle_tests {
             2,
             "both failed closes retain shutdown-only retry coordinates"
         );
+        // Even with provider shutdown still failing, the canonical terminal
+        // Call must deny the old sender before a single new media frame can
+        // be forwarded. This checks the same authorization gate used by both
+        // local and routed encrypted media publication.
+        assert!(
+            service.require_live_transport_claims(&active).is_err(),
+            "Hangup must deny publication while physical WebRTC close is pending"
+        );
+        // The same existing retry queue owns eventual physical shutdown.
+        // CloseFailsTwiceProvider succeeds on the third attempt; no fabricated
+        // acknowledgement is allowed while a provider close is failing.
+        service
+            .cleanup_closed_conferences_at(1_006)
+            .await
+            .expect("third provider attempt confirms both pending closures");
+        assert!(
+            registry.pending_webrtc_closes().expect("pending close queue").is_empty(),
+            "confirmed provider shutdown must drain the retry coordinates"
+        );
+        assert_eq!(registry.active_session_count(), 0);
     }
 
     #[tokio::test]
