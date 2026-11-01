@@ -178,6 +178,55 @@ fn create_call_with_parent_guard(
     Ok(DurableRecordStatus::Persisted)
 }
 
+fn apply_call_signal_in_state(
+    state: &mut MemoryState,
+    actor: &ScopedPrincipal,
+    signal: &CallSignal,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    if actor.scope != signal.scope {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
+    let key = call_key(&signal.scope, &signal.call_id);
+    let signal_key = call_signal_key(&signal.scope, signal.event_id.as_opaque().as_str());
+    let current = validated_call_from_state(&state, &signal.scope, &signal.call_id)?
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    if !group_actor_current_if_needed(&state, &current, &actor.principal) {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    if let Some((recorded_actor, existing, applied_revision)) =
+        state.call_signals.get(&signal_key)
+    {
+        if recorded_actor != &actor.principal
+            || !duplicate_actor_allowed(&current, &actor.principal, *applied_revision)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        return if existing == &fingerprint {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    if !active_call_participant(&current, &actor.principal) {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    require_group_signal_target_if_needed(&state, &current, signal)?;
+    let next = apply_call_signal(&current, &actor.scope, &actor.principal, signal)
+        .map_err(map_call_error)?;
+    let event_key = event_key_from_parts(&signal.scope, signal.event_id.as_opaque().as_str());
+    if state.events.contains_key(&event_key) || state.group_changes.contains_key(&event_key) {
+        return Err(DurableStoreError::Conflict);
+    }
+    let applied_revision = next.revision;
+    state.calls.insert(key, next);
+    state.call_signals.insert(
+        signal_key,
+        (actor.principal.clone(), fingerprint, applied_revision),
+    );
+    Ok(DurableRecordStatus::Persisted)
+}
+
 impl CallStore for MemoryLocalStore {
     fn create_call(
         &self,
@@ -216,67 +265,86 @@ impl CallStore for MemoryLocalStore {
         }
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         let Some(session) = validated_call_from_state(&state, scope, call_id)? else {
-            return Ok(None);
-        };
-        if !active_call_participant(&session, &subject.principal)
-            || !group_actor_current_if_needed(&state, &session, &subject.principal)
-        {
-            return Ok(None);
-        }
-        Ok(Some(session))
-    }
-
-    fn incoming_direct_calls(
-        &self,
-        recipient: &ScopedPrincipal,
-        max_items: usize,
-    ) -> Result<Vec<CallSession>, DurableStoreError> {
-        if max_items == 0 || max_items > 64 {
-            return Err(DurableStoreError::InvalidRecord);
-        }
-        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        let mut ids = state
-            .calls
-            .values()
-            .filter(|call| {
-                call.scope == recipient.scope
-                    && call.conversation.kind == ConversationKind::Direct
-                    && call.initiated_by != recipient.principal
-                    && matches!(
-                        call.signalling_state,
-                        CallSignallingState::Inviting | CallSignallingState::Ringing
-                    )
-                    && call.participants.iter().any(|participant| {
-                        participant.principal == recipient.principal
-                            && matches!(
-                                participant.state,
-                                CallParticipantState::Invited | CallParticipantState::Ringing
-                            )
-                    })
-            })
-            .map(|call| call.call_id.clone())
-            .collect::<Vec<_>>();
-        ids.sort_by(|a, b| a.as_opaque().as_str().cmp(b.as_opaque().as_str()));
-        ids.truncate(max_items);
-        ids.into_iter()
-            .map(|id| {
-                let call = validated_call_from_state(&state, &recipient.scope, &id)?
-                    .ok_or(DurableStoreError::Corrupt)?;
-                if !active_call_participant(&call, &recipient.principal) {
-                    return Err(DurableStoreError::Corrupt);
-                }
-                Ok(call)
-            })
-            .collect()
-    }
-
-    fn apply_call_signal(
+            return Ok(None    fn apply_call_signal(
         &self,
         actor: &ScopedPrincipal,
         signal: &CallSignal,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        if actor.scope != signal.scope {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        apply_call_signal_in_state(&mut state, actor, signal)
+    }
+
+    fn terminate_direct_call_with_derived(
+        &self,
+        actor: &ScopedPrincipal,
+        direct_signal: &CallSignal,
+        derived_call_id: &CallId,
+        derived_event_id: &ucr_model::EventId,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if actor.scope != direct_signal.scope
+            || derived_call_id == &direct_signal.call_id
+            || !matches!(&direct_signal.kind, CallSignalKind::Terminate { .. })
+        {
             return Err(DurableStoreError::PermissionDenied);
+        }
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let direct = validated_call_from_state(&state, &direct_signal.scope, &direct_signal.call_id)?
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if direct.conversation.kind != ConversationKind::Direct {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        // Compute both transitions before modifying the canonical state.
+        // If the derived transition is invalid, the parent must not commit.
+        // The same mutex fences concurrent media creation and Hangup.
+        let snapshot = state.clone();
+        let outcome = (|| {
+            let result = apply_call_signal_in_state(&mut state, actor, direct_signal)?;
+            if result != DurableRecordStatus::Duplicate {
+                if let Some(media) = validated_call_from_state(&state, &direct.scope, derived_call_id)? {
+                    if media.scope != direct.scope
+                        || media.conversation.kind != ConversationKind::PrivateGroup
+                        || media.initiated_by != direct.initiated_by
+                        || media.participants.len() != direct.participants.len()
+                        || !media.participants.iter().all(|member| {
+                            direct.participants.iter().any(|p| p.principal == member.principal)
+                        })
+                    {
+                        return Err(DurableStoreError::PermissionDenied);
+                    }
+                    let kind = match media.signalling_state {
+                        CallSignallingState::Terminated => None,
+                        CallSignallingState::Inviting | CallSignallingState::Ringing => {
+                            Some(CallSignalKind::Cancel)
+                        }
+                        CallSignallingState::Active | CallSignallingState::Reconnecting => {
+                            Some(CallSignalKind::Terminate {
+                                reason: CallTerminationReason::Completed,
+                            })
+                        }
+                    };
+                    if let Some(kind) = kind {
+                        let media_actor = ScopedPrincipal {
+                            scope: direct.scope.clone(),
+                            principal: direct.initiated_by.clone(),
+                        };
+                        let media_signal = CallSignal {
+                            event_id: derived_event_id.clone(),
+                            scope: direct.scope.clone(),
+                            call_id: derived_call_id.clone(),
+                            expected_revision: media.revision,
+                            kind,
+                        };
+                        apply_call_signal_in_state(&mut state, &media_actor, &media_signal)?;
+                    }
+                }
+            }
+            Ok(result)
+        })();
+        if outcome.is_err() {
+            *state = snapshot;
+        }
+        outcome
+    }issionDenied);
         }
         let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
         let key = call_key(&signal.scope, &signal.call_id);
