@@ -307,8 +307,12 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
     // Rollback is now a generation-fenced operation. A stale async failure
     // must never evict a newer Join or release its shared SFU placement.
     assert!(
-        realtime.contains("rollback_realtime_join(&claims, outcome.join_generation, now)"),
-        "only the generation created by this Join may be rolled back"
+        realtime.contains("retire_failed_realtime_join(&claims, outcome.join_generation, now)"),
+        "failed Join must retire the exact generation through canonical Leave"
+    );
+    assert!(
+        realtime.contains("leave_realtime_session_with_sfu_placement(\n                claims,"),
+        "failed Join cleanup must use the existing Leave and provider-close owner"
     );
     assert!(
         realtime.contains("leave_if_sequence(claims, expected_join_generation, now_unix_ms)"),
