@@ -105,7 +105,7 @@ async fn close_pending_webrtc_provider(
         provider.close_session(&session_id)
     });
     match tokio::time::timeout(WEBRTC_PROVIDER_CLOSE_WAIT, close).await {
-        Ok(Ok(Ok(()) | Ok(Err(WebRtcProviderError::SessionUnavailable)))) => Ok(()),
+        Ok(Ok(Ok(()))) | Ok(Ok(Err(WebRtcProviderError::SessionUnavailable))) => Ok(()),
         Ok(Ok(Err(error))) => Err(map_webrtc_provider_error(error)),
         Ok(Err(_)) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
         Err(_) => Err(CanonicalError::new(
