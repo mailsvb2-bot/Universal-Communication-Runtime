@@ -57,10 +57,18 @@ export async function establishRecoveredDirectCall(
     a.callId===b.callId && a.groupId===b.groupId &&
     a.mediaCallId===b.mediaCallId && a.conversationId===b.conversationId;
   if (!same(caller,callee) || caller.callId!==call.callId ||
+      caller.expectedRevision!==call.revision || callee.expectedRevision!==call.revision ||
+      caller.deviceId!==initiator.auth.deviceId || callee.deviceId!==recipient.auth.deviceId ||
+      caller.cryptoCapability!=="group_mls" || callee.cryptoCapability!=="group_mls" ||
+      caller.requiresEndpointOwnedCommit!==true || callee.requiresEndpointOwnedCommit!==true ||
       !caller.groupId.startsWith("fp-mg-") ||
       caller.creatorPrincipalId!==initiator.auth.participantId ||
       caller.peerPrincipalId!==recipient.auth.participantId ||
       callee.creatorPrincipalId!==caller.creatorPrincipalId ||
+      callee.peerPrincipalId!==caller.peerPrincipalId ||
+      caller.groupRevision!==null || callee.groupRevision!==null ||
+      caller.expectedPeerDeviceId!==null || callee.expectedPeerDeviceId!==null ||
+      caller.cryptoStateRef!==null || callee.cryptoStateRef!==null ||
       caller.cryptoEpoch!==null || callee.cryptoEpoch!==null) {
     throw new Error("recovery MLS descriptor is not fresh and Call-bound");
   }
@@ -80,17 +88,23 @@ export async function establishRecoveredDirectCall(
   // endpoint runtime (not an unauthenticated browser Join fragment).
   const decode=(value:string):Uint8Array=>{
     const alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    if (!value || /[^A-Za-z0-9_-]/.test(value)) throw new Error("invalid KeyPackage wire");
+    if (!value || value.length%4===1 || /[^A-Za-z0-9_-]/.test(value)) {
+      throw new Error("invalid KeyPackage wire");
+    }
     let carry=0,bits=0; const out:number[]=[];
     for(const ch of value){carry=(carry<<6)|alphabet.indexOf(ch);bits+=6;
       if(bits>=8){bits-=8;out.push((carry>>bits)&255);}}
     if(bits>0 && (carry&((1<<bits)-1))!==0) throw new Error("noncanonical KeyPackage");
+    if(out.length===0) throw new Error("empty KeyPackage wire");
     return Uint8Array.from(out);
   };
   const staged=await initiator.endpoint.addPeer(caller.groupId,decode(offer.recipientKeyPackageBase64Url));
   const updated=await initiator.host.describeAcceptedCallMls(initiator.auth,ctx);
-  if (!same(caller,updated) || updated.groupRevision===null ||
-      updated.cryptoEpoch!==0 || staged.cryptoEpoch!==1) {
+  if (!same(caller,updated) || updated.deviceId!==initiator.auth.deviceId ||
+      updated.expectedRevision!==call.revision || updated.groupRevision===null ||
+      updated.expectedPeerDeviceId!==null ||
+      updated.cryptoEpoch!==0 || updated.cryptoStateRef!==created.cryptoStateRef ||
+      staged.cryptoEpoch!==1) {
     throw new Error("fresh MLS epoch/revision is not ready for endpoint Commit");
   }
   await initiator.host.addEndpointMlsPeer(initiator.auth,{
@@ -105,7 +119,9 @@ export async function establishRecoveredDirectCall(
   });
   const bootstrap=await recipient.host.fetchEndpointMlsBootstrap(recipient.auth,ctx);
   if (bootstrap.groupId!==caller.groupId || bootstrap.cryptoEpoch!==staged.cryptoEpoch ||
-      bootstrap.cryptoStateRef!==staged.cryptoStateRef) {
+      bootstrap.cryptoStateRef!==staged.cryptoStateRef ||
+      bootstrap.welcomeEpoch!==staged.cryptoEpoch ||
+      bootstrap.welcomeStateRef!==staged.cryptoStateRef) {
     throw new Error("recipient MLS bootstrap does not match endpoint Commit");
   }
   const recovered=await recipient.endpoint.applyWelcome(caller.groupId,bootstrap.welcome,bootstrap.commits);
@@ -114,6 +130,27 @@ export async function establishRecoveredDirectCall(
       !(await initiator.endpoint.verifyRoster(caller.groupId,initiator.auth.deviceId,recipient.auth.deviceId)) ||
       !(await recipient.endpoint.verifyRoster(caller.groupId,recipient.auth.deviceId,initiator.auth.deviceId))) {
     throw new Error("endpoint-only MLS recovery roster or epoch verification failed");
+  }
+  // Re-read BOTH canonical Group views after Commit/Welcome. A valid local
+  // roster alone is insufficient: the Call owner must bind the same committed
+  // epoch to the exact two authenticated Devices before issuing either Join.
+  const [committedCaller,committedRecipient]=await Promise.all([
+    initiator.host.describeAcceptedCallMls(initiator.auth,ctx),
+    recipient.host.describeAcceptedCallMls(recipient.auth,ctx),
+  ]);
+  if (!same(caller,committedCaller) || !same(caller,committedRecipient) ||
+      committedCaller.deviceId!==initiator.auth.deviceId ||
+      committedRecipient.deviceId!==recipient.auth.deviceId ||
+      committedCaller.expectedRevision!==call.revision ||
+      committedRecipient.expectedRevision!==call.revision ||
+      committedCaller.expectedPeerDeviceId!==recipient.auth.deviceId ||
+      committedRecipient.expectedPeerDeviceId!==initiator.auth.deviceId ||
+      committedCaller.cryptoEpoch!==staged.cryptoEpoch ||
+      committedRecipient.cryptoEpoch!==staged.cryptoEpoch ||
+      committedCaller.cryptoStateRef!==staged.cryptoStateRef ||
+      committedRecipient.cryptoStateRef!==staged.cryptoStateRef ||
+      committedCaller.groupRevision===null || committedRecipient.groupRevision===null) {
+    throw new Error("canonical committed MLS peer Device or epoch mismatch");
   }
   // Server-issued Join follows completed endpoint MLS exchange, never precedes it.
   const [callerJoin,recipientJoin]=await Promise.all([
