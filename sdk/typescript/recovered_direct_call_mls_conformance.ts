@@ -10,7 +10,7 @@ const bob:UcrAuthenticatedFirstEntry={tenantId:"t",namespaceId:null,participantI
 const call:UcrDirectCall={tenantId:"t",namespaceId:null,callId:"call-new",callerIdentityId:"alice",calleeIdentityId:"bob",media:"video",state:"active",revision:2};
 let epoch:number|null=null, joins=0, published=false, committed=false;
 const descriptor=(auth:UcrAuthenticatedFirstEntry):UcrEndpointMlsCallDescriptor=>({
-  callId:call.callId,expectedRevision:2,groupRevision:published?3:null,
+  callId:call.callId,expectedRevision:2,groupRevision:published?(committed?4:3):null,
   expectedPeerDeviceId:committed?(auth.deviceId==="a"?"b":"a"):null,
   cryptoEpoch:epoch,cryptoStateRef:epoch===null?null:epoch===0?"epoch-zero":"epoch-one",
   mediaCallId:"fp-m-call-new",groupId:"fp-mg-call-new",conversationId:"fp-mc-call-new",
@@ -57,6 +57,46 @@ const own=(id:string):UcrRecoveredCallEndpoint=>({
 });
 await assert.rejects(establishRecoveredDirectCall("call-new",call,
   {host,endpoint:own("a"),auth:alice},{host,endpoint:own("b"),auth:bob}),/independent/);
+// A host response for another Device must not create even a local MLS Group.
+const foreignDeviceHost={...host,
+  async describeAcceptedCallMls(auth:UcrAuthenticatedFirstEntry) {
+    return {...descriptor(auth),deviceId:"foreign-device"};
+  },
+} as UcrManagedFirstPartyHost;
+await assert.rejects(establishRecoveredDirectCall("call-old",call,
+  {host:foreignDeviceHost,endpoint:own("a"),auth:alice},
+  {host:foreignDeviceHost,endpoint:own("b"),auth:bob}),/fresh and Call-bound/);
+assert.equal(published,false);
+
+// A valid signed Commit is not enough when the canonical BFF reports a
+// different recipient Device for the committed epoch. No Join may be issued.
+const wrongPeerHost={...host,
+  async describeAcceptedCallMls(auth:UcrAuthenticatedFirstEntry) {
+    const state=descriptor(auth);
+    return committed && auth.deviceId==="a"
+      ? {...state,expectedPeerDeviceId:"foreign-device"} : state;
+  },
+} as UcrManagedFirstPartyHost;
+await assert.rejects(establishRecoveredDirectCall("call-old",call,
+  {host:wrongPeerHost,endpoint:own("a"),auth:alice},
+  {host:wrongPeerHost,endpoint:own("b"),auth:bob}),/committed MLS peer Device/);
+assert.equal(joins,0);
+epoch=null;published=false;committed=false;
+
+// A Welcome for a different epoch must be refused before endpoint import.
+const wrongWelcomeHost={...host,
+  async fetchEndpointMlsBootstrap(auth:UcrAuthenticatedFirstEntry,
+    input:{callId:string;expectedRevision:number}) {
+    const bootstrap=await host.fetchEndpointMlsBootstrap(auth,input);
+    return {...bootstrap,welcomeEpoch:bootstrap.welcomeEpoch+1};
+  },
+} as UcrManagedFirstPartyHost;
+await assert.rejects(establishRecoveredDirectCall("call-old",call,
+  {host:wrongWelcomeHost,endpoint:own("a"),auth:alice},
+  {host:wrongWelcomeHost,endpoint:own("b"),auth:bob}),/recipient MLS bootstrap/);
+assert.equal(joins,0);
+epoch=null;published=false;committed=false;
+
 const result=await establishRecoveredDirectCall("call-old",call,
   {host,endpoint:own("a"),auth:alice},{host,endpoint:own("b"),auth:bob});
 assert.equal(result.groupId,"fp-mg-call-new");
