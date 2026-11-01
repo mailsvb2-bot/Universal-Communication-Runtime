@@ -1070,4 +1070,82 @@ mod tests {
             Err(DurableStoreError::PermissionDenied)
         );
     }
+
+    #[test]
+    fn atomic_memory_hangup_rolls_back_on_wrong_derived_binding() {
+        let store = MemoryLocalStore::default();
+        let (conversation, direct, alice, bob) = fixture();
+        store.persist_conversation(&conversation).unwrap();
+        store.create_call(&alice, &direct).unwrap();
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(&direct, "atomic-memory-accept", CallSignalKind::Accept),
+            )
+            .unwrap();
+        let active = store.call(&scope(), &direct.call_id).unwrap().unwrap();
+        let mut impostor = direct.clone();
+        impostor.call_id = CallId::from_opaque(oid("atomic-memory-impostor"));
+        store.create_call(&alice, &impostor).unwrap();
+        let hangup = signal(
+            &active,
+            "atomic-memory-hangup",
+            CallSignalKind::Terminate {
+                reason: CallTerminationReason::Completed,
+            },
+        );
+        assert_eq!(
+            store.terminate_direct_call_with_derived(
+                &bob,
+                &hangup,
+                &impostor.call_id,
+                &EventId::from_opaque(oid("atomic-memory-child-event")),
+            ),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(store.call(&scope(), &direct.call_id).unwrap(), Some(active));
+        assert_eq!(
+            store.apply_call_signal(&bob, &hangup),
+            Ok(DurableRecordStatus::Persisted)
+        );
+    }
+
+    #[test]
+    fn atomic_memory_hangup_without_media_rejects_late_child() {
+        let store = MemoryLocalStore::default();
+        let (conversation, direct, alice, bob) = fixture();
+        store.persist_conversation(&conversation).unwrap();
+        store.create_call(&alice, &direct).unwrap();
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(&direct, "atomic-memory-no-media-accept", CallSignalKind::Accept),
+            )
+            .unwrap();
+        let active = store.call(&scope(), &direct.call_id).unwrap().unwrap();
+        let child_id = CallId::from_opaque(oid("atomic-memory-late-media"));
+        let hangup = signal(
+            &active,
+            "atomic-memory-no-media-hangup",
+            CallSignalKind::Terminate {
+                reason: CallTerminationReason::Completed,
+            },
+        );
+        assert_eq!(
+            store.terminate_direct_call_with_derived(
+                &bob,
+                &hangup,
+                &child_id,
+                &EventId::from_opaque(oid("atomic-memory-no-media-event")),
+            ),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let mut child = direct.clone();
+        child.call_id = child_id;
+        assert_eq!(
+            store.create_call_if_parent_current(&alice, &child, &active),
+            Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
 }
