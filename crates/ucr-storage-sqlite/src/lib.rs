@@ -783,7 +783,7 @@ fn migrate_v52_to_v53(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     endpoint_mls_offer_store::create_v53_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V53)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
