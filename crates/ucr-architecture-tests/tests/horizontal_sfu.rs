@@ -171,7 +171,6 @@ fn horizontal_sfu_async_handoff_separates_validation_from_transport_acceptance()
     assert!(spec.contains("remote `Accepted`"));
 }
 
-
 #[test]
 fn horizontal_sfu_remote_ingress_rechecks_authority_and_stale_receipts_fail_closed() {
     let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
