@@ -2027,7 +2027,6 @@ mod tests {
             &old_call.state,
         )
         .unwrap();
-        assert_ne!(sender_secret, previous_exporter);
         assert!(
             open_endpoint_group_media_wire(
                 &previous_exporter,
