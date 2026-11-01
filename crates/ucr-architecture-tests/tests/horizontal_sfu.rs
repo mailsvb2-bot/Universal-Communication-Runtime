@@ -195,6 +195,24 @@ fn horizontal_sfu_remote_ingress_rechecks_authority_and_stale_receipts_fail_clos
 }
 
 #[test]
+fn local_sfu_sink_receipt_rechecks_live_claims_before_media_ready() {
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let local = realtime
+        .split("    pub fn forward_authenticated_e2ee_media(\\n")
+        .nth(1)
+        .expect("local encrypted SFU media route");
+    let dispatch = local
+        .find("dispatch_validated_forward_batch(&sfu, &batch, sink)")
+        .expect("live SFU dispatch boundary");
+    let ready = local[dispatch..]
+        .find(".mark_media_ready(claims, self.now()?)")
+        .expect("local media-ready transition");
+    let completion = &local[dispatch..dispatch + ready];
+    assert!(completion.contains("self.require_live_transport_claims(claims)?;"));
+    assert!(completion.contains(".require_active_session(claims, self.now()?)"));
+}
+
+#[test]
 fn horizontal_sfu_node_media_listener_is_private_mtls_and_not_a_public_capability_claim() {
     let runtime = read("crates/ucr-runtime/src/lib.rs");
     let runtime_main = read("crates/ucr-runtime/src/main.rs");
