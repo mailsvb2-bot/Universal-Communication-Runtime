@@ -194,8 +194,7 @@ fn apply_call_signal_in_state(
     if !group_actor_current_if_needed(state, &current, &actor.principal) {
         return Err(DurableStoreError::PermissionDenied);
     }
-    if let Some((recorded_actor, existing, applied_revision)) =
-        state.call_signals.get(&signal_key)
+    if let Some((recorded_actor, existing, applied_revision)) = state.call_signals.get(&signal_key)
     {
         if recorded_actor != &actor.principal
             || !duplicate_actor_allowed(&current, &actor.principal, *applied_revision)
@@ -342,8 +341,9 @@ impl CallStore for MemoryLocalStore {
             return Err(DurableStoreError::PermissionDenied);
         }
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        let direct = validated_call_from_state(&state, &direct_signal.scope, &direct_signal.call_id)?
-            .ok_or(DurableStoreError::InvalidRecord)?;
+        let direct =
+            validated_call_from_state(&state, &direct_signal.scope, &direct_signal.call_id)?
+                .ok_or(DurableStoreError::InvalidRecord)?;
         if direct.conversation.kind != ConversationKind::Direct {
             return Err(DurableStoreError::PermissionDenied);
         }
@@ -357,8 +357,7 @@ impl CallStore for MemoryLocalStore {
         let media_key = call_key(&direct.scope, derived_call_id);
         let direct_event_key =
             call_signal_key(&direct.scope, direct_signal.event_id.as_opaque().as_str());
-        let media_event_key =
-            call_signal_key(&direct.scope, derived_event_id.as_opaque().as_str());
+        let media_event_key = call_signal_key(&direct.scope, derived_event_id.as_opaque().as_str());
         let direct_before = state.calls.get(&direct_key).cloned();
         let media_before = state.calls.get(&media_key).cloned();
         let direct_event_before = state.call_signals.get(&direct_event_key).cloned();
@@ -366,13 +365,18 @@ impl CallStore for MemoryLocalStore {
         let outcome = (|| {
             let result = apply_call_signal_in_state(&mut state, actor, direct_signal)?;
             if result != DurableRecordStatus::Duplicate {
-                if let Some(media) = validated_call_from_state(&state, &direct.scope, derived_call_id)? {
+                if let Some(media) =
+                    validated_call_from_state(&state, &direct.scope, derived_call_id)?
+                {
                     if media.scope != direct.scope
                         || media.conversation.kind != ConversationKind::PrivateGroup
                         || media.initiated_by != direct.initiated_by
                         || media.participants.len() != direct.participants.len()
                         || !media.participants.iter().all(|member| {
-                            direct.participants.iter().any(|p| p.principal == member.principal)
+                            direct
+                                .participants
+                                .iter()
+                                .any(|p| p.principal == member.principal)
                         })
                     {
                         return Err(DurableStoreError::PermissionDenied);
@@ -414,12 +418,20 @@ impl CallStore for MemoryLocalStore {
                 state.calls.insert(media_key, call);
             }
             match direct_event_before {
-                Some(record) => { state.call_signals.insert(direct_event_key, record); }
-                None => { state.call_signals.remove(&direct_event_key); }
+                Some(record) => {
+                    state.call_signals.insert(direct_event_key, record);
+                }
+                None => {
+                    state.call_signals.remove(&direct_event_key);
+                }
             }
             match media_event_before {
-                Some(record) => { state.call_signals.insert(media_event_key, record); }
-                None => { state.call_signals.remove(&media_event_key); }
+                Some(record) => {
+                    state.call_signals.insert(media_event_key, record);
+                }
+                None => {
+                    state.call_signals.remove(&media_event_key);
+                }
             }
         }
         outcome
@@ -1173,7 +1185,11 @@ mod tests {
         store
             .apply_call_signal(
                 &bob,
-                &signal(&direct, "atomic-memory-no-media-accept", CallSignalKind::Accept),
+                &signal(
+                    &direct,
+                    "atomic-memory-no-media-accept",
+                    CallSignalKind::Accept,
+                ),
             )
             .unwrap();
         let active = store.call(&scope(), &direct.call_id).unwrap().unwrap();
@@ -1201,5 +1217,4 @@ mod tests {
             Err(DurableStoreError::PermissionDenied)
         );
     }
-
 }
