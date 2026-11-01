@@ -306,6 +306,35 @@ fn validate_endpoint_mls_commit_material(
     Ok(())
 }
 
+// Permanent historical custody evidence is an admission fence, not just a
+// diagnostic. Endpoint-only writes and trusted peer lookup must consult the
+// same canonical SQLite quarantine under their existing connection/transaction.
+fn require_group_not_quarantined(
+    connection: &Connection,
+    scope: &TenantScope,
+    group_id: &GroupId,
+) -> Result<(), DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let held: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM server_mls_custody_quarantine
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4)",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                group_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if held {
+        Err(DurableStoreError::Conflict)
+    } else {
+        Ok(())
+    }
+}
+
 impl SqliteLocalStore {
     /// Read the exact creator/recipient Device pair from the canonical,
     /// committed endpoint MLS Add. Never infer a peer Device from a Call
@@ -319,6 +348,7 @@ impl SqliteLocalStore {
         group_id: &GroupId,
     ) -> Result<Option<(String, String)>, DurableStoreError> {
         let connection = self.lock_connection()?;
+        require_group_not_quarantined(&connection, scope, group_id)?;
         let ns = namespace_storage_key(scope);
         let mut statement = connection
             .prepare(
@@ -383,6 +413,8 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
+        require_group_not_quarantined(&transaction, &actor.scope, &requested_change.group_id)
+            .map_err(GroupMlsStoreError::Durable)?;
         require_device_for_principal(
             &transaction,
             &actor.scope,
@@ -1831,6 +1863,46 @@ mod phase29_atomic_mls_tests {
         let state = current_crypto_state(&scope(), &group.group_id, &mls).unwrap();
         let devices = member_device_ids(&mls, &scope()).unwrap();
         (state, devices)
+    }
+
+    #[test]
+    fn quarantine_blocks_endpoint_commit_owner_and_peer_lookup_after_restart() {
+        let db = TestDb::new();
+        let group_id = GroupId::from_opaque(oid("fp-mg-held-endpoint"));
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("canonical database");
+            let connection = store.lock_connection().expect("database");
+            connection
+                .execute(
+                    "INSERT INTO server_mls_custody_quarantine
+                     (tenant_id, namespace_present, namespace_id, group_id,
+                      reason, incident_ref, detected_at_unix_ms)
+                     VALUES (?1, 0, '', ?2, 'operator_hold', 'held-endpoint', 1)",
+                    params![
+                        scope().tenant_id.as_opaque().as_str(),
+                        group_id.as_opaque().as_str(),
+                    ],
+                )
+                .expect("persist hold");
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen database");
+        let connection = reopened.lock_connection().expect("canonical connection");
+        assert_eq!(
+            require_group_not_quarantined(&connection, &scope(), &group_id),
+            Err(DurableStoreError::Conflict),
+            "endpoint commit transaction must deny a held group",
+        );
+        drop(connection);
+        assert!(matches!(
+            reopened.endpoint_mls_direct_call_device_pair(&scope(), &group_id),
+            Err(DurableStoreError::Conflict)
+        ));
+        let safe_group = GroupId::from_opaque(oid("fp-mg-clean-endpoint"));
+        assert_eq!(
+            reopened.endpoint_mls_direct_call_device_pair(&scope(), &safe_group),
+            Ok(None),
+            "unheld groups keep their ordinary first-entry path",
+        );
     }
 
     #[test]
