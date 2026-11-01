@@ -159,4 +159,14 @@ await assert.rejects(establishRecoveredDirectCall("call-old",call,
   {host:hungUpHost,endpoint:own("b"),auth:bob}),/changed after MLS Join issuance/);
 assert.equal(inspection,2);
 assert.equal(joins,2);
+// A still-active Call at a NEW revision is not the same accepted snapshot.
+// A concurrent signal/re-negotiation after Join issuance must also fail closed.
+epoch=null;published=false;committed=false;joins=0;
+const revisedHost={...host,
+  async getDirectCall(){return {...call,revision:call.revision+1};},
+} as UcrManagedFirstPartyHost;
+await assert.rejects(establishRecoveredDirectCall("call-old",call,
+  {host:revisedHost,endpoint:own("a"),auth:alice},
+  {host:revisedHost,endpoint:own("b"),auth:bob}),/changed after MLS Join issuance/);
+assert.equal(joins,2);
 console.log("contract-only recovered endpoint MLS + canonical Join orchestration (NOT live media)");
