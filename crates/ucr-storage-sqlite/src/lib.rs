@@ -770,6 +770,9 @@ fn migrate_v53_to_v54(connection: &mut Connection) -> Result<(), DurableStoreErr
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
     group_mls_store::create_v54_objects(&transaction)?;
+    // Persist historic server-host quarantine atomically with the schema
+    // version bump. A crash must never leave v54 marked usable without holds.
+    group_mls_store::backfill_legacy_host_quarantine(&transaction)?;
     transaction
         .pragma_update(None, "user_version", SQLITE_SCHEMA_V54)
         .map_err(|error| map_sqlite_error(&error))?;
