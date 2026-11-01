@@ -4980,7 +4980,9 @@ mod sfu_placement_lifecycle_tests {
             .expect("provider close must return within its bounded wait")
             .expect("close task must complete");
         assert_eq!(
-            first_result.expect_err("blocked close cannot be acknowledged").code,
+            first_result
+                .expect_err("blocked close cannot be acknowledged")
+                .code,
             CanonicalErrorCode::TemporarilyUnavailable
         );
         assert!(
@@ -5023,13 +5025,9 @@ mod sfu_placement_lifecycle_tests {
         })
         .await
         .expect("completed blocking call must release its session guard");
-        close_pending_webrtc_provider(
-            provider_dyn,
-            blocked.session_id.clone(),
-            in_flight,
-        )
-        .await
-        .expect("a later retry can confirm idempotent provider shutdown");
+        close_pending_webrtc_provider(provider_dyn, blocked.session_id.clone(), in_flight)
+            .await
+            .expect("a later retry can confirm idempotent provider shutdown");
         assert_eq!(
             registry
                 .pending_webrtc_closes()
