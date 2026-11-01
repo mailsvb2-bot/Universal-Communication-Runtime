@@ -387,8 +387,7 @@ where
     // Never reuse its Group ID, even after membership changes.
     if members.iter().any(|member| {
         member.member == legacy_host.principal
-            || (member.state == GroupMemberState::Active
-                && !participants.contains(&member.member))
+            || (member.state == GroupMemberState::Active && !participants.contains(&member.member))
     }) {
         return Err(MediaRuntimeError::Conflict);
     }
