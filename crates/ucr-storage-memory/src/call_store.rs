@@ -296,7 +296,19 @@ impl CallStore for MemoryLocalStore {
         // Compute both transitions before modifying the canonical state.
         // If the derived transition is invalid, the parent must not commit.
         // The same mutex fences concurrent media creation and Hangup.
-        let snapshot = state.clone();
+        // Only these two canonical maps can be mutated by the signal helper.
+        // Preserve exact affected entries for rollback without cloning the
+        // entire MemoryState (which also owns unrelated credentials/records).
+        let direct_key = call_key(&direct.scope, &direct.call_id);
+        let media_key = call_key(&direct.scope, derived_call_id);
+        let direct_event_key =
+            call_signal_key(&direct.scope, direct_signal.event_id.as_opaque().as_str());
+        let media_event_key =
+            call_signal_key(&direct.scope, derived_event_id.as_opaque().as_str());
+        let direct_before = state.calls.get(&direct_key).cloned();
+        let media_before = state.calls.get(&media_key).cloned();
+        let direct_event_before = state.call_signals.get(&direct_event_key).cloned();
+        let media_event_before = state.call_signals.get(&media_event_key).cloned();
         let outcome = (|| {
             let result = apply_call_signal_in_state(&mut state, actor, direct_signal)?;
             if result != DurableRecordStatus::Duplicate {
@@ -341,7 +353,20 @@ impl CallStore for MemoryLocalStore {
             Ok(result)
         })();
         if outcome.is_err() {
-            *state = snapshot;
+            if let Some(call) = direct_before {
+                state.calls.insert(direct_key, call);
+            }
+            if let Some(call) = media_before {
+                state.calls.insert(media_key, call);
+            }
+            match direct_event_before {
+                Some(record) => { state.call_signals.insert(direct_event_key, record); }
+                None => { state.call_signals.remove(&direct_event_key); }
+            }
+            match media_event_before {
+                Some(record) => { state.call_signals.insert(media_event_key, record); }
+                None => { state.call_signals.remove(&media_event_key); }
+            }
         }
         outcome
     }issionDenied);
