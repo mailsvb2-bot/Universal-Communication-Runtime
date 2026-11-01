@@ -369,48 +369,6 @@ impl CallStore for MemoryLocalStore {
             }
         }
         outcome
-    }issionDenied);
-        }
-        let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
-        let key = call_key(&signal.scope, &signal.call_id);
-        let signal_key = call_signal_key(&signal.scope, signal.event_id.as_opaque().as_str());
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        let current = validated_call_from_state(&state, &signal.scope, &signal.call_id)?
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        if !group_actor_current_if_needed(&state, &current, &actor.principal) {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        if let Some((recorded_actor, existing, applied_revision)) =
-            state.call_signals.get(&signal_key)
-        {
-            if recorded_actor != &actor.principal
-                || !duplicate_actor_allowed(&current, &actor.principal, *applied_revision)
-            {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            return if existing == &fingerprint {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        if !active_call_participant(&current, &actor.principal) {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        require_group_signal_target_if_needed(&state, &current, signal)?;
-        let next = apply_call_signal(&current, &actor.scope, &actor.principal, signal)
-            .map_err(map_call_error)?;
-        let event_key = event_key_from_parts(&signal.scope, signal.event_id.as_opaque().as_str());
-        if state.events.contains_key(&event_key) || state.group_changes.contains_key(&event_key) {
-            return Err(DurableStoreError::Conflict);
-        }
-        let applied_revision = next.revision;
-        state.calls.insert(key, next);
-        state.call_signals.insert(
-            signal_key,
-            (actor.principal.clone(), fingerprint, applied_revision),
-        );
-        Ok(DurableRecordStatus::Persisted)
     }
 }
 
