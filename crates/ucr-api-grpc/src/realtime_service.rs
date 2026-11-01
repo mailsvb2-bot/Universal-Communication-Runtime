@@ -2258,6 +2258,13 @@ where
             dispatch_validated_forward_batch(&sfu, &batch, sink)
                 .map_err(|error| map_conference_error(&ConferenceError::Sfu(error)))?
         };
+        // The synchronous sink can finish after a concurrent Hangup, Device revoke,
+        // or Leave. As with horizontal routing, never acknowledge stale delivery
+        // or promote media-ready from a no-longer-authorized session.
+        self.require_live_transport_claims(claims)?;
+        self.registry
+            .require_active_session(claims, self.now()?)
+            .map_err(map_registry_error)?;
         if outcome.accepted_recipients > 0
             && let Some(transition) = self
                 .registry
