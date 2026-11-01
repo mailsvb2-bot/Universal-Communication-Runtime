@@ -19,6 +19,7 @@ const descriptor=(auth:UcrAuthenticatedFirstEntry):UcrEndpointMlsCallDescriptor=
   cryptoCapability:"ucr.group.mls",requiresEndpointOwnedCommit:true,
 });
 const host:UcrManagedFirstPartyHost={
+  async getDirectCall(){return call;},
   async describeAcceptedCallMls(auth){return descriptor(auth);},
   async publishEndpointMlsGroup(){assert.equal(published,false);published=true;epoch=0;},
   async publishEndpointMlsOffer(_auth,input){assert.deepEqual([...input.keyPackage],[1,2,3]);},
@@ -145,5 +146,17 @@ assert.equal(result.groupId,"fp-mg-call-new");
 assert.equal(result.mediaCallId,"fp-m-call-new");
 assert.equal(result.callerJoin.deviceId,"a");
 assert.equal(result.recipientJoin.deviceId,"b");
+assert.equal(joins,2);
+// Hangup concurrent with final issuance must deny the recovered handoff.
+epoch=null;published=false;committed=false;joins=0;
+let inspection=0;
+const hungUpHost={...host,
+  async getDirectCall(){inspection++;return inspection===2
+    ? {...call,state:"terminated" as const,revision:3} : call;},
+} as UcrManagedFirstPartyHost;
+await assert.rejects(establishRecoveredDirectCall("call-old",call,
+  {host:hungUpHost,endpoint:own("a"),auth:alice},
+  {host:hungUpHost,endpoint:own("b"),auth:bob}),/changed after MLS Join issuance/);
+assert.equal(inspection,2);
 assert.equal(joins,2);
 console.log("contract-only recovered endpoint MLS + canonical Join orchestration (NOT live media)");
