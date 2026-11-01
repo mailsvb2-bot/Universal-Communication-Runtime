@@ -2256,6 +2256,27 @@ pub(super) fn create_v54_objects(transaction: &Transaction<'_>) -> Result<(), Du
     verify_v54_objects(transaction)
 }
 
+/// Reconstruct immutable legacy-host quarantine from canonical membership history.
+/// Restored pre-v54 databases must not regain media access just because the
+/// historical quarantine table was absent in an older backup.
+pub(super) fn backfill_legacy_host_quarantine(
+    connection: &Connection,
+) -> Result<(), DurableStoreError> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO server_mls_custody_quarantine
+             (tenant_id, namespace_present, namespace_id, group_id,
+              reason, incident_ref, detected_at_unix_ms)
+             SELECT tenant_id, namespace_present, namespace_id, group_id,
+                    'legacy_host', 'auto-v54-restore-membership',
+                    CAST(strftime('%s','now') AS INTEGER)*1000
+             FROM group_memberships WHERE principal_id='fp-media-host'",
+            [],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    Ok(())
+}
+
 pub(super) fn verify_v54_objects(connection: &Connection) -> Result<(), DurableStoreError> {
     verify_table_columns(
         connection,
