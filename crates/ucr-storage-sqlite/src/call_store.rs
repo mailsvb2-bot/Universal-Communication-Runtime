@@ -448,13 +448,13 @@ fn apply_call_signal_in_transaction(
         return Err(DurableStoreError::PermissionDenied);
     }
     let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
-    let current = load_call_from(&transaction, &signal.scope, &signal.call_id)?
+    let current = load_call_from(transaction, &signal.scope, &signal.call_id)?
         .ok_or(DurableStoreError::InvalidRecord)?;
-    if !group_actor_current_if_needed(&transaction, &current, &actor.principal)? {
+    if !group_actor_current_if_needed(transaction, &current, &actor.principal)? {
         return Err(DurableStoreError::PermissionDenied);
     }
     if let Some((recorded_actor, existing, applied_revision)) = load_signal_record(
-        &transaction,
+        transaction,
         &signal.scope,
         signal.event_id.as_opaque().as_str(),
     )? {
@@ -472,27 +472,27 @@ fn apply_call_signal_in_transaction(
     if !active_call_participant(&current, &actor.principal) {
         return Err(DurableStoreError::PermissionDenied);
     }
-    require_group_signal_target_if_needed(&transaction, &current, signal)?;
+    require_group_signal_target_if_needed(transaction, &current, signal)?;
     let next = apply_call_signal(&current, &actor.scope, &actor.principal, signal)
         .map_err(map_call_error)?;
-    if super::event_journal::load_event_by_id(&transaction, &signal.scope, &signal.event_id)?
+    if super::event_journal::load_event_by_id(transaction, &signal.scope, &signal.event_id)?
         .is_some()
         || group_change_reserves_event_id(
-            &transaction,
+            transaction,
             &signal.scope,
             signal.event_id.as_opaque().as_str(),
         )?
         || super::group_mls_store::mls_transition_reserves_event_id(
-            &transaction,
+            transaction,
             &signal.scope,
             signal.event_id.as_opaque().as_str(),
         )?
     {
         return Err(DurableStoreError::Conflict);
     }
-    update_call(&transaction, &next)?;
-    replace_participants(&transaction, &next)?;
-    insert_signal_record(&transaction, actor, signal, &fingerprint, next.revision)?;
+    update_call(transaction, &next)?;
+    replace_participants(transaction, &next)?;
+    insert_signal_record(transaction, actor, signal, &fingerprint, next.revision)?;
     Ok(DurableRecordStatus::Persisted)
 }
 
