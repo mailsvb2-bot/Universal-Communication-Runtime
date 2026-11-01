@@ -659,7 +659,10 @@ impl CallStore for SqliteLocalStore {
                     || media.initiated_by != direct.initiated_by
                     || media.participants.len() != direct.participants.len()
                     || !media.participants.iter().all(|member| {
-                        direct.participants.iter().any(|p| p.principal == member.principal)
+                        direct
+                            .participants
+                            .iter()
+                            .any(|p| p.principal == member.principal)
                     })
                 {
                     return Err(DurableStoreError::PermissionDenied);
@@ -1887,7 +1890,11 @@ mod tests {
         joining
             .apply_call_signal(
                 &bob,
-                &signal(&direct, "atomic-sqlite-no-media-accept", CallSignalKind::Accept),
+                &signal(
+                    &direct,
+                    "atomic-sqlite-no-media-accept",
+                    CallSignalKind::Accept,
+                ),
             )
             .unwrap();
         let active = joining.call(&scope(), &direct.call_id).unwrap().unwrap();
@@ -1923,5 +1930,4 @@ mod tests {
             Err(DurableStoreError::PermissionDenied)
         );
     }
-
 }
