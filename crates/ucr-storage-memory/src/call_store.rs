@@ -1,7 +1,8 @@
 use ucr_core::{CallStore, DurableRecordStatus, DurableStoreError, GroupCallLookupStore};
 use ucr_model::{
     CallId, CallParticipantState, CallParticipantUpdateKind, CallSession, CallSignal,
-    CallSignalKind, CallSignallingState, ConversationKind, GroupId, GroupMemberState,
+    CallSignalKind, CallSignallingState, CallTerminationReason, ConversationKind, GroupId,
+    GroupMemberState,
     GroupMembership, GroupRecord, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
