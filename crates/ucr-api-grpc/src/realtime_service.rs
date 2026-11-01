@@ -5837,7 +5837,6 @@ mod sfu_placement_lifecycle_tests {
             "failed Join's signed grant must not be replayable"
         );
     }
-
 }
 
 #[cfg(test)]
