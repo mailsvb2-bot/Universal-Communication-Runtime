@@ -652,46 +652,50 @@ impl CallStore for SqliteLocalStore {
         // Apply the canonical direct signal and derived media termination under
         // ONE SQLite IMMEDIATE transaction, shared with Join's parent fence.
         let outcome = apply_call_signal_in_transaction(&transaction, actor, direct_signal)?;
-        if outcome != DurableRecordStatus::Duplicate {
-            if let Some(media) = load_call_from(&transaction, &direct.scope, derived_call_id)? {
-                if media.scope != direct.scope
-                    || media.conversation.kind != ConversationKind::PrivateGroup
-                    || media.initiated_by != direct.initiated_by
-                    || media.participants.len() != direct.participants.len()
-                    || !media.participants.iter().all(|member| {
-                        direct
-                            .participants
-                            .iter()
-                            .any(|p| p.principal == member.principal)
+        if outcome == DurableRecordStatus::Duplicate {
+            transaction
+                .commit()
+                .map_err(|error| map_sqlite_error(&error))?;
+            return Ok(outcome);
+        }
+        if let Some(media) = load_call_from(&transaction, &direct.scope, derived_call_id)? {
+            if media.scope != direct.scope
+                || media.conversation.kind != ConversationKind::PrivateGroup
+                || media.initiated_by != direct.initiated_by
+                || media.participants.len() != direct.participants.len()
+                || !media.participants.iter().all(|member| {
+                    direct
+                        .participants
+                        .iter()
+                        .any(|p| p.principal == member.principal)
+                })
+            {
+                return Err(DurableStoreError::PermissionDenied);
+            }
+            let kind = match media.signalling_state {
+                CallSignallingState::Terminated => None,
+                CallSignallingState::Inviting | CallSignallingState::Ringing => {
+                    Some(CallSignalKind::Cancel)
+                }
+                CallSignallingState::Active | CallSignallingState::Reconnecting => {
+                    Some(CallSignalKind::Terminate {
+                        reason: CallTerminationReason::Completed,
                     })
-                {
-                    return Err(DurableStoreError::PermissionDenied);
                 }
-                let kind = match media.signalling_state {
-                    CallSignallingState::Terminated => None,
-                    CallSignallingState::Inviting | CallSignallingState::Ringing => {
-                        Some(CallSignalKind::Cancel)
-                    }
-                    CallSignallingState::Active | CallSignallingState::Reconnecting => {
-                        Some(CallSignalKind::Terminate {
-                            reason: CallTerminationReason::Completed,
-                        })
-                    }
+            };
+            if let Some(kind) = kind {
+                let media_actor = ScopedPrincipal {
+                    scope: direct.scope.clone(),
+                    principal: direct.initiated_by.clone(),
                 };
-                if let Some(kind) = kind {
-                    let media_actor = ScopedPrincipal {
-                        scope: direct.scope.clone(),
-                        principal: direct.initiated_by.clone(),
-                    };
-                    let media_signal = CallSignal {
-                        event_id: derived_event_id.clone(),
-                        scope: direct.scope.clone(),
-                        call_id: derived_call_id.clone(),
-                        expected_revision: media.revision,
-                        kind,
-                    };
-                    apply_call_signal_in_transaction(&transaction, &media_actor, &media_signal)?;
-                }
+                let media_signal = CallSignal {
+                    event_id: derived_event_id.clone(),
+                    scope: direct.scope.clone(),
+                    call_id: derived_call_id.clone(),
+                    expected_revision: media.revision,
+                    kind,
+                };
+                apply_call_signal_in_transaction(&transaction, &media_actor, &media_signal)?;
             }
         }
         transaction
