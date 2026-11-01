@@ -2140,7 +2140,7 @@ mod phase29_atomic_mls_tests {
 }
 
 const V54_OBJECTS_SQL: &str = r#"
-CREATE TABLE server_mls_custody_quarantine (
+CREATE TABLE IF NOT EXISTS server_mls_custody_quarantine (
   tenant_id TEXT NOT NULL,
   namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0,1)),
   namespace_id TEXT NOT NULL,
@@ -2152,20 +2152,22 @@ CREATE TABLE server_mls_custody_quarantine (
   CHECK((namespace_present=0 AND namespace_id='') OR
         (namespace_present=1 AND namespace_id<>''))
 ) WITHOUT ROWID;
-CREATE TRIGGER quarantine_delete_denied
+CREATE TRIGGER IF NOT EXISTS quarantine_delete_denied
 BEFORE DELETE ON server_mls_custody_quarantine
 BEGIN SELECT RAISE(ABORT,'security quarantine is append-only'); END;
-CREATE TRIGGER quarantine_identity_update_denied
+CREATE TRIGGER IF NOT EXISTS quarantine_identity_update_denied
 BEFORE UPDATE OF tenant_id,namespace_present,namespace_id,group_id
 ON server_mls_custody_quarantine
 BEGIN SELECT RAISE(ABORT,'quarantine identity is immutable'); END;
 "#;
 
 pub(super) fn create_v54_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
-    transaction.execute_batch(V54_OBJECTS_SQL).map_err(|error| {
-        eprintln!("UCR_MLS_CUSTODY_V54_SCHEMA_ERROR: {error}");
-        map_schema_change_error(&error)
-    })
+    transaction
+        .execute_batch(V54_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))?;
+    // Historical-schema fixtures and restored databases may already carry a
+    // canonical v54 quarantine table. Never replace it or lose prior holds.
+    verify_v54_objects(transaction)
 }
 
 pub(super) fn verify_v54_objects(connection: &Connection) -> Result<(), DurableStoreError> {
