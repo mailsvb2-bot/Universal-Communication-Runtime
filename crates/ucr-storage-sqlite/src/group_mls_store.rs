@@ -1834,32 +1834,36 @@ mod phase29_atomic_mls_tests {
     }
 
     #[test]
-    fn server_owned_mls_group_never_releases_welcome_or_commit_bootstrap() {
+    fn quarantined_first_party_group_never_releases_welcome_or_commit_bootstrap() {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(db.path()).expect("canonical database");
-        let (group, _owner, _bob) = bootstrap(&store);
-        let result = store.mls_bootstrap_for_device(
-            &scope(),
-            &group.group_id,
-            &device("phase29-owner-device"),
-        );
-        assert!(
-            matches!(
-                result,
-                Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict))
+        let group_id = GroupId::from_opaque(oid("fp-mg-compromised-media"));
+        {
+            let connection = store.lock_connection().expect("database");
+            connection
+                .execute(
+                    "INSERT INTO server_mls_custody_quarantine
+                     (tenant_id, namespace_present, namespace_id, group_id,
+                      reason, incident_ref, detected_at_unix_ms)
+                     VALUES (?1, 0, '', ?2, 'operator_hold', 'historical-backup', 1)",
+                    params![
+                        scope().tenant_id.as_opaque().as_str(),
+                        group_id.as_opaque().as_str(),
+                    ],
+                )
+                .expect("permanent incident");
+        }
+        assert!(matches!(
+            store.mls_bootstrap_for_device(
+                &scope(),
+                &group_id,
+                &device("phase29-owner-device"),
             ),
-            "server-owned MLS group cannot return historical bootstrap"
-        );
-        let connection = store.lock_connection().expect("quarantine connection");
-        let count: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM server_mls_custody_quarantine
-                 WHERE group_id=?1",
-                [group.group_id.as_opaque().as_str()],
-                |row| row.get(0),
-            )
-            .expect("quarantine persists");
-        assert_eq!(count, 1);
+            Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict))
+        ));
+        assert!(store
+            .server_possesses_mls_group(&scope(), &group_id)
+            .expect("persistent quarantine"));
     }
 
     #[test]
