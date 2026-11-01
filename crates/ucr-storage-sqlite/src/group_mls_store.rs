@@ -1579,6 +1579,12 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
         group_id: &GroupId,
         device_id: &DeviceId,
     ) -> Result<Option<MlsDeviceBootstrap>, GroupMlsStoreError> {
+        // Never deliver Welcome/Commit history for a historically exposed MLS
+        // group. The custody probe durably quarantines detected host state.
+        // Its connection lock is released before this read path takes its own.
+        if self.server_possesses_mls_group(scope, group_id)? {
+            return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
+        }
         let connection = self.lock_connection()?;
         require_active_device(&connection, scope, device_id)?;
         let Some((admission_event_id, welcome, welcome_crypto_state)) =
