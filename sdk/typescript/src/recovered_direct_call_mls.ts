@@ -193,7 +193,7 @@ export async function establishRecoveredDirectCall(
         live.tenantId!==call.tenantId || live.namespaceId!==call.namespaceId ||
         live.callerIdentityId!==call.callerIdentityId ||
         live.calleeIdentityId!==call.calleeIdentityId || live.media!==call.media ||
-        !Number.isSafeInteger(live.revision) || live.revision<call.revision) {
+        !Number.isSafeInteger(live.revision) || live.revision!==call.revision) {
       throw new Error("recovered Call changed after MLS Join issuance");
     }
   }
