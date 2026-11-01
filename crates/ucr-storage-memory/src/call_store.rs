@@ -2,8 +2,7 @@ use ucr_core::{CallStore, DurableRecordStatus, DurableStoreError, GroupCallLooku
 use ucr_model::{
     CallId, CallParticipantState, CallParticipantUpdateKind, CallSession, CallSignal,
     CallSignalKind, CallSignallingState, CallTerminationReason, ConversationKind, GroupId,
-    GroupMemberState,
-    GroupMembership, GroupRecord, PrincipalRef, ScopedPrincipal, TenantScope,
+    GroupMemberState, GroupMembership, GroupRecord, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     active_call_participant, apply_call_signal, call_creation_fingerprint, call_signal_fingerprint,
