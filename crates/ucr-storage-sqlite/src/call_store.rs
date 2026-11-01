@@ -439,6 +439,63 @@ fn create_call_with_parent_guard(
     Ok(DurableRecordStatus::Persisted)
 }
 
+fn apply_call_signal_in_transaction(
+    transaction: &Transaction<'_>,
+    actor: &ScopedPrincipal,
+    signal: &CallSignal,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    if actor.scope != signal.scope {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
+    let current = load_call_from(&transaction, &signal.scope, &signal.call_id)?
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    if !group_actor_current_if_needed(&transaction, &current, &actor.principal)? {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    if let Some((recorded_actor, existing, applied_revision)) = load_signal_record(
+        &transaction,
+        &signal.scope,
+        signal.event_id.as_opaque().as_str(),
+    )? {
+        if recorded_actor != actor.principal
+            || !duplicate_actor_allowed(&current, &actor.principal, applied_revision)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        return if existing == fingerprint {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    if !active_call_participant(&current, &actor.principal) {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    require_group_signal_target_if_needed(&transaction, &current, signal)?;
+    let next = apply_call_signal(&current, &actor.scope, &actor.principal, signal)
+        .map_err(map_call_error)?;
+    if super::event_journal::load_event_by_id(&transaction, &signal.scope, &signal.event_id)?
+        .is_some()
+        || group_change_reserves_event_id(
+            &transaction,
+            &signal.scope,
+            signal.event_id.as_opaque().as_str(),
+        )?
+        || super::group_mls_store::mls_transition_reserves_event_id(
+            &transaction,
+            &signal.scope,
+            signal.event_id.as_opaque().as_str(),
+        )?
+    {
+        return Err(DurableStoreError::Conflict);
+    }
+    update_call(&transaction, &next)?;
+    replace_participants(&transaction, &next)?;
+    insert_signal_record(&transaction, actor, signal, &fingerprint, next.revision)?;
+    Ok(DurableRecordStatus::Persisted)
+}
+
 impl CallStore for SqliteLocalStore {
     fn create_call(
         &self,
@@ -503,69 +560,91 @@ impl CallStore for SqliteLocalStore {
         }
         let connection = self.lock_connection()?;
         let namespace = namespace_storage_key(&recipient.scope);
-        let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
-        // Use the canonical participant index. Neither polling nor pagination
-        // scans another recipient's Call details or creates an inbox table.
-        let mut statement = connection
-            .prepare(
-                "SELECT c.call_id
-                 FROM calls c
-                 JOIN call_participants p
-                   ON p.tenant_id=c.tenant_id
-                  AND p.namespace_present=c.namespace_present
-                  AND p.namespace_id=c.namespace_id
-                  AND p.call_id=c.call_id
-                 WHERE c.tenant_id=?1 AND c.namespace_present=?2 AND c.namespace_id=?3
-                   AND p.principal_id=?4 AND p.principal_kind=?5
-                   AND p.state IN ('invited','ringing')
-                   AND c.conversation_kind='direct'
-                   AND c.signalling_state IN ('inviting','ringing')
-                   AND NOT (c.initiated_by_principal_id=?4
-                            AND c.initiated_by_principal_kind=?5)
-                 ORDER BY c.call_id LIMIT ?6",
-            )
-            .map_err(|error| map_sqlite_error(&error))?;
-        let ids = statement
-            .query_map(
-                params![
-                    recipient.scope.tenant_id.as_opaque().as_str(),
-                    namespace.present,
-                    namespace.value,
-                    recipient.principal.principal_id.as_opaque().as_str(),
-                    group_store::principal_kind_name(recipient.principal.kind),
-                    limit,
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(|error| map_sqlite_error(&error))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| map_sqlite_error(&error))?;
-        drop(statement);
-        ids.into_iter()
-            .map(|raw| {
-                let id = CallId::from_opaque(parse_id(&raw)?);
-                let call = load_call_from(&connection, &recipient.scope, &id)?
-                    .ok_or(DurableStoreError::Corrupt)?;
-                if !active_call_participant(&call, &recipient.principal) {
-                    return Err(DurableStoreError::Corrupt);
-                }
-                Ok(call)
-            })
-            .collect()
-    }
-
-    fn apply_call_signal(
+        let limit = i64::try_from(max_items).map_err(|_| DurableStoreError:    fn apply_call_signal(
         &self,
         actor: &ScopedPrincipal,
         signal: &CallSignal,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        if actor.scope != signal.scope {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let outcome = apply_call_signal_in_transaction(&transaction, actor, signal)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(outcome)
+    }
+
+    fn terminate_direct_call_with_derived(
+        &self,
+        actor: &ScopedPrincipal,
+        direct_signal: &CallSignal,
+        derived_call_id: &CallId,
+        derived_event_id: &ucr_model::EventId,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if actor.scope != direct_signal.scope
+            || derived_call_id == &direct_signal.call_id
+            || !matches!(&direct_signal.kind, CallSignalKind::Terminate { .. })
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let direct = load_call_from(&transaction, &direct_signal.scope, &direct_signal.call_id)?
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if direct.conversation.kind != ConversationKind::Direct {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        // Apply the canonical direct signal and derived media termination under
+        // ONE SQLite IMMEDIATE transaction, shared with Join's parent fence.
+        let outcome = apply_call_signal_in_transaction(&transaction, actor, direct_signal)?;
+        if outcome != DurableRecordStatus::Duplicate {
+            if let Some(media) = load_call_from(&transaction, &direct.scope, derived_call_id)? {
+                if media.scope != direct.scope
+                    || media.conversation.kind != ConversationKind::PrivateGroup
+                    || media.initiated_by != direct.initiated_by
+                    || media.participants.len() != direct.participants.len()
+                    || !media.participants.iter().all(|member| {
+                        direct.participants.iter().any(|p| p.principal == member.principal)
+                    })
+                {
+                    return Err(DurableStoreError::PermissionDenied);
+                }
+                let kind = match media.signalling_state {
+                    CallSignallingState::Terminated => None,
+                    CallSignallingState::Inviting | CallSignallingState::Ringing => {
+                        Some(CallSignalKind::Cancel)
+                    }
+                    CallSignallingState::Active | CallSignallingState::Reconnecting => {
+                        Some(CallSignalKind::Terminate {
+                            reason: CallTerminationReason::Completed,
+                        })
+                    }
+                };
+                if let Some(kind) = kind {
+                    let media_actor = ScopedPrincipal {
+                        scope: direct.scope.clone(),
+                        principal: direct.initiated_by.clone(),
+                    };
+                    let media_signal = CallSignal {
+                        event_id: derived_event_id.clone(),
+                        scope: direct.scope.clone(),
+                        call_id: derived_call_id.clone(),
+                        expected_revision: media.revision,
+                        kind,
+                    };
+                    apply_call_signal_in_transaction(&transaction, &media_actor, &media_signal)?;
+                }
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(outcome)
+    }avior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
         let current = load_call_from(&transaction, &signal.scope, &signal.call_id)?
             .ok_or(DurableStoreError::InvalidRecord)?;
