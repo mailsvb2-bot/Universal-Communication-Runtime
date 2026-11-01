@@ -5815,7 +5815,12 @@ mod sfu_placement_lifecycle_tests {
             Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
             "stale journal failure must not revoke a newer Join"
         );
-        assert!(service.join_issuer.validate_live_claims(&active, 1_003).is_ok());
+        assert!(
+            service
+                .join_issuer
+                .validate_live_claims(&active, 1_003)
+                .is_ok()
+        );
         assert_eq!(registry.active_session_count(), 1);
         assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 0);
 
