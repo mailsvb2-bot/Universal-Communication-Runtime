@@ -2194,3 +2194,37 @@ pub(super) fn verify_v54_objects(connection: &Connection) -> Result<(), DurableS
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod custody_quarantine_v54_tests {
+    use super::*;
+
+    #[test]
+    fn v54_quarantine_is_persistent_and_cannot_be_deleted_or_reidentified() {
+        let mut db = Connection::open_in_memory().expect("in-memory SQLite");
+        let tx = db.transaction().expect("migration transaction");
+        create_v54_objects(&tx).expect("create canonical quarantine");
+        tx.commit().expect("commit");
+        verify_v54_objects(&db).expect("verify schema and triggers");
+        db.execute(
+            "INSERT INTO server_mls_custody_quarantine
+             (tenant_id, namespace_present, namespace_id, group_id, reason, incident_ref, detected_at_unix_ms)
+             VALUES (?1, 0, '', ?2, 'legacy_host', ?3, 1)",
+            params!["tenant-a", "media-a", "inc-1"],
+        ).expect("operator-confirmed hold");
+        assert!(db.execute(
+            "DELETE FROM server_mls_custody_quarantine WHERE group_id='media-a'", [],
+        ).is_err(), "historic quarantine cannot be deleted");
+        assert!(db.execute(
+            "UPDATE server_mls_custody_quarantine SET group_id='media-b' WHERE group_id='media-a'", [],
+        ).is_err(), "historic quarantine cannot be moved");
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM server_mls_custody_quarantine WHERE group_id='media-a'",
+                [], |r| r.get::<_, i64>(0)).expect("hold persists"),
+            1
+        );
+        db.execute_batch("DROP TRIGGER quarantine_delete_denied;")
+            .expect("simulate schema corruption");
+        assert_eq!(verify_v54_objects(&db), Err(DurableStoreError::Corrupt));
+    }
+}
