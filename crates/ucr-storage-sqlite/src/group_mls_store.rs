@@ -1877,7 +1877,7 @@ mod phase29_atomic_mls_tests {
                     "INSERT INTO server_mls_custody_quarantine
                      (tenant_id, namespace_present, namespace_id, group_id,
                       reason, incident_ref, detected_at_unix_ms)
-                     VALUES (?1, 0, '', ?2, 'operator_hold', 'held-endpoint', 1)",
+                     VALUES (?1, 1, 'namespace-a', ?2, 'operator_hold', 'held-endpoint', 1)",
                     params![
                         scope().tenant_id.as_opaque().as_str(),
                         group_id.as_opaque().as_str(),
@@ -1917,7 +1917,7 @@ mod phase29_atomic_mls_tests {
                     "INSERT INTO server_mls_custody_quarantine
                      (tenant_id, namespace_present, namespace_id, group_id,
                       reason, incident_ref, detected_at_unix_ms)
-                     VALUES (?1, 0, '', ?2, 'operator_hold', 'historical-backup', 1)",
+                     VALUES (?1, 1, 'namespace-a', ?2, 'operator_hold', 'historical-backup', 1)",
                     params![
                         scope().tenant_id.as_opaque().as_str(),
                         group_id.as_opaque().as_str(),
@@ -1926,16 +1926,14 @@ mod phase29_atomic_mls_tests {
                 .expect("permanent incident");
         }
         assert!(matches!(
-            store.mls_bootstrap_for_device(
-                &scope(),
-                &group_id,
-                &device("phase29-owner-device"),
-            ),
+            store.mls_bootstrap_for_device(&scope(), &group_id, &device("phase29-owner-device"),),
             Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict))
         ));
-        assert!(store
-            .server_possesses_mls_group(&scope(), &group_id)
-            .expect("persistent quarantine"));
+        assert!(
+            store
+                .server_possesses_mls_group(&scope(), &group_id)
+                .expect("persistent quarantine")
+        );
     }
 
     #[test]
