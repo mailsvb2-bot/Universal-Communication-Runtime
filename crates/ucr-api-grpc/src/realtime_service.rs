@@ -805,6 +805,24 @@ where
                     let outcome = self
                         .admit_realtime_session_with_sfu_placement(claims.clone(), now)
                         .await?;
+                    // The canonical Call may terminate after entry admission
+                    // but before the realtime registry accepts this session.
+                    // Do not return an active lease for that stale Call.
+                    //
+                    // Use the existing Leave owner rather than rollback: Leave
+                    // revokes the grant, retires the downlink, queues provider
+                    // shutdown and acknowledges closure only on provider success.
+                    // A failed close stays pending for the normal retry sweep.
+                    if let Err(error) = self.require_accepted_conference_participant(&claims) {
+                        let _ = self
+                            .leave_realtime_session_with_sfu_placement(
+                                &claims,
+                                now,
+                                outcome.join_generation,
+                            )
+                            .await;
+                        return Err(error);
+                    }
                     if let Err(error) = self.append_attendance(&outcome.transition) {
                         let _ = self
                             .rollback_realtime_join(&claims, outcome.join_generation, now)
