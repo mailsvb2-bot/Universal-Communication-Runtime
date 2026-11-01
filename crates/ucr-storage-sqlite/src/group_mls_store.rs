@@ -2161,9 +2161,10 @@ BEGIN SELECT RAISE(ABORT,'quarantine identity is immutable'); END;
 "#;
 
 pub(super) fn create_v54_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
-    transaction
-        .execute_batch(V54_OBJECTS_SQL)
-        .map_err(|error| map_schema_change_error(&error))
+    transaction.execute_batch(V54_OBJECTS_SQL).map_err(|error| {
+        eprintln!("UCR_MLS_CUSTODY_V54_SCHEMA_ERROR: {error}");
+        map_schema_change_error(&error)
+    })
 }
 
 pub(super) fn verify_v54_objects(connection: &Connection) -> Result<(), DurableStoreError> {
