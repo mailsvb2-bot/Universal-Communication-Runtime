@@ -1105,17 +1105,31 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
     };
     let runtime = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref());
     if ends_media {
-        // `before` is a participant-scoped read at the expected revision. End
-        // media FIRST: a failure leaves the direct Call active and the user can
-        // retry, but media never keeps running after the direct Call ended.
-        first_party_media::end_direct_call_media(state.store.as_ref(), &before)
+        // The existing canonical CallStore owns BOTH transitions. An immediate
+        // SQLite transaction (or the Memory owner mutex) fences concurrent
+        // Join and guarantees that neither Call can be left half-terminated.
+        // Keep the regular first-party user/Device/Trust authorization gates.
+        let media = first_party_media::media_runtime_ids(&before.scope, &before.call_id)
+            .map_err(|_| StatusCode::CONFLICT)?;
+        let media_event_id = EventId::from_opaque(
+            generate_opaque_id().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+        );
+        runtime
+            .first_party_call_hangup_with_derived(
+                &session.subject,
+                &device(&session.binding)?,
+                &signal,
+                &media.call_id,
+                &media_event_id,
+            )
+            .map_err(|_| StatusCode::CONFLICT)?;
+    } else {
+        runtime
+            .first_party_call_signal(&session.subject, &device(&session.binding)?, &signal)
             .map_err(|_| StatusCode::CONFLICT)?;
     }
-    runtime
-        .first_party_call_signal(&session.subject, &device(&session.binding)?, &signal)
-        .map_err(|_| StatusCode::CONFLICT)?;
     let current = get_call(state, session, &req.call_id)?;
-    if current.signalling_state == CallSignallingState::Terminated {
+    if !ends_media && current.signalling_state == CallSignallingState::Terminated {
         first_party_media::end_direct_call_media(state.store.as_ref(), &current)
             .map_err(|_| StatusCode::CONFLICT)?;
     }
