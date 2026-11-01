@@ -198,7 +198,7 @@ fn horizontal_sfu_remote_ingress_rechecks_authority_and_stale_receipts_fail_clos
 fn local_sfu_sink_receipt_rechecks_live_claims_before_media_ready() {
     let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
     let local = realtime
-        .split("    pub fn forward_authenticated_e2ee_media(\\n")
+        .split("    pub fn forward_authenticated_e2ee_media(")
         .nth(1)
         .expect("local encrypted SFU media route");
     let dispatch = local
