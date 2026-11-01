@@ -98,7 +98,16 @@ export async function establishRecoveredDirectCall(
     if(out.length===0) throw new Error("empty KeyPackage wire");
     return Uint8Array.from(out);
   };
-  const staged=await initiator.endpoint.addPeer(caller.groupId,decode(offer.recipientKeyPackageBase64Url));
+  // A signed offer for the correct Device can still be stale. Commit must
+  // target the exact public KeyPackage whose private provider this recipient
+  // sealed for this recovery attempt; otherwise the accepted MLS epoch can
+  // strand the recipient with an undecryptable Welcome.
+  const offeredPackage=decode(offer.recipientKeyPackageBase64Url);
+  if (offeredPackage.length!==packageBytes.length ||
+      !offeredPackage.every((value,index)=>value===packageBytes[index])) {
+    throw new Error("recipient MLS KeyPackage changed between publish and Commit");
+  }
+  const staged=await initiator.endpoint.addPeer(caller.groupId,offeredPackage);
   const updated=await initiator.host.describeAcceptedCallMls(initiator.auth,ctx);
   if (!same(caller,updated) || updated.deviceId!==initiator.auth.deviceId ||
       updated.expectedRevision!==call.revision || updated.groupRevision===null ||
