@@ -1582,7 +1582,9 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
         // Never deliver Welcome/Commit history for a historically exposed MLS
         // group. The custody probe durably quarantines detected host state.
         // Its connection lock is released before this read path takes its own.
-        if self.server_possesses_mls_group(scope, group_id)? {
+        if group_id.as_opaque().as_str().starts_with("fp-mg-")
+            && self.server_possesses_mls_group(scope, group_id)?
+        {
             return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
         }
         let connection = self.lock_connection()?;
