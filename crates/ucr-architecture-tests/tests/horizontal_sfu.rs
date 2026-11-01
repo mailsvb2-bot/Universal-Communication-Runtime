@@ -171,6 +171,30 @@ fn horizontal_sfu_async_handoff_separates_validation_from_transport_acceptance()
     assert!(spec.contains("remote `Accepted`"));
 }
 
+
+#[test]
+fn horizontal_sfu_remote_ingress_rechecks_authority_and_stale_receipts_fail_closed() {
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let node = read("crates/ucr-api-grpc/src/sfu_node_media_service.rs");
+
+    // The remote node must independently validate current canonical media
+    // authority at ingress, rather than trusting the source node's batch.
+    assert!(node.contains("let runtime = SfuRuntime::new("));
+    assert!(node.contains("runtime.forward_selected("));
+
+    // An async remote receipt cannot promote a session to media-ready after
+    // its Call, Device, durable Join grant or realtime lease was revoked.
+    let receipt = realtime
+        .find("let outcome = router.forward_validated_batch(&batch).await?;")
+        .expect("horizontal SFU receipt boundary");
+    let ready = realtime[receipt..]
+        .find("self.append_attendance(&transition)?;")
+        .expect("media-ready attendance boundary");
+    let completion = &realtime[receipt..receipt + ready];
+    assert!(completion.contains("self.require_live_transport_claims(claims)?;"));
+    assert!(completion.contains(".require_active_session(claims, self.now()?)"));
+}
+
 #[test]
 fn horizontal_sfu_node_media_listener_is_private_mtls_and_not_a_public_capability_claim() {
     let runtime = read("crates/ucr-runtime/src/lib.rs");
