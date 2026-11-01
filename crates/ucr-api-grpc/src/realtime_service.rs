@@ -3097,6 +3097,41 @@ where
         first_error.map_or(Ok(()), Err)
     }
 
+    fn retire_closed_call_sessions(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        active_claims: &[RealtimeSessionClaims],
+        now_unix_ms: i64,
+        sweep: &mut RealtimeCleanupSweep,
+    ) -> Result<(Vec<SessionId>, Option<CanonicalError>), CanonicalError> {
+        let mut retired = Vec::new();
+        let mut attendance_error = None;
+        for claims in active_claims
+            .iter()
+            .filter(|claims| claims.scope == *scope && claims.call_id == *call_id)
+        {
+            let generation = match self.registry.current_join_generation(claims, now_unix_ms) {
+                Ok(generation) => generation,
+                Err(RealtimeRegistryError::SessionUnavailable) => continue,
+                Err(error) => return Err(map_registry_error(error)),
+            };
+            self.registry
+                .queue_webrtc_close(claims)
+                .map_err(map_registry_error)?;
+            let transition = self
+                .registry
+                .leave_if_sequence(claims, generation, now_unix_ms)
+                .map_err(map_registry_error)?;
+            if let Err(error) = self.append_attendance(&transition) {
+                attendance_error.get_or_insert(error);
+            }
+            sweep.sessions_reaped = sweep.sessions_reaped.saturating_add(1);
+            retired.push(claims.session_id.clone());
+        }
+        Ok((retired, attendance_error))
+    }
+
     async fn cleanup_closed_conferences_at(
         &self,
         now_unix_ms: i64,
@@ -3141,43 +3176,17 @@ where
                     .map_err(map_registry_error)?;
             }
 
-            // Retire ALL revoked downlinks before any fallible provider close.
-            // Otherwise one failed close leaves the next terminated participant
-            // active in the SFU registry until another cleanup sweep.
-            let mut retired_sessions = Vec::new();
-            let mut first_cleanup_error = None;
-            for claims in active_claims
-                .iter()
-                .filter(|claims| claims.scope == scope && claims.call_id == call_id)
-            {
-                // A terminated Call is already unauthorized. Retire its live
-                // downlink before attempting provider shutdown; otherwise a
-                // failed close can keep receiving SFU frames until the next
-                // sweep. The same canonical cleanup queue handles retries.
-                let generation = match self.registry.current_join_generation(claims, now_unix_ms) {
-                    Ok(generation) => generation,
-                    Err(RealtimeRegistryError::SessionUnavailable) => continue,
-                    Err(error) => return Err(map_registry_error(error)),
-                };
-                self.registry
-                    .queue_webrtc_close(claims)
-                    .map_err(map_registry_error)?;
-                let transition = self
-                    .registry
-                    .leave_if_sequence(claims, generation, now_unix_ms)
-                    .map_err(map_registry_error)?;
-                // A failed attendance journal write must not leave other
-                // terminated recipients active in the SFU registry.
-                if let Err(error) = self.append_attendance(&transition) {
-                    first_cleanup_error.get_or_insert(error);
-                }
-                sweep.sessions_reaped = sweep.sessions_reaped.saturating_add(1);
-                retired_sessions.push(claims.session_id.clone());
-            }
-
-            // All downlinks are already retired. Provider shutdown must not
-            // monopolize the cross-Call Join/Leave gate.
+            // First retire all recipients; shutdown retries must not block
+            // the canonical downlink authorization boundary.
+            let (retired_sessions, attendance_error) = self.retire_closed_call_sessions(
+                &scope,
+                &call_id,
+                &active_claims,
+                now_unix_ms,
+                &mut sweep,
+            )?;
             drop(placement_guard);
+            let mut first_cleanup_error = None;
             for session_id in retired_sessions {
                 if let Err(error) = self
                     .confirm_pending_webrtc_close(&scope, &call_id, &session_id)
@@ -3185,6 +3194,11 @@ where
                 {
                     first_cleanup_error.get_or_insert(error);
                 }
+            }
+            // Preserve a failed attendance write, but do not let it mask the
+            // provider-close failure needed to drive retry and diagnostics.
+            if let Some(error) = attendance_error {
+                first_cleanup_error.get_or_insert(error);
             }
             // Serialize placement release with any concurrent fresh Join.
             let _placement_guard = self.sfu_placement_transition_guard().await;
