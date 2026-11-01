@@ -5556,7 +5556,10 @@ mod sfu_placement_lifecycle_tests {
             .await
             .expect("third provider attempt confirms both pending closures");
         assert!(
-            registry.pending_webrtc_closes().expect("pending close queue").is_empty(),
+            registry
+                .pending_webrtc_closes()
+                .expect("pending close queue")
+                .is_empty(),
             "confirmed provider shutdown must drain the retry coordinates"
         );
         assert_eq!(registry.active_session_count(), 0);
