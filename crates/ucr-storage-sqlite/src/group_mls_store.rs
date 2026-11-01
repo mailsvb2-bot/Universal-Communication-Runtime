@@ -480,6 +480,23 @@ impl GroupMlsServerCustodyProbe for SqliteLocalStore {
         let connection = self
             .lock_connection()
             .map_err(GroupMlsStoreError::Durable)?;
+        // Quarantine records survive departure of the legacy MLS host.
+        // Absence or corruption of the v54 table fails closed.
+        let namespace = namespace_storage_key(scope);
+        let held: i64 = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM server_mls_custody_quarantine
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4)",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                group_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        ).map_err(|error| GroupMlsStoreError::Durable(map_sqlite_error(&error)))?;
+        if held != 0 {
+            return Ok(true);
+        }
         let provider = sqlite_provider(&connection);
         // The actual server-side OpenMLS storage is checked, not a Group
         // membership projection or a caller-supplied endpoint-only flag.
@@ -2118,4 +2135,62 @@ mod phase29_atomic_mls_tests {
         );
         let _ = owner;
     }
+}
+
+
+const V54_OBJECTS_SQL: &str = r#"
+CREATE TABLE server_mls_custody_quarantine (
+  tenant_id TEXT NOT NULL,
+  namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0,1)),
+  namespace_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK(reason IN ('legacy_host','server_private_group','backup_exposure','operator_hold')),
+  incident_ref TEXT NOT NULL CHECK(length(incident_ref) BETWEEN 1 AND 128),
+  detected_at_unix_ms INTEGER NOT NULL CHECK(detected_at_unix_ms > 0),
+  PRIMARY KEY(tenant_id, namespace_present, namespace_id, group_id),
+  CHECK((namespace_present=0 AND namespace_id='') OR
+        (namespace_present=1 AND namespace_id<>''))
+) WITHOUT ROWID;
+CREATE TRIGGER quarantine_delete_denied
+BEFORE DELETE ON server_mls_custody_quarantine
+BEGIN SELECT RAISE(ABORT,'security quarantine is append-only'); END;
+CREATE TRIGGER quarantine_identity_update_denied
+BEFORE UPDATE OF tenant_id,namespace_present,namespace_id,group_id
+ON server_mls_custody_quarantine
+BEGIN SELECT RAISE(ABORT,'quarantine identity is immutable'); END;
+"#;
+
+pub(super) fn create_v54_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V54_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn verify_v54_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "server_mls_custody_quarantine",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("group_id", "TEXT", 1, 4),
+            ("reason", "TEXT", 1, 0),
+            ("incident_ref", "TEXT", 1, 0),
+            ("detected_at_unix_ms", "INTEGER", 1, 0),
+        ],
+    )?;
+    for trigger in ["quarantine_delete_denied", "quarantine_identity_update_denied"] {
+        let exists: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1)",
+                [trigger],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if exists != 1 {
+            return Err(DurableStoreError::Corrupt);
+        }
+    }
+    Ok(())
 }
