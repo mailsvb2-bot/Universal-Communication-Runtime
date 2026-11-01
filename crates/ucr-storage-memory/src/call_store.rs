@@ -189,9 +189,9 @@ fn apply_call_signal_in_state(
     let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
     let key = call_key(&signal.scope, &signal.call_id);
     let signal_key = call_signal_key(&signal.scope, signal.event_id.as_opaque().as_str());
-    let current = validated_call_from_state(&state, &signal.scope, &signal.call_id)?
+    let current = validated_call_from_state(state, &signal.scope, &signal.call_id)?
         .ok_or(DurableStoreError::InvalidRecord)?;
-    if !group_actor_current_if_needed(&state, &current, &actor.principal) {
+    if !group_actor_current_if_needed(state, &current, &actor.principal) {
         return Err(DurableStoreError::PermissionDenied);
     }
     if let Some((recorded_actor, existing, applied_revision)) =
@@ -211,7 +211,7 @@ fn apply_call_signal_in_state(
     if !active_call_participant(&current, &actor.principal) {
         return Err(DurableStoreError::PermissionDenied);
     }
-    require_group_signal_target_if_needed(&state, &current, signal)?;
+    require_group_signal_target_if_needed(state, &current, signal)?;
     let next = apply_call_signal(&current, &actor.scope, &actor.principal, signal)
         .map_err(map_call_error)?;
     let event_key = event_key_from_parts(&signal.scope, signal.event_id.as_opaque().as_str());
