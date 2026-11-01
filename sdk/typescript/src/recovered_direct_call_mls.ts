@@ -181,5 +181,21 @@ export async function establishRecoveredDirectCall(
       callerJoin.sessionId===recipientJoin.sessionId) {
     throw new Error("recovered Call Join grant not bound to authenticated endpoint Identity/Device");
   }
+  // Both authenticated Call owners must still observe the SAME active Call
+  // after signed Join issuance. A concurrent Hangup must invalidate the
+  // completed client handoff; realtime admission independently rechecks too.
+  const [liveCaller,liveRecipient]=await Promise.all([
+    initiator.host.getDirectCall(initiator.auth,call.callId),
+    recipient.host.getDirectCall(recipient.auth,call.callId),
+  ]);
+  for (const live of [liveCaller,liveRecipient]) {
+    if (live.callId!==call.callId || live.state!=="active" ||
+        live.tenantId!==call.tenantId || live.namespaceId!==call.namespaceId ||
+        live.callerIdentityId!==call.callerIdentityId ||
+        live.calleeIdentityId!==call.calleeIdentityId || live.media!==call.media ||
+        !Number.isSafeInteger(live.revision) || live.revision<call.revision) {
+      throw new Error("recovered Call changed after MLS Join issuance");
+    }
+  }
   return {groupId:caller.groupId,mediaCallId:caller.mediaCallId,callerJoin,recipientJoin};
 }
