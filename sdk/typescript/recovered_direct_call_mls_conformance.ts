@@ -14,7 +14,8 @@ const descriptor=(auth:UcrAuthenticatedFirstEntry):UcrEndpointMlsCallDescriptor=
   expectedPeerDeviceId:committed?(auth.deviceId==="a"?"b":"a"):null,
   cryptoEpoch:epoch,cryptoStateRef:epoch===null?null:epoch===0?"epoch-zero":"epoch-one",
   mediaCallId:"fp-m-call-new",groupId:"fp-mg-call-new",conversationId:"fp-mc-call-new",
-  creatorPrincipalId:"alice",peerPrincipalId:"bob",deviceId:auth.deviceId,
+  creatorPrincipalId:"alice",peerPrincipalId:auth.deviceId==="a"?"bob":"alice",
+  deviceId:auth.deviceId,
   cryptoCapability:"group_mls",requiresEndpointOwnedCommit:true,
 });
 const host:UcrManagedFirstPartyHost={
