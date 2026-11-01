@@ -1,4 +1,4 @@
-use ucr_model::{CallId, CallSession, CallSignal, GroupId, ScopedPrincipal, TenantScope};
+use ucr_model::{CallId, CallSession, CallSignal, EventId, GroupId, ScopedPrincipal, TenantScope};
 
 use crate::{
     ConversationStore, DurableRecordStatus, DurableStoreError, GroupStore, StorageProvider,
@@ -81,6 +81,28 @@ pub trait CallStore: StorageProvider + ConversationStore + GroupStore {
         _creator: &ScopedPrincipal,
         _session: &CallSession,
         _parent: &CallSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        Err(DurableStoreError::PermissionDenied)
+    }
+
+    /// Atomically applies one participant-authorized direct Call termination and
+    /// terminates its existing derived media Call in the SAME canonical store
+    /// transaction/lock. A failure in either transition rolls back BOTH. The
+    /// derived Call may be absent or already terminal, but must never belong
+    /// to another principal, scope or roster. Event IDs remain independently
+    /// reserved by the existing Call signal owner.
+    ///
+    /// Implementations that cannot guarantee the atomic boundary MUST fail closed.
+    ///
+    /// # Errors
+    /// Rejects stale/unauthorized parent signals, inconsistent derived Calls,
+    /// event collisions and durable transaction failures.
+    fn terminate_direct_call_with_derived(
+        &self,
+        _actor: &ScopedPrincipal,
+        _direct_signal: &CallSignal,
+        _derived_call_id: &CallId,
+        _derived_event_id: &EventId,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         Err(DurableStoreError::PermissionDenied)
     }
