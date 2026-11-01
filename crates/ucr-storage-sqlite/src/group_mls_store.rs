@@ -1822,6 +1822,39 @@ mod phase29_atomic_mls_tests {
     }
 
     #[test]
+    fn legacy_server_owned_mls_group_is_quarantined_permanently() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open canonical database");
+        let (group, _owner, _bob) = bootstrap(&store);
+        assert!(
+            store
+                .server_possesses_mls_group(&scope(), &group.group_id)
+                .expect("detect server OpenMLS custody")
+        );
+        {
+            let connection = store.lock_connection().expect("database");
+            let (reason, evidence): (String, String) = connection
+                .query_row(
+                    "SELECT reason, incident_ref FROM server_mls_custody_quarantine
+                     WHERE group_id=?1",
+                    [group.group_id.as_opaque().as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("custody detection must persist quarantine");
+            assert_eq!(reason, "server_private_group");
+            assert_eq!(evidence, "auto-v54-openmls-custody");
+        }
+        // A new process must still deny the historical group.
+        drop(store);
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen canonical database");
+        assert!(
+            reopened
+                .server_possesses_mls_group(&scope(), &group.group_id)
+                .expect("hold survives restart")
+        );
+    }
+
+    #[test]
     fn stale_group_revision_rolls_back_staged_mls_writes() {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(db.path()).unwrap();
