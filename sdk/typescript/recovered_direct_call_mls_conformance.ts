@@ -97,6 +97,20 @@ await assert.rejects(establishRecoveredDirectCall("call-old",call,
 assert.equal(joins,0);
 epoch=null;published=false;committed=false;
 
+// The recovered Join must bind the exact independently authenticated Identity,
+// not merely a matching Device string returned by the same HTTP host.
+const foreignJoinHost={...host,
+  async issueSignedJoinForAcceptedCall(auth:UcrAuthenticatedFirstEntry) {
+    const grant=await host.issueSignedJoinForAcceptedCall(auth,{callId:call.callId,expectedRevision:call.revision});
+    return auth.deviceId==="a" ? {...grant,participantId:"foreign-identity"} : grant;
+  },
+} as UcrManagedFirstPartyHost;
+await assert.rejects(establishRecoveredDirectCall("call-old",call,
+  {host:foreignJoinHost,endpoint:own("a"),auth:alice},
+  {host:foreignJoinHost,endpoint:own("b"),auth:bob}),/authenticated endpoint Identity\/Device/);
+assert.equal(joins,2);
+epoch=null;published=false;committed=false;joins=0;
+
 const result=await establishRecoveredDirectCall("call-old",call,
   {host,endpoint:own("a"),auth:alice},{host,endpoint:own("b"),auth:bob});
 assert.equal(result.groupId,"fp-mg-call-new");
