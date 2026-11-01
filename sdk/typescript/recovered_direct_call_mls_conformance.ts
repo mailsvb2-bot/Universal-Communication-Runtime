@@ -58,6 +58,16 @@ const own=(id:string):UcrRecoveredCallEndpoint=>({
 });
 await assert.rejects(establishRecoveredDirectCall("call-new",call,
   {host,endpoint:own("a"),auth:alice},{host,endpoint:own("b"),auth:bob}),/independent/);
+// The Call object is not an authority for tenant/namespace selection.
+// Reject cross-scope recovery before either endpoint can create MLS state.
+for (const foreignCall of [
+  {...call,tenantId:"foreign-tenant"},
+  {...call,namespaceId:"foreign-namespace"},
+]) {
+  await assert.rejects(establishRecoveredDirectCall("call-old",foreignCall,
+    {host,endpoint:own("a"),auth:alice},{host,endpoint:own("b"),auth:bob}),/independent/);
+  assert.equal(published,false,"cross-scope Call must not publish MLS state");
+}
 // A host response for another Device must not create even a local MLS Group.
 const foreignDeviceHost={...host,
   async describeAcceptedCallMls(auth:UcrAuthenticatedFirstEntry) {
