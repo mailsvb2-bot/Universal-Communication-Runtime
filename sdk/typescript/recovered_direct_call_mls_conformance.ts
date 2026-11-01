@@ -112,6 +112,23 @@ await assert.rejects(establishRecoveredDirectCall("call-old",call,
 assert.equal(joins,2);
 epoch=null;published=false;committed=false;joins=0;
 
+// A stale but correctly Device-labelled KeyPackage cannot be committed:
+// Bob has sealed the private provider for AQID, not the offered AQIE.
+// Reject before accepting an irreversible canonical MLS epoch transition.
+const staleOfferHost={...host,
+  async listEndpointMlsOffers(auth:UcrAuthenticatedFirstEntry,
+    input:{callId:string;expectedRevision:number}) {
+    const offers=await host.listEndpointMlsOffers(auth,input);
+    return offers.map(offer=>({...offer,recipientKeyPackageBase64Url:"AQIE"}));
+  },
+} as UcrManagedFirstPartyHost;
+await assert.rejects(establishRecoveredDirectCall("call-old",call,
+  {host:staleOfferHost,endpoint:own("a"),auth:alice},
+  {host:staleOfferHost,endpoint:own("b"),auth:bob}),/KeyPackage changed between publish and Commit/);
+assert.equal(committed,false);
+assert.equal(joins,0);
+epoch=null;published=false;committed=false;joins=0;
+
 const result=await establishRecoveredDirectCall("call-old",call,
   {host,endpoint:own("a"),auth:alice},{host,endpoint:own("b"),auth:bob});
 assert.equal(result.groupId,"fp-mg-call-new");
