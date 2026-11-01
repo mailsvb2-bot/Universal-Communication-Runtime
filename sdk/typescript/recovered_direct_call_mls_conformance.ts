@@ -16,7 +16,7 @@ const descriptor=(auth:UcrAuthenticatedFirstEntry):UcrEndpointMlsCallDescriptor=
   mediaCallId:"fp-m-call-new",groupId:"fp-mg-call-new",conversationId:"fp-mc-call-new",
   creatorPrincipalId:"alice",peerPrincipalId:auth.deviceId==="a"?"bob":"alice",
   deviceId:auth.deviceId,
-  cryptoCapability:"group_mls",requiresEndpointOwnedCommit:true,
+  cryptoCapability:"ucr.group.mls",requiresEndpointOwnedCommit:true,
 });
 const host:UcrManagedFirstPartyHost={
   async describeAcceptedCallMls(auth){return descriptor(auth);},
