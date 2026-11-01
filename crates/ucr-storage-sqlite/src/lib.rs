@@ -237,6 +237,7 @@ impl SqliteLocalStore {
         preflight_store_ownership(&connection)?;
         configure_durability(&connection)?;
         initialize_or_validate_schema(&mut connection)?;
+        group_mls_store::backfill_legacy_host_quarantine(&connection)?;
         initialize_or_validate_group_mls_storage(&mut connection)?;
         harden_store_permissions(path)?;
         Ok(Self {
