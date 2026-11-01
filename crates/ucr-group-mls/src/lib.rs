@@ -1830,6 +1830,36 @@ mod tests {
         );
     }
 
+    fn assert_previous_group_cannot_open_recovered_video(
+        context: &GroupMediaE2eeContext,
+        wire: &[u8],
+        signer: &ucr_crypto::SigningKeyMaterial,
+    ) {
+        use ucr_crypto::open_endpoint_group_media_wire;
+
+        // Old group keys may have been disclosed to an historic server host.
+        // A new independent endpoint-owned Call must reject that exporter.
+        let old_call = three_member_group();
+        let previous_exporter = export_group_media_secret(
+            &old_call.alice_provider,
+            &old_call.alice_group,
+            &old_call.scope,
+            &old_call.group_id,
+            &old_call.state,
+        )
+        .unwrap();
+        assert!(
+            open_endpoint_group_media_wire(
+                &previous_exporter,
+                context,
+                wire,
+                signer.verifying_key(),
+            )
+            .is_err(),
+            "old compromised MLS exporter cannot decrypt recovered Call video"
+        );
+    }
+
     /// An endpoint-created two-Device group never grants the relay a media leaf.
     /// Unlike host-removal tests, the server is not a member in any epoch.
     /// This is cryptographic fixture evidence, not a live browser/SFU call.
@@ -2013,30 +2043,9 @@ mod tests {
                 signer.verifying_key(),
             )
             .unwrap(),
-            b"endpoint A to endpoint B only",
+            b"video after recovered MLS and new Call",
         );
-        // The previous Call's full MLS exporter is known to this fixture,
-        // as it could be to a historical server-held member. Its secret is
-        // cryptographically independent from the new Call/Group exporter.
-        let old_call = three_member_group();
-        let previous_exporter = export_group_media_secret(
-            &old_call.alice_provider,
-            &old_call.alice_group,
-            &old_call.scope,
-            &old_call.group_id,
-            &old_call.state,
-        )
-        .unwrap();
-        assert!(
-            open_endpoint_group_media_wire(
-                &previous_exporter,
-                &media_context,
-                &wire,
-                signer.verifying_key(),
-            )
-            .is_err(),
-            "old compromised MLS exporter cannot decrypt recovered Call video"
-        );
+        assert_previous_group_cannot_open_recovered_video(&media_context, &wire, &signer);
         assert_unadmitted_relay_blind_to_video(
             &scope,
             &group_id,
