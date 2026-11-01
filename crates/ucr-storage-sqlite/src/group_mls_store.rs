@@ -483,17 +483,19 @@ impl GroupMlsServerCustodyProbe for SqliteLocalStore {
         // Quarantine records survive departure of the legacy MLS host.
         // Absence or corruption of the v54 table fails closed.
         let namespace = namespace_storage_key(scope);
-        let held: i64 = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM server_mls_custody_quarantine
+        let held: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM server_mls_custody_quarantine
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4)",
-            params![
-                scope.tenant_id.as_opaque().as_str(),
-                namespace.present,
-                namespace.value,
-                group_id.as_opaque().as_str(),
-            ],
-            |row| row.get(0),
-        ).map_err(|error| GroupMlsStoreError::Durable(map_sqlite_error(&error)))?;
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    group_id.as_opaque().as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| GroupMlsStoreError::Durable(map_sqlite_error(&error)))?;
         if held != 0 {
             return Ok(true);
         }
@@ -2137,7 +2139,6 @@ mod phase29_atomic_mls_tests {
     }
 }
 
-
 const V54_OBJECTS_SQL: &str = r#"
 CREATE TABLE server_mls_custody_quarantine (
   tenant_id TEXT NOT NULL,
@@ -2181,7 +2182,10 @@ pub(super) fn verify_v54_objects(connection: &Connection) -> Result<(), DurableS
             ("detected_at_unix_ms", "INTEGER", 1, 0),
         ],
     )?;
-    for trigger in ["quarantine_delete_denied", "quarantine_identity_update_denied"] {
+    for trigger in [
+        "quarantine_delete_denied",
+        "quarantine_identity_update_denied",
+    ] {
         let exists: i64 = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1)",
@@ -2213,15 +2217,29 @@ mod custody_quarantine_v54_tests {
              VALUES (?1, 0, '', ?2, 'legacy_host', ?3, 1)",
             params!["tenant-a", "media-a", "inc-1"],
         ).expect("operator-confirmed hold");
-        assert!(db.execute(
-            "DELETE FROM server_mls_custody_quarantine WHERE group_id='media-a'", [],
-        ).is_err(), "historic quarantine cannot be deleted");
-        assert!(db.execute(
-            "UPDATE server_mls_custody_quarantine SET group_id='media-b' WHERE group_id='media-a'", [],
-        ).is_err(), "historic quarantine cannot be moved");
+        assert!(
+            db.execute(
+                "DELETE FROM server_mls_custody_quarantine WHERE group_id='media-a'",
+                [],
+            )
+            .is_err(),
+            "historic quarantine cannot be deleted"
+        );
+        assert!(
+            db.execute(
+                "UPDATE server_mls_custody_quarantine SET group_id='media-b' WHERE group_id='media-a'",
+                [],
+            )
+            .is_err(),
+            "historic quarantine cannot be moved"
+        );
         assert_eq!(
-            db.query_row("SELECT count(*) FROM server_mls_custody_quarantine WHERE group_id='media-a'",
-                [], |r| r.get::<_, i64>(0)).expect("hold persists"),
+            db.query_row(
+                "SELECT count(*) FROM server_mls_custody_quarantine WHERE group_id='media-a'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .expect("hold persists"),
             1
         );
         db.execute_batch("DROP TRIGGER quarantine_delete_denied;")
