@@ -644,57 +644,6 @@ impl CallStore for SqliteLocalStore {
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(outcome)
-    }avior::Immediate)
-            .map_err(|error| map_sqlite_error(&error))?;
-        let current = load_call_from(&transaction, &signal.scope, &signal.call_id)?
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        if !group_actor_current_if_needed(&transaction, &current, &actor.principal)? {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        if let Some((recorded_actor, existing, applied_revision)) = load_signal_record(
-            &transaction,
-            &signal.scope,
-            signal.event_id.as_opaque().as_str(),
-        )? {
-            if recorded_actor != actor.principal
-                || !duplicate_actor_allowed(&current, &actor.principal, applied_revision)
-            {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            return if existing == fingerprint {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        if !active_call_participant(&current, &actor.principal) {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        require_group_signal_target_if_needed(&transaction, &current, signal)?;
-        let next = apply_call_signal(&current, &actor.scope, &actor.principal, signal)
-            .map_err(map_call_error)?;
-        if super::event_journal::load_event_by_id(&transaction, &signal.scope, &signal.event_id)?
-            .is_some()
-            || group_change_reserves_event_id(
-                &transaction,
-                &signal.scope,
-                signal.event_id.as_opaque().as_str(),
-            )?
-            || super::group_mls_store::mls_transition_reserves_event_id(
-                &transaction,
-                &signal.scope,
-                signal.event_id.as_opaque().as_str(),
-            )?
-        {
-            return Err(DurableStoreError::Conflict);
-        }
-        update_call(&transaction, &next)?;
-        replace_participants(&transaction, &next)?;
-        insert_signal_record(&transaction, actor, signal, &fingerprint, next.revision)?;
-        transaction
-            .commit()
-            .map_err(|error| map_sqlite_error(&error))?;
-        Ok(DurableRecordStatus::Persisted)
     }
 }
 
