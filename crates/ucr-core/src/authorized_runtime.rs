@@ -1691,7 +1691,7 @@ where
     }
 
     /// Terminates an authenticated direct Call and its derived media Call in
-    /// one canonical CallStore transaction. The same live user permission and
+    /// one canonical `CallStore` transaction. The same live user permission and
     /// Device/Trust gates as regular first-party signalling apply on both sides
     /// of the durable operation; the derived media Call is not a second owner.
     ///
