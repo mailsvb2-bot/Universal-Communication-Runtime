@@ -2159,7 +2159,7 @@ CREATE TRIGGER IF NOT EXISTS quarantine_identity_update_denied
 BEFORE UPDATE OF tenant_id,namespace_present,namespace_id,group_id
 ON server_mls_custody_quarantine
 BEGIN SELECT RAISE(ABORT,'quarantine identity is immutable'); END;
-"#;
+";
 
 pub(super) fn create_v54_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     transaction
