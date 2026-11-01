@@ -2139,7 +2139,7 @@ mod phase29_atomic_mls_tests {
     }
 }
 
-const V54_OBJECTS_SQL: &str = r#"
+const V54_OBJECTS_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS server_mls_custody_quarantine (
   tenant_id TEXT NOT NULL,
   namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0,1)),
