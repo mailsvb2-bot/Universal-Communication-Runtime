@@ -499,12 +499,57 @@ impl GroupMlsServerCustodyProbe for SqliteLocalStore {
         if held != 0 {
             return Ok(true);
         }
-        let provider = sqlite_provider(&connection);
-        // The actual server-side OpenMLS storage is checked, not a Group
-        // membership projection or a caller-supplied endpoint-only flag.
-        let server_group =
-            load_group(&provider, scope, group_id).map_err(GroupMlsStoreError::Mls)?;
-        Ok(server_group.is_some())
+        // Removed members can retain earlier MLS exporter secrets. Detect the
+        // old server-owned principal even when its membership is no longer active.
+        let legacy_member: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM group_memberships
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND group_id=?4 AND principal_id='fp-media-host')",
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    group_id.as_opaque().as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| GroupMlsStoreError::Durable(map_sqlite_error(&error)))?;
+        // Inspect the real OpenMLS storage, never an untrusted descriptor flag.
+        let possesses_private_state = {
+            let provider = sqlite_provider(&connection);
+            load_group(&provider, scope, group_id)
+                .map_err(GroupMlsStoreError::Mls)?
+                .is_some()
+        };
+        if legacy_member == 0 && !possesses_private_state {
+            return Ok(false);
+        }
+        // Durable, idempotent evidence. In particular, the hold remains after
+        // the server's OpenMLS rows or old membership projection are removed.
+        // A missing quarantine schema or write failure denies the media Call.
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO server_mls_custody_quarantine
+                 (tenant_id, namespace_present, namespace_id, group_id, reason,
+                  incident_ref, detected_at_unix_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+                         CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    group_id.as_opaque().as_str(),
+                    if legacy_member != 0 { "legacy_host" } else { "server_private_group" },
+                    if legacy_member != 0 {
+                        "auto-v54-legacy-membership"
+                    } else {
+                        "auto-v54-openmls-custody"
+                    },
+                ],
+            )
+            .map_err(|error| GroupMlsStoreError::Durable(map_sqlite_error(&error)))?;
+        Ok(true)
     }
 }
 
