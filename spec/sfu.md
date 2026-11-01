@@ -166,8 +166,16 @@ so preferred-region/cross-region rules apply before the first sticky reservation
 introduced after the Call is already placed. The placement-aware router then uses that sticky
 canonical Call placement,
 resolves only the selected live private endpoint, opens the deployment-scoped mTLS node connection,
-and waits for concrete destination-ingress receipts. Local realtime forwarding is unchanged when
-the gate is disabled.
+and waits for concrete destination-ingress receipts. The destination's
+`SfuNodeMediaService::process_node_media_item` independently calls the canonical
+`SfuRuntime::forward_selected`, including live Call/Group/Device/Trust and
+send/receive checks at destination ingress; the source's prepared batch is
+not itself sufficient authorization. After the asynchronous receipt, the
+source realtime service rechecks durable Join/Call/Device authority and the
+active session before reporting success or marking media-ready. This protects
+control-plane state from stale receipts, but does not retroactively cancel an
+already accepted remote frame or prove bounded in-flight WebRTC provider stop.
+Local realtime forwarding is unchanged when the gate is disabled.
 
 Outbound router credentials are deployment infrastructure credentials, not tenant/user authority.
 The runtime requires an explicit client certificate/key, explicit server CA trust material and TLS
