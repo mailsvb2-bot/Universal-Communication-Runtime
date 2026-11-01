@@ -41,6 +41,8 @@ export async function establishRecoveredDirectCall(
   callerJoin:UcrCanonicalJoinIssuance; recipientJoin:UcrCanonicalJoinIssuance;
 }> {
   if (call.callId === oldCallId || call.state !== "active" ||
+      call.tenantId !== initiator.auth.tenantId ||
+      call.namespaceId !== initiator.auth.namespaceId ||
       call.callerIdentityId !== initiator.auth.participantId ||
       call.calleeIdentityId !== recipient.auth.participantId ||
       initiator.auth.deviceId === recipient.auth.deviceId ||
