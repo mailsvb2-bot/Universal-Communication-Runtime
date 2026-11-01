@@ -367,8 +367,7 @@ impl CallStore for MemoryLocalStore {
             if result == DurableRecordStatus::Duplicate {
                 return Ok(result);
             }
-            if let Some(media) =
-                validated_call_from_state(&state, &direct.scope, derived_call_id)?
+            if let Some(media) = validated_call_from_state(&state, &direct.scope, derived_call_id)?
             {
                 if media.scope != direct.scope
                     || media.conversation.kind != ConversationKind::PrivateGroup
