@@ -1775,4 +1775,102 @@ mod tests {
             "even an existing child cannot be returned from a stale parent"
         );
     }
+
+    #[test]
+    fn atomic_hangup_rolls_back_both_calls_when_derived_binding_is_wrong() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let (direct, alice, bob) = session();
+        store.persist_conversation(&conversation()).unwrap();
+        store.create_call(&alice, &direct).unwrap();
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(&direct, "atomic-sqlite-accept", CallSignalKind::Accept),
+            )
+            .unwrap();
+        let active = store.call(&scope(), &direct.call_id).unwrap().unwrap();
+
+        // A second unrelated direct Call must never be mistaken for the
+        // derived Group media Call, even when its roster and scope match.
+        let mut impostor = direct.clone();
+        impostor.call_id = CallId::from_opaque(oid("atomic-sqlite-impostor"));
+        store.create_call(&alice, &impostor).unwrap();
+        let hangup = signal(
+            &active,
+            "atomic-sqlite-hangup",
+            CallSignalKind::Terminate {
+                reason: CallTerminationReason::Completed,
+            },
+        );
+        let child_event = EventId::from_opaque(oid("atomic-sqlite-child-event"));
+        assert_eq!(
+            store.terminate_direct_call_with_derived(
+                &bob,
+                &hangup,
+                &impostor.call_id,
+                &child_event,
+            ),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(
+            store.call(&scope(), &direct.call_id).unwrap(),
+            Some(active.clone()),
+            "failed media termination must rollback the parent Hangup"
+        );
+        // Failed atomic operation must not reserve the parent's EventId.
+        assert_eq!(
+            store.apply_call_signal(&bob, &hangup),
+            Ok(DurableRecordStatus::Persisted)
+        );
+    }
+
+    #[test]
+    fn atomic_hangup_without_media_commits_and_fences_late_creation() {
+        let db = TestDb::new();
+        let joining = SqliteLocalStore::open(db.path()).unwrap();
+        let hanging_up = SqliteLocalStore::open(db.path()).unwrap();
+        let (direct, alice, bob) = session();
+        joining.persist_conversation(&conversation()).unwrap();
+        joining.create_call(&alice, &direct).unwrap();
+        joining
+            .apply_call_signal(
+                &bob,
+                &signal(&direct, "atomic-sqlite-no-media-accept", CallSignalKind::Accept),
+            )
+            .unwrap();
+        let active = joining.call(&scope(), &direct.call_id).unwrap().unwrap();
+        let media_id = CallId::from_opaque(oid("atomic-sqlite-late-media"));
+        let hangup = signal(
+            &active,
+            "atomic-sqlite-no-media-hangup",
+            CallSignalKind::Terminate {
+                reason: CallTerminationReason::Completed,
+            },
+        );
+        assert_eq!(
+            hanging_up.terminate_direct_call_with_derived(
+                &bob,
+                &hangup,
+                &media_id,
+                &EventId::from_opaque(oid("atomic-sqlite-no-media-event")),
+            ),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            joining
+                .call(&scope(), &direct.call_id)
+                .unwrap()
+                .unwrap()
+                .signalling_state,
+            CallSignallingState::Terminated
+        );
+        let mut child = direct.clone();
+        child.call_id = media_id;
+        assert_eq!(
+            joining.create_call_if_parent_current(&alice, &child, &active),
+            Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
 }
