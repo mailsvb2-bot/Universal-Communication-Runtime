@@ -3163,6 +3163,10 @@ where
             .pending_webrtc_closes()
             .map_err(map_registry_error)?;
         let mut first_error = None;
+        // Retire *every* terminated Call before awaiting any provider close.
+        // A newly blocked provider must not leave a different terminated Call's
+        // SFU downlinks active for the duration of its close timeout.
+        let mut retired_calls = Vec::new();
         for (_, (scope, call_id)) in calls {
             if self.cleanup_decision(&scope, &call_id)? != RuntimeCallCleanupDecision::Cleanup {
                 continue;
@@ -3176,8 +3180,6 @@ where
                     .map_err(map_registry_error)?;
             }
 
-            // First retire all recipients; shutdown retries must not block
-            // the canonical downlink authorization boundary.
             let (retired_sessions, attendance_error) = self.retire_closed_call_sessions(
                 &scope,
                 &call_id,
@@ -3186,6 +3188,13 @@ where
                 &mut sweep,
             )?;
             drop(placement_guard);
+            retired_calls.push((scope, call_id, retired_sessions, attendance_error));
+        }
+
+        // Provider shutdown and placement release follow the complete SFU
+        // retirement pass. Keep the existing per-Call retry/acknowledgement
+        // fences: no placement is released until its closes are confirmed.
+        for (scope, call_id, retired_sessions, attendance_error) in retired_calls {
             let mut first_cleanup_error = None;
             for session_id in retired_sessions {
                 if let Err(error) = self
@@ -5494,6 +5503,99 @@ mod sfu_placement_lifecycle_tests {
                 .expect("provider shutdown acknowledgements")
                 .is_empty(),
             "the unblocked provider must close even when attendance is denied"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_new_provider_close_does_not_delay_other_terminated_call_downlink_retirement() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([13_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("issuer"),
+        );
+        let store = Arc::new(ucr_storage_memory::MemoryLocalStore::default());
+        let first = claims("new-blocked-session", "new-blocked-device");
+        let mut second = claims("other-terminated-session", "other-terminated-device");
+        second.scope.tenant_id = TenantId::from_opaque(id("zz-other-terminated-tenant"));
+        second.scope.namespace_id =
+            Some(NamespaceId::from_opaque(id("other-terminated-namespace")));
+        persist_terminated_cleanup_call(&store, &first);
+        persist_terminated_cleanup_call(&store, &second);
+        persist_valid_attendance_device(&store, &first);
+        persist_valid_attendance_device(&store, &second);
+        let first_grant = issuer
+            .issue(
+                first.scope.clone(),
+                first.call_id.clone(),
+                first.participant.clone(),
+                first.device_id.clone(),
+                300,
+                1_000,
+            )
+            .expect("first signed grant")
+            .claims;
+        let second_grant = issuer
+            .issue(
+                second.scope.clone(),
+                second.call_id.clone(),
+                second.participant.clone(),
+                second.device_id.clone(),
+                300,
+                1_000,
+            )
+            .expect("second signed grant")
+            .claims;
+        let provider = Arc::new(BlockingCloseProvider {
+            blocked_session: first.session_id.clone(),
+            entered: Notify::new(),
+            release: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+        });
+        let provider_dyn: Arc<dyn WebRtcProvider> = provider.clone();
+        let service = GrpcRealtimeService::with_webrtc(
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(DenyTestAuthorization),
+            store,
+            issuer,
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+            RealtimeWebRtcDependencies::new(
+                provider_dyn,
+                Arc::new(WebRtcSessionConfigFactory::default()),
+            ),
+        );
+        service
+            .admit_realtime_session_with_sfu_placement(first_grant, 1_001)
+            .await
+            .expect("first active downlink");
+        service
+            .admit_realtime_session_with_sfu_placement(second_grant, 1_001)
+            .await
+            .expect("second active downlink");
+        assert_eq!(registry.active_session_count(), 2);
+        let entered = provider.entered.notified();
+        let cleanup =
+            tokio::spawn(async move { service.cleanup_closed_conferences_at(1_005).await });
+        let reached = tokio::time::timeout(Duration::from_secs(2), entered).await;
+        let active_at_block = registry.active_session_count();
+        // Unblock on failure too; never strand the test runtime.
+        provider.unblock();
+        reached.expect("first newly terminated Call close should block");
+        assert_eq!(
+            active_at_block, 0,
+            "both terminated Calls must lose SFU downlinks before any provider close wait"
+        );
+        cleanup
+            .await
+            .expect("cleanup task")
+            .expect("both providers confirmed closed");
+        assert!(
+            registry
+                .pending_webrtc_closes()
+                .expect("shutdown acknowledgements")
+                .is_empty()
         );
     }
 
