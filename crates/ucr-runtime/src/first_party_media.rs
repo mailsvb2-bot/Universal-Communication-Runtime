@@ -276,7 +276,7 @@ where
         ],
         signalling_state: CallSignallingState::Inviting,
         reconnecting_participant: None,
-        media_negotiation_ref: None,
+        media_negotiation_ref: Some(direct.call_id.as_opaque().clone()),
         media_negotiation_generation: 0,
         replication_generation: 0,
         revision: 0,
@@ -293,6 +293,12 @@ where
         .call(scope, &ids.call_id)?
         .ok_or(MediaRuntimeError::Unavailable)?;
     validate_media_call(&call, ids, participants)?;
+    // The derived Call must remain cryptographically bound to the exact
+    // direct Call that authorized its creation. Do not infer this solely
+    // from matching participants or a private-group conversation.
+    if call.media_negotiation_ref.as_ref() != Some(direct.call_id.as_opaque()) {
+        return Err(MediaRuntimeError::Conflict);
+    }
     Ok(call)
 }
 
