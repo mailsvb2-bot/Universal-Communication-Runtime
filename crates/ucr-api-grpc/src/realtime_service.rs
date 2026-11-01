@@ -3039,12 +3039,12 @@ where
     // A failing provider must not prevent the other revoked peers from being
     // closed. Every failed coordinate remains in the canonical registry's
     // shutdown-only queue; no live downlink is reauthorized on retry.
-    async fn retry_pending_webrtc_closes(&self, now_unix_ms: i64) -> Result<(), CanonicalError> {
+    async fn retry_pending_webrtc_closes(
+        &self,
+        now_unix_ms: i64,
+        pending: Vec<(TenantScope, CallId, SessionId)>,
+    ) -> Result<(), CanonicalError> {
         const MAX_PARALLEL_CLOSE_RETRIES: usize = 8;
-        let pending = self
-            .registry
-            .pending_webrtc_closes()
-            .map_err(map_registry_error)?;
         // Independent revoked Calls must not wait behind one blocked provider.
         // Bound concurrency, preserve the one canonical shutdown queue, and
         // serialize placement release with fresh Join only AFTER close.
@@ -3121,9 +3121,13 @@ where
             inspected_calls: calls.len(),
             ..RealtimeCleanupSweep::default()
         };
-        // A failed close of an already revoked peer must not delay retirement
-        // of other downlinks whose durable Call authority has ended.
-        let mut first_error = self.retry_pending_webrtc_closes(now_unix_ms).await.err();
+        // Snapshot older shutdowns before retiring newly terminated Calls.
+        // A blocked provider retry must not delay another Call's SFU retirement.
+        let previously_pending = self
+            .registry
+            .pending_webrtc_closes()
+            .map_err(map_registry_error)?;
+        let mut first_error = None;
         for (_, (scope, call_id)) in calls {
             if self.cleanup_decision(&scope, &call_id)? != RuntimeCallCleanupDecision::Cleanup {
                 continue;
@@ -3224,6 +3228,14 @@ where
                     first_error.get_or_insert(map_conference_error(&error));
                 }
             }
+        }
+        // Newly queued shutdowns already had one close attempt above. Retry
+        // only the preexisting queue, avoiding two attempts in one sweep.
+        if let Err(error) = self
+            .retry_pending_webrtc_closes(now_unix_ms, previously_pending)
+            .await
+        {
+            first_error.get_or_insert(error);
         }
         first_error.map_or(Ok(sweep), Err)
     }
@@ -5116,8 +5128,12 @@ mod sfu_placement_lifecycle_tests {
 
         let entered = provider.entered.notified();
         let retry_service = service.clone();
-        let retry =
-            tokio::spawn(async move { retry_service.retry_pending_webrtc_closes(1_002).await });
+        let pending = registry.pending_webrtc_closes().expect("pending shutdowns");
+        let retry = tokio::spawn(async move {
+            retry_service
+                .retry_pending_webrtc_closes(1_002, pending)
+                .await
+        });
         entered.await;
         let leave = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -5188,8 +5204,12 @@ mod sfu_placement_lifecycle_tests {
         registry.queue_webrtc_close(&other).expect("other close");
         let entered = provider.entered.notified();
         let retry_service = service.clone();
-        let retry =
-            tokio::spawn(async move { retry_service.retry_pending_webrtc_closes(1_002).await });
+        let pending = registry.pending_webrtc_closes().expect("pending shutdowns");
+        let retry = tokio::spawn(async move {
+            retry_service
+                .retry_pending_webrtc_closes(1_002, pending)
+                .await
+        });
         entered.await;
         let independent_closed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
@@ -5381,6 +5401,75 @@ mod sfu_placement_lifecycle_tests {
                 },
             )
             .expect("durable termination");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_old_provider_close_does_not_delay_terminated_call_downlink_retirement() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([13_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("issuer"),
+        );
+        let store = Arc::new(ucr_storage_memory::MemoryLocalStore::default());
+        let binding = claims("newly-terminated-session", "newly-terminated-device");
+        persist_terminated_cleanup_call(&store, &binding);
+        let active = issuer
+            .issue(
+                binding.scope,
+                binding.call_id,
+                binding.participant,
+                binding.device_id,
+                300,
+                1_000,
+            )
+            .expect("signed grant")
+            .claims;
+        let mut blocked = claims("old-pending-session", "old-pending-device");
+        blocked.call_id = CallId::from_opaque(id("old-pending-call"));
+        let provider = Arc::new(BlockingCloseProvider {
+            blocked_session: blocked.session_id.clone(),
+            entered: Notify::new(),
+            release: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+        });
+        let provider_dyn: Arc<dyn WebRtcProvider> = provider.clone();
+        let service = GrpcRealtimeService::with_webrtc(
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(DenyTestAuthorization),
+            store,
+            issuer,
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+            RealtimeWebRtcDependencies::new(
+                provider_dyn,
+                Arc::new(WebRtcSessionConfigFactory::default()),
+            ),
+        );
+        service
+            .admit_realtime_session_with_sfu_placement(active, 1_001)
+            .await
+            .expect("active downlink");
+        registry
+            .queue_webrtc_close(&blocked)
+            .expect("older shutdown");
+        let entered = provider.entered.notified();
+        let cleanup =
+            tokio::spawn(async move { service.cleanup_closed_conferences_at(1_005).await });
+        let reached = tokio::time::timeout(Duration::from_secs(2), entered).await;
+        let active_at_block = registry.active_session_count();
+        // Always unblock the fixture, even when the assertion fails.
+        provider.unblock();
+        reached.expect("older provider close should be attempted");
+        assert_eq!(
+            active_at_block, 0,
+            "a hung prior provider close must not delay another terminated Call's SFU revocation"
+        );
+        cleanup
+            .await
+            .expect("cleanup task")
+            .expect("provider eventually closed");
     }
 
     #[tokio::test]
