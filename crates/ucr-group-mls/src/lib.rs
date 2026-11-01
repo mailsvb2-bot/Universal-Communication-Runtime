@@ -1930,6 +1930,125 @@ mod tests {
     }
 
     #[test]
+    fn recovered_independent_group_rejects_old_group_exporter_and_server() {
+        use ucr_crypto::{
+            SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+        };
+        use ucr_model::KeyId;
+
+        let scope = scope();
+        let group_id = GroupId::from_opaque(oid("fp-mg-recovery-new-call"));
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let alice = create_device_key_package(&alice_provider, &scope, &device("alice")).unwrap();
+        let bob = create_device_key_package(&bob_provider, &scope, &device("bob")).unwrap();
+        let (mut alice_group, _) = create_group(
+            &alice_provider,
+            &scope,
+            &group_id,
+            &device("alice"),
+            &alice.signer_public_key,
+        )
+        .unwrap();
+        let bob_package =
+            decode_key_package(&alice_provider, &scope, &device("bob"), &bob.bytes).unwrap();
+        let added = stage_add_member(
+            &alice_provider,
+            &mut alice_group,
+            &scope,
+            &group_id,
+            &bob_package,
+        )
+        .unwrap();
+        merge_pending(
+            &alice_provider,
+            &mut alice_group,
+            &scope,
+            &group_id,
+            &added.next_crypto_state,
+        )
+        .unwrap();
+        let bob_group = join_from_welcome(
+            &bob_provider,
+            &scope,
+            &group_id,
+            added.welcome.as_deref().unwrap(),
+            &added.next_crypto_state,
+        )
+        .unwrap();
+        validate_direct_call_roster(&alice_group, &scope, &device("alice"), &device("bob"))
+            .unwrap();
+        validate_direct_call_roster(&bob_group, &scope, &device("bob"), &device("alice")).unwrap();
+        let state = &added.next_crypto_state;
+        let sender_secret =
+            export_group_media_secret(&alice_provider, &alice_group, &scope, &group_id, state)
+                .unwrap();
+        let receiver_secret =
+            export_group_media_secret(&bob_provider, &bob_group, &scope, &group_id, state).unwrap();
+        let media_context = GroupMediaE2eeContext {
+            scope: scope.clone(),
+            call_id: CallId::from_opaque(oid("fp-m-recovery-new-call")),
+            group_id: group_id.clone(),
+            negotiation_ref: oid("neg"),
+            negotiation_generation: 1,
+            crypto_epoch: state.epoch,
+            crypto_state_ref: state.state_ref.clone().unwrap(),
+            crypto_suite: CryptoSuite::UcrV1,
+        };
+        let signer = SigningKeyMaterial::from_seed([23; 32]);
+        let wire = seal_endpoint_group_media_wire(
+            &sender_secret,
+            &media_context,
+            endpoint_alice_video_header(&media_context),
+            b"video after recovered MLS and new Call",
+            KeyId::from_opaque(oid("alice-trusted-key")),
+            &signer,
+        )
+        .unwrap();
+        assert_eq!(
+            open_endpoint_group_media_wire(
+                &receiver_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .unwrap(),
+            b"endpoint A to endpoint B only",
+        );
+        // The previous Call's full MLS exporter is known to this fixture,
+        // as it could be to a historical server-held member. Its secret is
+        // cryptographically independent from the new Call/Group exporter.
+        let old_call = three_member_group();
+        let previous_exporter = export_group_media_secret(
+            &old_call.alice_provider,
+            &old_call.alice_group,
+            &old_call.scope,
+            &old_call.group_id,
+            &old_call.state,
+        )
+        .unwrap();
+        assert_ne!(sender_secret, previous_exporter);
+        assert!(
+            open_endpoint_group_media_wire(
+                &previous_exporter,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .is_err(),
+            "old compromised MLS exporter cannot decrypt recovered Call video"
+        );
+        assert_unadmitted_relay_blind_to_video(
+            &scope,
+            &group_id,
+            &added,
+            &media_context,
+            &wire,
+            &signer,
+        );
+    }
+
+    #[test]
     fn direct_call_roster_uses_real_openmls_leaves_and_rejects_third_devices() {
         let scope = scope();
         let group_id = GroupId::from_opaque(oid("fp-mg-test-direct"));
