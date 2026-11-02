@@ -269,7 +269,12 @@ return {
   cameraControl: !!document.getElementById("camera-toggle"),
   screenControl: !!document.getElementById("screen-toggle"),
   localVideo: !!document.getElementById("local-video"),
-  remoteVideo: !!document.getElementById("remote-video")
+  remoteVideo: !!document.getElementById("remote-video"),
+  // Informational capabilities for browser encrypted-media path selection.
+  mediaStreamTrackProcessor: typeof globalThis.MediaStreamTrackProcessor === "function",
+  videoEncoder: typeof globalThis.VideoEncoder === "function",
+  audioEncoder: typeof globalThis.AudioEncoder === "function",
+  rtcRtpScriptTransform: typeof globalThis.RTCRtpScriptTransform === "function"
 };
 """,
                 "args": [],

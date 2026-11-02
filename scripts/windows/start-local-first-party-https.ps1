@@ -8,7 +8,9 @@ param(
     [string]$PublicPrivateKey = '',
     [string]$PublicEdgeBind = '0.0.0.0:443',
     [string]$TurnUrl = '',
-    [string]$TurnSecretFile = ''
+    [string]$TurnSecretFile = '',
+    # OpenSSL development root; override with -OpenSslRoot or UCR_OPENSSL_ROOT.
+    [string]$OpenSslRoot = ''
 )
 # Keeps the existing canonical SQLite and in-process first-party BFF owner.
 $ErrorActionPreference = 'Stop'
@@ -73,7 +75,7 @@ if ($remote) {
     throw 'External TLS/TURN parameters require -PublicOrigin'
 }
 $vc = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
-$opensslRoot = 'C:\UCR-OpenSSL'
+$opensslRoot = if ($OpenSslRoot) { $OpenSslRoot } elseif ($env:UCR_OPENSSL_ROOT) { $env:UCR_OPENSSL_ROOT } else { 'C:\UCR-OpenSSL' }
 $logRoot = Join-Path $state 'logs'
 New-Item -ItemType Directory -Force -Path $state,$logRoot | Out-Null
 
