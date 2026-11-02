@@ -308,7 +308,9 @@ def main() -> None:
         and "SQLITE_SCHEMA_V51: u32 = 51" in sqlite_store
         and "SQLITE_SCHEMA_V52: u32 = 52" in sqlite_store
         and "SQLITE_SCHEMA_V53: u32 = 53" in sqlite_store
-        and "SQLITE_SCHEMA_VERSION: u32 = 54" in sqlite_store
+        and "SQLITE_SCHEMA_V54: u32 = 54" in sqlite_store
+        and "SQLITE_SCHEMA_V55: u32 = 55" in sqlite_store
+        and "SQLITE_SCHEMA_VERSION: u32 = 55" in sqlite_store
         and "migrate_v38_to_v39" in sqlite_store
         and "migrate_v39_to_v40" in sqlite_store
         and "migrate_v40_to_v41" in sqlite_store
@@ -325,6 +327,8 @@ def main() -> None:
         and "migrate_v51_to_v52" in sqlite_store
         and "migrate_v52_to_v53" in sqlite_store
         and "migrate_v53_to_v54" in sqlite_store
+        and "migrate_v54_to_v55" in sqlite_store
+        and "verify_schema_v55" in sqlite_store
         and "verify_schema_v53" in sqlite_store
         and "verify_schema_v54" in sqlite_store
         and "verify_schema_v51" in sqlite_store
