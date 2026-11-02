@@ -2631,6 +2631,22 @@ where
         claims: &RealtimeSessionClaims,
         group_id: &GroupId,
     ) -> Result<(), CanonicalError> {
+        // A first-party direct-media Call is not a Universal Conference.
+        // Its absence from universal_conference_profile must not bypass the
+        // canonical Group membership gate after an endpoint MLS removal.
+        // Recheck the current durable Group projection at every realtime
+        // admission/publication boundary, including after Join was signed.
+        if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
+            let membership = self
+                .store
+                .group_membership(&claims.scope, group_id, &claims.participant)
+                .map_err(map_store_error)?;
+            if !membership.is_some_and(|member| {
+                member.state == ucr_model::GroupMemberState::Active
+            }) {
+                return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+            }
+        }
         let Some(_) = self
             .store
             .universal_conference_profile(&claims.scope, group_id)
@@ -5050,6 +5066,34 @@ mod sfu_placement_lifecycle_tests {
             .expect("provider closure acknowledged");
         assert_eq!(service.sweep_expired_sfu_placements_at(1_004).await, Ok(1));
         assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn first_party_media_rechecks_current_group_membership_without_universal_profile() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let service = service(
+            registry,
+            Arc::new(RecordingPlacementLifecycle::default()),
+        );
+        let mut first_party = claims("first-party-member-check", "endpoint-device");
+        first_party.call_id = CallId::from_opaque(id("fp-m-member-check"));
+        let group_id = GroupId::from_opaque(id("fp-mg-member-check"));
+
+        // No canonical membership means no media admission even though this
+        // direct-media Group has no Universal Conference profile. A signed
+        // Join cannot be used to re-enroll a removed endpoint.
+        assert_eq!(
+            service.require_active_universal_participant(&first_party, &group_id),
+            Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
+        );
+
+        // Preserve the existing non-first-party behavior: a Group without a
+        // Universal Conference profile is not rejected by this new gate.
+        first_party.call_id = CallId::from_opaque(id("ordinary-group-call"));
+        assert_eq!(
+            service.require_active_universal_participant(&first_party, &group_id),
+            Ok(())
+        );
     }
 
     #[tokio::test]
