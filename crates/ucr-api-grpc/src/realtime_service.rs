@@ -2674,6 +2674,9 @@ where
         let snapshot = conference_runtime(self)
             .snapshot(&actor, &claims.scope, &claims.call_id)
             .map_err(|error| map_conference_error(&error))?;
+        // A plain first-party media Group has no Universal Conference profile.
+        // Enforce its current Group membership BEFORE the early Admitted return.
+        self.require_active_universal_participant(claims, &snapshot.group_id)?;
         let Some(conference) = self
             .store
             .universal_conference_profile(&claims.scope, &snapshot.group_id)
@@ -2681,7 +2684,6 @@ where
         else {
             return Ok(pb::RealtimeAdmissionState::Admitted);
         };
-        self.require_active_universal_participant(claims, &snapshot.group_id)?;
         Ok(match conference.lifecycle {
             UniversalConferenceLifecycle::Waiting => pb::RealtimeAdmissionState::WaitingRoom,
             UniversalConferenceLifecycle::Live => pb::RealtimeAdmissionState::Admitted,
