@@ -5218,6 +5218,45 @@ mod sfu_placement_lifecycle_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_offer_bound_signalling_worker_finishes_before_leave_gate() {
+        // SDP, ICE and offer-bound Close use the same worker-owned lifecycle
+        // gate as Create/Restart. Aborting a gRPC request cannot allow Leave
+        // to finish before a previously authorized provider mutation returns.
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let guard = Arc::clone(&gate).lock_owned().await;
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed_worker = Arc::clone(&completed);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let request = tokio::spawn(run_webrtc_lifecycle_operation(guard, move || {
+            let _ = entered_tx.send(());
+            release_rx.recv().expect("release signalling provider");
+            completed_worker.store(true, Ordering::SeqCst);
+            Ok::<(), WebRtcProviderError>(())
+        }));
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .expect("signalling worker started")
+            .expect("worker entry signal");
+        request.abort();
+        let premature_leave = tokio::time::timeout(
+            Duration::from_millis(100),
+            Arc::clone(&gate).lock_owned(),
+        )
+        .await
+        .is_ok();
+        release_tx.send(()).expect("release signalling worker");
+        let _leave_guard = tokio::time::timeout(Duration::from_secs(2), gate.lock_owned())
+            .await
+            .expect("Leave can acquire gate after provider completes");
+        assert!(!premature_leave, "Leave cannot overtake an aborted request");
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "provider mutation must finish before Leave acquires its gate"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn blocked_provider_close_has_bounded_wait_and_one_in_flight_attempt() {
         let blocked = claims("timeout-provider-session", "timeout-provider-device");
         let registry = RealtimeSessionRegistry::new(8, 2);
