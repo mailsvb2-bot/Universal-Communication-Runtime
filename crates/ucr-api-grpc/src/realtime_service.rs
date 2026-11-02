@@ -2069,9 +2069,10 @@ where
                                         match run_webrtc_lifecycle_operation(
                                             peer_lifecycle_guard,
                                             move || {
-                                                let description = provider.restart_session(&config)?;
-                                                let offer_id =
-                                                    provider.session_offer_id(&config.session_id)?;
+                                                let description =
+                                                    provider.restart_session(&config)?;
+                                                let offer_id = provider
+                                                    .session_offer_id(&config.session_id)?;
                                                 Ok((description, offer_id))
                                             },
                                         )
@@ -5200,12 +5201,9 @@ mod sfu_placement_lifecycle_tests {
         // or restart_session is still executing in a blocking thread.
         request.abort();
         assert!(
-            tokio::time::timeout(
-                Duration::from_millis(100),
-                Arc::clone(&gate).lock_owned(),
-            )
-            .await
-            .is_err(),
+            tokio::time::timeout(Duration::from_millis(100), Arc::clone(&gate).lock_owned(),)
+                .await
+                .is_err(),
             "Leave must not overtake a cancelled but still running provider operation"
         );
         release_tx.send(()).expect("release provider");
