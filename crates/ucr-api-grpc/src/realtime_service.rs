@@ -5543,7 +5543,10 @@ mod sfu_placement_lifecycle_tests {
             Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
             "revoked SDP/ICE mutation must not return the provider error instead of denying access"
         );
-        assert!(closed.load(Ordering::SeqCst), "recheck must close stale peer");
+        assert!(
+            closed.load(Ordering::SeqCst),
+            "recheck must close stale peer"
+        );
         tokio::time::timeout(Duration::from_secs(2), gate.lock_owned())
             .await
             .expect("Join/Leave gate released after cleanup");
