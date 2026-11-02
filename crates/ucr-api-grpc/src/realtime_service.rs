@@ -114,6 +114,23 @@ async fn close_pending_webrtc_provider(
     }
 }
 
+// The blocking WebRTC worker, not the request future, owns the Join/Leave
+// lifecycle gate. If a client disconnects while create/restart is blocked,
+// cancelling the request cannot release the gate before the provider finishes.
+// A concurrent Leave therefore waits and closes the completed provider peer.
+async fn run_webrtc_lifecycle_operation<T: Send + 'static>(
+    guard: tokio::sync::OwnedMutexGuard<()>,
+    operation: impl FnOnce() -> Result<T, WebRtcProviderError> + Send + 'static,
+) -> Result<T, CanonicalError> {
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        operation()
+    })
+    .await
+    .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?
+    .map_err(map_webrtc_provider_error)
+}
+
 pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const REALTIME_BEARER_PREFIX: &str = "Bearer ";
 const REALTIME_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
@@ -1807,7 +1824,7 @@ where
     ) -> Result<Response<pb::RealtimeStartWebRtcResponse>, Status> {
         // Serialize WebRTC peer creation and ICE restart with Join/Leave.
         // A provider operation completing late must not resurrect a retired lease.
-        let _peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
+        let peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let lookup = decode_realtime_lookup(request.into_inner());
         let result = match (token, lookup) {
@@ -1837,12 +1854,13 @@ where
                                     Ok(config) => {
                                         let ice_servers = config.ice_servers.clone();
                                         let provider = Arc::clone(&self.webrtc_provider);
-                                        match tokio::task::spawn_blocking(move || {
-                                            provider.create_session(&config)
-                                        })
+                                        match run_webrtc_lifecycle_operation(
+                                            peer_lifecycle_guard,
+                                            move || provider.create_session(&config),
+                                        )
                                         .await
                                         {
-                                            Ok(Ok(description)) => Ok(pb::RealtimeWebRtcOffer {
+                                            Ok(description) => Ok(pb::RealtimeWebRtcOffer {
                                                 offer_id: Some(ucr_webrtc::webrtc_offer_id(
                                                     &description.sdp,
                                                 )),
@@ -1854,10 +1872,7 @@ where
                                                     .map(pb_webrtc_ice_server)
                                                     .collect(),
                                             }),
-                                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
-                                            Err(_) => Err(CanonicalError::new(
-                                                CanonicalErrorCode::Internal,
-                                            )),
+                                            Err(error) => Err(error),
                                         }
                                     }
                                     Err(error) => Err(error),
@@ -2021,7 +2036,7 @@ where
     ) -> Result<Response<pb::RealtimeRestartWebRtcResponse>, Status> {
         // Serialize WebRTC peer creation and ICE restart with Join/Leave.
         // A provider operation completing late must not resurrect a retired lease.
-        let _peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
+        let peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let lookup = decode_realtime_lookup(request.into_inner());
         let result = match (token, lookup) {
@@ -2051,15 +2066,18 @@ where
                                     Ok(config) => {
                                         let ice_servers = config.ice_servers.clone();
                                         let provider = Arc::clone(&self.webrtc_provider);
-                                        match tokio::task::spawn_blocking(move || {
-                                            let description = provider.restart_session(&config)?;
-                                            let offer_id =
-                                                provider.session_offer_id(&config.session_id)?;
-                                            Ok::<_, WebRtcProviderError>((description, offer_id))
-                                        })
+                                        match run_webrtc_lifecycle_operation(
+                                            peer_lifecycle_guard,
+                                            move || {
+                                                let description = provider.restart_session(&config)?;
+                                                let offer_id =
+                                                    provider.session_offer_id(&config.session_id)?;
+                                                Ok((description, offer_id))
+                                            },
+                                        )
                                         .await
                                         {
-                                            Ok(Ok((description, offer_id))) => {
+                                            Ok((description, offer_id)) => {
                                                 Ok(pb::RealtimeWebRtcOffer {
                                                     offer_id: Some(offer_id),
                                                     description: Some(pb_webrtc_description(
@@ -2071,10 +2089,7 @@ where
                                                         .collect(),
                                                 })
                                             }
-                                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
-                                            Err(_) => Err(CanonicalError::new(
-                                                CanonicalErrorCode::Internal,
-                                            )),
+                                            Err(error) => Err(error),
                                         }
                                     }
                                     Err(error) => Err(error),
@@ -5164,6 +5179,39 @@ mod sfu_placement_lifecycle_tests {
             }
             Ok(())
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_webrtc_request_keeps_lifecycle_gate_until_blocking_provider_finishes() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let guard = Arc::clone(&gate).lock_owned().await;
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let request = tokio::spawn(run_webrtc_lifecycle_operation(guard, move || {
+            entered_tx.send(()).expect("worker started");
+            release_rx.recv().expect("worker released");
+            Ok::<(), WebRtcProviderError>(())
+        }));
+        tokio::task::spawn_blocking(move || entered_rx.recv())
+            .await
+            .expect("entry observer")
+            .expect("worker entered");
+        // Simulate the HTTP/gRPC caller disappearing while create_session
+        // or restart_session is still executing in a blocking thread.
+        request.abort();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                Arc::clone(&gate).lock_owned(),
+            )
+            .await
+            .is_err(),
+            "Leave must not overtake a cancelled but still running provider operation"
+        );
+        release_tx.send(()).expect("release provider");
+        tokio::time::timeout(Duration::from_secs(2), gate.lock_owned())
+            .await
+            .expect("provider completion must release the Join/Leave gate");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
