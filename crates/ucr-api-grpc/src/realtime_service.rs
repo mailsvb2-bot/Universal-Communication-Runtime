@@ -562,21 +562,31 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         {
             return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
         }
-        if let Some(record) = self
+        // A failing canonical store read/revoke MUST NOT strand an already
+        // admitted local downlink or WebRTC provider. Keep the original revoke
+        // error, but still retire the exact generation and attempt shutdown
+        // under the same Join/Leave gate. Durable cross-process revocation is
+        // NOT guaranteed by this node-local emergency cleanup.
+        let revoke_result = match self
             .store
             .conference_join_grant(&claims.scope, &claims.session_id)
-            .map_err(map_store_error)?
         {
-            require_durable_grant_matches_claims(&record, claims)?;
-            self.store
-                .revoke_conference_join_grant(&claims.scope, &claims.session_id)
-                .map_err(map_store_error)?;
-        } else {
-            self.join_issuer
+            Ok(Some(record)) => require_durable_grant_matches_claims(&record, claims).and_then(
+                |()| {
+                    self.store
+                        .revoke_conference_join_grant(&claims.scope, &claims.session_id)
+                        .map(|_| ())
+                        .map_err(map_store_error)
+                },
+            ),
+            Ok(None) => self
+                .join_issuer
                 .revoke(&claims.scope, &claims.session_id)
-                .map_err(map_join_token_error)?;
-        }
-        // Revoke authorization first and retire the live downlink immediately.
+                .map(|_| ())
+                .map_err(map_join_token_error),
+            Err(error) => Err(map_store_error(error)),
+        };
+        // Even if durable revocation failed, stop node-local delivery now.
         // Keeping a revoked session in the active registry would still allow an
         // existing subscriber to receive ciphertext while provider close fails.
         // Record the exact provider shutdown coordinates BEFORE removing that
@@ -608,7 +618,10 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             }
             Err(error) => Err(error),
         };
-        Ok((transition, placement_cleanup))
+        // The caller receives the Left transition even on revoke failure, so
+        // attendance/UI cleanup can proceed. Never report successful Leave
+        // while the canonical grant may still be reusable in another process.
+        Ok((transition, revoke_result.and(placement_cleanup)))
     }
 
     // A failed Join response must not leave a reusable grant or a live
@@ -823,18 +836,30 @@ where
                     // shutdown and acknowledges closure only on provider success.
                     // A failed close stays pending for the normal retry sweep.
                     if let Err(error) = self.require_accepted_conference_participant(&claims) {
-                        let _ = self
+                        if self
                             .retire_failed_realtime_join(&claims, outcome.join_generation, now)
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            return Err(CanonicalError::new(
+                                CanonicalErrorCode::TemporarilyUnavailable,
+                            ));
+                        }
                         return Err(error);
                     }
                     if let Err(error) = self.append_attendance(&outcome.transition) {
                         // The journal failed AFTER registry admission. Merely
                         // rolling back the registry leaves the signed Join grant
                         // reusable and can orphan a WebRTC provider/downlink.
-                        let _ = self
+                        if self
                             .retire_failed_realtime_join(&claims, outcome.join_generation, now)
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            return Err(CanonicalError::new(
+                                CanonicalErrorCode::TemporarilyUnavailable,
+                            ));
+                        }
                         return Err(error);
                     }
                     Ok(pb_realtime_session(
@@ -6017,6 +6042,46 @@ mod sfu_placement_lifecycle_tests {
             .await
             .expect("last cleanup");
         assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_join_retirement_closes_local_delivery_even_when_grant_revoke_fails() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
+        let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+        let orphan = claims("revoke-error-session", "revoke-error-device");
+        service
+            .ensure_sfu_call_placement(&orphan)
+            .await
+            .expect("placement for admitted session");
+        // Seed a post-admission failure with no corresponding issuer/store
+        // grant: the canonical revoke will return UnknownGrant. This tests
+        // emergency local cleanup, NOT cross-process durable revocation.
+        let joined = registry.join(orphan.clone(), 1_001).expect("admitted session");
+        assert_eq!(
+            service
+                .retire_failed_realtime_join(&orphan, joined.join_generation, 1_002)
+                .await,
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+            "failed canonical revoke must be visible to the caller"
+        );
+        assert_eq!(
+            registry.active_session_count(),
+            0,
+            "revoke failure must not leave an active downlink"
+        );
+        assert!(
+            registry
+                .pending_webrtc_closes()
+                .expect("provider close queue")
+                .is_empty(),
+            "successful local provider close must be acknowledged"
+        );
+        assert_eq!(
+            lifecycle.releases.load(Ordering::Relaxed),
+            1,
+            "local placement must be released after provider closure"
+        );
     }
 
     #[tokio::test]
