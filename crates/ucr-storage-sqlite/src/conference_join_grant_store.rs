@@ -141,30 +141,36 @@ pub(super) fn create_v55_objects(transaction: &Transaction<'_>) -> Result<(), Du
 }
 
 fn has_media_group_column(connection: &Connection) -> Result<bool, DurableStoreError> {
-    connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('conference_join_grants')
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('conference_join_grants')
                        WHERE name='media_group_id')",
-        [],
-        |row| row.get(0),
-    ).map_err(|error| map_sqlite_error(&error))
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))
 }
 
 pub(super) fn verify_v55_objects(connection: &Connection) -> Result<(), DurableStoreError> {
     if !has_media_group_column(connection)? {
         return Err(DurableStoreError::Corrupt);
     }
-    let group_fk: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_list('conference_join_grants')
+    let group_fk: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_list('conference_join_grants')
                        WHERE \"table\"='groups' AND \"from\"='media_group_id')",
-        [],
-        |row| row.get(0),
-    ).map_err(|error| map_sqlite_error(&error))?;
-    let index: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index'
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let index: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index'
                        AND name='conference_join_grants_media_group')",
-        [],
-        |row| row.get(0),
-    ).map_err(|error| map_sqlite_error(&error))?;
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
     if !group_fk || !index {
         return Err(DurableStoreError::Corrupt);
     }
@@ -204,7 +210,12 @@ pub(super) fn verify_v34_objects(connection: &Connection) -> Result<(), DurableS
         ("namespace_present", "INTEGER", 1, 2),
         ("namespace_id", "TEXT", 1, 3),
         ("session_id", "TEXT", 1, 4),
-        ("conference_id", "TEXT", i64::from(!has_media_group_column(connection)?), 0),
+        (
+            "conference_id",
+            "TEXT",
+            i64::from(!has_media_group_column(connection)?),
+            0,
+        ),
         ("integration_id", "TEXT", 1, 0),
         ("call_id", "TEXT", 1, 0),
         ("participant_kind", "TEXT", 1, 0),
@@ -256,13 +267,12 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
         }
         let namespace = namespace_storage_key(&grant.scope);
         let group_id = grant.conference_id.as_opaque().as_str();
-        let (conference_id, media_group_id) = if grant.integration_id.as_opaque().as_str()
-            == FIRST_PARTY_MEDIA_JOIN_INTEGRATION
-        {
-            (None, Some(group_id))
-        } else {
-            (Some(group_id), None)
-        };
+        let (conference_id, media_group_id) =
+            if grant.integration_id.as_opaque().as_str() == FIRST_PARTY_MEDIA_JOIN_INTEGRATION {
+                (None, Some(group_id))
+            } else {
+                (Some(group_id), None)
+            };
         transaction
             .execute(
                 "INSERT INTO conference_join_grants (
@@ -629,7 +639,9 @@ mod media_join_grant_tests {
             "a media grant cannot create its own MLS Group or bypass the Group FK"
         );
         assert_eq!(
-            store.conference_join_grant(&scope, &grant.session_id).unwrap(),
+            store
+                .conference_join_grant(&scope, &grant.session_id)
+                .unwrap(),
             None
         );
     }
