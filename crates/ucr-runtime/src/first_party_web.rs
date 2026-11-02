@@ -2634,7 +2634,9 @@ mod tests {
             namespace_id: None,
         };
         let principal = ucr_model::PrincipalRef {
-            principal_id: ucr_model::PrincipalId::from_opaque(OpaqueId::new("test-person").unwrap()),
+            principal_id: ucr_model::PrincipalId::from_opaque(
+                OpaqueId::new("test-person").unwrap(),
+            ),
             kind: PrincipalKind::Person,
         };
         for error in [StatusCode::CONFLICT, StatusCode::SERVICE_UNAVAILABLE] {
