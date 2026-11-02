@@ -131,6 +131,24 @@ async fn run_webrtc_lifecycle_operation<T: Send + 'static>(
     .map_err(map_webrtc_provider_error)
 }
 
+// The blocking worker also owns the final canonical authority check and any
+// provider rollback. Cancellation of the gRPC request must not skip that check,
+// nor release the Join/Leave gate before a stale peer is closed or queued.
+async fn run_webrtc_lifecycle_operation_with_recheck<T: Send + 'static>(
+    guard: tokio::sync::OwnedMutexGuard<()>,
+    operation: impl FnOnce() -> Result<T, WebRtcProviderError> + Send + 'static,
+    recheck: impl FnOnce() -> Result<(), CanonicalError> + Send + 'static,
+) -> Result<T, CanonicalError> {
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        let result = operation().map_err(map_webrtc_provider_error)?;
+        recheck()?;
+        Ok(result)
+    })
+    .await
+    .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?
+}
+
 pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const REALTIME_BEARER_PREFIX: &str = "Bearer ";
 const REALTIME_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
@@ -1875,9 +1893,18 @@ where
                                     Ok(config) => {
                                         let ice_servers = config.ice_servers.clone();
                                         let provider = Arc::clone(&self.webrtc_provider);
-                                        match run_webrtc_lifecycle_operation(
+                                        let validation_service = (*self).clone();
+                                        let validation_claims = claims.clone();
+                                        let validation_token = token.clone();
+                                        match run_webrtc_lifecycle_operation_with_recheck(
                                             peer_lifecycle_guard,
                                             move || provider.create_session(&config),
+                                            move || {
+                                                validation_service.require_post_provider_webrtc_authority(
+                                                    &validation_token,
+                                                    &validation_claims,
+                                                )
+                                            },
                                         )
                                         .await
                                         {
@@ -2090,7 +2117,10 @@ where
                                     Ok(config) => {
                                         let ice_servers = config.ice_servers.clone();
                                         let provider = Arc::clone(&self.webrtc_provider);
-                                        match run_webrtc_lifecycle_operation(
+                                        let validation_service = (*self).clone();
+                                        let validation_claims = claims.clone();
+                                        let validation_token = token.clone();
+                                        match run_webrtc_lifecycle_operation_with_recheck(
                                             peer_lifecycle_guard,
                                             move || {
                                                 let description =
@@ -2098,6 +2128,12 @@ where
                                                 let offer_id = provider
                                                     .session_offer_id(&config.session_id)?;
                                                 Ok((description, offer_id))
+                                            },
+                                            move || {
+                                                validation_service.require_post_provider_webrtc_authority(
+                                                    &validation_token,
+                                                    &validation_claims,
+                                                )
                                             },
                                         )
                                         .await
@@ -2484,6 +2520,53 @@ where
             .require_active_session(&claims, self.now()?)
             .map_err(map_registry_error)?;
         Ok(claims)
+    }
+
+    // Cross-process revoke/Hangup may commit while create_session/restart_session
+    // blocks. The same worker-owned Join/Leave guard must cover this fresh
+    // canonical read AND the provider close; never return a stale SDP/TURN offer.
+    fn require_post_provider_webrtc_authority(
+        &self,
+        token: &str,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), CanonicalError> {
+        let authorization = self
+            .authenticated_webrtc_claims(
+                token,
+                &claims.scope,
+                &claims.call_id,
+                &claims.session_id,
+            )
+            .and_then(|current| {
+                if current == *claims {
+                    Ok(())
+                } else {
+                    Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated))
+                }
+            });
+        if let Err(error) = authorization {
+            // Preserve retry coordinates if the provider cannot close. A
+            // failed close is never acknowledged as successful.
+            self.registry
+                .queue_webrtc_close(claims)
+                .map_err(map_registry_error)?;
+            match self.webrtc_provider.close_session(&claims.session_id) {
+                Ok(()) | Err(WebRtcProviderError::SessionUnavailable) => {
+                    self.acknowledge_pending_webrtc_close(
+                        &claims.scope,
+                        &claims.call_id,
+                        &claims.session_id,
+                    )?;
+                }
+                Err(_) => {
+                    return Err(CanonicalError::new(
+                        CanonicalErrorCode::TemporarilyUnavailable,
+                    ));
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn redeemed_claims(
@@ -5325,6 +5408,50 @@ mod sfu_placement_lifecycle_tests {
             }
             Ok(())
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_webrtc_operation_rechecks_revocation_before_releasing_gate() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let guard = Arc::clone(&gate).lock_owned().await;
+        let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let revoked_for_worker = Arc::clone(&revoked);
+        let closed_for_worker = Arc::clone(&closed);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let request = tokio::spawn(run_webrtc_lifecycle_operation_with_recheck(
+            guard,
+            move || {
+                let _ = entered_tx.send(());
+                release_rx.recv().expect("provider released");
+                Ok::<u64, WebRtcProviderError>(42)
+            },
+            move || {
+                if revoked_for_worker.load(Ordering::SeqCst) {
+                    closed_for_worker.store(true, Ordering::SeqCst);
+                    return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+                }
+                Ok(())
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .expect("provider entered")
+            .expect("entry notification");
+        // Simulates another independently running process revoking the durable
+        // grant while this node's blocking provider operation is in flight.
+        revoked.store(true, Ordering::SeqCst);
+        release_tx.send(()).expect("release provider");
+        assert_eq!(
+            request.await.expect("worker completed"),
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+            "no stale offer may escape after a post-provider revoke"
+        );
+        assert!(closed.load(Ordering::SeqCst), "rollback must run");
+        tokio::time::timeout(Duration::from_secs(2), gate.lock_owned())
+            .await
+            .expect("Join/Leave gate released after rollback");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
