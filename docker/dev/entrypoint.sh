@@ -81,7 +81,12 @@ echo "UCR_DEV_WEBHOOK_RECEIVER=http://127.0.0.1:8090/"
 echo "UCR_DEV_TURN_URL=turn:127.0.0.1:3478?transport=udp"
 # /start needs the first-party BFF + HTTPS edge, which this package does not run.
 echo "UCR_DEV_FIRST_PARTY=disabled see=docs/operations/first-party-realtime-gateway.md"
-UCR_DEV_TURN_SECRET="$TURN_SECRET" python3 /opt/ucr/dev/turn_credentials.py --session ucr-dev
+# Derived TURN credentials are bearer secrets for their TTL: never write them
+# to stdout (docker logs, CI logs). A restrictive 0600 file holds them.
+TURN_CREDENTIALS_FILE=/run/ucr/turn-credentials.env
+( umask 077 && UCR_DEV_TURN_SECRET="$TURN_SECRET" \
+    python3 /opt/ucr/dev/turn_credentials.py --session ucr-dev >"$TURN_CREDENTIALS_FILE" )
+echo "UCR_DEV_TURN_CREDENTIALS_FILE=$TURN_CREDENTIALS_FILE"
 
 while :; do
   for pid in $PIDS; do
