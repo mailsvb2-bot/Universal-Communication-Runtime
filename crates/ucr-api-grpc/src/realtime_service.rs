@@ -6060,7 +6060,9 @@ mod sfu_placement_lifecycle_tests {
         // Seed a post-admission failure with no corresponding issuer/store
         // grant: the canonical revoke will return UnknownGrant. This tests
         // emergency local cleanup, NOT cross-process durable revocation.
-        let joined = registry.join(orphan.clone(), 1_001).expect("admitted session");
+        let joined = registry
+            .join(orphan.clone(), 1_001)
+            .expect("admitted session");
         assert_eq!(
             service
                 .retire_failed_realtime_join(&orphan, joined.join_generation, 1_002)
