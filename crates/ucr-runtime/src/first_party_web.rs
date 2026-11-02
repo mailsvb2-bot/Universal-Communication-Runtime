@@ -29,8 +29,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore, GroupStore,
-    IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
+    AuthorizedDurableRuntime, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
+    GroupStore, IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
     PrincipalIdentityLookupStore, TrustedSigningKeyStore, generate_opaque_id,
 };
 use ucr_group_mls::{
@@ -38,13 +38,13 @@ use ucr_group_mls::{
 };
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
-    CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRecord, ConversationRef, DeliveryPolicy, DeviceDescriptor, DeviceId,
-    DeviceLifecycleState, EventId, GroupChange, GroupChangeKind, GroupCryptoState,
-    GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord, GroupRole,
-    ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, IdentityId, IntegrationId, KeyId,
-    KeyPurpose, NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor,
-    ScopedPrincipal, TenantId, TenantScope,
+    CallSignallingState, CallTerminationReason, ConferenceJoinGrantRecord,
+    ConferenceJoinGrantUsePolicy, ConversationId, ConversationKind, ConversationRecord,
+    ConversationRef, DeliveryPolicy, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventId,
+    GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
+    GroupOwnership, GroupRecord, GroupRole, IdentityId, IntegrationId, KeyId, KeyPurpose,
+    NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor, ScopedPrincipal, TenantId,
+    TenantScope,
 };
 use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
 use ucr_storage_sqlite::{EndpointMlsKeyPackageOffer, SqliteLocalStore};
@@ -1928,9 +1928,7 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
     let durable = ConferenceJoinGrantRecord {
         scope: grant.claims.scope.clone(),
         conference_id: ids.group_id.clone(),
-        integration_id: IntegrationId::from_opaque(
-            opaque("ucr-first-party-direct-media")?,
-        ),
+        integration_id: IntegrationId::from_opaque(opaque("ucr-first-party-direct-media")?),
         call_id: grant.claims.call_id.clone(),
         participant: grant.claims.participant.clone(),
         device_id: grant
