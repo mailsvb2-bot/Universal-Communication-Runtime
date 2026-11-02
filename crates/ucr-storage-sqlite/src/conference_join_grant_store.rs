@@ -586,3 +586,73 @@ fn parse_principal_kind(value: &str) -> Result<PrincipalKind, DurableStoreError>
         _ => Err(DurableStoreError::Corrupt),
     }
 }
+
+#[cfg(test)]
+mod media_join_grant_tests {
+    use super::*;
+    use crate::message_store::tests::TestDb;
+    use ucr_model::{PrincipalId, TenantId};
+
+    fn id(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("test identifier")
+    }
+
+    #[test]
+    fn first_party_media_grant_requires_existing_canonical_group() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("canonical store");
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(id("media-grant-tenant")),
+            namespace_id: None,
+        };
+        let grant = ConferenceJoinGrantRecord {
+            scope: scope.clone(),
+            conference_id: GroupId::from_opaque(id("fp-mg-nonexistent")),
+            integration_id: IntegrationId::from_opaque(id(FIRST_PARTY_MEDIA_JOIN_INTEGRATION)),
+            call_id: CallId::from_opaque(id("fp-m-nonexistent")),
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("alice")),
+                kind: PrincipalKind::Person,
+            },
+            device_id: DeviceId::from_opaque(id("alice-device")),
+            session_id: SessionId::from_opaque(id("missing-group-session")),
+            issued_at_unix_ms: 1000,
+            not_before_unix_ms: 1000,
+            expires_at_unix_ms: 60000,
+            use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+            revoked: false,
+            redeemed: false,
+        };
+        assert!(
+            store.persist_conference_join_grant(&grant).is_err(),
+            "a media grant cannot create its own MLS Group or bypass the Group FK"
+        );
+        assert_eq!(
+            store.conference_join_grant(&scope, &grant.session_id).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn v54_empty_grant_table_migrates_without_weakening_legacy_fk() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("current schema");
+        drop(store);
+        {
+            let mut connection = Connection::open(db.path()).expect("historical fixture");
+            connection
+                .execute_batch("DROP TABLE conference_join_grants;")
+                .expect("remove v55 table");
+            let tx = connection.transaction().expect("fixture transaction");
+            tx.execute_batch(V34_OBJECTS_SQL).expect("v34 grant schema");
+            create_v51_objects(&tx).expect("v51 redaction schema");
+            tx.pragma_update(None, "user_version", 54)
+                .expect("v54 marker");
+            tx.commit().expect("fixture commit");
+        }
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v54 to v55");
+        assert_eq!(migrated.schema_version(), Ok(crate::SQLITE_SCHEMA_VERSION));
+        let connection = migrated.lock_connection().expect("read schema");
+        verify_v55_objects(&connection).expect("media and legacy FKs");
+    }
+}
