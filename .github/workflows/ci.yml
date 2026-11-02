@@ -65,8 +65,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
-      - name: Tests
-        run: cargo test --workspace --all-targets --locked
       - name: Dev mode self-check
         run: cargo run -p ucr-dev -- dev --check
       - name: Public SDK format
@@ -99,6 +97,33 @@ jobs:
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
       - name: Fuzz workspace clippy
         run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+
+
+  rust-workspace-tests:
+    # The full debug test suite is a separate required CI job, not a skipped
+    # gate. Keeping it behind the sequential format/check/WASM/clippy/docs
+    # stages previously exhausted rust-quality's 20-minute budget before
+    # tests could finish; run the exact same unfiltered suite independently.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install native media build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v cmake >/dev/null &&
+             command -v cc >/dev/null &&
+             command -v c++ >/dev/null &&
+             command -v make >/dev/null; then
+            echo "native media build prerequisites already present"
+          else
+            bash tools/ci_install_apt_packages.sh cmake build-essential
+          fi
+      - name: Workspace debug tests (all targets, locked)
+        run: cargo test --workspace --all-targets --locked
 
   release-tests:
     runs-on: ubuntu-24.04
