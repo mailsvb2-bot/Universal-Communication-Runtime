@@ -105,7 +105,9 @@ fn phase20_release_truth_and_repository_guards_are_machine_locked() {
     let spec_readme = fs::read_to_string(root.join("spec/README.md")).expect("spec readme");
     assert!(readme.contains("Phase 20 now adds Prepared realtime Audio"));
     assert!(ci.contains("test -s spec/audio.md"));
-    assert_eq!(ci.matches("cmake build-essential").count(), 2);
+    // Both lint and debug-test jobs, plus release tests, install the same
+    // native media prerequisites. Keep all three mandatory test paths covered.
+    assert_eq!(ci.matches("cmake build-essential").count(), 3);
     assert!(ci.contains("test -s proto/ucr/v1/audio.proto"));
     assert!(ci.contains("0058-phase20-audio-reuses-canonical-call-and-capability-owners.md"));
     assert!(spec_readme.contains("Phase 20 adds `audio.md`"));
