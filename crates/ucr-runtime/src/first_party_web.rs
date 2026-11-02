@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, CallStore, DeviceLifecycleStore, GroupStore,
+    AuthorizedDurableRuntime, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore, GroupStore,
     IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
     PrincipalIdentityLookupStore, TrustedSigningKeyStore, generate_opaque_id,
 };
@@ -42,7 +42,8 @@ use ucr_model::{
     ConversationRecord, ConversationRef, DeliveryPolicy, DeviceDescriptor, DeviceId,
     DeviceLifecycleState, EventId, GroupChange, GroupChangeKind, GroupCryptoState,
     GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord, GroupRole,
-    IdentityId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor,
+    ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, IdentityId, IntegrationId, KeyId,
+    KeyPurpose, NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor,
     ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
@@ -1919,6 +1920,38 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
             now_unix_ms()?,
         )
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    // The first-party BFF and gRPC may run in different processes. An issuer-
+    // local grant cannot be validated or revoked after a process restart.
+    // Persist the exact signed claims in the EXISTING canonical Join-grant
+    // owner before returning any bearer. This provenance marker identifies
+    // the first-party transport; it grants no integration permissions.
+    let durable = ConferenceJoinGrantRecord {
+        scope: grant.claims.scope.clone(),
+        conference_id: ids.group_id.clone(),
+        integration_id: IntegrationId::from_opaque(
+            opaque("ucr-first-party-direct-media")?,
+        ),
+        call_id: grant.claims.call_id.clone(),
+        participant: grant.claims.participant.clone(),
+        device_id: grant
+            .claims
+            .device_id
+            .clone()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
+        session_id: grant.claims.session_id.clone(),
+        issued_at_unix_ms: grant.claims.issued_at_unix_ms,
+        not_before_unix_ms: grant.claims.not_before_unix_ms,
+        expires_at_unix_ms: grant.claims.expires_at_unix_ms,
+        use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+        revoked: false,
+        redeemed: false,
+    };
+    if state.store.persist_conference_join_grant(&durable).is_err() {
+        let _ = state
+            .issuer
+            .revoke(&grant.claims.scope, &grant.claims.session_id);
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     // A different authenticated Device may Hangup while MLS checks and Join
     // signing are in progress. Suppress a stale response if either canonical
     // Call changed. A later Hangup is fenced by the media Call's termination
@@ -1953,7 +1986,17 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
             }
             Ok(fragment)
         })(),
-    )?;
+    );
+    // A post-sign conflict must revoke BOTH canonical durable state and the
+    // issuer-local compatibility grant. A local-only revoke cannot fence a
+    // separate realtime process that already sees the durable record.
+    if fragment.is_err() {
+        state
+            .store
+            .revoke_conference_join_grant(&grant.claims.scope, &grant.claims.session_id)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    }
+    let fragment = fragment?;
     let binding = &session.binding;
     Ok(json!({
         "tenantId": binding.tenant_id,
