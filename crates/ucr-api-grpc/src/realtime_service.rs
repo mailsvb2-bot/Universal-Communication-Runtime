@@ -1900,10 +1900,11 @@ where
                                             peer_lifecycle_guard,
                                             move || provider.create_session(&config),
                                             move || {
-                                                validation_service.require_post_provider_webrtc_authority(
-                                                    &validation_token,
-                                                    &validation_claims,
-                                                )
+                                                validation_service
+                                                    .require_post_provider_webrtc_authority(
+                                                        &validation_token,
+                                                        &validation_claims,
+                                                    )
                                             },
                                         )
                                         .await
@@ -2130,10 +2131,11 @@ where
                                                 Ok((description, offer_id))
                                             },
                                             move || {
-                                                validation_service.require_post_provider_webrtc_authority(
-                                                    &validation_token,
-                                                    &validation_claims,
-                                                )
+                                                validation_service
+                                                    .require_post_provider_webrtc_authority(
+                                                        &validation_token,
+                                                        &validation_claims,
+                                                    )
                                             },
                                         )
                                         .await
@@ -2531,12 +2533,7 @@ where
         claims: &RealtimeSessionClaims,
     ) -> Result<(), CanonicalError> {
         let authorization = self
-            .authenticated_webrtc_claims(
-                token,
-                &claims.scope,
-                &claims.call_id,
-                &claims.session_id,
-            )
+            .authenticated_webrtc_claims(token, &claims.scope, &claims.call_id, &claims.session_id)
             .and_then(|current| {
                 if current == *claims {
                     Ok(())
