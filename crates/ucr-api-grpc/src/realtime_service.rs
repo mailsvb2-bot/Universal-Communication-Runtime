@@ -890,7 +890,15 @@ where
                     // revokes the grant, retires the downlink, queues provider
                     // shutdown and acknowledges closure only on provider success.
                     // A failed close stays pending for the normal retry sweep.
-                    if let Err(error) = self.require_accepted_conference_participant(&claims) {
+                    // Placement and registry admission may outlast the signed
+                    // Join validity window. Recheck the canonical durable grant
+                    // using a FRESH clock reading before returning the session.
+                    // On expiry or cross-process revoke, retire through Leave.
+                    let final_authority = self
+                        .now()
+                        .and_then(|current| self.require_live_canonical_join_grant(&claims, current))
+                        .and_then(|()| self.require_accepted_conference_participant(&claims));
+                    if let Err(error) = final_authority {
                         if self
                             .retire_failed_realtime_join(&claims, outcome.join_generation, now)
                             .await
