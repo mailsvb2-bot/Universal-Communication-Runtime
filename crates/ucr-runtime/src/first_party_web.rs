@@ -1851,6 +1851,23 @@ fn endpoint_mls_bootstrap(
     }))
 }
 
+// An issued Join is a reusable bearer even if the HTTP handler subsequently
+// rejects its response. Retire the exact grant on every post-sign failure;
+// returning an error alone must not leave an orphan usable token.
+// This is an issuer-local mitigation, NOT a cross-process revocation proof.
+fn finalize_issued_join<T>(
+    issuer: &JoinTokenIssuer,
+    grant: &ucr_realtime::IssuedJoinGrant,
+    result: Result<T, StatusCode>,
+) -> Result<T, StatusCode> {
+    if result.is_err() {
+        issuer
+            .revoke(&grant.claims.scope, &grant.claims.session_id)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    }
+    result
+}
+
 fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Value, StatusCode> {
     let call = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
         .first_party_call_join_admission(
@@ -1906,30 +1923,37 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
     // signing are in progress. Suppress a stale response if either canonical
     // Call changed. A later Hangup is fenced by the media Call's termination
     // at realtime admission; this read alone is not the durable CAS.
-    if state
-        .store
-        .call(&call.scope, &call.call_id)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-        .as_ref()
-        != Some(&call)
-        || !matches!(
-            state
+    let fragment = finalize_issued_join(
+        &state.issuer,
+        &grant,
+        (|| {
+            if state
                 .store
-                .call(&media.scope, &media.call_id)
-                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
-            Some(current) if current.signalling_state != CallSignallingState::Terminated
-        )
-    {
-        return Err(StatusCode::CONFLICT);
-    }
-    let fragment = grant
-        .join_url
-        .split_once('#')
-        .map(|(_, fragment)| format!("#{fragment}"))
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    if !fragment.starts_with("#ucr_join=") {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
+                .call(&call.scope, &call.call_id)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .as_ref()
+                != Some(&call)
+                || !matches!(
+                    state
+                        .store
+                        .call(&media.scope, &media.call_id)
+                        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+                    Some(current) if current.signalling_state != CallSignallingState::Terminated
+                )
+            {
+                return Err(StatusCode::CONFLICT);
+            }
+            let fragment = grant
+                .join_url
+                .split_once('#')
+                .map(|(_, fragment)| format!("#{fragment}"))
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+            if !fragment.starts_with("#ucr_join=") {
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            Ok(fragment)
+        })(),
+    )?;
     let binding = &session.binding;
     Ok(json!({
         "tenantId": binding.tenant_id,
@@ -2597,6 +2621,59 @@ mod acceptance_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_post_issue_join_retires_exact_bearer_without_revoking_success() {
+        let issuer = JoinTokenIssuer::new(
+            ucr_realtime::JoinTokenKey::from_bytes([23; 32]),
+            "https://call.example.invalid/client.html",
+        )
+        .unwrap();
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(OpaqueId::new("test-tenant").unwrap()),
+            namespace_id: None,
+        };
+        let principal = ucr_model::PrincipalRef {
+            principal_id: ucr_model::PrincipalId::from_opaque(OpaqueId::new("test-person").unwrap()),
+            kind: PrincipalKind::Person,
+        };
+        for error in [StatusCode::CONFLICT, StatusCode::SERVICE_UNAVAILABLE] {
+            let grant = issuer
+                .issue(
+                    scope.clone(),
+                    CallId::from_opaque(OpaqueId::new("test-call").unwrap()),
+                    principal.clone(),
+                    None,
+                    DEFAULT_JOIN_TTL_SECONDS,
+                    1_000,
+                )
+                .unwrap();
+            assert!(issuer.validate_live_claims(&grant.claims, 1_000).is_ok());
+            let rejected: Result<String, StatusCode> =
+                finalize_issued_join(&issuer, &grant, Err(error));
+            assert_eq!(rejected, Err(error));
+            assert_eq!(
+                issuer.validate_live_claims(&grant.claims, 1_000),
+                Err(ucr_realtime::JoinTokenError::Revoked),
+                "a rejected HTTP response must retire the issued bearer"
+            );
+        }
+        let grant = issuer
+            .issue(
+                scope,
+                CallId::from_opaque(OpaqueId::new("test-call").unwrap()),
+                principal,
+                None,
+                DEFAULT_JOIN_TTL_SECONDS,
+                1_000,
+            )
+            .unwrap();
+        assert_eq!(
+            finalize_issued_join(&issuer, &grant, Ok("valid".to_owned())),
+            Ok("valid".to_owned())
+        );
+        assert!(issuer.validate_live_claims(&grant.claims, 1_000).is_ok());
+    }
 
     #[test]
     fn origin_must_be_explicit_https_and_listener_loopback() {
