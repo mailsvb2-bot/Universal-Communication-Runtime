@@ -502,6 +502,35 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         Ok(())
     }
 
+    // The existing durable Join grant is the only cross-process authority.
+    // Recheck after an awaited placement operation: another process can
+    // revoke this grant while placement is being provisioned. This narrows
+    // that race, but is NOT an atomic cross-process revoke/Join fence.
+    fn require_live_canonical_join_grant(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<(), CanonicalError>
+    where
+        S: ConferenceJoinGrantStore,
+    {
+        if let Some(record) = self
+            .store
+            .conference_join_grant(&claims.scope, &claims.session_id)
+            .map_err(map_store_error)?
+        {
+            require_durable_grant_matches_claims(&record, claims)?;
+            if record.revoked {
+                return Err(map_join_token_error(JoinTokenError::Revoked));
+            }
+        } else {
+            self.join_issuer
+                .validate_live_claims(claims, now_unix_ms)
+                .map_err(map_join_token_error)?;
+        }
+        Ok(())
+    }
+
     async fn admit_realtime_session_with_sfu_placement(
         &self,
         claims: RealtimeSessionClaims,
@@ -513,21 +542,16 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         let _guard = self.sfu_placement_transition_guard().await;
         // Redemption can precede this mutex. Recheck the SAME canonical
         // grant owner inside the gate, before resurrecting a retired session.
-        if let Some(record) = self
-            .store
-            .conference_join_grant(&claims.scope, &claims.session_id)
-            .map_err(map_store_error)?
-        {
-            require_durable_grant_matches_claims(&record, &claims)?;
-            if record.revoked {
-                return Err(map_join_token_error(JoinTokenError::Revoked));
-            }
-        } else {
-            self.join_issuer
-                .validate_live_claims(&claims, now_unix_ms)
-                .map_err(map_join_token_error)?;
-        }
+        self.require_live_canonical_join_grant(&claims, now_unix_ms)?;
         self.ensure_sfu_call_placement(&claims).await?;
+        // Placement may await remote coordination while another process
+        // revokes the durable grant. Never admit that known-stale session.
+        if let Err(error) = self.require_live_canonical_join_grant(&claims, now_unix_ms) {
+            let _ = self
+                .release_sfu_call_placement_if_inactive(&claims, now_unix_ms)
+                .await;
+            return Err(error);
+        }
         match self.registry.join(claims.clone(), now_unix_ms) {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
@@ -4575,6 +4599,79 @@ mod sfu_placement_lifecycle_tests {
             Arc::new(ConferenceRuntimeState::new()),
         )
         .with_sfu_placement_lifecycle(lifecycle)
+    }
+
+    #[derive(Debug, Default)]
+    struct BlockingEnsurePlacementLifecycle {
+        ensure_started: Notify,
+        allow_ensure: Notify,
+        releases: AtomicUsize,
+    }
+
+    #[tonic::async_trait]
+    impl RealtimeSfuPlacementLifecycle for BlockingEnsurePlacementLifecycle {
+        async fn ensure_call_placement(
+            &self,
+            _scope: &TenantScope,
+            _call_id: &CallId,
+        ) -> Result<(), CanonicalError> {
+            self.ensure_started.notify_one();
+            self.allow_ensure.notified().await;
+            Ok(())
+        }
+
+        async fn release_call_placement(
+            &self,
+            _scope: &TenantScope,
+            _call_id: &CallId,
+        ) -> Result<(), CanonicalError> {
+            self.releases.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_join_during_awaited_placement_never_enters_live_registry() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let lifecycle = Arc::new(BlockingEnsurePlacementLifecycle::default());
+        let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+        let binding = claims("placement-revoked-session", "placement-revoked-device");
+        let grant = service
+            .join_issuer
+            .issue(
+                binding.scope,
+                binding.call_id,
+                binding.participant,
+                binding.device_id,
+                300,
+                1_000,
+            )
+            .expect("issue existing canonical grant")
+            .claims;
+        let joining_service = service.clone();
+        let joining_grant = grant.clone();
+        let joining = tokio::spawn(async move {
+            joining_service
+                .admit_realtime_session_with_sfu_placement(joining_grant, 1_001)
+                .await
+        });
+        lifecycle.ensure_started.notified().await;
+        service
+            .join_issuer
+            .revoke(&grant.scope, &grant.session_id)
+            .expect("revoke while placement is pending");
+        lifecycle.allow_ensure.notify_one();
+        assert_eq!(
+            joining.await.expect("join task"),
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+            "a grant revoked during placement cannot become a live session"
+        );
+        assert_eq!(registry.active_session_count(), 0);
+        assert_eq!(
+            lifecycle.releases.load(Ordering::Relaxed),
+            1,
+            "failed admission releases its unused placement"
+        );
     }
 
     #[derive(Debug, Default)]
