@@ -10,6 +10,8 @@ use super::{
     verify_table_columns,
 };
 
+const FIRST_PARTY_MEDIA_JOIN_INTEGRATION: &str = "ucr-first-party-direct-media";
+
 const V34_OBJECTS_SQL: &str = r"
 CREATE TABLE conference_join_grants (
     tenant_id TEXT NOT NULL,
@@ -67,6 +69,108 @@ pub(super) fn create_v51_objects(transaction: &Transaction<'_>) -> Result<(), Du
         .map_err(|error| map_schema_change_error(&error))
 }
 
+// v55 keeps the SAME canonical grant owner while admitting an endpoint-owned
+// first-party MLS Group as a different FK target from UniversalConference.
+// The two references are mutually exclusive and both are durable FK-checked.
+// Never fabricate a UniversalConference to make a first-party Join persist.
+pub(super) fn create_v55_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    if has_media_group_column(transaction)? {
+        // Historical migration fixtures can retain this newer table shape
+        // while replaying an earlier user_version. Verify it after upgrade.
+        return Ok(());
+    }
+    transaction.execute_batch(r"
+        CREATE TABLE conference_join_grants_v55 (
+            tenant_id TEXT NOT NULL,
+            namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+            namespace_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            conference_id TEXT,
+            integration_id TEXT NOT NULL,
+            call_id TEXT NOT NULL,
+            participant_kind TEXT NOT NULL,
+            participant_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            issued_at_unix_ms INTEGER NOT NULL CHECK(issued_at_unix_ms >= 0),
+            not_before_unix_ms INTEGER NOT NULL,
+            expires_at_unix_ms INTEGER NOT NULL,
+            use_policy TEXT NOT NULL CHECK(use_policy IN ('single_use', 'reusable')),
+            revoked INTEGER NOT NULL CHECK(revoked IN (0, 1)),
+            redeemed INTEGER NOT NULL CHECK(redeemed IN (0, 1)),
+            metadata_redacted INTEGER NOT NULL DEFAULT 0 CHECK(metadata_redacted IN (0,1)),
+            media_group_id TEXT,
+            PRIMARY KEY(tenant_id, namespace_present, namespace_id, session_id),
+            FOREIGN KEY(tenant_id, namespace_present, namespace_id, conference_id)
+                REFERENCES universal_conferences(tenant_id, namespace_present, namespace_id, conference_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(tenant_id, namespace_present, namespace_id, media_group_id)
+                REFERENCES groups(tenant_id, namespace_present, namespace_id, group_id)
+                ON DELETE CASCADE,
+            CHECK((conference_id IS NULL) != (media_group_id IS NULL)),
+            CHECK(media_group_id IS NULL OR
+                  integration_id IN ('ucr-first-party-direct-media', 'expired')),
+            CHECK(integration_id != 'ucr-first-party-direct-media' OR media_group_id IS NOT NULL),
+            CHECK(not_before_unix_ms >= issued_at_unix_ms),
+            CHECK(expires_at_unix_ms > not_before_unix_ms),
+            CHECK((namespace_present = 0 AND namespace_id = '') OR
+                  (namespace_present = 1 AND namespace_id <> ''))
+        ) WITHOUT ROWID;
+        INSERT INTO conference_join_grants_v55 (
+            tenant_id, namespace_present, namespace_id, session_id, conference_id,
+            integration_id, call_id, participant_kind, participant_id, device_id,
+            issued_at_unix_ms, not_before_unix_ms, expires_at_unix_ms, use_policy,
+            revoked, redeemed, metadata_redacted, media_group_id
+        )
+        SELECT tenant_id, namespace_present, namespace_id, session_id, conference_id,
+               integration_id, call_id, participant_kind, participant_id, device_id,
+               issued_at_unix_ms, not_before_unix_ms, expires_at_unix_ms, use_policy,
+               revoked, redeemed, metadata_redacted, NULL
+        FROM conference_join_grants;
+        DROP TABLE conference_join_grants;
+        ALTER TABLE conference_join_grants_v55 RENAME TO conference_join_grants;
+        CREATE INDEX conference_join_grants_conference
+            ON conference_join_grants(tenant_id, namespace_present, namespace_id, conference_id);
+        CREATE INDEX conference_join_grants_media_group
+            ON conference_join_grants(tenant_id, namespace_present, namespace_id, media_group_id);
+        CREATE INDEX conference_join_grants_expiry
+            ON conference_join_grants(expires_at_unix_ms);
+        CREATE INDEX conference_join_grants_pending_redaction
+            ON conference_join_grants(expires_at_unix_ms)
+            WHERE metadata_redacted=0;
+    ").map_err(|error| map_schema_change_error(&error))
+}
+
+fn has_media_group_column(connection: &Connection) -> Result<bool, DurableStoreError> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('conference_join_grants')
+                       WHERE name='media_group_id')",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| map_sqlite_error(&error))
+}
+
+pub(super) fn verify_v55_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    if !has_media_group_column(connection)? {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let group_fk: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_list('conference_join_grants')
+                       WHERE \"table\"='groups' AND \"from\"='media_group_id')",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| map_sqlite_error(&error))?;
+    let index: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index'
+                       AND name='conference_join_grants_media_group')",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| map_sqlite_error(&error))?;
+    if !group_fk || !index {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
+}
+
 pub(super) fn verify_v51_objects(connection: &Connection) -> Result<(), DurableStoreError> {
     for name in [
         "conference_join_grants_expiry",
@@ -100,7 +204,7 @@ pub(super) fn verify_v34_objects(connection: &Connection) -> Result<(), DurableS
         ("namespace_present", "INTEGER", 1, 2),
         ("namespace_id", "TEXT", 1, 3),
         ("session_id", "TEXT", 1, 4),
-        ("conference_id", "TEXT", 1, 0),
+        ("conference_id", "TEXT", i64::from(!has_media_group_column(connection)?), 0),
         ("integration_id", "TEXT", 1, 0),
         ("call_id", "TEXT", 1, 0),
         ("participant_kind", "TEXT", 1, 0),
@@ -115,6 +219,9 @@ pub(super) fn verify_v34_objects(connection: &Connection) -> Result<(), DurableS
     ];
     if super::read_schema_version(connection)? >= 51 {
         columns.push(("metadata_redacted", "INTEGER", 1, 0));
+    }
+    if has_media_group_column(connection)? {
+        columns.push(("media_group_id", "TEXT", 0, 0));
     }
     verify_table_columns(connection, "conference_join_grants", &columns)?;
     let index_exists: bool = connection
@@ -148,22 +255,30 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
             };
         }
         let namespace = namespace_storage_key(&grant.scope);
+        let group_id = grant.conference_id.as_opaque().as_str();
+        let (conference_id, media_group_id) = if grant.integration_id.as_opaque().as_str()
+            == FIRST_PARTY_MEDIA_JOIN_INTEGRATION
+        {
+            (None, Some(group_id))
+        } else {
+            (Some(group_id), None)
+        };
         transaction
             .execute(
                 "INSERT INTO conference_join_grants (
                     tenant_id, namespace_present, namespace_id, session_id, conference_id,
                     integration_id, call_id, participant_kind, participant_id, device_id,
                     issued_at_unix_ms, not_before_unix_ms, expires_at_unix_ms, use_policy,
-                    revoked, redeemed
+                    revoked, redeemed, metadata_redacted, media_group_id
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0, 0
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0, 0, 0, ?15
                 )",
                 params![
                     grant.scope.tenant_id.as_opaque().as_str(),
                     namespace.present,
                     namespace.value,
                     grant.session_id.as_opaque().as_str(),
-                    grant.conference_id.as_opaque().as_str(),
+                    conference_id,
                     grant.integration_id.as_opaque().as_str(),
                     grant.call_id.as_opaque().as_str(),
                     principal_kind_text(grant.participant.kind),
@@ -173,6 +288,7 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
                     grant.not_before_unix_ms,
                     grant.expires_at_unix_ms,
                     use_policy_text(grant.use_policy),
+                    media_group_id,
                 ],
             )
             .map_err(|error| map_sqlite_error(&error))?;
@@ -323,7 +439,7 @@ fn load_grant(
     let namespace = namespace_storage_key(scope);
     connection
         .query_row(
-            "SELECT conference_id, integration_id, call_id, participant_kind, participant_id,
+            "SELECT COALESCE(conference_id, media_group_id), integration_id, call_id, participant_kind, participant_id,
                     device_id, issued_at_unix_ms, not_before_unix_ms, expires_at_unix_ms,
                     use_policy, revoked, redeemed
              FROM conference_join_grants
