@@ -53,16 +53,29 @@ pub(super) fn create_v34_objects(transaction: &Transaction<'_>) -> Result<(), Du
 /// New schema index: bounded expiry sweeps must not scan a growing history of
 /// long-lived replay-prevention tombstones.
 pub(super) fn create_v51_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    // Historical migration fixtures can already contain the v55 canonical
+    // grant table while replaying an older user_version. Do not attempt to
+    // add the same redaction column twice. For a genuinely old v50 table,
+    // missing metadata_redacted must still be added by this migration.
+    if has_metadata_redacted_column(transaction)? {
+        if !has_media_group_column(transaction)? {
+            return Err(DurableStoreError::Corrupt);
+        }
+    } else {
+        transaction
+            .execute_batch(
+                "ALTER TABLE conference_join_grants
+                 ADD COLUMN metadata_redacted INTEGER NOT NULL DEFAULT 0
+                 CHECK(metadata_redacted IN (0,1));",
+            )
+            .map_err(|error| map_schema_change_error(&error))?;
+    }
     transaction
         .execute_batch(
-            "ALTER TABLE conference_join_grants
-             ADD COLUMN metadata_redacted INTEGER NOT NULL DEFAULT 0
-             CHECK(metadata_redacted IN (0,1));
-             CREATE INDEX conference_join_grants_expiry
+            "CREATE INDEX IF NOT EXISTS conference_join_grants_expiry
              ON conference_join_grants(expires_at_unix_ms);
-             -- Explicit state avoids treating legal opaque ID 'expired' as a
-             -- completed redaction. Only unredacted rows appear in this index.
-             CREATE INDEX conference_join_grants_pending_redaction
+             -- Only unredacted rows appear in the bounded privacy sweep.
+             CREATE INDEX IF NOT EXISTS conference_join_grants_pending_redaction
              ON conference_join_grants(expires_at_unix_ms)
              WHERE metadata_redacted=0;",
         )
@@ -138,6 +151,17 @@ pub(super) fn create_v55_objects(transaction: &Transaction<'_>) -> Result<(), Du
             ON conference_join_grants(expires_at_unix_ms)
             WHERE metadata_redacted=0;
     ").map_err(|error| map_schema_change_error(&error))
+}
+
+fn has_metadata_redacted_column(connection: &Connection) -> Result<bool, DurableStoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('conference_join_grants')
+                       WHERE name='metadata_redacted')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))
 }
 
 fn has_media_group_column(connection: &Connection) -> Result<bool, DurableStoreError> {
@@ -228,7 +252,9 @@ pub(super) fn verify_v34_objects(connection: &Connection) -> Result<(), DurableS
         ("revoked", "INTEGER", 1, 0),
         ("redeemed", "INTEGER", 1, 0),
     ];
-    if super::read_schema_version(connection)? >= 51 {
+    if super::read_schema_version(connection)? >= 51
+        || (has_media_group_column(connection)? && has_metadata_redacted_column(connection)?)
+    {
         columns.push(("metadata_redacted", "INTEGER", 1, 0));
     }
     if has_media_group_column(connection)? {
