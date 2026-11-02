@@ -2119,6 +2119,8 @@ where
         &self,
         request: Request<pb::RealtimeCloseWebRtcRequest>,
     ) -> Result<Response<pb::RealtimeCloseWebRtcResponse>, Status> {
+        // A cancelled close must not run after a newer Join/Start has passed the gate.
+        let peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let payload = request.into_inner();
         let offer_id = payload.offer_id;
@@ -2145,21 +2147,21 @@ where
                         let provider = Arc::clone(&self.webrtc_provider);
                         let close_session_id = claims.session_id.clone();
                         let expected_offer_id = offer_id.expect("validated offer identifier");
-                        match tokio::task::spawn_blocking(move || {
-                            provider.close_session_if_offer_matches(
+                        match run_webrtc_lifecycle_operation(peer_lifecycle_guard, move || {
+                            match provider.close_session_if_offer_matches(
                                 &close_session_id,
                                 &expected_offer_id,
-                            )
+                            ) {
+                                Ok(()) | Err(WebRtcProviderError::SessionUnavailable) => Ok(()),
+                                Err(error) => Err(error),
+                            }
                         })
                         .await
                         {
-                            Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {
-                                Ok(pb_acknowledgement(acknowledgement_for(
-                                    claims.session_id.as_opaque().clone(),
-                                )))
-                            }
-                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
-                            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+                            Ok(()) => Ok(pb_acknowledgement(acknowledgement_for(
+                                claims.session_id.as_opaque().clone(),
+                            ))),
+                            Err(error) => Err(error),
                         }
                     }
                     Err(error) => Err(error),
