@@ -882,11 +882,14 @@ where
             canonical.frame.header.video_source_kind,
         );
         self.authorization
-            .authorize(&AuthorizationRequest {
-                subject: authenticated_source.clone(),
-                permission: send.to_owned(),
-                resource_scope: context.scope,
-            })
+            .authorize_in_call(
+                &AuthorizationRequest {
+                    subject: authenticated_source.clone(),
+                    permission: send.to_owned(),
+                    resource_scope: context.scope,
+                },
+                &call.call_id,
+            )
             .map_err(SfuError::Authorization)?;
         Ok(SfuValidatedSourceFrame {
             envelope: canonical,
@@ -931,11 +934,14 @@ where
             return Err(SfuError::SourceMismatch);
         }
         self.authorization
-            .authorize(&AuthorizationRequest {
-                subject: source.clone(),
-                permission: send_permission.to_owned(),
-                resource_scope: source.scope.clone(),
-            })
+            .authorize_in_call(
+                &AuthorizationRequest {
+                    subject: source.clone(),
+                    permission: send_permission.to_owned(),
+                    resource_scope: source.scope.clone(),
+                },
+                &live_call.call_id,
+            )
             .map_err(SfuError::Authorization)?;
         Ok(())
     }
@@ -1020,11 +1026,14 @@ where
                 return Err(SfuError::RecipientMembershipUnavailable);
             }
             self.authorization
-                .authorize(&AuthorizationRequest {
-                    subject: target_principal,
-                    permission: receive.to_owned(),
-                    resource_scope: canonical.frame.header.scope.clone(),
-                })
+                .authorize_in_call(
+                    &AuthorizationRequest {
+                        subject: target_principal,
+                        permission: receive.to_owned(),
+                        resource_scope: canonical.frame.header.scope.clone(),
+                    },
+                    &recipient_call.call_id,
+                )
                 .map_err(SfuError::Authorization)?;
             targets.push(SfuForwardTarget { recipient });
         }
