@@ -1979,10 +1979,27 @@ where
                             sdp: description.1,
                         };
                         let provider = Arc::clone(&self.webrtc_provider);
-                        match run_webrtc_lifecycle_operation(peer_lifecycle_guard, move || {
-                            provider
-                                .set_remote_description_if_offer_matches(&description, &offer_id)
-                        })
+                        let validation_service = (*self).clone();
+                        let validation_claims = claims.clone();
+                        let validation_token = token.clone();
+                        // A different process can revoke the Join while the
+                        // provider applies SDP. Recheck and close the peer even
+                        // if the provider reports a partial mutation error.
+                        match run_webrtc_lifecycle_operation_with_recheck(
+                            peer_lifecycle_guard,
+                            move || {
+                                provider.set_remote_description_if_offer_matches(
+                                    &description,
+                                    &offer_id,
+                                )
+                            },
+                            move || {
+                                validation_service.require_post_provider_webrtc_authority(
+                                    &validation_token,
+                                    &validation_claims,
+                                )
+                            },
+                        )
                         .await
                         {
                             Ok(()) => Ok(pb_acknowledgement(acknowledgement_for(
@@ -2048,11 +2065,23 @@ where
                                     sdp_mline_index,
                                 };
                                 let provider = Arc::clone(&self.webrtc_provider);
-                                match run_webrtc_lifecycle_operation(
+                                let validation_service = (*self).clone();
+                                let validation_claims = claims.clone();
+                                let validation_token = token.clone();
+                                // ICE may be accepted after a cross-process
+                                // revoke. Never acknowledge stale signalling
+                                // or leave its provider peer running.
+                                match run_webrtc_lifecycle_operation_with_recheck(
                                     peer_lifecycle_guard,
                                     move || {
                                         provider.add_remote_candidate_if_offer_matches(
                                             &candidate, &offer_id,
+                                        )
+                                    },
+                                    move || {
+                                        validation_service.require_post_provider_webrtc_authority(
+                                            &validation_token,
+                                            &validation_claims,
                                         )
                                     },
                                 )
@@ -5475,6 +5504,49 @@ mod sfu_placement_lifecycle_tests {
         tokio::time::timeout(Duration::from_secs(2), gate.lock_owned())
             .await
             .expect("Join/Leave gate released after rollback");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_offer_bound_signalling_rechecks_revocation_after_provider_mutation() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let guard = Arc::clone(&gate).lock_owned().await;
+        let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let revoked_for_worker = Arc::clone(&revoked);
+        let closed_for_worker = Arc::clone(&closed);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let request = tokio::spawn(run_webrtc_lifecycle_operation_with_recheck(
+            guard,
+            move || {
+                let _ = entered_tx.send(());
+                release_rx.recv().expect("release SDP/ICE provider");
+                // The provider may mutate a peer before returning an error.
+                Err::<(), WebRtcProviderError>(WebRtcProviderError::SessionUnavailable)
+            },
+            move || {
+                if revoked_for_worker.load(Ordering::SeqCst) {
+                    closed_for_worker.store(true, Ordering::SeqCst);
+                    return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+                }
+                Ok(())
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .expect("provider entered")
+            .expect("entry notification");
+        revoked.store(true, Ordering::SeqCst);
+        release_tx.send(()).expect("release provider");
+        assert_eq!(
+            request.await.expect("worker completed"),
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+            "revoked SDP/ICE mutation must not return the provider error instead of denying access"
+        );
+        assert!(closed.load(Ordering::SeqCst), "recheck must close stale peer");
+        tokio::time::timeout(Duration::from_secs(2), gate.lock_owned())
+            .await
+            .expect("Join/Leave gate released after cleanup");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
