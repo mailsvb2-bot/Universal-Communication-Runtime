@@ -2641,9 +2641,8 @@ where
                 .store
                 .group_membership(&claims.scope, group_id, &claims.participant)
                 .map_err(map_store_error)?;
-            if !membership.is_some_and(|member| {
-                member.state == ucr_model::GroupMemberState::Active
-            }) {
+            if !membership.is_some_and(|member| member.state == ucr_model::GroupMemberState::Active)
+            {
                 return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
             }
         }
