@@ -5071,10 +5071,7 @@ mod sfu_placement_lifecycle_tests {
     #[test]
     fn first_party_media_rechecks_current_group_membership_without_universal_profile() {
         let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
-        let service = service(
-            registry,
-            Arc::new(RecordingPlacementLifecycle::default()),
-        );
+        let service = service(registry, Arc::new(RecordingPlacementLifecycle::default()));
         let mut first_party = claims("first-party-member-check", "endpoint-device");
         first_party.call_id = CallId::from_opaque(id("fp-m-member-check"));
         let group_id = GroupId::from_opaque(id("fp-mg-member-check"));
