@@ -344,6 +344,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one linear end-to-end grant lifecycle scenario
     fn call_grant_is_bound_to_one_live_call_and_revoked_on_terminate_and_leave() {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(db.path()).expect("store");
@@ -366,7 +367,7 @@ mod tests {
             .expect("grant");
         // Idempotent repeat.
         store
-            .grant_call_permissions(&scope(), &call("c1"), &[alice.clone()], &[perm])
+            .grant_call_permissions(&scope(), &call("c1"), std::slice::from_ref(&alice), &[perm])
             .expect("idempotent grant");
         assert!(
             store
