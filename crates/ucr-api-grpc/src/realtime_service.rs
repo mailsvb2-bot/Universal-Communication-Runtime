@@ -4648,6 +4648,32 @@ mod sfu_placement_lifecycle_tests {
             )
             .expect("issue existing canonical grant")
             .claims;
+        // The second actor revokes through the existing canonical store,
+        // independently of the Join service's local transition mutex.
+        service
+            .store
+            .persist_conference_join_grant(&ConferenceJoinGrantRecord {
+                scope: grant.scope.clone(),
+                conference_id: GroupId::from_opaque(id("placement-revoke-conference")),
+                integration_id: ucr_model::IntegrationId::from_opaque(id(
+                    "placement-revoke-integration",
+                )),
+                call_id: grant.call_id.clone(),
+                participant: grant.participant.clone(),
+                device_id: grant.device_id.clone().expect("bound device"),
+                session_id: grant.session_id.clone(),
+                issued_at_unix_ms: grant.issued_at_unix_ms,
+                not_before_unix_ms: grant.not_before_unix_ms,
+                expires_at_unix_ms: grant.expires_at_unix_ms,
+                use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+                revoked: false,
+                redeemed: false,
+            })
+            .expect("persist canonical Join grant");
+        service
+            .store
+            .redeem_conference_join_grant(&grant.scope, &grant.session_id)
+            .expect("redeem canonical Join grant");
         let joining_service = service.clone();
         let joining_grant = grant.clone();
         let joining = tokio::spawn(async move {
@@ -4657,9 +4683,9 @@ mod sfu_placement_lifecycle_tests {
         });
         lifecycle.ensure_started.notified().await;
         service
-            .join_issuer
-            .revoke(&grant.scope, &grant.session_id)
-            .expect("revoke while placement is pending");
+            .store
+            .revoke_conference_join_grant(&grant.scope, &grant.session_id)
+            .expect("revoke in canonical store while placement is pending");
         lifecycle.allow_ensure.notify_one();
         assert_eq!(
             joining.await.expect("join task"),
