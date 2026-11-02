@@ -260,7 +260,18 @@ pub(super) fn verify_v34_objects(connection: &Connection) -> Result<(), DurableS
     if has_media_group_column(connection)? {
         columns.push(("media_group_id", "TEXT", 0, 0));
     }
-    verify_table_columns(connection, "conference_join_grants", &columns)?;
+    // A legacy test fixture may remove the v51 redaction column from a v55
+    // table, then replay the real v51 ALTER TABLE migration. SQLite appends
+    // that column after media_group_id. Column order has no authority meaning,
+    // but accept ONLY these two fully specified layouts (never extra columns).
+    if verify_table_columns(connection, "conference_join_grants", &columns).is_err() {
+        if !(has_media_group_column(connection)? && has_metadata_redacted_column(connection)?) {
+            return Err(DurableStoreError::Corrupt);
+        }
+        let len = columns.len();
+        columns.swap(len - 2, len - 1);
+        verify_table_columns(connection, "conference_join_grants", &columns)?;
+    }
     let index_exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name=?1)",
