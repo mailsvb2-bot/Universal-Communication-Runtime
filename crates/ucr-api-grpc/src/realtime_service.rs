@@ -541,6 +541,9 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
                 return Err(map_join_token_error(JoinTokenError::Revoked));
             }
         } else {
+            if requires_durable_first_party_join(claims) {
+                return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+            }
             self.join_issuer
                 .validate_live_claims(claims, now_unix_ms)
                 .map_err(map_join_token_error)?;
@@ -2511,6 +2514,9 @@ where
                 Err(error) => return Err(map_store_error(error)),
             }
         } else {
+            if requires_durable_first_party_join(&claims) {
+                return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+            }
             let legacy = self
                 .join_issuer
                 .redeem(token, self.now()?)
@@ -3870,6 +3876,13 @@ fn pb_realtime_session(
     }
 }
 
+// First-party media Join is always issued through the canonical durable
+// ConferenceJoinGrantStore. Never downgrade a missing/deleted record to an
+// issuer-local compatibility grant after restart or on another process.
+fn requires_durable_first_party_join(claims: &RealtimeSessionClaims) -> bool {
+    claims.call_id.as_opaque().as_str().starts_with("fp-m-")
+}
+
 pub(crate) fn authenticate_realtime_bearer_claims<S>(
     store: &S,
     join_issuer: &JoinTokenIssuer,
@@ -3891,6 +3904,9 @@ where
             return Err(map_join_token_error(JoinTokenError::Revoked));
         }
     } else {
+        if requires_durable_first_party_join(&claims) {
+            return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+        }
         let legacy = join_issuer
             .verify(token, now_unix_ms)
             .map_err(map_join_token_error)?;
@@ -4649,6 +4665,60 @@ mod sfu_placement_lifecycle_tests {
             self.releases.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+    }
+
+    #[test]
+    fn first_party_media_join_requires_durable_grant_even_when_issuer_knows_token() {
+        let service = service(
+            Arc::new(RealtimeSessionRegistry::new(8, 2)),
+            Arc::new(BlockingEnsurePlacementLifecycle::default()),
+        );
+        let binding = claims("fp-durable-session", "fp-durable-device");
+        let issued = service
+            .join_issuer
+            .issue(
+                binding.scope.clone(),
+                CallId::from_opaque(id("fp-m-durable-media-call")),
+                binding.participant.clone(),
+                binding.device_id.clone(),
+                300,
+                1_000,
+            )
+            .expect("issuer-local signed token");
+        let claims = &issued.claims;
+        assert!(
+            service.require_live_canonical_join_grant(claims, 1_001).is_err(),
+            "a missing durable record must never fall back to local issuer state"
+        );
+        service
+            .store
+            .persist_conference_join_grant(&ConferenceJoinGrantRecord {
+                scope: claims.scope.clone(),
+                conference_id: GroupId::from_opaque(id("fp-durable-media-group")),
+                integration_id: ucr_model::IntegrationId::from_opaque(id(
+                    "ucr-first-party-direct-media",
+                )),
+                call_id: claims.call_id.clone(),
+                participant: claims.participant.clone(),
+                device_id: claims.device_id.clone().expect("bound Device"),
+                session_id: claims.session_id.clone(),
+                issued_at_unix_ms: claims.issued_at_unix_ms,
+                not_before_unix_ms: claims.not_before_unix_ms,
+                expires_at_unix_ms: claims.expires_at_unix_ms,
+                use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+                revoked: false,
+                redeemed: false,
+            })
+            .expect("canonical durable grant");
+        assert!(service.require_live_canonical_join_grant(claims, 1_001).is_ok());
+        service
+            .store
+            .revoke_conference_join_grant(&claims.scope, &claims.session_id)
+            .expect("canonical revoke");
+        assert!(
+            service.require_live_canonical_join_grant(claims, 1_001).is_err(),
+            "durable revoke must override a still-live issuer-local token"
+        );
     }
 
     #[tokio::test]
