@@ -571,14 +571,16 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .store
             .conference_join_grant(&claims.scope, &claims.session_id)
         {
-            Ok(Some(record)) => require_durable_grant_matches_claims(&record, claims).and_then(
-                |()| {
+            Ok(Some(record)) => {
+                if let Err(error) = require_durable_grant_matches_claims(&record, claims) {
+                    Err(error)
+                } else {
                     self.store
                         .revoke_conference_join_grant(&claims.scope, &claims.session_id)
                         .map(|_| ())
                         .map_err(map_store_error)
-                },
-            ),
+                }
+            }
             Ok(None) => self
                 .join_issuer
                 .revoke(&claims.scope, &claims.session_id)
@@ -589,8 +591,9 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         // Even if durable revocation failed, stop node-local delivery now.
         // Keeping a revoked session in the active registry would still allow an
         // existing subscriber to receive ciphertext while provider close fails.
-        // Record the exact provider shutdown coordinates BEFORE removing that
-        // session; the ordinary sweep retries failures without any valid bearer.
+        // Record exact shutdown coordinates BEFORE removing that session.
+        // Provider retries do not repair a failed durable revocation: the
+        // bearer may remain valid in another process until that is resolved.
         self.registry
             .queue_webrtc_close(claims)
             .map_err(map_registry_error)?;
@@ -598,8 +601,8 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .registry
             .leave_if_sequence(claims, expected_session_sequence, now_unix_ms)
             .map_err(map_registry_error)?;
-        // Revocation and downlink retirement are now committed under the
-        // Join/Leave gate. A slow provider close must not block unrelated
+        // The node-local downlink is retired under the Join/Leave gate.
+        // A slow provider close must not block unrelated
         // Calls from revoking their own grants.
         drop(placement_guard);
         let close_result = self
