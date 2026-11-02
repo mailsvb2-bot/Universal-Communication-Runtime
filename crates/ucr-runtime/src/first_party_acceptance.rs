@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
-use ucr_core::{IdentityDeviceLookupStore, TrustedSigningKeyStore};
+use ucr_core::{ConferenceJoinGrantStore, IdentityDeviceLookupStore, TrustedSigningKeyStore};
 use ucr_crypto::{
     SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
 };
@@ -1321,6 +1321,39 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             .verify_signed_claims(&token, now_unix_ms().unwrap())
             .expect("first-party grant signed by the realtime issuer")
     });
+    // A separate BFF/realtime process cannot rely on the issuer's in-memory
+    // grants. Both signed Joins must exist in the SAME canonical SQLite owner,
+    // visible through an independent connection and verifiable after restart.
+    let other_store = SqliteLocalStore::open(&db.0).expect("independent SQLite handle");
+    let independent_issuer = JoinTokenIssuer::new(
+        JoinTokenKey::from_bytes([9; 32]),
+        "https://call.example.invalid/client.html",
+    )
+    .expect("independent issuer");
+    for (claim, token) in claims.iter().zip(&tokens) {
+        assert!(
+            independent_issuer.verify(token, now_unix_ms().unwrap()).is_err(),
+            "a new issuer has no process-local grant"
+        );
+        assert_eq!(
+            independent_issuer
+                .verify_signed_claims(token, now_unix_ms().unwrap())
+                .expect("signed claims survive restart"),
+            *claim
+        );
+        let durable = other_store
+            .conference_join_grant(&claim.scope, &claim.session_id)
+            .expect("canonical grant lookup")
+            .expect("first-party Join must be durable");
+        assert_eq!(durable.call_id, claim.call_id);
+        assert_eq!(durable.participant, claim.participant);
+        assert_eq!(durable.device_id, claim.device_id.clone().unwrap());
+        assert_eq!(
+            durable.integration_id.as_opaque().as_str(),
+            "ucr-first-party-direct-media"
+        );
+        assert!(!durable.revoked);
+    }
     // Both grants name ONE derived media Group Call, bound to the exact Device.
     assert_eq!(claims[0].call_id, claims[1].call_id);
     assert!(claims[0].call_id.as_opaque().as_str().starts_with("fp-m-"));
@@ -1529,6 +1562,20 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             Some(pb::realtime_heartbeat_response::Result::Error(_))
         ),
         "{after:?}"
+    );
+    // Revocation on a second SQLite connection must be visible to the
+    // original process even though its compatibility issuer still knows the
+    // signed token. This is durable evidence, not a physical A/B media test.
+    other_store
+        .revoke_conference_join_grant(&claims[0].scope, &claims[0].session_id)
+        .expect("cross-connection canonical revoke");
+    assert!(
+        server
+            .store
+            .conference_join_grant(&claims[0].scope, &claims[0].session_id)
+            .unwrap()
+            .unwrap()
+            .revoked
     );
 }
 
