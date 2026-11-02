@@ -1332,7 +1332,9 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     .expect("independent issuer");
     for (claim, token) in claims.iter().zip(&tokens) {
         assert!(
-            independent_issuer.verify(token, now_unix_ms().unwrap()).is_err(),
+            independent_issuer
+                .verify(token, now_unix_ms().unwrap())
+                .is_err(),
             "a new issuer has no process-local grant"
         );
         assert_eq!(
