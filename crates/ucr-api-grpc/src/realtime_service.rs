@@ -540,6 +540,14 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             if record.revoked {
                 return Err(map_join_token_error(JoinTokenError::Revoked));
             }
+            // A placement may await another process. Durable grant presence
+            // is not sufficient if the signed lease has become time-invalid.
+            if now_unix_ms < record.not_before_unix_ms {
+                return Err(map_join_token_error(JoinTokenError::NotYetValid));
+            }
+            if now_unix_ms >= record.expires_at_unix_ms {
+                return Err(map_join_token_error(JoinTokenError::Expired));
+            }
         } else {
             if requires_durable_first_party_join(claims) {
                 return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
@@ -4733,6 +4741,16 @@ mod sfu_placement_lifecycle_tests {
             service
                 .require_live_canonical_join_grant(claims, 1_001)
                 .is_ok()
+        );
+        assert_eq!(
+            service.require_live_canonical_join_grant(claims, claims.not_before_unix_ms - 1),
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+            "a durable Join cannot be used before its signed not-before time"
+        );
+        assert_eq!(
+            service.require_live_canonical_join_grant(claims, claims.expires_at_unix_ms),
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+            "a durable Join must expire at its exact signed expiry boundary"
         );
         service
             .store
