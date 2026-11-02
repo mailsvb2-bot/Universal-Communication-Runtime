@@ -20,6 +20,23 @@ const {
 } = media;
 
 const el = (id) => document.getElementById(id);
+// Integrity failure of THIS endpoint's MLS state. Only such a failure makes a
+// Call "compromised" and offers the explicit new-secure-call recovery; an
+// ordinary hangup, reject or timeout never shows that button.
+class MlsIntegrityError extends Error {}
+const COMPROMISED_CALLS_KEY="ucr.compromised-calls.v1";
+function compromisedCalls(){
+  try{
+    const list=JSON.parse(sessionStorage.getItem(COMPROMISED_CALLS_KEY)||"[]");
+    return new Set(Array.isArray(list)?list.filter(x=>typeof x==="string"):[]);
+  }catch(_){return new Set();}
+}
+function markCallCompromised(callId){
+  if(typeof callId!=="string")return;
+  const list=[...compromisedCalls()].filter(x=>x!==callId).slice(-31);
+  list.push(callId);
+  try{sessionStorage.setItem(COMPROMISED_CALLS_KEY,JSON.stringify(list));}catch(_){}
+}
 // Externalized from start.html: the server CSP intentionally forbids inline scripts.
 const KEY="petrellink.language.v1";
   const allowed=["ru","en"];
@@ -65,6 +82,12 @@ const KEY="petrellink.language.v1";
     "Выберите контакт и нажмите «Видеозвонок».":"Select a contact and choose Video call.",
     "Зарегистрируйте первое доверенное устройство.":"Register your first trusted device.",
     "Вызов завершён. Выберите контакт для нового звонка.":"Call ended. Select a contact to call again.",
+    "Новый защищённый звонок":"New secure call",
+    "Старый звонок ещё не завершён":"The previous call has not ended yet",
+    "Смена устройства во время восстановления":"Device changed during recovery",
+    "Восстановленный Call создан, но пользовательская сессия изменилась":"Recovery call created, but your session changed",
+    "Создан новый независимый вызов. Ожидаем принятия и новых MLS-ключей.":"A new independent call was created. Waiting for acceptance and fresh MLS keys.",
+    "Защищённый канал этого звонка повреждён. Начните новый защищённый звонок.":"This call's secure channel is damaged. Start a new secure call.",
     "Вызов принят. Проверяем криптографический допуск и открываем видеоэкран…":"Call answered. Verifying encrypted-media admission…",
     "Аудиовызов принят. Проверяем криптографический допуск и открываем экран аудиосвязи…":"Audio call answered. Verifying encrypted-media admission…",
     "Видеовызов отправлен. Ожидается принятие вторым участником; камера пока выключена.":"Video call sent. Waiting for the other person; camera is off.",
@@ -492,7 +515,14 @@ async function run(action) {
   if (busy || navigating) return;
   busy = true;
   try {await action();}
-  catch(error) { message("Действие не подтверждено: " + (error instanceof Error ? error.message : String(error)));}
+  catch(error) {
+    if (error instanceof MlsIntegrityError && active) {
+      markCallCompromised(active.call.callId);
+      message("Защищённый канал этого звонка повреждён. Начните новый защищённый звонок.");
+      showActive();
+      return;
+    }
+    message("Действие не подтверждено: " + (error instanceof Error ? error.message : String(error)));}
   finally {busy = false;}
 }
 function renderContacts(contacts) {
@@ -549,7 +579,8 @@ function showActive() {
     + " (" + (active.call.media === "video" ? "видео" : "аудио") + ")";
   el("cancel").hidden = active.call.state === "terminated";
   if (active.call.state === "terminated" &&
-      active.identity === active.call.callerIdentityId) {
+      active.identity === active.call.callerIdentityId &&
+      compromisedCalls().has(active.call.callId)) {
     // A compromised MLS Group is never reused. Re-entry creates an entirely
     // new canonical Call (hence a different derived endpoint-owned Group).
     // The ordinary accepted-Call path below then performs Device-owned
@@ -633,7 +664,7 @@ async function mlsRecord(store,key,write,record,insertOnly=false){
 }
 function mlsBytes(bytes){
   const value=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
-  if(!value.length||value.length>MLS_MAX_SNAPSHOT)throw Error("Invalid sealed MLS snapshot");
+  if(!value.length||value.length>MLS_MAX_SNAPSHOT)throw new MlsIntegrityError("Invalid sealed MLS snapshot");
   return value;
 }
 async function mlsSnapshot(key){
@@ -665,11 +696,11 @@ function checkedMlsTransition(journal,descriptor){
      typeof journal.recipientSignatureBase64Url!=="string"||
      !Array.isArray(journal.commit)||!Array.isArray(journal.welcome)||
      !Array.isArray(journal.sealed))
-    throw Error("Corrupt pending MLS Commit journal");
+    throw new MlsIntegrityError("Corrupt pending MLS Commit journal");
   const bounded=(value,max)=>{
     if(value.length===0||value.length>max||
        value.some(byte=>!Number.isInteger(byte)||byte<0||byte>255))
-      throw Error("Invalid pending MLS Commit journal bytes");
+      throw new MlsIntegrityError("Invalid pending MLS Commit journal bytes");
     return new Uint8Array(value);
   };
   return {
@@ -681,9 +712,9 @@ function checkedMlsTransition(journal,descriptor){
 function mlsWrappingRecord(record){
   if(!record||record.version!==1||record.kek?.type!=="secret"||
      record.kek.extractable!==false||record.kek.algorithm?.name!=="AES-GCM")
-    throw Error("Invalid MLS wrapping-key record");
+    throw new MlsIntegrityError("Invalid MLS wrapping-key record");
   const iv=new Uint8Array(record.iv),wrapped=new Uint8Array(record.wrapped);
-  if(iv.length!==12||wrapped.length<=32)throw Error("Invalid MLS wrapping-key ciphertext");
+  if(iv.length!==12||wrapped.length<=32)throw new MlsIntegrityError("Invalid MLS wrapping-key ciphertext");
   return {...record,iv,wrapped};
 }
 async function mlsWrappingKey(key,{requireExisting=false}={}){
@@ -714,7 +745,7 @@ async function mlsWrappingKey(key,{requireExisting=false}={}){
     name:"AES-GCM",iv:saved.iv,additionalData:new TextEncoder().encode(MLS_AAD+key)
   },saved.kek,saved.wrapped));
   if(result.length!==32||result.every(byte=>byte===0))
-    throw Error("Invalid recovered MLS wrapping key");
+    throw new MlsIntegrityError("Invalid recovered MLS wrapping key");
   return result;
 }
 async function mlsWasm(){
