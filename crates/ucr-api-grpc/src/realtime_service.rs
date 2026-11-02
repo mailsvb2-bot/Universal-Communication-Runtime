@@ -4687,7 +4687,9 @@ mod sfu_placement_lifecycle_tests {
             .expect("issuer-local signed token");
         let claims = &issued.claims;
         assert!(
-            service.require_live_canonical_join_grant(claims, 1_001).is_err(),
+            service
+                .require_live_canonical_join_grant(claims, 1_001)
+                .is_err(),
             "a missing durable record must never fall back to local issuer state"
         );
         service
@@ -4710,13 +4712,19 @@ mod sfu_placement_lifecycle_tests {
                 redeemed: false,
             })
             .expect("canonical durable grant");
-        assert!(service.require_live_canonical_join_grant(claims, 1_001).is_ok());
+        assert!(
+            service
+                .require_live_canonical_join_grant(claims, 1_001)
+                .is_ok()
+        );
         service
             .store
             .revoke_conference_join_grant(&claims.scope, &claims.session_id)
             .expect("canonical revoke");
         assert!(
-            service.require_live_canonical_join_grant(claims, 1_001).is_err(),
+            service
+                .require_live_canonical_join_grant(claims, 1_001)
+                .is_err(),
             "durable revoke must override a still-live issuer-local token"
         );
     }
