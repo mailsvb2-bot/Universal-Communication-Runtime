@@ -896,7 +896,9 @@ where
                     // On expiry or cross-process revoke, retire through Leave.
                     let final_authority = self
                         .now()
-                        .and_then(|current| self.require_live_canonical_join_grant(&claims, current))
+                        .and_then(|current| {
+                            self.require_live_canonical_join_grant(&claims, current)
+                        })
                         .and_then(|()| self.require_accepted_conference_participant(&claims));
                     if let Err(error) = final_authority {
                         if self
