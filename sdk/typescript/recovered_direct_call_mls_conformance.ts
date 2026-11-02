@@ -95,6 +95,35 @@ await assert.rejects(establishRecoveredDirectCall("call-old",call,
 assert.equal(joins,0);
 epoch=null;published=false;committed=false;
 
+// Both independently authenticated Group snapshots must report the same
+// committed CAS revision, advanced beyond the pre-Commit Group revision.
+// A matching MLS epoch/state digest alone is not sufficient for signed Join.
+for (const skew of [1, -1]) {
+  const divergentGroupHost={...host,
+    async describeAcceptedCallMls(auth:UcrAuthenticatedFirstEntry) {
+      const state=descriptor(auth);
+      return committed && auth.deviceId==="b"
+        ? {...state,groupRevision:state.groupRevision!+skew} : state;
+    },
+  } as UcrManagedFirstPartyHost;
+  await assert.rejects(establishRecoveredDirectCall("call-old",call,
+    {host:divergentGroupHost,endpoint:own("a"),auth:alice},
+    {host:divergentGroupHost,endpoint:own("b"),auth:bob}),/canonical committed MLS peer Device or epoch mismatch/);
+  assert.equal(joins,0,"divergent Group revision cannot issue Join");
+  epoch=null;published=false;committed=false;
+}
+const unadvancedGroupHost={...host,
+  async describeAcceptedCallMls(auth:UcrAuthenticatedFirstEntry) {
+    const state=descriptor(auth);
+    return committed ? {...state,groupRevision:3} : state;
+  },
+} as UcrManagedFirstPartyHost;
+await assert.rejects(establishRecoveredDirectCall("call-old",call,
+  {host:unadvancedGroupHost,endpoint:own("a"),auth:alice},
+  {host:unadvancedGroupHost,endpoint:own("b"),auth:bob}),/canonical committed MLS peer Device or epoch mismatch/);
+assert.equal(joins,0,"unadvanced Group revision cannot issue Join");
+epoch=null;published=false;committed=false;
+
 // A Welcome for a different epoch must be refused before endpoint import.
 const wrongWelcomeHost={...host,
   async fetchEndpointMlsBootstrap(auth:UcrAuthenticatedFirstEntry,
