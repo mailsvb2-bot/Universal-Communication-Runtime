@@ -1898,6 +1898,8 @@ where
         &self,
         request: Request<pb::RealtimeSetWebRtcRemoteDescriptionRequest>,
     ) -> Result<Response<pb::RealtimeSetWebRtcRemoteDescriptionResponse>, Status> {
+        // SDP mutations must remain fenced against Leave even after request cancellation.
+        let peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let offer_id = body.offer_id.clone().filter(|id| {
@@ -1924,17 +1926,16 @@ where
                             sdp: description.1,
                         };
                         let provider = Arc::clone(&self.webrtc_provider);
-                        match tokio::task::spawn_blocking(move || {
+                        match run_webrtc_lifecycle_operation(peer_lifecycle_guard, move || {
                             provider
                                 .set_remote_description_if_offer_matches(&description, &offer_id)
                         })
                         .await
                         {
-                            Ok(Ok(())) => Ok(pb_acknowledgement(acknowledgement_for(
+                            Ok(()) => Ok(pb_acknowledgement(acknowledgement_for(
                                 claims.session_id.as_opaque().clone(),
                             ))),
-                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
-                            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+                            Err(error) => Err(error),
                         }
                     }
                     Err(error) => Err(error),
@@ -1962,6 +1963,8 @@ where
         &self,
         request: Request<pb::RealtimeAddWebRtcIceCandidateRequest>,
     ) -> Result<Response<pb::RealtimeAddWebRtcIceCandidateResponse>, Status> {
+        // ICE mutations share the cancellable-request-safe Join/Leave gate.
+        let peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let offer_id = body.offer_id.clone().filter(|id| {
@@ -1992,20 +1995,20 @@ where
                                     sdp_mline_index,
                                 };
                                 let provider = Arc::clone(&self.webrtc_provider);
-                                match tokio::task::spawn_blocking(move || {
-                                    provider.add_remote_candidate_if_offer_matches(
-                                        &candidate, &offer_id,
-                                    )
-                                })
+                                match run_webrtc_lifecycle_operation(
+                                    peer_lifecycle_guard,
+                                    move || {
+                                        provider.add_remote_candidate_if_offer_matches(
+                                            &candidate, &offer_id,
+                                        )
+                                    },
+                                )
                                 .await
                                 {
-                                    Ok(Ok(())) => Ok(pb_acknowledgement(acknowledgement_for(
+                                    Ok(()) => Ok(pb_acknowledgement(acknowledgement_for(
                                         claims.session_id.as_opaque().clone(),
                                     ))),
-                                    Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
-                                    Err(_) => {
-                                        Err(CanonicalError::new(CanonicalErrorCode::Internal))
-                                    }
+                                    Err(error) => Err(error),
                                 }
                             }
                             Err(error) => Err(error),
