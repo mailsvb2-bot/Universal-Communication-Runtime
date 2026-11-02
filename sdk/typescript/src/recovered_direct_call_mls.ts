@@ -160,7 +160,14 @@ export async function establishRecoveredDirectCall(
       committedRecipient.cryptoEpoch!==staged.cryptoEpoch ||
       committedCaller.cryptoStateRef!==staged.cryptoStateRef ||
       committedRecipient.cryptoStateRef!==staged.cryptoStateRef ||
-      committedCaller.groupRevision===null || committedRecipient.groupRevision===null) {
+      // Both independently authenticated Device views must agree on the SAME
+      // canonical Group CAS revision, not merely on a matching MLS epoch hash.
+      // A stale or divergent Group snapshot must never issue signed Joins.
+      !Number.isSafeInteger(committedCaller.groupRevision) ||
+      !Number.isSafeInteger(committedRecipient.groupRevision) ||
+      !Number.isSafeInteger(updated.groupRevision) ||
+      committedCaller.groupRevision <= updated.groupRevision ||
+      committedCaller.groupRevision !== committedRecipient.groupRevision) {
     throw new Error("canonical committed MLS peer Device or epoch mismatch");
   }
   // Server-issued Join follows completed endpoint MLS exchange, never precedes it.
