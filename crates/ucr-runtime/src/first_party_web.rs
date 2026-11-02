@@ -1869,6 +1869,44 @@ fn finalize_issued_join<T>(
     result
 }
 
+fn persist_issued_first_party_join(
+    state: &State,
+    grant: &ucr_realtime::IssuedJoinGrant,
+    group_id: &GroupId,
+) -> Result<(), StatusCode> {
+    // The first-party BFF and gRPC may run in different processes. An issuer-
+    // local grant cannot be validated or revoked after a process restart.
+    // Persist the exact signed claims in the EXISTING canonical Join-grant
+    // owner before returning any bearer. This provenance marker identifies
+    // the first-party transport; it grants no integration permissions.
+    let durable = ConferenceJoinGrantRecord {
+        scope: grant.claims.scope.clone(),
+        conference_id: group_id.clone(),
+        integration_id: IntegrationId::from_opaque(opaque("ucr-first-party-direct-media")?),
+        call_id: grant.claims.call_id.clone(),
+        participant: grant.claims.participant.clone(),
+        device_id: grant
+            .claims
+            .device_id
+            .clone()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
+        session_id: grant.claims.session_id.clone(),
+        issued_at_unix_ms: grant.claims.issued_at_unix_ms,
+        not_before_unix_ms: grant.claims.not_before_unix_ms,
+        expires_at_unix_ms: grant.claims.expires_at_unix_ms,
+        use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+        revoked: false,
+        redeemed: false,
+    };
+    if state.store.persist_conference_join_grant(&durable).is_err() {
+        let _ = state
+            .issuer
+            .revoke(&grant.claims.scope, &grant.claims.session_id);
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    Ok(())
+}
+
 fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Value, StatusCode> {
     let call = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
         .first_party_call_join_admission(
@@ -1920,36 +1958,7 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
             now_unix_ms()?,
         )
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    // The first-party BFF and gRPC may run in different processes. An issuer-
-    // local grant cannot be validated or revoked after a process restart.
-    // Persist the exact signed claims in the EXISTING canonical Join-grant
-    // owner before returning any bearer. This provenance marker identifies
-    // the first-party transport; it grants no integration permissions.
-    let durable = ConferenceJoinGrantRecord {
-        scope: grant.claims.scope.clone(),
-        conference_id: ids.group_id.clone(),
-        integration_id: IntegrationId::from_opaque(opaque("ucr-first-party-direct-media")?),
-        call_id: grant.claims.call_id.clone(),
-        participant: grant.claims.participant.clone(),
-        device_id: grant
-            .claims
-            .device_id
-            .clone()
-            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
-        session_id: grant.claims.session_id.clone(),
-        issued_at_unix_ms: grant.claims.issued_at_unix_ms,
-        not_before_unix_ms: grant.claims.not_before_unix_ms,
-        expires_at_unix_ms: grant.claims.expires_at_unix_ms,
-        use_policy: ConferenceJoinGrantUsePolicy::Reusable,
-        revoked: false,
-        redeemed: false,
-    };
-    if state.store.persist_conference_join_grant(&durable).is_err() {
-        let _ = state
-            .issuer
-            .revoke(&grant.claims.scope, &grant.claims.session_id);
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
+    persist_issued_first_party_join(state, &grant, &ids.group_id)?;
     // A different authenticated Device may Hangup while MLS checks and Join
     // signing are in progress. Suppress a stale response if either canonical
     // Call changed. A later Hangup is fenced by the media Call's termination
