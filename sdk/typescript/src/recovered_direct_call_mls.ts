@@ -50,6 +50,25 @@ export async function establishRecoveredDirectCall(
       initiator.auth.namespaceId !== recipient.auth.namespaceId) {
     throw new Error("recovery requires independent accepted Call and two authenticated Devices");
   }
+  // A fresh Call ID is not sufficient: the compromised parent Call must be
+  // canonically terminal for BOTH independently authenticated Devices before
+  // either endpoint creates new MLS private state. A stale browser snapshot
+  // or a still-live old Group cannot authorize overlapping recovery.
+  const [priorCaller,priorRecipient]=await Promise.all([
+    initiator.host.getDirectCall(initiator.auth,oldCallId),
+    recipient.host.getDirectCall(recipient.auth,oldCallId),
+  ]);
+  const terminalPrior=(prior:UcrDirectCall)=>
+    prior.callId===oldCallId && prior.state==="terminated" &&
+    prior.tenantId===call.tenantId && prior.namespaceId===call.namespaceId &&
+    prior.callerIdentityId===call.callerIdentityId &&
+    prior.calleeIdentityId===call.calleeIdentityId &&
+    prior.media===call.media && Number.isSafeInteger(prior.revision) &&
+    prior.revision>=0;
+  if (!terminalPrior(priorCaller) || !terminalPrior(priorRecipient) ||
+      priorCaller.revision!==priorRecipient.revision) {
+    throw new Error("prior Call is not canonically terminated for both Devices");
+  }
   const ctx={callId:call.callId,expectedRevision:call.revision};
   const [caller,callee]=await Promise.all([
     initiator.host.describeAcceptedCallMls(initiator.auth,ctx),
