@@ -591,6 +591,7 @@ fn parse_principal_kind(value: &str) -> Result<PrincipalKind, DurableStoreError>
 mod media_join_grant_tests {
     use super::*;
     use crate::message_store::tests::TestDb;
+    use ucr_core::StorageProvider;
     use ucr_model::{PrincipalId, TenantId};
 
     fn id(value: &str) -> OpaqueId {
