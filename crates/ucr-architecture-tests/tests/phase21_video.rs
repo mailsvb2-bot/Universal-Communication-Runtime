@@ -128,7 +128,9 @@ fn phase21_release_truth_and_repository_guards_are_machine_locked() {
     assert!(ci.contains("test -s spec/video.md"));
     assert!(ci.contains("test -s proto/ucr/v1/video.proto"));
     assert!(ci.contains("0059-phase21-video-reuses-canonical-call-and-capability-owners.md"));
-    assert_eq!(ci.matches("cmake build-essential").count(), 2);
+    // Both lint and debug-test jobs, plus release tests, install the same
+    // native media prerequisites. Keep all three mandatory test paths covered.
+    assert_eq!(ci.matches("cmake build-essential").count(), 3);
     assert!(spec_readme.contains("Phase 21 adds `video.md`"));
     assert!(fuzz_manifest.contains("h264_sps_preflight"));
     assert!(fuzz_manifest.contains("ucr-video"));
