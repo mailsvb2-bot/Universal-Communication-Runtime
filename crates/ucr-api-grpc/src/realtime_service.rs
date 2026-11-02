@@ -141,9 +141,13 @@ async fn run_webrtc_lifecycle_operation_with_recheck<T: Send + 'static>(
 ) -> Result<T, CanonicalError> {
     tokio::task::spawn_blocking(move || {
         let _guard = guard;
-        let result = operation().map_err(map_webrtc_provider_error)?;
+        // A provider may create or mutate a peer before reporting an error
+        // (for example, an ICE restart can succeed before offer-id lookup
+        // fails). Recheck canonical authority even on that error path, so a
+        // concurrent cross-process revoke still closes the partial peer.
+        let result = operation().map_err(map_webrtc_provider_error);
         recheck()?;
-        Ok(result)
+        result
     })
     .await
     .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?
@@ -4663,6 +4667,28 @@ mod sfu_placement_lifecycle_tests {
     use tokio::sync::Notify;
     use ucr_model::{NamespaceId, PrincipalRef, TenantId};
     use ucr_realtime::{JoinGrantUsePolicy, JoinTokenKey};
+
+    #[tokio::test]
+    async fn failed_provider_operation_still_checks_revoked_canonical_authority() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let checks = Arc::new(AtomicUsize::new(0));
+        let worker_checks = Arc::clone(&checks);
+        let result: Result<(), CanonicalError> = run_webrtc_lifecycle_operation_with_recheck(
+            gate.lock_owned().await,
+            || Err(WebRtcProviderError::SessionUnavailable),
+            move || {
+                worker_checks.fetch_add(1, Ordering::SeqCst);
+                Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated))
+            },
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+            "a partially completed provider operation must not bypass revoke cleanup"
+        );
+        assert_eq!(checks.load(Ordering::SeqCst), 1);
+    }
 
     #[derive(Debug, Default)]
     struct RecordingPlacementLifecycle {
