@@ -2449,20 +2449,12 @@ where
         claims: &RealtimeSessionClaims,
     ) -> Result<(), CanonicalError> {
         let now = self.now()?;
-        if let Some(record) = self
-            .store
-            .conference_join_grant(&claims.scope, &claims.session_id)
-            .map_err(map_store_error)?
-        {
-            require_durable_grant_matches_claims(&record, claims)?;
-            if record.revoked || now >= record.expires_at_unix_ms {
-                return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
-            }
-        } else {
-            self.join_issuer
-                .validate_live_claims(claims, now)
-                .map_err(map_join_token_error)?;
-        }
+        // Every encrypted media frame (including long-lived WebRTC streams)
+        // uses the SAME canonical durable Join fence as initial admission.
+        // In particular, a missing first-party grant cannot downgrade to
+        // issuer-local state after another process revokes/prunes its record.
+        // This also enforces not-before and expiry at the current frame time.
+        self.require_live_canonical_join_grant(claims, now)?;
         validate_device_claim(&*self.store, claims)?;
         self.require_accepted_conference_participant(claims)?;
         self.require_live_universal_conference(claims)
