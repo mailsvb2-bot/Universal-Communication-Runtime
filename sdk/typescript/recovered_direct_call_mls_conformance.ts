@@ -8,6 +8,7 @@ import type {UcrDirectCall} from "./src/contact_call_journey.ts";
 const alice:UcrAuthenticatedFirstEntry={tenantId:"t",namespaceId:null,participantId:"alice",deviceId:"a"};
 const bob:UcrAuthenticatedFirstEntry={tenantId:"t",namespaceId:null,participantId:"bob",deviceId:"b"};
 const call:UcrDirectCall={tenantId:"t",namespaceId:null,callId:"call-new",callerIdentityId:"alice",calleeIdentityId:"bob",media:"video",state:"active",revision:2};
+const oldCall:UcrDirectCall={...call,callId:"call-old",state:"terminated",revision:3};
 let epoch:number|null=null, joins=0, published=false, committed=false;
 const descriptor=(auth:UcrAuthenticatedFirstEntry):UcrEndpointMlsCallDescriptor=>({
   callId:call.callId,expectedRevision:2,groupRevision:published?(committed?4:3):null,
@@ -19,7 +20,7 @@ const descriptor=(auth:UcrAuthenticatedFirstEntry):UcrEndpointMlsCallDescriptor=
   cryptoCapability:"ucr.group.mls",requiresEndpointOwnedCommit:true,
 });
 const host:UcrManagedFirstPartyHost={
-  async getDirectCall(){return call;},
+  async getDirectCall(_auth,id){return id==="call-old"?oldCall:call;},
   async describeAcceptedCallMls(auth){return descriptor(auth);},
   async publishEndpointMlsGroup(){assert.equal(published,false);published=true;epoch=0;},
   async publishEndpointMlsOffer(_auth,input){assert.deepEqual([...input.keyPackage],[1,2,3]);},
@@ -69,6 +70,32 @@ for (const foreignCall of [
     {host,endpoint:own("a"),auth:alice},{host,endpoint:own("b"),auth:bob}),/independent/);
   assert.equal(published,false,"cross-scope Call must not publish MLS state");
 }
+// A new Call must not start endpoint MLS recovery while the compromised
+// Call remains live, even if the caller's browser claims it was terminated.
+const liveOldHost={...host,
+  async getDirectCall(_auth:UcrAuthenticatedFirstEntry,id:string) {
+    return id==="call-old" ? {...oldCall,state:"active" as const} : call;
+  },
+} as UcrManagedFirstPartyHost;
+await assert.rejects(establishRecoveredDirectCall("call-old",call,
+  {host:liveOldHost,endpoint:own("a"),auth:alice},
+  {host:liveOldHost,endpoint:own("b"),auth:bob}),/prior Call is not canonically terminated/);
+assert.equal(published,false,"live compromised Group must not initiate recovery");
+
+// A different old-Call revision on the recipient is not the same canonical
+// terminal snapshot. Do not publish MLS state before the two views converge.
+const skewOldHost={...host,
+  async getDirectCall(auth:UcrAuthenticatedFirstEntry,id:string) {
+    return id==="call-old" && auth.deviceId==="b"
+      ? {...oldCall,revision:oldCall.revision+1}
+      : id==="call-old" ? oldCall : call;
+  },
+} as UcrManagedFirstPartyHost;
+await assert.rejects(establishRecoveredDirectCall("call-old",call,
+  {host:skewOldHost,endpoint:own("a"),auth:alice},
+  {host:skewOldHost,endpoint:own("b"),auth:bob}),/prior Call is not canonically terminated/);
+assert.equal(published,false,"divergent old-Call snapshots must fail closed");
+
 // A host response for another Device must not create even a local MLS Group.
 const foreignDeviceHost={...host,
   async describeAcceptedCallMls(auth:UcrAuthenticatedFirstEntry) {
@@ -180,7 +207,7 @@ assert.equal(joins,2);
 epoch=null;published=false;committed=false;joins=0;
 let inspection=0;
 const hungUpHost={...host,
-  async getDirectCall(){inspection++;return inspection===2
+  async getDirectCall(_auth,id){if(id==="call-old")return oldCall;inspection++;return inspection===2
     ? {...call,state:"terminated" as const,revision:3} : call;},
 } as UcrManagedFirstPartyHost;
 await assert.rejects(establishRecoveredDirectCall("call-old",call,
@@ -192,7 +219,7 @@ assert.equal(joins,2);
 // A concurrent signal/re-negotiation after Join issuance must also fail closed.
 epoch=null;published=false;committed=false;joins=0;
 const revisedHost={...host,
-  async getDirectCall(){return {...call,revision:call.revision+1};},
+  async getDirectCall(_auth,id){return id==="call-old"?oldCall:{...call,revision:call.revision+1};},
 } as UcrManagedFirstPartyHost;
 await assert.rejects(establishRecoveredDirectCall("call-old",call,
   {host:revisedHost,endpoint:own("a"),auth:alice},
