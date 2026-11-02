@@ -5239,12 +5239,10 @@ mod sfu_placement_lifecycle_tests {
             .expect("signalling worker started")
             .expect("worker entry signal");
         request.abort();
-        let premature_leave = tokio::time::timeout(
-            Duration::from_millis(100),
-            Arc::clone(&gate).lock_owned(),
-        )
-        .await
-        .is_ok();
+        let premature_leave =
+            tokio::time::timeout(Duration::from_millis(100), Arc::clone(&gate).lock_owned())
+                .await
+                .is_ok();
         release_tx.send(()).expect("release signalling worker");
         let _leave_guard = tokio::time::timeout(Duration::from_secs(2), gate.lock_owned())
             .await
