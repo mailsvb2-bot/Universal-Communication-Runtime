@@ -163,6 +163,8 @@ export async function establishRecoveredDirectCall(
       // Both independently authenticated Device views must agree on the SAME
       // canonical Group CAS revision, not merely on a matching MLS epoch hash.
       // A stale or divergent Group snapshot must never issue signed Joins.
+      committedCaller.groupRevision===null || committedRecipient.groupRevision===null ||
+      updated.groupRevision===null ||
       !Number.isSafeInteger(committedCaller.groupRevision) ||
       !Number.isSafeInteger(committedRecipient.groupRevision) ||
       !Number.isSafeInteger(updated.groupRevision) ||
