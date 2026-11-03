@@ -4294,7 +4294,6 @@ mod tests {
         assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
         assert!(!csp.contains("https:"));
 
-
         let js = super::first_party_start_js_response();
         assert_eq!(js.status(), super::StatusCode::OK);
         assert_eq!(
