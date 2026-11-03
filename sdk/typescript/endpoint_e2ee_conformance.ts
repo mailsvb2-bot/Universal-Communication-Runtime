@@ -19,6 +19,7 @@ import {
   ucrCameraLayerStreamId,
   ucrVideoEncodingTarget,
   ucrVideoEncodeSize,
+  ucrVideoSoftwareFrameRate,
   ucrVideoStageProfile,
   ucrAdvanceVideoPacing,
   ucrDetectVideoCodec,
@@ -2320,6 +2321,10 @@ assert.deepEqual(ucrVideoEncodeSize(1920, 1080, 1), {width: 1280, height: 720});
 assert.deepEqual(ucrVideoEncodeSize(1080, 1920, 1), {width: 720, height: 1280});
 assert.deepEqual(ucrVideoEncodeSize(1280, 720, 0.5), {width: 640, height: 360});
 assert.deepEqual(ucrVideoEncodeSize(640, 480, 1), {width: 640, height: 480});
+assert.deepEqual(ucrVideoEncodeSize(1920, 1080, 1, true), {width: 960, height: 540});
+assert.deepEqual(ucrVideoEncodeSize(1280, 720, 0.5, true), {width: 480, height: 270});
+assert.equal(ucrVideoSoftwareFrameRate(30, true), 24);
+assert.equal(ucrVideoSoftwareFrameRate(30, false), 30);
 assert.equal(ucrVideoStageProfile(2).frameRate, 24);
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0, 0, 0, 1, 0x65, 0x88])), "avc1.42002a");
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0, 0, 1, 0x65, 0x88])), "avc1.42002a");
@@ -2834,7 +2839,7 @@ try {
   await layerProducer.stop();
   assert.equal(producerConfigured.length, 2, "one camera creates at most two encoders");
   assert.deepEqual(producerConfigured.map((c: any) => [c.width, c.height]),
-    [[1280, 720], [640, 360]]);
+    [[960, 540], [640, 360]]);
   assert.equal(outputFrames.filter(f => f.streamId === "camera123").length, 12);
   assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length >= 3);
   assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length <= 6);

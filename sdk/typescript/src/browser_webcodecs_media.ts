@@ -151,10 +151,11 @@ export function ucrVideoEncodingTarget(width: number, height: number): {
   const bitrate = Math.round(Math.min(2_500_000, Math.max(600_000, w * h * 30 * 0.09)) / 1000) * 1000;
   return {frameRate: 30, bitrate};
 }
-export function ucrVideoEncodeSize(width: number, height: number, scale: number): {
+export function ucrVideoEncodeSize(width: number, height: number, scale: number, software = false): {
   width: number; height: number;
 } {
-  const cap = Math.min(1, 1280 / Math.max(width, height), 720 / Math.min(width, height));
+  const [longCap, shortCap] = software ? [960, 540] : [1280, 720];
+  const cap = Math.min(1, longCap / Math.max(width, height), shortCap / Math.min(width, height));
   const f = Math.min(1, cap) * Math.min(1, Math.max(0.25, scale));
   const even = (v: number) => Math.max(2, Math.round(v * f / 2) * 2);
   return {width: even(width), height: even(height)};
@@ -165,6 +166,10 @@ export function ucrVideoStageProfile(stage: number): {scale: number; bitrateFact
   return {scale: 0.5, bitrateFactor: 0.35, frameRate: 24};
 }
 let ucrVideoForceSoftware = false;
+/** Conservative video frame rate when hardware H.264 encoding is unavailable. */
+export function ucrVideoSoftwareFrameRate(frameRate: number, software: boolean): number {
+  return software ? Math.min(24, frameRate) : frameRate;
+}
 let ucrVideoH264Hardware: boolean | null = null;
 const ucrVideoUsesH264 = (): boolean =>
   !ucrVideoForceSoftware && ucrVideoH264Hardware === true &&
@@ -469,11 +474,12 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       const width = settings.width ?? VIDEO_WIDTH;
       const height = settings.height ?? VIDEO_HEIGHT;
       const quality = ucrVideoEncodingTarget(width, height);
-      const size = ucrVideoEncodeSize(width, height, 1);
+      const software = !ucrVideoUsesH264();
+      const size = ucrVideoEncodeSize(width, height, 1, software);
       const config = {...ucrVideoCodecConfig(), width: size.width, height: size.height,
-        framerate: Math.min(
+        framerate: ucrVideoSoftwareFrameRate(Math.min(
           Math.max(1, settings.frameRate ?? VIDEO_FRAMERATE), quality.frameRate,
-        ),
+        ), software),
         bitrate: quality.bitrate, bitrateMode: "variable", latencyMode: "realtime"};
       // On some Windows GPU stacks configure(prefer-hardware) succeeds but
       // the asynchronous first encode fails, leaving a live camera and zero
@@ -594,9 +600,11 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               const height = settings.height ?? VIDEO_HEIGHT;
               const full = ucrVideoEncodingTarget(width, height);
               const profile = ucrVideoStageProfile(qualityStage);
-              const size = ucrVideoEncodeSize(width, height, profile.scale);
+              const software = !ucrVideoUsesH264();
+              const size = ucrVideoEncodeSize(width, height, profile.scale, software);
               const config = {...ucrVideoCodecConfig(), width: size.width, height: size.height,
-                framerate: Math.min(settings.frameRate ?? VIDEO_FRAMERATE, profile.frameRate),
+                framerate: ucrVideoSoftwareFrameRate(
+                  Math.min(settings.frameRate ?? VIDEO_FRAMERATE, profile.frameRate), software),
                 bitrate: Math.max(250_000, Math.round(full.bitrate * profile.bitrateFactor)),
                 bitrateMode: "variable", latencyMode: "realtime"};
               try {
