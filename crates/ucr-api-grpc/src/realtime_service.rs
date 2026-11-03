@@ -21,7 +21,8 @@ use ucr_core::{
 };
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_group_mls::{
-    GroupMlsAtomicStore, GroupMlsBootstrapStore, GroupMlsStoreError, MAX_MLS_KEY_PACKAGE_BYTES,
+    EndpointMlsCommittedDevicePairStore, GroupMlsAtomicStore, GroupMlsBootstrapStore,
+    GroupMlsStoreError, MAX_MLS_KEY_PACKAGE_BYTES,
     MlsDeviceAdmission, MlsDeviceBootstrap,
 };
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
@@ -269,6 +270,7 @@ pub trait RealtimeValidatedMediaObserver: fmt::Debug + Send + Sync {
 
 pub trait RealtimeMlsAdmissionStore:
     GroupStore
+    + EndpointMlsCommittedDevicePairStore
     + GroupMlsAtomicStore
     + GroupMlsBootstrapStore
     + PrincipalIdentityBindingStore
@@ -280,6 +282,7 @@ pub trait RealtimeMlsAdmissionStore:
 
 impl<T> RealtimeMlsAdmissionStore for T where
     T: GroupStore
+        + EndpointMlsCommittedDevicePairStore
         + GroupMlsAtomicStore
         + GroupMlsBootstrapStore
         + PrincipalIdentityBindingStore
@@ -1120,9 +1123,25 @@ where
                         let authenticated_device = claims.device_id.as_ref().ok_or_else(|| {
                             CanonicalError::new(CanonicalErrorCode::Unauthenticated)
                         })?;
+                        // The current Identity's sole active Device is not
+                        // necessarily the Device that joined the endpoint MLS
+                        // Group. Resolve the exact committed pair from the
+                        // canonical MLS transition ledger, not from Join hints.
+                        let committed_pair = self
+                            .mls_admission_store
+                            .as_ref()
+                            .ok_or_else(|| {
+                                CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)
+                            })?
+                            .endpoint_mls_direct_call_device_pair(&claims.scope, &group_id)
+                            .map_err(map_store_error)?
+                            .ok_or_else(|| {
+                                CanonicalError::new(CanonicalErrorCode::IntegrityFailure)
+                            })?;
                         require_complete_first_party_media_binding(
                             binding.as_ref(),
                             authenticated_device,
+                            &committed_pair,
                         )?;
                     }
                     Ok(pb::RealtimeMlsAdmissionContext {
@@ -4350,12 +4369,20 @@ struct LiveMediaBinding {
 fn require_complete_first_party_media_binding(
     binding: Option<&LiveMediaBinding>,
     authenticated_device_id: &DeviceId,
+    committed_devices: &(String, String),
 ) -> Result<(), CanonicalError> {
     let current =
         binding.ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
     let keys = &current.trusted_device_keys;
     let authenticated_device = pb_opaque(authenticated_device_id.as_opaque());
-    if current.negotiation_ref.is_none()
+    let committed_creator = OpaqueId::new(committed_devices.0.clone())
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
+    let committed_recipient = OpaqueId::new(committed_devices.1.clone())
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
+    let committed_creator = pb_opaque(&committed_creator);
+    let committed_recipient = pb_opaque(&committed_recipient);
+    if committed_creator == committed_recipient
+        || current.negotiation_ref.is_none()
         || current.negotiation_generation == 0
         || current.group_crypto_epoch == 0
         || keys.len() != 2
@@ -4366,6 +4393,12 @@ fn require_complete_first_party_media_binding(
         || !keys
             .iter()
             .any(|key| key.device_id.as_ref() == Some(&authenticated_device))
+        || !keys
+            .iter()
+            .any(|key| key.device_id.as_ref() == Some(&committed_creator))
+        || !keys
+            .iter()
+            .any(|key| key.device_id.as_ref() == Some(&committed_recipient))
     {
         return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
     }
@@ -4395,25 +4428,32 @@ mod first_party_media_binding_tests {
     fn first_party_mls_context_requires_complete_independent_endpoint_trust() {
         let device_a = DeviceId::from_opaque(OpaqueId::new("device-a").unwrap());
         let device_c = DeviceId::from_opaque(OpaqueId::new("device-c").unwrap());
-        assert!(require_complete_first_party_media_binding(None, &device_a).is_err());
+        let committed = ("device-a".to_owned(), "device-b".to_owned());
+        assert!(require_complete_first_party_media_binding(None, &device_a, &committed).is_err());
         let mut binding = valid_binding();
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_ok());
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_c).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_ok());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_c, &committed).is_err());
+        // A new active Device for the same Identity cannot silently replace
+        // the endpoint MLS member that committed the Group epoch.
+        let wrong_pair = ("device-a".to_owned(), "device-c".to_owned());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &wrong_pair).is_err());
+        let duplicate_pair = ("device-a".to_owned(), "device-a".to_owned());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &duplicate_pair).is_err());
         binding.trusted_device_keys.pop();
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_err());
         let mut binding = valid_binding();
         let first_device = binding.trusted_device_keys[0].device_id.clone();
         binding.trusted_device_keys[1].device_id = first_device;
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_err());
         let mut binding = valid_binding();
         binding.trusted_device_keys[1].public_key.clear();
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_err());
         let mut binding = valid_binding();
         binding.negotiation_ref = None;
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_err());
         let mut binding = valid_binding();
         binding.group_crypto_epoch = 0;
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_err());
     }
 }
 
