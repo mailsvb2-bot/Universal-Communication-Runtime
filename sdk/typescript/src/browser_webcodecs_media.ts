@@ -170,6 +170,10 @@ let ucrVideoForceSoftware = false;
 export function ucrVideoSoftwareFrameRate(frameRate: number, software: boolean): number {
   return software ? Math.min(24, frameRate) : frameRate;
 }
+/** One source-owned rate for encoder configuration and actual capture pacing. */
+export function ucrVideoStageTargetFrameRate(sourceFps: number, stage: number, software: boolean): number {
+  return ucrVideoSoftwareFrameRate(Math.min(sourceFps, ucrVideoStageProfile(stage).frameRate), software);
+}
 let ucrVideoH264Hardware: boolean | null = null;
 const ucrVideoUsesH264 = (): boolean =>
   !ucrVideoForceSoftware && ucrVideoH264Hardware === true &&
@@ -465,6 +469,9 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     const encoder = kind === "audio"
       ? new b.AudioEncoder!({output: emitChunkFor(encodedStreamId), error: onError})
       : new b.VideoEncoder!({output: emitChunkFor(encodedStreamId), error: onError});
+    const captureFrameRate = (stage: number): number =>
+      ucrVideoStageTargetFrameRate(track.getSettings().frameRate ?? VIDEO_FRAMERATE,
+        stage, !ucrVideoUsesH264());
     if (kind === "audio") {
       encoder.configure({codec: AUDIO_CODEC, sampleRate: AUDIO_RATE,
         numberOfChannels: AUDIO_CHANNELS, bitrate: 48_000,
@@ -473,13 +480,10 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       const settings = track.getSettings();
       const width = settings.width ?? VIDEO_WIDTH;
       const height = settings.height ?? VIDEO_HEIGHT;
-      const quality = ucrVideoEncodingTarget(width, height);
       const software = !ucrVideoUsesH264();
       const size = ucrVideoEncodeSize(width, height, 1, software);
       const config = {...ucrVideoCodecConfig(), width: size.width, height: size.height,
-        framerate: ucrVideoSoftwareFrameRate(Math.min(
-          Math.max(1, settings.frameRate ?? VIDEO_FRAMERATE), quality.frameRate,
-        ), software),
+        framerate: captureFrameRate(0),
         bitrate: quality.bitrate, bitrateMode: "variable", latencyMode: "realtime"};
       // On some Windows GPU stacks configure(prefer-hardware) succeeds but
       // the asynchronous first encode fails, leaving a live camera and zero
@@ -594,7 +598,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               ucrVideoAdaptation.stage = next.stage;
               qualityStage = next.stage;
               nextVideoEncodeTimestamp = lastVideoEncodeTimestamp +
-                1_000_000 / ucrVideoStageProfile(qualityStage).frameRate;
+                1_000_000 / captureFrameRate(qualityStage);
               const settings = track.getSettings();
               const width = settings.width ?? VIDEO_WIDTH;
               const height = settings.height ?? VIDEO_HEIGHT;
@@ -603,8 +607,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               const software = !ucrVideoUsesH264();
               const size = ucrVideoEncodeSize(width, height, profile.scale, software);
               const config = {...ucrVideoCodecConfig(), width: size.width, height: size.height,
-                framerate: ucrVideoSoftwareFrameRate(
-                  Math.min(settings.frameRate ?? VIDEO_FRAMERATE, profile.frameRate), software),
+                framerate: captureFrameRate(qualityStage),
                 bitrate: Math.max(250_000, Math.round(full.bitrate * profile.bitrateFactor)),
                 bitrateMode: "variable", latencyMode: "realtime"};
               try {
@@ -621,7 +624,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             nextLowEncodeTimestamp = Number.NEGATIVE_INFINITY;
           const videoPacing = kind === "video" ?
             ucrAdvanceVideoPacing(frame.timestamp, nextVideoEncodeTimestamp,
-              ucrVideoStageProfile(qualityStage).frameRate) : null;
+              captureFrameRate(qualityStage)) : null;
           const videoPacingOk = videoPacing?.publish ?? true;
           if (videoPacingOk && ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
             const keyframe = kind === "video" &&
