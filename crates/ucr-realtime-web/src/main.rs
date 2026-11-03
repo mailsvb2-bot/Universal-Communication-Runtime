@@ -2892,11 +2892,46 @@ fn html_response(status: StatusCode, html: &'static str) -> HttpResponse {
     html_body_response(status, html.to_owned())
 }
 
+/// Hash the exact inline bootstrap scripts rather than enabling unsafe-inline.
+/// Endpoint MLS needs wasm-unsafe-eval, but arbitrary script evaluation is denied.
+fn call_document_csp(html: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut hashes = String::new();
+    let mut rest = html;
+    while let Some(open) = rest.find("<script>") {
+        let body_start = open + "<script>".len();
+        let Some(close) = rest[body_start..].find("</script>") else {
+            break;
+        };
+        let body = &rest[body_start..body_start + close];
+        hashes.push_str(" 'sha256-");
+        hashes.push_str(&STANDARD.encode(Sha256::digest(body.as_bytes()).as_slice()));
+        hashes.push('\'');
+        rest = &rest[body_start + close..];
+    }
+    format!(
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'{hashes}; \
+         style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
+         media-src 'self' blob:; worker-src 'self' blob:; \
+         connect-src 'self' http://127.0.0.1:* http://localhost:* http://[::1]:*; \
+         object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    )
+}
+
 fn html_body_response(status: StatusCode, html: String) -> HttpResponse {
+    let csp = call_document_csp(&html);
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "text/html; charset=utf-8")
         .header(CACHE_CONTROL, "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("X-Frame-Options", "DENY")
+        .header(
+            "Permissions-Policy",
+            "camera=(self), microphone=(self), display-capture=(self), geolocation=()",
+        )
+        .header("Content-Security-Policy", csp)
         .body(full_body(Bytes::from(html)))
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
@@ -3458,6 +3493,31 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn call_document_has_strict_csp_and_security_headers() {
+        use base64::Engine as _;
+        use sha2::{Digest as _, Sha256};
+        for response in [
+            super::html_response(hyper::StatusCode::OK, super::CLIENT_HTML),
+            super::html_body_response(hyper::StatusCode::OK, super::room_page()),
+        ] {
+            let headers = response.headers();
+            assert_eq!(headers["Referrer-Policy"], "no-referrer");
+            assert_eq!(headers["X-Content-Type-Options"], "nosniff");
+            assert_eq!(headers["X-Frame-Options"], "DENY");
+            let csp = headers["Content-Security-Policy"].to_str().expect("csp");
+            assert!(csp.contains("frame-ancestors 'none'"));
+            assert!(csp.contains("object-src 'none'"));
+            assert!(!csp.contains("'unsafe-eval'"));
+            assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+        }
+        let html = super::room_page();
+        let start = html.find("<script>").expect("inline script") + "<script>".len();
+        let end = start + html[start..].find("</script>").expect("end");
+        let hash = super::STANDARD.encode(Sha256::digest(&html.as_bytes()[start..end]).as_slice());
+        assert!(super::call_document_csp(&html).contains(&format!("'sha256-{hash}'")));
+    }
+
     #[tokio::test]
     async fn bff_readiness_requires_scoped_bootstrap_http_200() {
         use bytes::Bytes;
