@@ -1360,6 +1360,28 @@ function receiveE2eeChunk(data){
 // Aggregate encrypted transport pressure only: no ciphertext, keys or peers.
 window.ucrEncryptedTransportBufferedAmount=()=>e2eeChannel?.readyState==="open"?
   e2eeChannel.bufferedAmount:Number.POSITIVE_INFINITY;
+// C5: aggregate path stats for the opt-in loss/RTT controller input
+// (window.ucrLossRttBwe===true; default off). Polls getStats() at most 1/s and
+// returns the last measured sample synchronously: rttMs from the nominated
+// candidate pair; lossFraction from remote-inbound-rtp when RTP exists, else 0
+// (DataChannel-only paths expose no loss, so the input is RTT-only there).
+let ucrPathStatsSample=null;
+function ucrInstallPathStats(peer){
+  ucrPathStatsSample=null;
+  if(window.ucrLossRttBwe!==true||typeof peer?.getStats!=="function")return;
+  const timer=setInterval(async()=>{
+    if(peer.connectionState==="closed"){clearInterval(timer);ucrPathStatsSample=null;return;}
+    try{
+      const report=await peer.getStats();let rtt=null;let loss=0;
+      report.forEach(stat=>{
+        if(stat.type==="candidate-pair"&&stat.nominated&&Number.isFinite(stat.currentRoundTripTime))rtt=stat.currentRoundTripTime*1000;
+        if(stat.type==="remote-inbound-rtp"&&Number.isFinite(stat.fractionLost))loss=Math.max(loss,stat.fractionLost);
+      });
+      ucrPathStatsSample=rtt&&rtt>0?{lossFraction:loss,rttMs:rtt}:null;
+    }catch{ucrPathStatsSample=null;}
+  },1000);
+}
+window.ucrEncryptedTransportPathStats=()=>ucrPathStatsSample;
 function ucrTransportError(code,message){const error=new Error(message);error.code=code;return error;}
 function sendE2eeEnvelope(wire,mediaKind){
   if(!e2eeChannel||e2eeChannel.readyState!=="open")throw ucrTransportError("UCR_TRANSPORT_CHANNEL_CLOSED","Encrypted media channel is not open");
@@ -2003,6 +2025,7 @@ async function startWebRtcOnce(forceMedia=false){
   let pc;
   try{
     pc=new RTCPeerConnection(rtcConfig);
+    if(typeof ucrInstallPathStats==="function")ucrInstallPathStats(pc);
   }catch(error){
     // The server allocated an offer, but the browser rejected peer creation.
     // No local peer owns that offer; release the server session for retry.
