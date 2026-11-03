@@ -3494,6 +3494,24 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn call_document_stops_chat_timer_on_leave_and_pauses_hidden_ui_polling() {
+        let html = super::CLIENT_HTML;
+        let leave = html
+            .find("sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;")
+            .expect("leave reset");
+        let line_end = leave + html[leave..].find('\n').expect("eol");
+        assert!(html[leave..line_end].contains("clearInterval(chatTimer);chatTimer=null;"));
+        assert!(!html.contains("setInterval(ucrRenderDiagnostics,1500)"));
+        for poll in ["pollChat", "pollReactions", "pollActiveSpeaker"] {
+            let start = html
+                .find(&format!("async function {poll}(){{"))
+                .expect(poll);
+            assert!(html[start..start + 200].contains("if(document.hidden)return;"));
+        }
+        assert!(html.contains("Private mode could not reach the TURN relay"));
+    }
+
+    #[test]
     fn call_document_has_strict_csp_and_security_headers() {
         use base64::Engine as _;
         use sha2::{Digest as _, Sha256};
