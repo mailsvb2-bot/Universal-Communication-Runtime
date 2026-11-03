@@ -481,6 +481,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       const settings = track.getSettings();
       const width = settings.width ?? VIDEO_WIDTH;
       const height = settings.height ?? VIDEO_HEIGHT;
+      const quality = ucrVideoEncodingTarget(width, height);
       const software = !ucrVideoUsesH264();
       const size = ucrVideoEncodeSize(width, height, 1, software);
       const config = {...ucrVideoCodecConfig(), width: size.width, height: size.height,
