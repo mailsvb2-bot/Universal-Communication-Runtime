@@ -2912,11 +2912,14 @@ fn frame_ancestor_policy(config: Option<&str>) -> (String, bool) {
             return ("'self'".to_owned(), false);
         };
         if uri.scheme_str() != Some("https")
-            || uri.authority().is_none_or(|authority| authority.host().is_empty())
-            || uri.path_and_query().is_some_and(|path| path.as_str() != "/")
+            || uri
+                .authority()
+                .is_none_or(|authority| authority.host().is_empty())
+            || uri
+                .path_and_query()
+                .is_some_and(|path| path.as_str() != "/")
             || !origin[8..].bytes().all(|byte| {
-                byte.is_ascii_alphanumeric()
-                    || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
             })
         {
             return ("'self'".to_owned(), false);
@@ -2955,11 +2958,7 @@ fn call_document_csp(html: &str, frame_ancestors: &str) -> String {
 
 fn html_body_response(status: StatusCode, html: String) -> HttpResponse {
     let configured = std::env::var("UCR_REALTIME_WEB_FRAME_ANCESTORS").ok();
-    html_body_response_with_policy(
-        status,
-        html,
-        frame_ancestor_policy(configured.as_deref()),
-    )
+    html_body_response_with_policy(status, html, frame_ancestor_policy(configured.as_deref()))
 }
 
 fn html_body_response_with_policy(
