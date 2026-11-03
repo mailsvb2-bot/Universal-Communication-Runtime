@@ -19,6 +19,17 @@ assert "grant_permission(" not in media_owner
 assert "validate_group_media_source_frame(self.store" in sfu_owner
 assert "self.authorization" in sfu_owner and "permission: send.to_owned()" in sfu_owner
 assert "permission: receive.to_owned()" in sfu_owner
+# The same durable Call termination fence must govern MLS metadata and
+# KeyPackage registration. A valid token/registry lease is not authority to
+# access a terminated first-party Group without a Universal Conference row.
+realtime_owner = (root/"crates/ucr-api-grpc/src/realtime_service.rs").read_text(encoding="utf-8")
+admission_gate = realtime_owner.split("fn realtime_admission_state(", 1)[1].split(
+    "/// Binds an Active conference Call", 1)[0]
+assert "if snapshot.call.signalling_state == CallSignallingState::Terminated" in admission_gate
+assert "return Ok(pb::RealtimeAdmissionState::Closed);" in admission_gate
+mls_gate = realtime_owner.split("fn mls_admission_context(", 1)[1].split(
+    "fn register_endpoint_mls_key_package(", 1)[0]
+assert "self.require_live_universal_conference(claims)?;" in mls_gate
 
 client = (root/"crates/ucr-realtime-web/static/client.html").read_text(encoding="utf-8")
 sdk = (root/"sdk/typescript/src/reference_browser_media_installer.ts").read_text(encoding="utf-8")
