@@ -1901,6 +1901,7 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "first_party_call_get",
     "first_party_call_incoming",
     "first_party_call_signal",
+    "first_party_call_hangup_with_derived",
     "first_party_call_join_admission",
     "persist_communication_intent",
     "communication_intent",

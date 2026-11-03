@@ -130,6 +130,27 @@ assert.equal((await b.signal(first.callId,"hangup")).state,"terminated");
 current=alice;
 await assert.rejects(a.join(first.callId),/not accepted/);
 assert.equal(issuanceCount,3,"closed Call must not issue a new Join");
+// Recovery MUST request an independently authorized new Call, not reuse
+// the old MLS Group's deterministic Call-bound identity.
+const originalStart = host.startDirectCall;
+let recoveryRequests = 0;
+host.startDirectCall = async (auth,intent) => {
+  assert.equal(auth.participantId,"alice");
+  assert.equal(intent.peerIdentityId,"bob");
+  assert.equal(intent.idempotencyKey,"recovery-attempt-1");
+  recoveryRequests++;
+  return {...call!,callId:"call-2",state:"ringing",revision:1};
+};
+const recovery=await a.restartCompromisedCall("call-1","recovery-attempt-1");
+assert.equal(recovery.callId,"call-2");
+assert.equal(recovery.state,"ringing");
+assert.equal(recoveryRequests,1);
+host.startDirectCall=async ()=>({...call!,callId:"call-1"});
+await assert.rejects(
+  a.restartCompromisedCall("call-1","recovery-attempt-2"),
+  /independently created canonical Call/,
+);
+host.startDirectCall=originalStart;
 revoked=true;
 await assert.rejects(a.start(ac.id,"audio","new-call"),/revoked/);
 assert.equal(idempotentStarts,1,"revoked Device cannot initiate");

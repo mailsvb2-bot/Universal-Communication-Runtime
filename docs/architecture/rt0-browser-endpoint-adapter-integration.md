@@ -537,3 +537,29 @@ bootstrap flow for that stage. No two physical Devices, NAT/TURN, real A/V
 media, revocation measurement or production-readiness evidence is established
 by this change. Both PR #329 (host-decrypt reproducer) and PR #330 remain
 draft; the endpoint-only path must be integrated end-to-end before merge.
+
+## Draft #335: canonical direct-Call / derived-media Hangup transaction
+
+The first-party `hangup` route now delegates to the **existing** authorized
+Call runtime and one `CallStore::terminate_direct_call_with_derived` operation.
+SQLite applies the direct termination and any existing derived Group media
+Call termination under the same `BEGIN IMMEDIATE` transaction. The Memory
+provider uses the existing state mutex and rolls back the affected canonical
+Call/signal records if either transition fails. The operation validates the
+derived Call's exact scope, initiator and two-person roster; a mismatched
+derived Call fails closed. A missing or already-terminated derived Call is
+idempotent. The same independently authenticated Device/Trust and
+`CALL_SIGNAL_PERMISSION` checks as ordinary signalling remain in force.
+
+The transaction shares its SQLite lock with the existing
+`create_call_if_parent_current` fence, so an accepted-Call Join cannot create
+a new media Call *after* committed Hangup. Tests cover a conflicting derived
+binding (neither termination may commit), an absent child and stale Join
+creation from another SQLite connection.
+
+**Verification pending on the exact draft HEAD:** these repository-local
+regressions do not prove that a remote WebRTC provider has physically stopped
+transmitting, nor that in-flight encrypted packets are cancelled. They do not
+remove the current explicit administrative media-grant requirement. Real
+two-device NAT/TURN E2EE A/V and measured revoke/stop remain release blockers.
+No remote UCR host is authorized by this document.

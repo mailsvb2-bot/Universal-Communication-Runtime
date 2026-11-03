@@ -347,7 +347,12 @@ where
             &self.local.principal,
             &self.local_device_id,
         )?;
-        authorize_media(self.authorization, &self.local, send_permission(media_kind))?;
+        authorize_media(
+            self.authorization,
+            &self.local,
+            send_permission(media_kind),
+            &self.context.call_id,
+        )?;
         let key_id = GroupStreamCursorKey {
             source: self.local.principal.clone(),
             source_device_id: self.local_device_id.clone(),
@@ -425,6 +430,7 @@ where
             self.authorization,
             &self.local,
             receive_permission(frame.header.media_kind),
+            &self.context.call_id,
         )?;
         if !accepted_participant(&call, &frame.header.source) {
             return Err(GroupMediaE2eeError::SourceNotAccepted);
@@ -732,13 +738,17 @@ fn authorize_media<A: AuthorizationEvaluator>(
     authorization: &A,
     subject: &ScopedPrincipal,
     permission: &str,
+    call_id: &ucr_model::CallId,
 ) -> Result<(), GroupMediaE2eeError> {
     authorization
-        .authorize(&AuthorizationRequest {
-            subject: subject.clone(),
-            permission: permission.to_owned(),
-            resource_scope: subject.scope.clone(),
-        })
+        .authorize_in_call(
+            &AuthorizationRequest {
+                subject: subject.clone(),
+                permission: permission.to_owned(),
+                resource_scope: subject.scope.clone(),
+            },
+            call_id,
+        )
         .map_err(GroupMediaE2eeError::Authorization)
 }
 

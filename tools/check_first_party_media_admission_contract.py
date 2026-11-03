@@ -6,6 +6,35 @@ This is a security/UX regression guard, not a proof of bidirectional E2EE A/V.
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
+# First-party calls must never silently mint broad grants or treat a stale
+# parent-Call CAS conflict as authorization. This contract is intentionally
+# insufficient to claim successful two-device media on its own; media authority
+# must be call-scoped (v56 call_permission_grants), never tenant-wide.
+media_owner = (root/"crates/ucr-runtime/src/first_party_media.rs").read_text(encoding="utf-8")
+sfu_owner = (root/"crates/ucr-sfu/src/lib.rs").read_text(encoding="utf-8")
+assert "fn grant_call_media_permissions<S>(" in media_owner
+assert ".grant_call_permissions(" in media_owner and "&media.call_id," in media_owner
+assert "PermissionScope::Exact" not in media_owner, "first-party media must not mint tenant-wide grants"
+assert "create_call_if_parent_current(&caller, &draft, direct)" in media_owner
+assert "Err(error) => return Err(error.into())," in media_owner
+assert "Err(DurableStoreError::Conflict) => {}" not in media_owner.split("fn ensure_media_call<S>(", 1)[1].split("/// First-party media must never mint", 1)[0]
+assert "grant_permission(" not in media_owner
+assert "validate_group_media_source_frame(self.store" in sfu_owner
+assert "authorize_in_call" in sfu_owner
+assert "self.authorization" in sfu_owner and "permission: send.to_owned()" in sfu_owner
+assert "permission: receive.to_owned()" in sfu_owner
+# The same durable Call termination fence must govern MLS metadata and
+# KeyPackage registration. A valid token/registry lease is not authority to
+# access a terminated first-party Group without a Universal Conference row.
+realtime_owner = (root/"crates/ucr-api-grpc/src/realtime_service.rs").read_text(encoding="utf-8")
+admission_gate = realtime_owner.split("fn realtime_admission_state(", 1)[1].split(
+    "/// Binds an Active conference Call", 1)[0]
+assert "if snapshot.call.signalling_state == CallSignallingState::Terminated" in admission_gate
+assert "return Ok(pb::RealtimeAdmissionState::Closed);" in admission_gate
+mls_gate = realtime_owner.split("fn mls_admission_context(", 1)[1].split(
+    "fn register_endpoint_mls_key_package(", 1)[0]
+assert "self.require_live_universal_conference(claims)?;" in mls_gate
+
 client = (root/"crates/ucr-realtime-web/static/client.html").read_text(encoding="utf-8")
 sdk = (root/"sdk/typescript/src/reference_browser_media_installer.ts").read_text(encoding="utf-8")
 factory = (root/"sdk/typescript/src/canonical_browser_media_factory.ts").read_text(encoding="utf-8")

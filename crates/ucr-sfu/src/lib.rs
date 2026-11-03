@@ -751,7 +751,7 @@ where
             authenticated_source_device_id,
             envelope,
         )?;
-        dispatch_validated_forward_batch(&batch, sink)
+        dispatch_validated_forward_batch(self, &batch, sink)
     }
 
     /// Validates and canonicalizes one encrypted frame for current accepted Call participants
@@ -838,7 +838,7 @@ where
             envelope,
             recipients,
         )?;
-        dispatch_validated_forward_batch(&batch, sink)
+        dispatch_validated_forward_batch(self, &batch, sink)
     }
 
     /// Validates and canonicalizes one encrypted frame for an explicitly selected current
@@ -882,11 +882,14 @@ where
             canonical.frame.header.video_source_kind,
         );
         self.authorization
-            .authorize(&AuthorizationRequest {
-                subject: authenticated_source.clone(),
-                permission: send.to_owned(),
-                resource_scope: context.scope,
-            })
+            .authorize_in_call(
+                &AuthorizationRequest {
+                    subject: authenticated_source.clone(),
+                    permission: send.to_owned(),
+                    resource_scope: context.scope,
+                },
+                &call.call_id,
+            )
             .map_err(SfuError::Authorization)?;
         Ok(SfuValidatedSourceFrame {
             envelope: canonical,
@@ -909,6 +912,40 @@ where
         self.prepare_forward_from_validated_impl(validated, selected_recipients)
     }
 
+    // Do not cache authorization in a validated frame: Hangup or revoke may
+    // occur between source validation and the recipient fan-out.
+    fn recheck_source_before_fanout(
+        &self,
+        source: &ScopedPrincipal,
+        call_id: &ucr_model::CallId,
+        send_permission: &str,
+    ) -> Result<(), SfuError> {
+        let live_call = self
+            .store
+            .call_for_participant(source, &source.scope, call_id)?
+            .ok_or(SfuError::SourceMismatch)?;
+        if live_call.signalling_state != ucr_model::CallSignallingState::Active
+            || !live_call.participants.iter().any(|participant| {
+                participant.principal == source.principal
+                    && participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            })
+        {
+            return Err(SfuError::SourceMismatch);
+        }
+        self.authorization
+            .authorize_in_call(
+                &AuthorizationRequest {
+                    subject: source.clone(),
+                    permission: send_permission.to_owned(),
+                    resource_scope: source.scope.clone(),
+                },
+                &live_call.call_id,
+            )
+            .map_err(SfuError::Authorization)?;
+        Ok(())
+    }
+
     fn prepare_forward_from_validated_impl(
         &self,
         validated: SfuValidatedSourceFrame,
@@ -922,10 +959,12 @@ where
             scope: canonical.frame.header.scope.clone(),
             principal: canonical.frame.header.source.clone(),
         };
-        let (_, receive) = permissions(
+        let (send, receive) = permissions(
             canonical.frame.header.media_kind,
             canonical.frame.header.video_source_kind,
         );
+
+        self.recheck_source_before_fanout(&authenticated_source, &call.call_id, send)?;
 
         let recipients = if let Some(selected) = selected_recipients {
             validate_selected_recipients(&call, &authenticated_source.principal, selected)?;
@@ -966,12 +1005,35 @@ where
                 scope: canonical.frame.header.scope.clone(),
                 principal: recipient.clone(),
             };
-            self.authorization
-                .authorize(&AuthorizationRequest {
-                    subject: target_principal,
-                    permission: receive.to_owned(),
-                    resource_scope: canonical.frame.header.scope.clone(),
+            // Recipient Call authority can change between source validation
+            // and fan-out. Recheck the canonical recipient-scoped Call before
+            // accepting a ciphertext target; never rely on a stale snapshot.
+            let recipient_call = self
+                .store
+                .call_for_participant(
+                    &target_principal,
+                    &canonical.frame.header.scope,
+                    &call.call_id,
+                )?
+                .ok_or(SfuError::RecipientMembershipUnavailable)?;
+            if recipient_call.signalling_state != ucr_model::CallSignallingState::Active
+                || !recipient_call.participants.iter().any(|participant| {
+                    participant.principal == recipient
+                        && participant.state == CallParticipantState::Accepted
+                        && participant.left_revision.is_none()
                 })
+            {
+                return Err(SfuError::RecipientMembershipUnavailable);
+            }
+            self.authorization
+                .authorize_in_call(
+                    &AuthorizationRequest {
+                        subject: target_principal,
+                        permission: receive.to_owned(),
+                        resource_scope: canonical.frame.header.scope.clone(),
+                    },
+                    &recipient_call.call_id,
+                )
                 .map_err(SfuError::Authorization)?;
             targets.push(SfuForwardTarget { recipient });
         }
@@ -983,18 +1045,53 @@ where
     }
 }
 
-/// Executes one already-validated canonical routing batch against a synchronous infrastructure sink.
+/// Dispatches an encrypted batch only through the canonical live SFU runtime.
 ///
-/// This preserves the existing local SFU semantics. Async horizontal transports should instead
-/// consume the validated batch and await their own concrete per-target acceptance evidence.
+/// A prepared batch is NOT a durable permission grant. Before each sink side effect,
+/// the current Call, Group/MLS, source Device/signature and send/receive authority
+/// are revalidated for that exact target. This also fences a batch that was prepared
+/// before Hangup, Device revocation, key rotation or a permission revoke.
+///
+/// An asynchronous transport MUST recheck through this boundary at its actual send
+/// point; queueing a batch or receiving an earlier validation is not send authority.
+/// An in-flight sink operation is not cancelled by this synchronous check: provider
+/// close and physical remote-capture stop require separate lifecycle enforcement.
 ///
 /// # Errors
-/// Returns the exact partial-acceptance count and bounded sink error from the first failed target.
-pub fn dispatch_validated_forward_batch(
+/// Rejects stale/revoked authority before the next sink call, or returns the exact
+/// partial-acceptance count and bounded sink error from the first failed target.
+pub fn dispatch_validated_forward_batch<A, S, E, C>(
+    runtime: &SfuRuntime<'_, A, S, E, C>,
     batch: &SfuValidatedForwardBatch,
     sink: &dyn SfuForwardSink,
-) -> Result<SfuForwardOutcome, SfuError> {
+) -> Result<SfuForwardOutcome, SfuError>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+    E: GroupMediaE2eeCapabilityProvider,
+    C: SfuCapabilityProvider,
+{
+    let source = ScopedPrincipal {
+        scope: batch.envelope.frame.header.scope.clone(),
+        principal: batch.envelope.frame.header.source.clone(),
+    };
+    let device_id = &batch.envelope.frame.header.source_device_id;
     for (accepted, target) in batch.targets.iter().enumerate() {
+        let current = runtime.prepare_forward_selected(
+            &source,
+            device_id,
+            &batch.envelope,
+            std::slice::from_ref(&target.recipient),
+        )?;
+        if current.targets.as_slice() != std::slice::from_ref(target)
+            || current.envelope != batch.envelope
+        {
+            return Err(SfuError::SourceMismatch);
+        }
         if let Err(error) = sink.forward_encrypted(target, &batch.envelope) {
             return Err(SfuError::Sink {
                 accepted_before_failure: accepted,

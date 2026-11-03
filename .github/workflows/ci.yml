@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust-quality:
+  rust-lints:
     runs-on: ubuntu-24.04
     # This job intentionally runs the full workspace, public SDK, reference app, and fuzz checks.
     # Recent main runs routinely approach 10 minutes, so a 10-minute hard cap creates false red CI.
@@ -65,8 +65,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
-      - name: Tests
-        run: cargo test --workspace --all-targets --locked
       - name: Dev mode self-check
         run: cargo run -p ucr-dev -- dev --check
       - name: Public SDK format
@@ -99,6 +97,51 @@ jobs:
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
       - name: Fuzz workspace clippy
         run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+
+
+  rust-workspace-tests:
+    # The full debug test suite is a separate non-optional CI job, not a skipped
+    # gate. Keeping it behind the sequential format/check/WASM/clippy/docs
+    # stages previously exhausted rust-quality's 20-minute budget before
+    # tests could finish; run the exact same unfiltered suite independently.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install native media build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v cmake >/dev/null &&
+             command -v cc >/dev/null &&
+             command -v c++ >/dev/null &&
+             command -v make >/dev/null; then
+            echo "native media build prerequisites already present"
+          else
+            bash tools/ci_install_apt_packages.sh cmake build-essential
+          fi
+      - name: Workspace debug tests (all targets, locked)
+        run: cargo test --workspace --all-targets --locked
+
+
+  rust-quality:
+    # Keep the original protected status name, but require BOTH independent
+    # jobs to succeed. A failed/skipped/cancelled test suite must never yield
+    # a green protected rust-quality status.
+    needs: [rust-lints, rust-workspace-tests]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require lint and complete debug test success
+        env:
+          LINT_RESULT: ${{ needs.rust-lints.result }}
+          TEST_RESULT: ${{ needs.rust-workspace-tests.result }}
+        run: |
+          test "$LINT_RESULT" = success
+          test "$TEST_RESULT" = success
 
   release-tests:
     runs-on: ubuntu-24.04

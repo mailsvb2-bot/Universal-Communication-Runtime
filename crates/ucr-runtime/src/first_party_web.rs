@@ -29,21 +29,22 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use ucr_core::{
-    AuthorizedDurableRuntime, DeviceLifecycleStore, GroupStore, IdentityDeviceLookupStore,
-    IdentityStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
-    TrustedSigningKeyStore, generate_opaque_id,
+    AuthorizedDurableRuntime, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
+    GroupStore, IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
+    PrincipalIdentityLookupStore, TrustedSigningKeyStore, generate_opaque_id,
 };
 use ucr_group_mls::{
     EndpointMlsCommitStore, GroupMlsBootstrapStore, MlsCommitArtifacts, MlsDeviceAdmission,
 };
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
-    CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRecord, ConversationRef, DeliveryPolicy, DeviceDescriptor, DeviceId,
-    DeviceLifecycleState, EventId, GroupChange, GroupChangeKind, GroupCryptoState,
-    GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord, GroupRole,
-    IdentityId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor,
-    ScopedPrincipal, TenantId, TenantScope,
+    CallSignallingState, CallTerminationReason, ConferenceJoinGrantRecord,
+    ConferenceJoinGrantUsePolicy, ConversationId, ConversationKind, ConversationRecord,
+    ConversationRef, DeliveryPolicy, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventId,
+    GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
+    GroupOwnership, GroupRecord, GroupRole, IdentityId, IntegrationId, KeyId, KeyPurpose,
+    NamespaceId, OpaqueId, PrincipalKind, PublicKeyDescriptor, ScopedPrincipal, TenantId,
+    TenantScope,
 };
 use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
 use ucr_storage_sqlite::{EndpointMlsKeyPackageOffer, SqliteLocalStore};
@@ -1105,17 +1106,31 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
     };
     let runtime = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref());
     if ends_media {
-        // `before` is a participant-scoped read at the expected revision. End
-        // media FIRST: a failure leaves the direct Call active and the user can
-        // retry, but media never keeps running after the direct Call ended.
-        first_party_media::end_direct_call_media(state.store.as_ref(), &before)
+        // The existing canonical CallStore owns BOTH transitions. An immediate
+        // SQLite transaction (or the Memory owner mutex) fences concurrent
+        // Join and guarantees that neither Call can be left half-terminated.
+        // Keep the regular first-party user/Device/Trust authorization gates.
+        let media = first_party_media::media_runtime_ids(&before.scope, &before.call_id)
+            .map_err(|_| StatusCode::CONFLICT)?;
+        let media_event_id = EventId::from_opaque(
+            generate_opaque_id().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+        );
+        runtime
+            .first_party_call_hangup_with_derived(
+                &session.subject,
+                &device(&session.binding)?,
+                &signal,
+                &media.call_id,
+                &media_event_id,
+            )
+            .map_err(|_| StatusCode::CONFLICT)?;
+    } else {
+        runtime
+            .first_party_call_signal(&session.subject, &device(&session.binding)?, &signal)
             .map_err(|_| StatusCode::CONFLICT)?;
     }
-    runtime
-        .first_party_call_signal(&session.subject, &device(&session.binding)?, &signal)
-        .map_err(|_| StatusCode::CONFLICT)?;
     let current = get_call(state, session, &req.call_id)?;
-    if current.signalling_state == CallSignallingState::Terminated {
+    if !ends_media && current.signalling_state == CallSignallingState::Terminated {
         first_party_media::end_direct_call_media(state.store.as_ref(), &current)
             .map_err(|_| StatusCode::CONFLICT)?;
     }
@@ -1837,6 +1852,61 @@ fn endpoint_mls_bootstrap(
     }))
 }
 
+// An issued Join is a reusable bearer even if the HTTP handler subsequently
+// rejects its response. Retire the exact grant on every post-sign failure;
+// returning an error alone must not leave an orphan usable token.
+// This is an issuer-local mitigation, NOT a cross-process revocation proof.
+fn finalize_issued_join<T>(
+    issuer: &JoinTokenIssuer,
+    grant: &ucr_realtime::IssuedJoinGrant,
+    result: Result<T, StatusCode>,
+) -> Result<T, StatusCode> {
+    if result.is_err() {
+        issuer
+            .revoke(&grant.claims.scope, &grant.claims.session_id)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    }
+    result
+}
+
+fn persist_issued_first_party_join(
+    state: &State,
+    grant: &ucr_realtime::IssuedJoinGrant,
+    group_id: &GroupId,
+) -> Result<(), StatusCode> {
+    // The first-party BFF and gRPC may run in different processes. An issuer-
+    // local grant cannot be validated or revoked after a process restart.
+    // Persist the exact signed claims in the EXISTING canonical Join-grant
+    // owner before returning any bearer. This provenance marker identifies
+    // the first-party transport; it grants no integration permissions.
+    let durable = ConferenceJoinGrantRecord {
+        scope: grant.claims.scope.clone(),
+        conference_id: group_id.clone(),
+        integration_id: IntegrationId::from_opaque(opaque("ucr-first-party-direct-media")?),
+        call_id: grant.claims.call_id.clone(),
+        participant: grant.claims.participant.clone(),
+        device_id: grant
+            .claims
+            .device_id
+            .clone()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
+        session_id: grant.claims.session_id.clone(),
+        issued_at_unix_ms: grant.claims.issued_at_unix_ms,
+        not_before_unix_ms: grant.claims.not_before_unix_ms,
+        expires_at_unix_ms: grant.claims.expires_at_unix_ms,
+        use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+        revoked: false,
+        redeemed: false,
+    };
+    if state.store.persist_conference_join_grant(&durable).is_err() {
+        let _ = state
+            .issuer
+            .revoke(&grant.claims.scope, &grant.claims.session_id);
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    Ok(())
+}
+
 fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Value, StatusCode> {
     let call = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref())
         .first_party_call_join_admission(
@@ -1880,22 +1950,60 @@ fn issue_join(state: &State, session: &Session, req: &JoinRequest) -> Result<Val
     let grant = state
         .issuer
         .issue(
-            media.scope,
-            media.call_id,
+            media.scope.clone(),
+            media.call_id.clone(),
             session.subject.principal.clone(),
             Some(device(&session.binding)?),
             DEFAULT_JOIN_TTL_SECONDS,
             now_unix_ms()?,
         )
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let fragment = grant
-        .join_url
-        .split_once('#')
-        .map(|(_, fragment)| format!("#{fragment}"))
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    if !fragment.starts_with("#ucr_join=") {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    persist_issued_first_party_join(state, &grant, &ids.group_id)?;
+    // A different authenticated Device may Hangup while MLS checks and Join
+    // signing are in progress. Suppress a stale response if either canonical
+    // Call changed. A later Hangup is fenced by the media Call's termination
+    // at realtime admission; this read alone is not the durable CAS.
+    let fragment = finalize_issued_join(
+        &state.issuer,
+        &grant,
+        (|| {
+            if state
+                .store
+                .call(&call.scope, &call.call_id)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .as_ref()
+                != Some(&call)
+                || !matches!(
+                    state
+                        .store
+                        .call(&media.scope, &media.call_id)
+                        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+                    Some(current) if current.signalling_state != CallSignallingState::Terminated
+                )
+            {
+                return Err(StatusCode::CONFLICT);
+            }
+            let fragment = grant
+                .join_url
+                .split_once('#')
+                .map(|(_, fragment)| format!("#{fragment}"))
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+            if !fragment.starts_with("#ucr_join=") {
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            Ok(fragment)
+        })(),
+    );
+    // A post-sign conflict must revoke BOTH canonical durable state and the
+    // issuer-local compatibility grant. A local-only revoke cannot fence a
+    // separate realtime process that already sees the durable record.
+    if fragment.is_err() {
+        state
+            .store
+            .revoke_conference_join_grant(&grant.claims.scope, &grant.claims.session_id)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     }
+    let fragment = fragment?;
     let binding = &session.binding;
     Ok(json!({
         "tenantId": binding.tenant_id,
@@ -2563,6 +2671,61 @@ mod acceptance_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_post_issue_join_retires_exact_bearer_without_revoking_success() {
+        let issuer = JoinTokenIssuer::new(
+            ucr_realtime::JoinTokenKey::from_bytes([23; 32]),
+            "https://call.example.invalid/client.html",
+        )
+        .unwrap();
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(OpaqueId::new("test-tenant").unwrap()),
+            namespace_id: None,
+        };
+        let principal = ucr_model::PrincipalRef {
+            principal_id: ucr_model::PrincipalId::from_opaque(
+                OpaqueId::new("test-person").unwrap(),
+            ),
+            kind: PrincipalKind::Person,
+        };
+        for error in [StatusCode::CONFLICT, StatusCode::SERVICE_UNAVAILABLE] {
+            let grant = issuer
+                .issue(
+                    scope.clone(),
+                    CallId::from_opaque(OpaqueId::new("test-call").unwrap()),
+                    principal.clone(),
+                    None,
+                    DEFAULT_JOIN_TTL_SECONDS,
+                    1_000,
+                )
+                .unwrap();
+            assert!(issuer.validate_live_claims(&grant.claims, 1_000).is_ok());
+            let rejected: Result<String, StatusCode> =
+                finalize_issued_join(&issuer, &grant, Err(error));
+            assert_eq!(rejected, Err(error));
+            assert_eq!(
+                issuer.validate_live_claims(&grant.claims, 1_000),
+                Err(ucr_realtime::JoinTokenError::Revoked),
+                "a rejected HTTP response must retire the issued bearer"
+            );
+        }
+        let grant = issuer
+            .issue(
+                scope,
+                CallId::from_opaque(OpaqueId::new("test-call").unwrap()),
+                principal,
+                None,
+                DEFAULT_JOIN_TTL_SECONDS,
+                1_000,
+            )
+            .unwrap();
+        assert_eq!(
+            finalize_issued_join(&issuer, &grant, Ok("valid".to_owned())),
+            Ok("valid".to_owned())
+        );
+        assert!(issuer.validate_live_claims(&grant.claims, 1_000).is_ok());
+    }
 
     #[test]
     fn origin_must_be_explicit_https_and_listener_loopback() {

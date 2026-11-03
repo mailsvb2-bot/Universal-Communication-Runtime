@@ -164,11 +164,52 @@ fn horizontal_sfu_async_handoff_separates_validation_from_transport_acceptance()
     assert!(conference.contains("pub fn prepare_forward"));
     assert!(conference.contains("Result<Option<SfuValidatedForwardBatch>, ConferenceError>"));
     assert!(conference.contains("self.subscribers_for_source"));
-    assert!(conference.contains("dispatch_validated_forward_batch(&batch, sink)"));
+    assert!(conference.contains("dispatch_validated_forward_batch(&sfu, &batch, sink)"));
     assert!(spec.contains("immutable validated forward batch"));
     assert!(spec.contains("canonical Conference subscription selection"));
     assert!(spec.contains("local queue admission"));
     assert!(spec.contains("remote `Accepted`"));
+}
+
+#[test]
+fn horizontal_sfu_remote_ingress_rechecks_authority_and_stale_receipts_fail_closed() {
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let node = read("crates/ucr-api-grpc/src/sfu_node_media_service.rs");
+
+    // The remote node must independently validate current canonical media
+    // authority at ingress, rather than trusting the source node's batch.
+    assert!(node.contains("let runtime = SfuRuntime::new("));
+    assert!(node.contains("runtime.forward_selected("));
+
+    // An async remote receipt cannot promote a session to media-ready after
+    // its Call, Device, durable Join grant or realtime lease was revoked.
+    let receipt = realtime
+        .find("let outcome = router.forward_validated_batch(&batch).await?;")
+        .expect("horizontal SFU receipt boundary");
+    let ready = realtime[receipt..]
+        .find("self.append_attendance(&transition)?;")
+        .expect("media-ready attendance boundary");
+    let completion = &realtime[receipt..receipt + ready];
+    assert!(completion.contains("self.require_live_transport_claims(claims)?;"));
+    assert!(completion.contains(".require_active_session(claims, self.now()?)"));
+}
+
+#[test]
+fn local_sfu_sink_receipt_rechecks_live_claims_before_media_ready() {
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let local = realtime
+        .split("    pub fn forward_authenticated_e2ee_media(")
+        .nth(1)
+        .expect("local encrypted SFU media route");
+    let dispatch = local
+        .find("dispatch_validated_forward_batch(&sfu, &batch, sink)")
+        .expect("live SFU dispatch boundary");
+    let ready = local[dispatch..]
+        .find(".mark_media_ready(claims, self.now()?)")
+        .expect("local media-ready transition");
+    let completion = &local[dispatch..dispatch + ready];
+    assert!(completion.contains("self.require_live_transport_claims(claims)?;"));
+    assert!(completion.contains(".require_active_session(claims, self.now()?)"));
 }
 
 #[test]
@@ -266,12 +307,16 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
     // Rollback is now a generation-fenced operation. A stale async failure
     // must never evict a newer Join or release its shared SFU placement.
     assert!(
-        realtime.contains("rollback_realtime_join(&claims, outcome.join_generation, now)"),
-        "only the generation created by this Join may be rolled back"
+        realtime.contains("retire_failed_realtime_join(&claims, outcome.join_generation, now)"),
+        "failed Join must retire the exact generation through canonical Leave"
     );
     assert!(
-        realtime.contains("leave_if_sequence(claims, expected_join_generation, now_unix_ms)"),
-        "rollback must atomically check the canonical registry Join fence"
+        realtime.contains("leave_realtime_session_with_sfu_placement(\n                claims,"),
+        "failed Join cleanup must use the existing Leave and provider-close owner"
+    );
+    assert!(
+        realtime.contains("leave_if_sequence(claims, expected_session_sequence, now_unix_ms)"),
+        "canonical Leave must atomically check the registry Join-generation fence"
     );
     assert!(
         registry.contains("pub fn current_join_generation(")
@@ -437,7 +482,7 @@ fn terminal_conference_cleanup_reuses_serialized_sfu_placement_retry_path() {
     let spec = read("spec/realtime.md");
 
     assert!(realtime.contains("cleanup_closed_conferences_once"));
-    assert!(realtime.contains("sfu_placement_transition_guard().await"));
+    assert!(realtime.contains("sfu_placement_transition_guard(&scope, &call_id).await"));
     assert!(realtime.contains("queue_call_cleanup_candidate(&scope, &call_id)"));
     assert!(realtime.contains("release_call_placement(&scope, &call_id).await"));
     assert!(realtime.contains("acknowledge_expired_call_cleanup(&scope, &call_id)"));

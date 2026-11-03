@@ -1,13 +1,14 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{DurableRecordStatus, DurableStoreError};
 use ucr_group_mls::{
-    AtomicMlsGroupChangeResult, DeviceKeyPackage, EndpointMlsCommitStore, GroupMlsAtomicStore,
-    GroupMlsBootstrapStore, GroupMlsServerCustodyProbe, GroupMlsStoreError,
-    MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS, MlsBootstrapCommit, MlsCommitArtifacts,
-    MlsDeviceAdmission, MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput,
-    create_device_key_package, create_group, current_crypto_state, decode_key_package, load_group,
-    member_device_ids, mls_change_request_fingerprint, mls_device_admission_fingerprint,
-    own_device_id, sqlite_provider, stage_transition,
+    AtomicMlsGroupChangeResult, DeviceKeyPackage, EndpointMlsCommitStore,
+    EndpointMlsCommittedDevicePairStore, GroupMlsAtomicStore, GroupMlsBootstrapStore,
+    GroupMlsServerCustodyProbe, GroupMlsStoreError, MAX_MLS_BOOTSTRAP_BYTES,
+    MAX_MLS_BOOTSTRAP_COMMITS, MlsBootstrapCommit, MlsCommitArtifacts, MlsDeviceAdmission,
+    MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput, create_device_key_package, create_group,
+    current_crypto_state, decode_key_package, load_group, member_device_ids,
+    mls_change_request_fingerprint, mls_device_admission_fingerprint, own_device_id,
+    sqlite_provider, stage_transition,
 };
 use ucr_model::{
     ConversationRecord, DeviceId, EventId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
@@ -306,6 +307,35 @@ fn validate_endpoint_mls_commit_material(
     Ok(())
 }
 
+// Permanent historical custody evidence is an admission fence, not just a
+// diagnostic. Endpoint-only writes and trusted peer lookup must consult the
+// same canonical SQLite quarantine under their existing connection/transaction.
+fn require_group_not_quarantined(
+    connection: &Connection,
+    scope: &TenantScope,
+    group_id: &GroupId,
+) -> Result<(), DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let held: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM server_mls_custody_quarantine
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4)",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                group_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if held {
+        Err(DurableStoreError::Conflict)
+    } else {
+        Ok(())
+    }
+}
+
 impl SqliteLocalStore {
     /// Read the exact creator/recipient Device pair from the canonical,
     /// committed endpoint MLS Add. Never infer a peer Device from a Call
@@ -319,6 +349,7 @@ impl SqliteLocalStore {
         group_id: &GroupId,
     ) -> Result<Option<(String, String)>, DurableStoreError> {
         let connection = self.lock_connection()?;
+        require_group_not_quarantined(&connection, scope, group_id)?;
         let ns = namespace_storage_key(scope);
         let mut statement = connection
             .prepare(
@@ -383,6 +414,8 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
+        require_group_not_quarantined(&transaction, &actor.scope, &requested_change.group_id)
+            .map_err(GroupMlsStoreError::Durable)?;
         require_device_for_principal(
             &transaction,
             &actor.scope,
@@ -471,6 +504,18 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
     }
 }
 
+impl EndpointMlsCommittedDevicePairStore for SqliteLocalStore {
+    fn endpoint_mls_direct_call_device_pair(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<Option<(String, String)>, DurableStoreError> {
+        // Reuse the existing canonical SQLite transition ledger and quarantine
+        // checks; do not create a second media/Device membership projection.
+        SqliteLocalStore::endpoint_mls_direct_call_device_pair(self, scope, group_id)
+    }
+}
+
 impl GroupMlsServerCustodyProbe for SqliteLocalStore {
     fn server_possesses_mls_group(
         &self,
@@ -480,12 +525,80 @@ impl GroupMlsServerCustodyProbe for SqliteLocalStore {
         let connection = self
             .lock_connection()
             .map_err(GroupMlsStoreError::Durable)?;
-        let provider = sqlite_provider(&connection);
-        // The actual server-side OpenMLS storage is checked, not a Group
-        // membership projection or a caller-supplied endpoint-only flag.
-        let server_group =
-            load_group(&provider, scope, group_id).map_err(GroupMlsStoreError::Mls)?;
-        Ok(server_group.is_some())
+        // Quarantine records survive departure of the legacy MLS host.
+        // Absence or corruption of the v54 table fails closed.
+        let namespace = namespace_storage_key(scope);
+        let held: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM server_mls_custody_quarantine
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4)",
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    group_id.as_opaque().as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| GroupMlsStoreError::Durable(map_sqlite_error(&error)))?;
+        if held != 0 {
+            return Ok(true);
+        }
+        // Removed members can retain earlier MLS exporter secrets. Detect the
+        // old server-owned principal even when its membership is no longer active.
+        let legacy_member: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM group_memberships
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND group_id=?4 AND principal_id='fp-media-host')",
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    group_id.as_opaque().as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| GroupMlsStoreError::Durable(map_sqlite_error(&error)))?;
+        // Inspect the real OpenMLS storage, never an untrusted descriptor flag.
+        let possesses_private_state = {
+            let provider = sqlite_provider(&connection);
+            load_group(&provider, scope, group_id)
+                .map_err(GroupMlsStoreError::Mls)?
+                .is_some()
+        };
+        if legacy_member == 0 && !possesses_private_state {
+            return Ok(false);
+        }
+        // Durable, idempotent evidence. In particular, the hold remains after
+        // the server's OpenMLS rows or old membership projection are removed.
+        // A missing quarantine schema or write failure denies the media Call.
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO server_mls_custody_quarantine
+                 (tenant_id, namespace_present, namespace_id, group_id, reason,
+                  incident_ref, detected_at_unix_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+                         CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    group_id.as_opaque().as_str(),
+                    if legacy_member != 0 {
+                        "legacy_host"
+                    } else {
+                        "server_private_group"
+                    },
+                    if legacy_member != 0 {
+                        "auto-v54-legacy-membership"
+                    } else {
+                        "auto-v54-openmls-custody"
+                    },
+                ],
+            )
+            .map_err(|error| GroupMlsStoreError::Durable(map_sqlite_error(&error)))?;
+        Ok(true)
     }
 }
 
@@ -1511,6 +1624,14 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
         group_id: &GroupId,
         device_id: &DeviceId,
     ) -> Result<Option<MlsDeviceBootstrap>, GroupMlsStoreError> {
+        // Never deliver Welcome/Commit history for a historically exposed MLS
+        // group. The custody probe durably quarantines detected host state.
+        // Its connection lock is released before this read path takes its own.
+        if group_id.as_opaque().as_str().starts_with("fp-mg-")
+            && self.server_possesses_mls_group(scope, group_id)?
+        {
+            return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
+        }
         let connection = self.lock_connection()?;
         require_active_device(&connection, scope, device_id)?;
         let Some((admission_event_id, welcome, welcome_crypto_state)) =
@@ -1755,6 +1876,110 @@ mod phase29_atomic_mls_tests {
         let state = current_crypto_state(&scope(), &group.group_id, &mls).unwrap();
         let devices = member_device_ids(&mls, &scope()).unwrap();
         (state, devices)
+    }
+
+    #[test]
+    fn quarantine_blocks_endpoint_commit_owner_and_peer_lookup_after_restart() {
+        let db = TestDb::new();
+        let group_id = GroupId::from_opaque(oid("fp-mg-held-endpoint"));
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("canonical database");
+            let connection = store.lock_connection().expect("database");
+            connection
+                .execute(
+                    "INSERT INTO server_mls_custody_quarantine
+                     (tenant_id, namespace_present, namespace_id, group_id,
+                      reason, incident_ref, detected_at_unix_ms)
+                     VALUES (?1, 1, 'namespace-a', ?2, 'operator_hold', 'held-endpoint', 1)",
+                    params![
+                        scope().tenant_id.as_opaque().as_str(),
+                        group_id.as_opaque().as_str(),
+                    ],
+                )
+                .expect("persist hold");
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen database");
+        let connection = reopened.lock_connection().expect("canonical connection");
+        assert_eq!(
+            require_group_not_quarantined(&connection, &scope(), &group_id),
+            Err(DurableStoreError::Conflict),
+            "endpoint commit transaction must deny a held group",
+        );
+        drop(connection);
+        assert!(matches!(
+            reopened.endpoint_mls_direct_call_device_pair(&scope(), &group_id),
+            Err(DurableStoreError::Conflict)
+        ));
+        let safe_group = GroupId::from_opaque(oid("fp-mg-clean-endpoint"));
+        assert_eq!(
+            reopened.endpoint_mls_direct_call_device_pair(&scope(), &safe_group),
+            Ok(None),
+            "unheld groups keep their ordinary first-entry path",
+        );
+    }
+
+    #[test]
+    fn quarantined_first_party_group_never_releases_welcome_or_commit_bootstrap() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("canonical database");
+        let group_id = GroupId::from_opaque(oid("fp-mg-compromised-media"));
+        {
+            let connection = store.lock_connection().expect("database");
+            connection
+                .execute(
+                    "INSERT INTO server_mls_custody_quarantine
+                     (tenant_id, namespace_present, namespace_id, group_id,
+                      reason, incident_ref, detected_at_unix_ms)
+                     VALUES (?1, 1, 'namespace-a', ?2, 'operator_hold', 'historical-backup', 1)",
+                    params![
+                        scope().tenant_id.as_opaque().as_str(),
+                        group_id.as_opaque().as_str(),
+                    ],
+                )
+                .expect("permanent incident");
+        }
+        assert!(matches!(
+            store.mls_bootstrap_for_device(&scope(), &group_id, &device("phase29-owner-device"),),
+            Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict))
+        ));
+        assert!(
+            store
+                .server_possesses_mls_group(&scope(), &group_id)
+                .expect("persistent quarantine")
+        );
+    }
+
+    #[test]
+    fn legacy_server_owned_mls_group_is_quarantined_permanently() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open canonical database");
+        let (group, _owner, _bob) = bootstrap(&store);
+        assert!(
+            store
+                .server_possesses_mls_group(&scope(), &group.group_id)
+                .expect("detect server OpenMLS custody")
+        );
+        {
+            let connection = store.lock_connection().expect("database");
+            let (reason, evidence): (String, String) = connection
+                .query_row(
+                    "SELECT reason, incident_ref FROM server_mls_custody_quarantine
+                     WHERE group_id=?1",
+                    [group.group_id.as_opaque().as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("custody detection must persist quarantine");
+            assert_eq!(reason, "server_private_group");
+            assert_eq!(evidence, "auto-v54-openmls-custody");
+        }
+        // A new process must still deny the historical group.
+        drop(store);
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen canonical database");
+        assert!(
+            reopened
+                .server_possesses_mls_group(&scope(), &group.group_id)
+                .expect("hold survives restart")
+        );
     }
 
     #[test]
@@ -2117,5 +2342,196 @@ mod phase29_atomic_mls_tests {
             removed_state
         );
         let _ = owner;
+    }
+}
+
+const V54_OBJECTS_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS server_mls_custody_quarantine (
+  tenant_id TEXT NOT NULL,
+  namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0,1)),
+  namespace_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK(reason IN ('legacy_host','server_private_group','backup_exposure','operator_hold')),
+  incident_ref TEXT NOT NULL CHECK(length(incident_ref) BETWEEN 1 AND 128),
+  detected_at_unix_ms INTEGER NOT NULL CHECK(detected_at_unix_ms > 0),
+  PRIMARY KEY(tenant_id, namespace_present, namespace_id, group_id),
+  CHECK((namespace_present=0 AND namespace_id='') OR
+        (namespace_present=1 AND namespace_id<>''))
+) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS quarantine_delete_denied
+BEFORE DELETE ON server_mls_custody_quarantine
+BEGIN SELECT RAISE(ABORT,'security quarantine is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS quarantine_identity_update_denied
+BEFORE UPDATE OF tenant_id,namespace_present,namespace_id,group_id
+ON server_mls_custody_quarantine
+BEGIN SELECT RAISE(ABORT,'quarantine identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS quarantine_metadata_update_denied
+BEFORE UPDATE OF reason,incident_ref,detected_at_unix_ms
+ON server_mls_custody_quarantine
+BEGIN SELECT RAISE(ABORT,'security quarantine evidence is immutable'); END;
+";
+
+pub(super) fn create_v54_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V54_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))?;
+    // Historical-schema fixtures and restored databases may already carry a
+    // canonical v54 quarantine table. Never replace it or lose prior holds.
+    verify_v54_objects(transaction)
+}
+
+/// Reconstruct immutable legacy-host quarantine from canonical membership history.
+/// Restored pre-v54 databases must not regain media access just because the
+/// historical quarantine table was absent in an older backup.
+pub(super) fn backfill_legacy_host_quarantine(
+    connection: &Connection,
+) -> Result<(), DurableStoreError> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO server_mls_custody_quarantine
+             (tenant_id, namespace_present, namespace_id, group_id,
+              reason, incident_ref, detected_at_unix_ms)
+             SELECT tenant_id, namespace_present, namespace_id, group_id,
+                    'legacy_host', 'auto-v54-restore-membership',
+                    CAST(strftime('%s','now') AS INTEGER)*1000
+             FROM group_memberships WHERE principal_id='fp-media-host'",
+            [],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    Ok(())
+}
+
+pub(super) fn verify_v54_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "server_mls_custody_quarantine",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("group_id", "TEXT", 1, 4),
+            ("reason", "TEXT", 1, 0),
+            ("incident_ref", "TEXT", 1, 0),
+            ("detected_at_unix_ms", "INTEGER", 1, 0),
+        ],
+    )?;
+    for trigger in [
+        "quarantine_delete_denied",
+        "quarantine_identity_update_denied",
+        "quarantine_metadata_update_denied",
+    ] {
+        let exists: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1)",
+                [trigger],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if exists != 1 {
+            return Err(DurableStoreError::Corrupt);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod custody_quarantine_v54_tests {
+    use super::*;
+
+    #[test]
+    fn restored_legacy_host_history_backfills_idempotent_quarantine() {
+        let mut db = Connection::open_in_memory().expect("SQLite");
+        let tx = db.transaction().expect("migration");
+        create_v54_objects(&tx).expect("canonical quarantine");
+        tx.commit().expect("commit");
+        db.execute_batch(
+            "CREATE TABLE group_memberships (
+              tenant_id TEXT NOT NULL, namespace_present INTEGER NOT NULL,
+              namespace_id TEXT NOT NULL, group_id TEXT NOT NULL,
+              principal_id TEXT NOT NULL);
+             INSERT INTO group_memberships VALUES
+             ('tenant-a',0,'','legacy-media','fp-media-host'),
+             ('tenant-a',0,'','safe-media','ordinary-person');",
+        )
+        .expect("simulate historical membership after backup restore");
+        backfill_legacy_host_quarantine(&db).expect("restore barrier");
+        backfill_legacy_host_quarantine(&db).expect("idempotent restart");
+        let held: i64 = db
+            .query_row(
+                "SELECT count(*) FROM server_mls_custody_quarantine
+                 WHERE group_id='legacy-media' AND reason='legacy_host'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy hold");
+        assert_eq!(held, 1);
+        let safe: i64 = db
+            .query_row(
+                "SELECT count(*) FROM server_mls_custody_quarantine
+                 WHERE group_id='safe-media'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("safe group not quarantined");
+        assert_eq!(safe, 0);
+    }
+
+    #[test]
+    fn v54_quarantine_is_persistent_and_cannot_be_deleted_or_reidentified() {
+        let mut db = Connection::open_in_memory().expect("in-memory SQLite");
+        let tx = db.transaction().expect("migration transaction");
+        create_v54_objects(&tx).expect("create canonical quarantine");
+        tx.commit().expect("commit");
+        verify_v54_objects(&db).expect("verify schema and triggers");
+        db.execute(
+            "INSERT INTO server_mls_custody_quarantine
+             (tenant_id, namespace_present, namespace_id, group_id, reason, incident_ref, detected_at_unix_ms)
+             VALUES (?1, 0, '', ?2, 'legacy_host', ?3, 1)",
+            params!["tenant-a", "media-a", "inc-1"],
+        ).expect("operator-confirmed hold");
+        assert!(
+            db.execute(
+                "DELETE FROM server_mls_custody_quarantine WHERE group_id='media-a'",
+                [],
+            )
+            .is_err(),
+            "historic quarantine cannot be deleted"
+        );
+        assert!(
+            db.execute(
+                "UPDATE server_mls_custody_quarantine SET group_id='media-b' WHERE group_id='media-a'",
+                [],
+            )
+            .is_err(),
+            "historic quarantine cannot be moved"
+        );
+        assert!(
+            db.execute(
+                "UPDATE server_mls_custody_quarantine SET incident_ref='altered' WHERE group_id='media-a'",
+                [],
+            )
+            .is_err(),
+            "quarantine incident evidence cannot be rewritten"
+        );
+        assert!(
+            db.execute(
+                "UPDATE server_mls_custody_quarantine SET reason='operator_hold' WHERE group_id='media-a'",
+                [],
+            )
+            .is_err(),
+            "quarantine reason cannot be rewritten"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM server_mls_custody_quarantine WHERE group_id='media-a'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .expect("hold persists"),
+            1
+        );
+        db.execute_batch("DROP TRIGGER quarantine_delete_denied;")
+            .expect("simulate schema corruption");
+        assert_eq!(verify_v54_objects(&db), Err(DurableStoreError::Corrupt));
     }
 }

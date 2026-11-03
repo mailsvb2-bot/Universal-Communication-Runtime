@@ -367,49 +367,151 @@ impl GroupCallLookupStore for SqliteLocalStore {
     }
 }
 
+/// One canonical creation path: optional parent Call CAS is checked under the
+/// same `SQLite` write transaction as the derived Call's durable insert.
+fn create_call_with_parent_guard(
+    store: &SqliteLocalStore,
+    creator: &ScopedPrincipal,
+    session: &CallSession,
+    parent: Option<&CallSession>,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    let session = canonical_call_creation(session, &creator.scope, &creator.principal)
+        .map_err(map_call_error)?;
+    let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
+    let mut connection = store.lock_connection()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    if let Some(parent) = parent {
+        // The parent snapshot and child creation are serialized with every
+        // canonical Call signal by this SQLite IMMEDIATE transaction.
+        if parent.scope != session.scope
+            || parent.call_id == session.call_id
+            || parent.initiated_by != creator.principal
+            || session.initiated_by != parent.initiated_by
+            || session.participants.len() != 2
+            || !session.participants.iter().all(|participant| {
+                parent
+                    .participants
+                    .iter()
+                    .any(|member| member.principal == participant.principal)
+            })
+            || parent.conversation.kind != ConversationKind::Direct
+            || parent.signalling_state != CallSignallingState::Active
+            || parent.participants.len() != 2
+            || !parent.participants.iter().all(|participant| {
+                participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            })
+            || load_call_from(&transaction, &parent.scope, &parent.call_id)?.as_ref()
+                != Some(parent)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+    }
+    let conversation = message_store::load_conversation_from(
+        &transaction,
+        &session.scope,
+        &session.conversation.conversation_id,
+    )?
+    .ok_or(DurableStoreError::InvalidRecord)?;
+    if conversation.conversation != session.conversation {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    if let Some(existing) = load_call_from(&transaction, &session.scope, &session.call_id)? {
+        if !group_actor_current_if_needed(&transaction, &existing, &creator.principal)? {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let recorded = load_creation_fingerprint(&transaction, &session.scope, &session.call_id)?
+            .ok_or(DurableStoreError::Corrupt)?;
+        return if recorded == creation_fingerprint && creator.principal == existing.initiated_by {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    require_group_participants_if_needed(&transaction, &session)?;
+    insert_call(&transaction, &session, &creation_fingerprint)?;
+    replace_participants(&transaction, &session)?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    Ok(DurableRecordStatus::Persisted)
+}
+
+fn apply_call_signal_in_transaction(
+    transaction: &Transaction<'_>,
+    actor: &ScopedPrincipal,
+    signal: &CallSignal,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    if actor.scope != signal.scope {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
+    let current = load_call_from(transaction, &signal.scope, &signal.call_id)?
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    if !group_actor_current_if_needed(transaction, &current, &actor.principal)? {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    if let Some((recorded_actor, existing, applied_revision)) = load_signal_record(
+        transaction,
+        &signal.scope,
+        signal.event_id.as_opaque().as_str(),
+    )? {
+        if recorded_actor != actor.principal
+            || !duplicate_actor_allowed(&current, &actor.principal, applied_revision)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        return if existing == fingerprint {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    if !active_call_participant(&current, &actor.principal) {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    require_group_signal_target_if_needed(transaction, &current, signal)?;
+    let next = apply_call_signal(&current, &actor.scope, &actor.principal, signal)
+        .map_err(map_call_error)?;
+    if super::event_journal::load_event_by_id(transaction, &signal.scope, &signal.event_id)?
+        .is_some()
+        || group_change_reserves_event_id(
+            transaction,
+            &signal.scope,
+            signal.event_id.as_opaque().as_str(),
+        )?
+        || super::group_mls_store::mls_transition_reserves_event_id(
+            transaction,
+            &signal.scope,
+            signal.event_id.as_opaque().as_str(),
+        )?
+    {
+        return Err(DurableStoreError::Conflict);
+    }
+    update_call(transaction, &next)?;
+    replace_participants(transaction, &next)?;
+    insert_signal_record(transaction, actor, signal, &fingerprint, next.revision)?;
+    Ok(DurableRecordStatus::Persisted)
+}
+
 impl CallStore for SqliteLocalStore {
     fn create_call(
         &self,
         creator: &ScopedPrincipal,
         session: &CallSession,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let session = canonical_call_creation(session, &creator.scope, &creator.principal)
-            .map_err(map_call_error)?;
-        let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
-        let mut connection = self.lock_connection()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| map_sqlite_error(&error))?;
-        let conversation = message_store::load_conversation_from(
-            &transaction,
-            &session.scope,
-            &session.conversation.conversation_id,
-        )?
-        .ok_or(DurableStoreError::InvalidRecord)?;
-        if conversation.conversation != session.conversation {
-            return Err(DurableStoreError::InvalidRecord);
-        }
-        if let Some(existing) = load_call_from(&transaction, &session.scope, &session.call_id)? {
-            if !group_actor_current_if_needed(&transaction, &existing, &creator.principal)? {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            let recorded =
-                load_creation_fingerprint(&transaction, &session.scope, &session.call_id)?
-                    .ok_or(DurableStoreError::Corrupt)?;
-            return if recorded == creation_fingerprint && creator.principal == existing.initiated_by
-            {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        require_group_participants_if_needed(&transaction, &session)?;
-        insert_call(&transaction, &session, &creation_fingerprint)?;
-        replace_participants(&transaction, &session)?;
-        transaction
-            .commit()
-            .map_err(|error| map_sqlite_error(&error))?;
-        Ok(DurableRecordStatus::Persisted)
+        create_call_with_parent_guard(self, creator, session, None)
+    }
+
+    fn create_call_if_parent_current(
+        &self,
+        creator: &ScopedPrincipal,
+        session: &CallSession,
+        parent: &CallSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        create_call_with_parent_guard(self, creator, session, Some(parent))
     }
 
     fn call(
@@ -514,64 +616,123 @@ impl CallStore for SqliteLocalStore {
         actor: &ScopedPrincipal,
         signal: &CallSignal,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        if actor.scope != signal.scope {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        let current = load_call_from(&transaction, &signal.scope, &signal.call_id)?
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        if !group_actor_current_if_needed(&transaction, &current, &actor.principal)? {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        if let Some((recorded_actor, existing, applied_revision)) = load_signal_record(
-            &transaction,
-            &signal.scope,
-            signal.event_id.as_opaque().as_str(),
-        )? {
-            if recorded_actor != actor.principal
-                || !duplicate_actor_allowed(&current, &actor.principal, applied_revision)
-            {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            return if existing == fingerprint {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        if !active_call_participant(&current, &actor.principal) {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        require_group_signal_target_if_needed(&transaction, &current, signal)?;
-        let next = apply_call_signal(&current, &actor.scope, &actor.principal, signal)
-            .map_err(map_call_error)?;
-        if super::event_journal::load_event_by_id(&transaction, &signal.scope, &signal.event_id)?
-            .is_some()
-            || group_change_reserves_event_id(
-                &transaction,
-                &signal.scope,
-                signal.event_id.as_opaque().as_str(),
-            )?
-            || super::group_mls_store::mls_transition_reserves_event_id(
-                &transaction,
-                &signal.scope,
-                signal.event_id.as_opaque().as_str(),
-            )?
-        {
-            return Err(DurableStoreError::Conflict);
-        }
-        update_call(&transaction, &next)?;
-        replace_participants(&transaction, &next)?;
-        insert_signal_record(&transaction, actor, signal, &fingerprint, next.revision)?;
+        let outcome = apply_call_signal_in_transaction(&transaction, actor, signal)?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
-        Ok(DurableRecordStatus::Persisted)
+        Ok(outcome)
     }
+
+    fn terminate_direct_call_with_derived(
+        &self,
+        actor: &ScopedPrincipal,
+        direct_signal: &CallSignal,
+        derived_call_id: &CallId,
+        derived_event_id: &ucr_model::EventId,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if actor.scope != direct_signal.scope
+            || derived_call_id == &direct_signal.call_id
+            || !matches!(&direct_signal.kind, CallSignalKind::Terminate { .. })
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let direct = load_call_from(&transaction, &direct_signal.scope, &direct_signal.call_id)?
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if direct.conversation.kind != ConversationKind::Direct {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        // Apply the canonical direct signal and derived media termination under
+        // ONE SQLite IMMEDIATE transaction, shared with Join's parent fence.
+        let outcome = apply_call_signal_in_transaction(&transaction, actor, direct_signal)?;
+        if outcome == DurableRecordStatus::Duplicate {
+            // Retry after a historical/uncertain response still retires any
+            // canonical Join credentials for this ended direct Call.
+            revoke_direct_media_join_grants(&transaction, &direct.scope, derived_call_id)?;
+            transaction
+                .commit()
+                .map_err(|error| map_sqlite_error(&error))?;
+            return Ok(outcome);
+        }
+        if let Some(media) = load_call_from(&transaction, &direct.scope, derived_call_id)? {
+            if media.scope != direct.scope
+                || media.conversation.kind != ConversationKind::PrivateGroup
+                || media.initiated_by != direct.initiated_by
+                || media.participants.len() != direct.participants.len()
+                || !media.participants.iter().all(|member| {
+                    direct
+                        .participants
+                        .iter()
+                        .any(|p| p.principal == member.principal)
+                })
+            {
+                return Err(DurableStoreError::PermissionDenied);
+            }
+            let kind = match media.signalling_state {
+                CallSignallingState::Terminated => None,
+                CallSignallingState::Inviting | CallSignallingState::Ringing => {
+                    Some(CallSignalKind::Cancel)
+                }
+                CallSignallingState::Active | CallSignallingState::Reconnecting => {
+                    Some(CallSignalKind::Terminate {
+                        reason: CallTerminationReason::Completed,
+                    })
+                }
+            };
+            if let Some(kind) = kind {
+                let media_actor = ScopedPrincipal {
+                    scope: direct.scope.clone(),
+                    principal: direct.initiated_by.clone(),
+                };
+                let media_signal = CallSignal {
+                    event_id: derived_event_id.clone(),
+                    scope: direct.scope.clone(),
+                    call_id: derived_call_id.clone(),
+                    expected_revision: media.revision,
+                    kind,
+                };
+                apply_call_signal_in_transaction(&transaction, &media_actor, &media_signal)?;
+            }
+        }
+        // Retire all previously issued first-party media bearers atomically
+        // with the canonical parent and child Call termination. A separate
+        // Realtime process observes the same durable revocation tombstones.
+        revoke_direct_media_join_grants(&transaction, &direct.scope, derived_call_id)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(outcome)
+    }
+}
+
+fn revoke_direct_media_join_grants(
+    transaction: &Transaction<'_>,
+    scope: &TenantScope,
+    media_call_id: &CallId,
+) -> Result<(), DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    transaction
+        .execute(
+            "UPDATE conference_join_grants SET revoked=1
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+               AND call_id=?4 AND integration_id='ucr-first-party-direct-media'
+               AND revoked=0",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                media_call_id.as_opaque().as_str(),
+            ],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    Ok(())
 }
 
 pub(super) fn reconcile_group_calls_after_membership_change(
@@ -1632,6 +1793,175 @@ mod tests {
         assert_eq!(
             reopened.apply_call_signal(&bob, &reject),
             Ok(DurableRecordStatus::Duplicate)
+        );
+    }
+    #[test]
+    fn parent_fence_rejects_stale_media_creation_across_sqlite_connections() {
+        // Two independently opened SQLite handles model separate BFF workers.
+        // The CallStore fence is transport-neutral; the production child is
+        // a derived Group Call, while this fixture uses an existing conversation.
+        let db = TestDb::new();
+        let joining = SqliteLocalStore::open(db.path()).expect("joining worker");
+        let hanging_up = SqliteLocalStore::open(db.path()).expect("hangup worker");
+        let (direct, alice, bob) = session();
+        joining
+            .persist_conversation(&conversation())
+            .expect("canonical conversation");
+        joining.create_call(&alice, &direct).expect("direct Call");
+        hanging_up
+            .apply_call_signal(
+                &bob,
+                &signal(&direct, "fence-accept", CallSignalKind::Accept),
+            )
+            .expect("accepted Call");
+        let active = joining
+            .call(&scope(), &direct.call_id)
+            .unwrap()
+            .expect("accepted snapshot");
+        assert_eq!(active.signalling_state, CallSignallingState::Active);
+
+        let mut child = direct.clone();
+        child.call_id = CallId::from_opaque(oid("fence-derived-before-hangup"));
+        assert_eq!(
+            joining.create_call_if_parent_current(&alice, &child, &active),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            joining.create_call_if_parent_current(&alice, &child, &active),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+
+        // A has already read the active parent; B commits Hangup through a
+        // separate connection before A tries to create its next media Call.
+        hanging_up
+            .apply_call_signal(
+                &bob,
+                &signal(
+                    &active,
+                    "fence-hangup",
+                    CallSignalKind::Terminate {
+                        reason: CallTerminationReason::Completed,
+                    },
+                ),
+            )
+            .expect("committed Hangup");
+        let mut stale_child = child.clone();
+        stale_child.call_id = CallId::from_opaque(oid("fence-derived-after-hangup"));
+        assert_eq!(
+            joining.create_call_if_parent_current(&alice, &stale_child, &active),
+            Err(DurableStoreError::PermissionDenied),
+            "stale A snapshot must not create a child after B Hangup"
+        );
+        assert_eq!(
+            joining.call(&scope(), &stale_child.call_id),
+            Ok(None),
+            "no orphan media Call may persist after terminal parent"
+        );
+        assert_eq!(
+            joining.create_call_if_parent_current(&alice, &child, &active),
+            Err(DurableStoreError::PermissionDenied),
+            "even an existing child cannot be returned from a stale parent"
+        );
+    }
+
+    #[test]
+    fn atomic_hangup_rolls_back_both_calls_when_derived_binding_is_wrong() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let (direct, alice, bob) = session();
+        store.persist_conversation(&conversation()).unwrap();
+        store.create_call(&alice, &direct).unwrap();
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(&direct, "atomic-sqlite-accept", CallSignalKind::Accept),
+            )
+            .unwrap();
+        let active = store.call(&scope(), &direct.call_id).unwrap().unwrap();
+
+        // A second unrelated direct Call must never be mistaken for the
+        // derived Group media Call, even when its roster and scope match.
+        let mut impostor = direct.clone();
+        impostor.call_id = CallId::from_opaque(oid("atomic-sqlite-impostor"));
+        store.create_call(&alice, &impostor).unwrap();
+        let hangup = signal(
+            &active,
+            "atomic-sqlite-hangup",
+            CallSignalKind::Terminate {
+                reason: CallTerminationReason::Completed,
+            },
+        );
+        let child_event = EventId::from_opaque(oid("atomic-sqlite-child-event"));
+        assert_eq!(
+            store.terminate_direct_call_with_derived(
+                &bob,
+                &hangup,
+                &impostor.call_id,
+                &child_event,
+            ),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(
+            store.call(&scope(), &direct.call_id).unwrap(),
+            Some(active.clone()),
+            "failed media termination must rollback the parent Hangup"
+        );
+        // Failed atomic operation must not reserve the parent's EventId.
+        assert_eq!(
+            store.apply_call_signal(&bob, &hangup),
+            Ok(DurableRecordStatus::Persisted)
+        );
+    }
+
+    #[test]
+    fn atomic_hangup_without_media_commits_and_fences_late_creation() {
+        let db = TestDb::new();
+        let joining = SqliteLocalStore::open(db.path()).unwrap();
+        let hanging_up = SqliteLocalStore::open(db.path()).unwrap();
+        let (direct, alice, bob) = session();
+        joining.persist_conversation(&conversation()).unwrap();
+        joining.create_call(&alice, &direct).unwrap();
+        joining
+            .apply_call_signal(
+                &bob,
+                &signal(
+                    &direct,
+                    "atomic-sqlite-no-media-accept",
+                    CallSignalKind::Accept,
+                ),
+            )
+            .unwrap();
+        let active = joining.call(&scope(), &direct.call_id).unwrap().unwrap();
+        let media_id = CallId::from_opaque(oid("atomic-sqlite-late-media"));
+        let hangup = signal(
+            &active,
+            "atomic-sqlite-no-media-hangup",
+            CallSignalKind::Terminate {
+                reason: CallTerminationReason::Completed,
+            },
+        );
+        assert_eq!(
+            hanging_up.terminate_direct_call_with_derived(
+                &bob,
+                &hangup,
+                &media_id,
+                &EventId::from_opaque(oid("atomic-sqlite-no-media-event")),
+            ),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            joining
+                .call(&scope(), &direct.call_id)
+                .unwrap()
+                .unwrap()
+                .signalling_state,
+            CallSignallingState::Terminated
+        );
+        let mut child = direct.clone();
+        child.call_id = media_id;
+        assert_eq!(
+            joining.create_call_if_parent_current(&alice, &child, &active),
+            Err(DurableStoreError::PermissionDenied)
         );
     }
 }
