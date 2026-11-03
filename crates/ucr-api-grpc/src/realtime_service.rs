@@ -4388,7 +4388,8 @@ mod first_party_media_binding_tests {
         binding.trusted_device_keys.pop();
         assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
         let mut binding = valid_binding();
-        binding.trusted_device_keys[1].device_id = binding.trusted_device_keys[0].device_id.clone();
+        let first_device = binding.trusted_device_keys[0].device_id.clone();
+        binding.trusted_device_keys[1].device_id = first_device;
         assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
         let mut binding = valid_binding();
         binding.trusted_device_keys[1].public_key.clear();
