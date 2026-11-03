@@ -1571,6 +1571,76 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         ),
         "revoked Alice must lose active media-operation authority: {revoked_audio:?}"
     );
+    // The same cross-process tombstone must fence all MLS mutation/read
+    // surfaces and the active lease, not just the admission descriptor. The
+    // direct Call remains ACTIVE throughout these checks, so its eventual
+    // Hangup cannot accidentally explain the denial.
+    let mut revoked_register = tonic::Request::new(pb::RealtimeRegisterMlsKeyPackageRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+        key_package: vec![0xA5],
+    });
+    revoked_register.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_register = realtime
+        .register_mls_key_package(revoked_register)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_register.result,
+            Some(pb::realtime_register_mls_key_package_response::Result::Error(_))
+        ),
+        "cross-process revoke must deny active-Call MLS KeyPackage writes: {revoked_register:?}"
+    );
+    let mut revoked_bootstrap = tonic::Request::new(pb::RealtimeGetMlsBootstrapRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    revoked_bootstrap.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_bootstrap = realtime
+        .get_mls_bootstrap(revoked_bootstrap)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_bootstrap.result,
+            Some(pb::realtime_get_mls_bootstrap_response::Result::Error(_))
+        ),
+        "cross-process revoke must deny active-Call MLS bootstrap: {revoked_bootstrap:?}"
+    );
+    let mut revoked_heartbeat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+        expected_session_sequence: generations[0],
+    });
+    revoked_heartbeat.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_heartbeat = realtime
+        .heartbeat_realtime(revoked_heartbeat)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_heartbeat.result,
+            Some(pb::realtime_heartbeat_response::Result::Error(_))
+        ),
+        "cross-process revoke must not refresh the active Join lease: {revoked_heartbeat:?}"
+    );
+
     let bob_audio = realtime
         .report_audio_level(audio(&claims[1], &tokens[1]))
         .await
