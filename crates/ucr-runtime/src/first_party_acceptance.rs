@@ -1743,6 +1743,36 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .unwrap()
         .unwrap();
     assert_eq!(media.signalling_state, CallSignallingState::Terminated);
+    // Hangup must atomically revoke BOTH already-issued durable bearers,
+    // not merely depend on a later Realtime read of the terminal media Call.
+    // A separate SQLite connection must see the tombstones immediately.
+    for (index, claim) in claims.iter().enumerate() {
+        let durable = other_store
+            .conference_join_grant(&claim.scope, &claim.session_id)
+            .unwrap()
+            .expect("canonical first-party Join tombstone");
+        assert!(durable.revoked, "Hangup must revoke each Device's Join");
+        // Model an HTTP issuer that signed before Hangup but persisted late.
+        // It must not resurrect authorization after the terminal transaction.
+        let mut late = durable;
+        late.session_id = ucr_model::SessionId::from_opaque(
+            opaque(&format!("post-hangup-media-join-{index}")).unwrap(),
+        );
+        late.revoked = false;
+        late.redeemed = false;
+        assert_eq!(
+            other_store.persist_conference_join_grant(&late),
+            Err(ucr_core::DurableStoreError::PermissionDenied),
+            "a delayed first-party Join cannot persist after Hangup"
+        );
+        assert!(
+            other_store
+                .conference_join_grant(&late.scope, &late.session_id)
+                .unwrap()
+                .is_none(),
+            "rejected late bearer must not leave a durable grant"
+        );
+    }
     for (index, subject) in subjects.iter().enumerate() {
         assert_eq!(
             server.store.permission_grants_for(subject).unwrap(),
