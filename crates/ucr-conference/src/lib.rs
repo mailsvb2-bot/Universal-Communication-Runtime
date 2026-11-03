@@ -611,7 +611,12 @@ where
             self.group_e2ee_capabilities,
         )?;
         let set = canonical_conference_subscription_set(set, &actor.scope, &actor.principal)?;
-        authorize(self.authorization, actor, CONFERENCE_SUBSCRIBE_PERMISSION)?;
+        authorize_in_call(
+            self.authorization,
+            actor,
+            CONFERENCE_SUBSCRIBE_PERMISSION,
+            &set.call_id,
+        )?;
         self.prune_subscriptions(&set.scope, &set.call_id)?;
         let snapshot = conference_projection(self.store, actor, &set.scope, &set.call_id)?;
         require_accepted_participant(&snapshot.call, &actor.principal)?;
@@ -619,10 +624,11 @@ where
             require_accepted_participant(&snapshot.call, &subscription.source)
                 .map_err(|_| ConferenceError::SourceUnavailable)?;
             require_active_member(self.store, actor, &snapshot.group_id, &subscription.source)?;
-            authorize(
+            authorize_in_call(
                 self.authorization,
                 actor,
                 receive_permission(subscription.media_kind),
+                &set.call_id,
             )?;
         }
         let mut state = self
@@ -1053,7 +1059,12 @@ where
             self.sfu_capabilities,
             self.group_e2ee_capabilities,
         )?;
-        authorize(self.authorization, actor, CONFERENCE_SUBSCRIBE_PERMISSION)?;
+        authorize_in_call(
+            self.authorization,
+            actor,
+            CONFERENCE_SUBSCRIBE_PERMISSION,
+            call_id,
+        )?;
         self.prune_subscriptions(scope, call_id)?;
         let snapshot = conference_projection(self.store, actor, scope, call_id)?;
         require_accepted_participant(&snapshot.call, &actor.principal)?;
@@ -1478,6 +1489,26 @@ fn authorize<A: AuthorizationEvaluator>(
             permission: permission.to_owned(),
             resource_scope: subject.scope.clone(),
         })
+        .map_err(ConferenceError::Authorization)
+}
+
+/// Media-plane permissions may come from a tenant-wide grant or from a durable
+/// grant bound to exactly this Call (first-party per-call media rights).
+fn authorize_in_call<A: AuthorizationEvaluator>(
+    authorization: &A,
+    subject: &ScopedPrincipal,
+    permission: &str,
+    call_id: &CallId,
+) -> Result<(), ConferenceError> {
+    authorization
+        .authorize_in_call(
+            &AuthorizationRequest {
+                subject: subject.clone(),
+                permission: permission.to_owned(),
+                resource_scope: subject.scope.clone(),
+            },
+            call_id,
+        )
         .map_err(ConferenceError::Authorization)
 }
 

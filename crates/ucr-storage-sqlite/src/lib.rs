@@ -3,6 +3,7 @@
 mod anti_entropy_store;
 mod attachment_store;
 mod bridge_store;
+mod call_permission_grant_store;
 mod call_store;
 mod command_store;
 mod conference_join_grant_store;
@@ -115,7 +116,8 @@ const SQLITE_SCHEMA_V52: u32 = 52;
 const SQLITE_SCHEMA_V53: u32 = 53;
 const SQLITE_SCHEMA_V54: u32 = 54;
 const SQLITE_SCHEMA_V55: u32 = 55;
-pub const SQLITE_SCHEMA_VERSION: u32 = 55;
+const SQLITE_SCHEMA_V56: u32 = 56;
+pub const SQLITE_SCHEMA_VERSION: u32 = 56;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -694,7 +696,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v55(connection);
+        return verify_schema_v56(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -759,11 +761,30 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V52 => migrate_v52_to_v53(connection)?,
             SQLITE_SCHEMA_V53 => migrate_v53_to_v54(connection)?,
             SQLITE_SCHEMA_V54 => migrate_v54_to_v55(connection)?,
+            SQLITE_SCHEMA_V55 => migrate_v55_to_v56(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v55(connection)
+    verify_schema_v56(connection)
+}
+
+fn migrate_v55_to_v56(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v55(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    call_permission_grant_store::create_v56_objects(&transaction)?;
+    // Revoke historic implicit tenant-wide media grants atomically with the
+    // version bump: v56 must never be observable with them still present.
+    call_permission_grant_store::revoke_legacy_implicit_media_grants(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V56)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v56(connection)
 }
 
 fn migrate_v54_to_v55(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -902,6 +923,11 @@ fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreErr
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v47(connection)
+}
+
+fn verify_schema_v56(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v55(connection)?;
+    call_permission_grant_store::verify_v56_objects(connection)
 }
 
 fn verify_schema_v55(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1092,6 +1118,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     endpoint_mls_offer_store::create_v53_objects(&transaction)?;
     group_mls_store::create_v54_objects(&transaction)?;
     conference_join_grant_store::create_v55_objects(&transaction)?;
+    call_permission_grant_store::create_v56_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -2175,7 +2202,17 @@ fn test_restore_v49_mls_transition_shape(connection: &Connection) -> Result<(), 
 }
 
 #[cfg(test)]
+fn test_remove_v56_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TRIGGER IF EXISTS call_permission_grants_revoke_on_terminate;
+         DROP TRIGGER IF EXISTS call_permission_grants_revoke_on_leave;
+         DROP TABLE IF EXISTS call_permission_grants;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v53_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v56_objects(connection)?;
     connection.execute_batch("DROP TABLE IF EXISTS endpoint_mls_key_package_offers;")
 }
 

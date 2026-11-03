@@ -26,16 +26,16 @@
 
 use sha2::{Digest, Sha256};
 use ucr_core::{
-    AuthorizationEvaluator, CallStore, DurableRecordStatus, DurableStoreError, GroupStore,
+    CallPermissionGrantStore, CallStore, DurableRecordStatus, DurableStoreError, GroupStore,
 };
 use ucr_group_mls::GroupMlsServerCustodyProbe;
 use ucr_model::{
-    AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallSession, CallSignal,
-    CallSignalKind, CallSignallingState, CallTerminationReason, ConversationId, ConversationKind,
-    ConversationRef, DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, IdentityId,
-    OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
+    CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
+    CallSignallingState, CallTerminationReason, ConversationId, ConversationKind, ConversationRef,
+    DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, IdentityId, OpaqueId,
+    PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
 };
-use ucr_protocol::{CanonicalErrorCode, GROUP_MLS_CAPABILITY};
+use ucr_protocol::GROUP_MLS_CAPABILITY;
 
 const MAX_CAS_ATTEMPTS: usize = 6;
 
@@ -47,7 +47,8 @@ const MEDIA_GROUP_PREFIX: &str = "fp-mg-";
 const MEDIA_CONVERSATION_PREFIX: &str = "fp-mc-";
 
 /// Permissions the realtime/SFU stack checks for a participant's own media.
-/// Admission to a particular Call is still decided by canonical Call membership.
+/// First-party grants them ONLY bound to one derived media Call (never tenant-wide);
+/// admission is additionally decided by canonical Call membership.
 pub(crate) const FIRST_PARTY_MEDIA_PERMISSIONS: [&str; 5] = [
     ucr_protocol::CONFERENCE_SUBSCRIBE_PERMISSION,
     ucr_protocol::AUDIO_SEND_PERMISSION,
@@ -308,31 +309,26 @@ where
 }
 
 /// First-party media must never mint durable tenant-wide permissions as a side
-/// effect of joining one Call. Reuse the canonical permission evaluator and
-/// require independently provisioned explicit grants. SFU/Conference recheck
-/// these grants for each media operation, so a later revoke still fails closed.
-fn require_media_permissions<S>(
+/// effect of joining one Call. Instead, BOTH accepted participants of the ACTIVE
+/// direct Call receive durable grants bound to exactly the derived media Call.
+/// They authorize only `authorize_in_call` for that Call and are revoked in the
+/// same transaction that terminates it (or records a participant's departure).
+fn grant_call_media_permissions<S>(
     store: &S,
-    subject: &ScopedPrincipal,
+    media: &CallSession,
+    participants: &[PrincipalRef; 2],
 ) -> Result<(), MediaRuntimeError>
 where
-    S: AuthorizationEvaluator,
+    S: CallPermissionGrantStore,
 {
-    for permission in FIRST_PARTY_MEDIA_PERMISSIONS {
-        store
-            .authorize(&AuthorizationRequest {
-                subject: subject.clone(),
-                permission: permission.to_owned(),
-                resource_scope: subject.scope.clone(),
-            })
-            .map_err(|error| match error.code {
-                CanonicalErrorCode::PermissionDenied
-                | CanonicalErrorCode::Unauthenticated
-                | CanonicalErrorCode::PolicyDenied => MediaRuntimeError::NotAdmissible,
-                _ => MediaRuntimeError::Unavailable,
-            })?;
-    }
-    Ok(())
+    store
+        .grant_call_permissions(
+            &media.scope,
+            &media.call_id,
+            participants,
+            &FIRST_PARTY_MEDIA_PERMISSIONS,
+        )
+        .map_err(MediaRuntimeError::from)
 }
 
 /// Resolves the endpoint-owned media runtime of one ACTIVE direct Call for the
@@ -348,7 +344,7 @@ pub(crate) fn prepare_direct_call_media<S>(
     subject: &ScopedPrincipal,
 ) -> Result<CallSession, MediaRuntimeError>
 where
-    S: CallStore + GroupStore + GroupMlsServerCustodyProbe + AuthorizationEvaluator,
+    S: CallStore + GroupStore + GroupMlsServerCustodyProbe + CallPermissionGrantStore,
 {
     let participants = admissible_participants(direct, subject)?;
     let ids = media_runtime_ids(&direct.scope, &direct.call_id)?;
@@ -398,25 +394,13 @@ where
     }) {
         return Err(MediaRuntimeError::Unavailable);
     }
-    // Permission denial must happen before creating even the derived media
-    // Call. This check is read-only: no Join or Hangup can leave an orphan
-    // permission grant behind, including under concurrent termination.
-    // Require independent media authorization for BOTH accepted endpoints.
-    // A caller's grant cannot confer media capability on an unprovisioned
-    // recipient. Run both checks before creating the derived Call.
-    for principal in &participants {
-        require_media_permissions(
-            store,
-            &ScopedPrincipal {
-                scope: direct.scope.clone(),
-                principal: principal.clone(),
-            },
-        )?;
-    }
     let media = ensure_media_call(store, direct, &ids, &direct.scope, &participants)?;
     if media.signalling_state == CallSignallingState::Terminated {
         return Err(MediaRuntimeError::Conflict);
     }
+    // Grant only after the derived Call exists; the grant transaction itself
+    // rechecks that it is not terminated, so a concurrent Hangup fails closed.
+    grant_call_media_permissions(store, &media, &participants)?;
     Ok(media)
 }
 

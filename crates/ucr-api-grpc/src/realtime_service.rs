@@ -324,6 +324,39 @@ pub trait RealtimeSfuPlacementLifecycle: Send + Sync {
     ) -> Result<(), CanonicalError>;
 }
 
+/// Queues a Call for the placement sweep if admission is dropped mid-placement.
+struct PlacementCancelGuard<'a> {
+    registry: &'a RealtimeSessionRegistry,
+    scope: &'a TenantScope,
+    call_id: &'a CallId,
+    armed: bool,
+}
+
+impl Drop for PlacementCancelGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self
+                .registry
+                .queue_call_cleanup_candidate(self.scope, self.call_id);
+        }
+    }
+}
+
+/// Lock stripes for the per-Call Join/Leave/peer-lifecycle gate.
+const SFU_PLACEMENT_LOCK_STRIPES: usize = 64;
+
+fn sfu_placement_stripe(scope: &TenantScope, call_id: &CallId) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    scope.tenant_id.hash(&mut hasher);
+    scope.namespace_id.hash(&mut hasher);
+    call_id.hash(&mut hasher);
+    // Truncation is intended: only the stripe index is needed.
+    #[allow(clippy::cast_possible_truncation)]
+    let index = hasher.finish() as usize;
+    index % SFU_PLACEMENT_LOCK_STRIPES
+}
+
 pub struct GrpcRealtimeService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
@@ -339,7 +372,7 @@ pub struct GrpcRealtimeService<C, A, S> {
     validated_media_observer: Option<Arc<dyn RealtimeValidatedMediaObserver>>,
     mls_bootstrap_store: Option<Arc<dyn GroupMlsBootstrapStore + Send + Sync>>,
     mls_admission_store: Option<Arc<dyn RealtimeMlsAdmissionStore>>,
-    sfu_placement_transition: Arc<tokio::sync::Mutex<()>>,
+    sfu_placement_transition: Arc<[Arc<tokio::sync::Mutex<()>>]>,
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S> {
@@ -388,7 +421,9 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             validated_media_observer: None,
             mls_bootstrap_store: None,
             mls_admission_store: None,
-            sfu_placement_transition: Arc::new(tokio::sync::Mutex::new(())),
+            sfu_placement_transition: (0..SFU_PLACEMENT_LOCK_STRIPES)
+                .map(|_| Arc::new(tokio::sync::Mutex::new(())))
+                .collect(),
         }
     }
 
@@ -442,8 +477,32 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     // Serialize Join, terminal Leave and grant revocation even when SFU
     // placement management is disabled. Otherwise old reusable grants can
     // reconnect between a Leave's generation check and its revocation.
-    async fn sfu_placement_transition_guard(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        Arc::clone(&self.sfu_placement_transition)
+    //
+    // The gate is PER CALL (lock striping by scope+Call): every invariant it
+    // protects (grant generation, placement, peer lifecycle) is owned by one
+    // Call, so a slow provider operation in one Call no longer blocks Join or
+    // Leave of every other Call on the node. Callers never hold two stripes
+    // at once, so striping cannot deadlock; a hash collision only shares a gate.
+    async fn sfu_placement_transition_guard(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.sfu_placement_transition[sfu_placement_stripe(scope, call_id)])
+            .lock_owned()
+            .await
+    }
+
+    // Requests whose coordinates fail to decode perform no transition; they
+    // still pass a (shared) gate so their error ordering is unchanged.
+    async fn sfu_placement_transition_guard_for<E>(
+        &self,
+        lookup: &Result<(TenantScope, CallId, SessionId), E>,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let index = lookup.as_ref().map_or(0, |(scope, call_id, _)| {
+            sfu_placement_stripe(scope, call_id)
+        });
+        Arc::clone(&self.sfu_placement_transition[index])
             .lock_owned()
             .await
     }
@@ -583,6 +642,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn admit_realtime_session_with_sfu_placement(
         &self,
         claims: RealtimeSessionClaims,
@@ -591,11 +651,41 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     where
         S: ConferenceJoinGrantStore,
     {
-        let _guard = self.sfu_placement_transition_guard().await;
+        self.admit_realtime_session_with_sfu_placement_clocked(claims, now_unix_ms, || {
+            Ok(now_unix_ms)
+        })
+        .await
+    }
+
+    async fn admit_realtime_session_with_sfu_placement_clocked(
+        &self,
+        claims: RealtimeSessionClaims,
+        now_unix_ms: i64,
+        fresh_now: impl Fn() -> Result<i64, CanonicalError>,
+    ) -> Result<RealtimeJoinOutcome, CanonicalError>
+    where
+        S: ConferenceJoinGrantStore,
+    {
+        let _guard = self
+            .sfu_placement_transition_guard(&claims.scope, &claims.call_id)
+            .await;
         // Redemption can precede this mutex. Recheck the SAME canonical
         // grant owner inside the gate, before resurrecting a retired session.
         self.require_live_canonical_join_grant(&claims, now_unix_ms)?;
+        // If this future is cancelled (client disconnect) while placement is
+        // being coordinated, the drop-guard queues the Call for the expired
+        // placement sweep instead of leaking SFU capacity.
+        let mut cancel_guard = PlacementCancelGuard {
+            registry: &self.registry,
+            scope: &claims.scope,
+            call_id: &claims.call_id,
+            armed: self.sfu_placement_lifecycle.is_some(),
+        };
         self.ensure_sfu_call_placement(&claims).await?;
+        // Placement may await remote coordination (seconds). Re-read the clock:
+        // a grant that expired DURING placement must not be admitted with the
+        // stale pre-placement timestamp.
+        let now_unix_ms = fresh_now()?.max(now_unix_ms);
         // Placement may await remote coordination while another process
         // revokes the durable grant. Never admit that known-stale session.
         if let Err(error) = self.require_live_canonical_join_grant(&claims, now_unix_ms) {
@@ -604,7 +694,9 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
                 .await;
             return Err(error);
         }
-        match self.registry.join(claims.clone(), now_unix_ms) {
+        let joined = self.registry.join(claims.clone(), now_unix_ms);
+        cancel_guard.armed = false;
+        match joined {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
                 let error = map_registry_error(error);
@@ -625,7 +717,9 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     where
         S: ConferenceJoinGrantStore,
     {
-        let placement_guard = self.sfu_placement_transition_guard().await;
+        let placement_guard = self
+            .sfu_placement_transition_guard(&claims.scope, &claims.call_id)
+            .await;
         // A stale Leave must not revoke a valid, newer connection grant.
         // The check, canonical revocation, and registry retirement share
         // the same Join/Leave gate, preventing a reset to sequence 1 (ABA).
@@ -686,7 +780,9 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             .await;
         // Recheck placement under the same Join/Leave gate: a new authorized
         // session may have joined while the provider was closing.
-        let _placement_guard = self.sfu_placement_transition_guard().await;
+        let _placement_guard = self
+            .sfu_placement_transition_guard(&claims.scope, &claims.call_id)
+            .await;
         // Return the retirement transition even if provider shutdown failed.
         // The caller MUST persist attendance and clear ephemeral UI state,
         // then report the failed provider shutdown; the retry queue survives.
@@ -757,13 +853,14 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         let Some(lifecycle) = self.sfu_placement_lifecycle.as_ref() else {
             return Ok(0);
         };
-        let _guard = self.sfu_placement_transition_guard().await;
         let candidates = self
             .registry
             .expired_call_cleanup_candidates_at(now_unix_ms)
             .map_err(map_registry_error)?;
         let mut released = 0_usize;
         for (scope, call_id) in candidates {
+            // Each candidate is re-evaluated under ITS OWN Call gate.
+            let _guard = self.sfu_placement_transition_guard(&scope, &call_id).await;
             let active = self
                 .registry
                 .active_call_session_count_at(&scope, &call_id, now_unix_ms)
@@ -904,7 +1001,11 @@ where
                         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
                     }
                     let outcome = self
-                        .admit_realtime_session_with_sfu_placement(claims.clone(), now)
+                        .admit_realtime_session_with_sfu_placement_clocked(
+                            claims.clone(),
+                            now,
+                            || self.now(),
+                        )
                         .await?;
                     // The canonical Call may terminate after entry admission
                     // but before the realtime registry accepts this session.
@@ -1902,9 +2003,10 @@ where
     ) -> Result<Response<pb::RealtimeStartWebRtcResponse>, Status> {
         // Serialize WebRTC peer creation and ICE restart with Join/Leave.
         // A provider operation completing late must not resurrect a retired lease.
-        let peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let lookup = decode_realtime_lookup(request.into_inner());
+        // The gate is taken BEFORE any provider operation, keyed by this Call.
+        let peer_lifecycle_guard = self.sfu_placement_transition_guard_for(&lookup).await;
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => {
                 match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
@@ -1987,7 +2089,6 @@ where
         request: Request<pb::RealtimeSetWebRtcRemoteDescriptionRequest>,
     ) -> Result<Response<pb::RealtimeSetWebRtcRemoteDescriptionResponse>, Status> {
         // SDP mutations must remain fenced against Leave even after request cancellation.
-        let peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let offer_id = body.offer_id.clone().filter(|id| {
@@ -1997,6 +2098,8 @@ where
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
         });
         let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        // The gate is taken BEFORE any provider operation, keyed by this Call.
+        let peer_lifecycle_guard = self.sfu_placement_transition_guard_for(&lookup).await;
         let description = body
             .description
             .ok_or_else(invalid_argument)
@@ -2069,7 +2172,6 @@ where
         request: Request<pb::RealtimeAddWebRtcIceCandidateRequest>,
     ) -> Result<Response<pb::RealtimeAddWebRtcIceCandidateResponse>, Status> {
         // ICE mutations share the cancellable-request-safe Join/Leave gate.
-        let peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let offer_id = body.offer_id.clone().filter(|id| {
@@ -2079,6 +2181,8 @@ where
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
         });
         let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        // The gate is taken BEFORE any provider operation, keyed by this Call.
+        let peer_lifecycle_guard = self.sfu_placement_transition_guard_for(&lookup).await;
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => {
                 match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
@@ -2156,9 +2260,10 @@ where
     ) -> Result<Response<pb::RealtimeRestartWebRtcResponse>, Status> {
         // Serialize WebRTC peer creation and ICE restart with Join/Leave.
         // A provider operation completing late must not resurrect a retired lease.
-        let peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let lookup = decode_realtime_lookup(request.into_inner());
+        // The gate is taken BEFORE any provider operation, keyed by this Call.
+        let peer_lifecycle_guard = self.sfu_placement_transition_guard_for(&lookup).await;
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => {
                 match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
@@ -2247,12 +2352,13 @@ where
         request: Request<pb::RealtimeCloseWebRtcRequest>,
     ) -> Result<Response<pb::RealtimeCloseWebRtcResponse>, Status> {
         // A cancelled close must not run after a newer Join/Start has passed the gate.
-        let peer_lifecycle_guard = self.sfu_placement_transition_guard().await;
         let token = decode_bearer_token(request.metadata());
         let payload = request.into_inner();
         let offer_id = payload.offer_id;
         let lookup =
             decode_realtime_lookup_fields(payload.scope, payload.call_id, payload.session_id);
+        // The gate is taken BEFORE any provider operation, keyed by this Call.
+        let peer_lifecycle_guard = self.sfu_placement_transition_guard_for(&lookup).await;
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => {
                 match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
@@ -3371,7 +3477,8 @@ where
                 .and_then(|()| self.acknowledge_pending_webrtc_close(&scope, &call_id, &session_id))
             {
                 Ok(()) => {
-                    let _placement_guard = self.sfu_placement_transition_guard().await;
+                    let _placement_guard =
+                        self.sfu_placement_transition_guard(&scope, &call_id).await;
                     self.release_sfu_call_placement_for_call_if_inactive(
                         &scope,
                         &call_id,
@@ -3464,7 +3571,7 @@ where
             }
             sweep.closed_calls = sweep.closed_calls.saturating_add(1);
 
-            let placement_guard = self.sfu_placement_transition_guard().await;
+            let placement_guard = self.sfu_placement_transition_guard(&scope, &call_id).await;
             if self.sfu_placement_lifecycle.is_some() {
                 self.registry
                     .queue_call_cleanup_candidate(&scope, &call_id)
@@ -3501,7 +3608,7 @@ where
                 first_cleanup_error.get_or_insert(error);
             }
             // Serialize placement release with any concurrent fresh Join.
-            let _placement_guard = self.sfu_placement_transition_guard().await;
+            let _placement_guard = self.sfu_placement_transition_guard(&scope, &call_id).await;
             if let Some(error) = first_cleanup_error {
                 first_error.get_or_insert(error);
                 continue;
@@ -5030,8 +5137,11 @@ mod sfu_placement_lifecycle_tests {
             .persist_conference_join_grant(&ConferenceJoinGrantRecord {
                 scope: claims.scope.clone(),
                 conference_id: GroupId::from_opaque(id("fp-durable-media-group")),
+                // This test verifies the durable-token requirement only.
+                // A first-party issuer is separately fenced by an ACTIVE
+                // canonical derived Call and Group, covered by other tests.
                 integration_id: ucr_model::IntegrationId::from_opaque(id(
-                    "ucr-first-party-direct-media",
+                    "ucr-durable-grant-regression",
                 )),
                 call_id: claims.call_id.clone(),
                 participant: claims.participant.clone(),
@@ -5417,6 +5527,89 @@ mod sfu_placement_lifecycle_tests {
         assert_eq!(
             service.require_active_universal_participant(&first_party, &group_id),
             Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_rechecks_grant_with_fresh_clock_after_placement() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([11_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("issuer"),
+        );
+        let service = GrpcRealtimeService::new(
+            Arc::new(()),
+            Arc::new(()),
+            Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
+            Arc::clone(&issuer),
+            Arc::clone(&registry),
+            Arc::new(ConferenceRuntimeState::new()),
+        );
+        let binding = claims("fresh-clock", "fresh-clock-device");
+        let active = issuer
+            .issue(
+                binding.scope.clone(),
+                binding.call_id.clone(),
+                binding.participant.clone(),
+                binding.device_id.clone(),
+                300,
+                1_000,
+            )
+            .expect("issue grant")
+            .claims;
+        // The grant was live at entry but expired while placement awaited.
+        let result = service
+            .admit_realtime_session_with_sfu_placement_clocked(active.clone(), 1_001, || {
+                Ok(i64::MAX / 2)
+            })
+            .await;
+        assert!(result.is_err(), "stale-clock admission must be rejected");
+        assert_eq!(registry.active_session_count(), 0);
+        // A live fresh clock still admits.
+        service
+            .admit_realtime_session_with_sfu_placement_clocked(active, 1_001, || Ok(1_002))
+            .await
+            .expect("live admission");
+        assert_eq!(registry.active_session_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn placement_gate_is_per_call_not_global() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let service = service(registry, Arc::new(RecordingPlacementLifecycle::default()));
+        let first = claims("gate-a", "gate-device");
+        let mut other = first.clone();
+        let mut n = 0_u32;
+        loop {
+            other.call_id = CallId::from_opaque(id(&format!("gate-other-call-{n}")));
+            if sfu_placement_stripe(&other.scope, &other.call_id)
+                != sfu_placement_stripe(&first.scope, &first.call_id)
+            {
+                break;
+            }
+            n += 1;
+        }
+        let _held = service
+            .sfu_placement_transition_guard(&first.scope, &first.call_id)
+            .await;
+        // Another Call is not blocked by a slow transition of the first.
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            service.sfu_placement_transition_guard(&other.scope, &other.call_id),
+        )
+        .await
+        .expect("independent Call gate");
+        // The SAME Call stays serialized.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                service.sfu_placement_transition_guard(&first.scope, &first.call_id),
+            )
+            .await
+            .is_err()
         );
     }
 
