@@ -521,11 +521,11 @@ pub trait EndpointMlsCommitStore {
     ) -> Result<DurableRecordStatus, GroupMlsStoreError>;
 }
 
-/// Read the exact committed endpoint-owned creator/recipient Device pair from
-/// the canonical Group transition ledger. This is not inferred from active
-/// Identity devices, a Join token, or an unauthenticated browser hint.
+/// Read the exact committed endpoint-owned creator/recipient `Device` pair from
+/// the canonical `Group` transition ledger. This is not inferred from active
+/// `Identity` devices, a `Join` token, or an unauthenticated browser hint.
 pub trait EndpointMlsCommittedDevicePairStore {
-    /// Returns None before the endpoint's first committed Add.
+    /// Returns `None` before the endpoint's first committed `Add`.
     ///
     /// # Errors
     /// Fail closed on ambiguous, quarantined or corrupt canonical MLS history.
