@@ -1261,6 +1261,46 @@ async function initialize() {
         (err instanceof Error ? err.message : String(err)));
     });
   },2500);
+  startIncomingCallWake();
+}
+// Item C6: optional incoming-call wake-up (server flag
+// UCR_FIRST_PARTY_CALL_WAIT, default off). The long-poll response carries no
+// Call data; it only triggers the same authorized refresh() the periodic
+// poller runs. 404 (flag off) or repeated errors stop it and leave the
+// periodic polling above as the only path. No third-party push service.
+let incomingWakeGeneration = 0;
+function startIncomingCallWake() {
+  const generation = ++incomingWakeGeneration;
+  const authGeneration = uiAuthGeneration;
+  void (async () => {
+    let since = null, failures = 0;
+    while (generation === incomingWakeGeneration && authGeneration === uiAuthGeneration) {
+      let response;
+      try {
+        response = await fetch("/v1/first-party/call/wait" + (since === null ? "" : "/" + since),
+          {method:"GET",credentials:"same-origin",cache:"no-store",redirect:"error"});
+      } catch (error) {
+        response = null;
+      }
+      if (generation !== incomingWakeGeneration || authGeneration !== uiAuthGeneration) return;
+      if (response && response.status === 404) return;
+      if (!response || !response.ok) {
+        failures += 1;
+        if (failures >= 3) return;
+        await new Promise(resolve => setTimeout(resolve, 2500 * failures));
+        continue;
+      }
+      failures = 0;
+      let result;
+      try { result = await response.json(); } catch (error) { return; }
+      if (!result || typeof result.revision !== "string" || !/^[0-9]{1,20}$/.test(result.revision)) return;
+      const changed = since !== null && result.changed === true;
+      since = result.revision;
+      if (changed && !busy && !navigating) {
+        void refresh().catch(err => authDiagnostic("periodic_refresh","failed",err));
+      }
+    }
+  })();
 }
 el("device-login").addEventListener("submit", event => {
   event.preventDefault();

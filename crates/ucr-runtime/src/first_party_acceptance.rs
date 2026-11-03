@@ -71,6 +71,7 @@ fn state(path: &PathBuf) -> State {
         recovery_consumed: Mutex::new(Vec::new()),
         sessions: Mutex::new(SessionLedger::default()),
         protected_actions: Mutex::new(HashMap::new()),
+        call_wait_enabled: true,
     }
 }
 
@@ -2364,4 +2365,61 @@ fn logout_revocation_and_live_cookies_survive_server_restart() {
         Some(StatusCode::UNAUTHORIZED)
     );
     signed_login(&restarted, &alice, &alice_signer);
+}
+
+/// Item C6: the wake-up endpoint carries no Call data, fires on a real
+/// incoming Call write, honours the default-off flag, and dies with Logout.
+#[tokio::test]
+async fn incoming_call_wait_wakes_on_new_call_and_stops_after_logout() {
+    let db = TestDb::new();
+    let mut server = state(&db.0);
+    let (alice, _, _) = signup(&server, 121);
+    let (bob, _, _) = signup(&server, 122);
+    let bob_session = session_of(&server, &bob);
+
+    let baseline = super::call_wait(&server, &bob_session, None).await.unwrap();
+    assert_eq!(baseline["changed"], false);
+    let since = baseline["revision"].as_str().unwrap().to_owned();
+    assert_eq!(baseline.as_object().unwrap().len(), 2, "no Call data leaks");
+
+    call(
+        &server,
+        &alice,
+        "/v1/first-party/call/start",
+        &json!({"binding": alice, "intent": {"peerIdentityId": bob.participant_id, "media": "audio", "idempotencyKey": "wake"}}),
+    )
+    .expect("Alice dials Bob");
+    let woke = super::call_wait(&server, &bob_session, Some(since.as_str()))
+        .await
+        .unwrap();
+    assert_eq!(woke["changed"], true, "incoming Call wakes the waiter");
+    assert_eq!(woke.as_object().unwrap().len(), 2);
+    assert_eq!(
+        super::call_wait(&server, &bob_session, Some("x"))
+            .await
+            .err(),
+        Some(StatusCode::BAD_REQUEST)
+    );
+
+    dispatch_post(
+        &server,
+        "/v1/first-party/logout",
+        &serde_json::to_vec(&json!({"binding": bob})).unwrap(),
+        Some(&bob_session),
+    )
+    .unwrap();
+    assert_eq!(
+        super::call_wait(&server, &bob_session, Some(since.as_str()))
+            .await
+            .err(),
+        Some(StatusCode::UNAUTHORIZED)
+    );
+
+    server.call_wait_enabled = false;
+    let alice_session = session_of(&server, &alice);
+    assert_eq!(
+        super::call_wait(&server, &alice_session, None).await.err(),
+        Some(StatusCode::NOT_FOUND),
+        "default-off flag keeps the endpoint absent"
+    );
 }

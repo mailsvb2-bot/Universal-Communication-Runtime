@@ -297,6 +297,9 @@ struct State {
     // One in-process serialization gate per canonical Device. Weak entries are
     // pruned so anonymous/retired Devices cannot grow this map without bound.
     protected_actions: Mutex<HashMap<Binding, Weak<Mutex<()>>>>,
+    /// `UCR_FIRST_PARTY_CALL_WAIT=1` enables the incoming-call long-poll
+    /// wake-up endpoint. Default off: clients keep periodic polling only.
+    call_wait_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -364,6 +367,7 @@ pub(super) async fn serve(
         recovery_consumed: Mutex::new(Vec::new()),
         sessions: Mutex::new(SessionLedger::default()),
         protected_actions: Mutex::new(HashMap::new()),
+        call_wait_enabled: call_wait_enabled_from_env(),
     });
     println!(
         "UCR_FIRST_PARTY_READY loopback={} https_edge=required",
@@ -2167,6 +2171,14 @@ async fn dispatch(
                 None,
             ));
         }
+        if let Some(rest) = path.strip_prefix("/v1/first-party/call/wait") {
+            let auth = session.ok_or(StatusCode::UNAUTHORIZED)?;
+            let since = match rest {
+                "" => None,
+                tail => Some(tail.strip_prefix('/').ok_or(StatusCode::NOT_FOUND)?),
+            };
+            return Ok((call_wait(state, &auth, since).await?, None));
+        }
         return Err(StatusCode::NOT_FOUND);
     }
     // Bound the stream before aggregating DATA frames. A Content-Length check
@@ -2201,6 +2213,61 @@ fn require_post_headers(request: &Request<Incoming>, origin: &str) -> Result<(),
         Ok(())
     } else {
         Err(StatusCode::FORBIDDEN)
+    }
+}
+
+/// Upper bound one wake-up request is held open; the browser re-issues it.
+/// Must stay below the realtime-web edge proxy timeout (`ROOM_PROXY_TIMEOUT`).
+const CALL_WAIT_MAX: Duration = Duration::from_secs(15);
+/// Server-side check period of the single-row revision (in-process read).
+const CALL_WAIT_STEP: Duration = Duration::from_millis(250);
+
+fn call_wait_enabled_from_env() -> bool {
+    std::env::var("UCR_FIRST_PARTY_CALL_WAIT").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on"
+        )
+    })
+}
+
+/// Incoming-call wake-up (item C6). Carries NO Call data: it only reports that
+/// the canonical authorization revision (bumped by every Call/participant
+/// write, schema v58) moved, so the browser should re-run its normal,
+/// fully authorized `call/incoming` read. The session is revalidated on every
+/// step, so Logout/Device revoke ends the wait with 401.
+async fn call_wait(
+    state: &State,
+    auth: &Session,
+    since: Option<&str>,
+) -> Result<Value, StatusCode> {
+    if !state.call_wait_enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let since = since
+        .map(|value| value.parse::<u64>().map_err(|_| StatusCode::BAD_REQUEST))
+        .transpose()?;
+    let current = || {
+        state
+            .store
+            .authorization_revision_value()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+    };
+    revalidate_session(state, auth)?;
+    let Some(since) = since else {
+        return Ok(json!({"revision": current()?.to_string(), "changed": false}));
+    };
+    let deadline = Instant::now() + CALL_WAIT_MAX;
+    loop {
+        revalidate_session(state, auth)?;
+        let revision = current()?;
+        if revision != since {
+            return Ok(json!({"revision": revision.to_string(), "changed": true}));
+        }
+        if Instant::now() >= deadline {
+            return Ok(json!({"revision": revision.to_string(), "changed": false}));
+        }
+        tokio::time::sleep(CALL_WAIT_STEP).await;
     }
 }
 
