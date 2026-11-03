@@ -3588,6 +3588,44 @@ mod tests {
         assert!(super::call_document_csp(&html, "'self'").contains(&format!("'sha256-{hash}'")));
     }
 
+    #[test]
+    fn configured_iframe_allowlist_never_accepts_wildcards_or_http() {
+        let (ancestors, cross_origin) = super::frame_ancestor_policy(Some(
+            "https://embed.example.com https://another.example.org:8443",
+        ));
+        assert!(cross_origin);
+        assert_eq!(
+            ancestors,
+            "'self' https://embed.example.com https://another.example.org:8443"
+        );
+        let response = super::html_body_response_with_policy(
+            super::StatusCode::OK,
+            super::CLIENT_HTML.to_owned(),
+            (ancestors, cross_origin),
+        );
+        assert!(response.headers().get("X-Frame-Options").is_none());
+        let csp = response.headers()["Content-Security-Policy"]
+            .to_str()
+            .expect("CSP");
+        assert!(csp.contains(
+            "frame-ancestors 'self' https://embed.example.com https://another.example.org:8443"
+        ));
+        assert!(csp.contains("img-src 'self' https: data: blob:"));
+        for invalid in [
+            "http://embed.example.com",
+            "https://embed.example.com/path",
+            "https://embed.example.com@evil.example",
+            "https://*.example.com",
+            "https://embed.example.com;script-src",
+        ] {
+            assert_eq!(
+                super::frame_ancestor_policy(Some(invalid)),
+                ("'self'".to_owned(), false),
+                "{invalid}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn bff_readiness_requires_scoped_bootstrap_http_200() {
         use bytes::Bytes;
