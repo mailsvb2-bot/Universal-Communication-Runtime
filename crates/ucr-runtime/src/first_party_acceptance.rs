@@ -1547,7 +1547,6 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         );
     }
 
-
     // A second BFF process can revoke Alice's durable Join while the parent
     // and derived media Calls are STILL ACTIVE. This is a stronger regression
     // than a denial after Hangup: the live Call cannot mask a missing grant
