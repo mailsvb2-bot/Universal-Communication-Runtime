@@ -4189,7 +4189,11 @@ mod tests {
         // integrity checks, never for an ordinary terminated Call; EN UI.
         assert!(js.contains("compromisedCalls().has(active.call.callId)"));
         assert!(js.contains("throw new MlsIntegrityError(\"Corrupt pending MLS Commit journal\")"));
-        assert!(js.contains("error instanceof MlsIntegrityError && active"));
+        assert!(js.contains("function handleMlsIntegrityError(error)"));
+        assert!(js.contains("if (!(error instanceof MlsIntegrityError) || !active) return false"));
+        assert!(js.contains("if (handleMlsIntegrityError(error)) return"));
+        assert!(js.contains("if (!handleMlsIntegrityError(error))"));
+        assert!(js.contains("handleMlsIntegrityError(err)"));
         assert!(js.contains("\"Новый защищённый звонок\":\"New secure call\""));
         assert!(js.contains("await host.resumeAuthenticatedDevice()"));
         assert!(js.contains("await calls.contacts()"));
