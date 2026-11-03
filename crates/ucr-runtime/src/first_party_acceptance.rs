@@ -1438,7 +1438,6 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "{level:?}"
     );
 
-
     // Media authority exists ONLY inside the derived media Call: it authorizes
     // the SFU/conference per-call checks, but never tenant-wide nor another Call.
     let other_call = CallId::from_opaque(opaque("fp-m-unrelated-call").unwrap());
@@ -1475,6 +1474,8 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
                 &derived_media_call_id
             )
             .is_err()
+    );
+
     // An Identity may own several independently trusted active Devices.
     // Enrollment of a second Alice Device must not replace the exact Alice
     // Device committed into the endpoint-owned MLS Group or deny the Call.
@@ -1714,7 +1715,6 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             Some(pb::realtime_get_mls_admission_context_response::Result::Context(_))
         ),
         "revoking Alice must not revoke Bob's independently admitted Device: {bob_live_mls:?}"
-
     );
 
     // Hang-up ends the media Call too; no new Join grant and no re-admission.
