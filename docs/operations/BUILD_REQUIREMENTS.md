@@ -17,3 +17,7 @@ machines, **not** real codec, NAT/TURN or browser behaviour. Real-browser
 coverage is limited to `tools/browser_compatibility_probe.py`, which reports
 `mediaStreamTrackProcessor`, `videoEncoder`, `audioEncoder` and
 `rtcRtpScriptTransform` as informational capabilities.
+
+## Trusted conference iframe embedding
+
+The call/join document permits same-origin iframe embedding by default (`frame-ancestors 'self'`, `X-Frame-Options: SAMEORIGIN`). To embed the documented `mountConference({mode: "iframe"})` UI from a separate trusted HTTPS origin, configure `UCR_REALTIME_WEB_FRAME_ANCESTORS` on the realtime-web gateway as a whitespace-separated list of **exact HTTPS origins** (for example `https://app.example.com https://portal.example.org:8443`). The gateway adds those origins to CSP `frame-ancestors` and omits the incompatible `X-Frame-Options` header only when the list is valid. HTTP, wildcards, credentials, paths, oversized or malformed input fail closed to same-origin. Do not use a broad wildcard; configure only the exact application hosts. The first-party `/start` page remains non-embeddable. HTTPS branding logos are allowed by `img-src https:` under the existing `no-referrer` policy.
