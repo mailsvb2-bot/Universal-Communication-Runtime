@@ -1512,7 +1512,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .unwrap()
         .into_inner();
     let Some(pb::realtime_get_mls_admission_context_response::Result::Context(context)) =
-        live_mls.result
+        live_mls.result.as_ref()
     else {
         panic!("active accepted Call must admit the Device MLS context: {live_mls:?}");
     };
