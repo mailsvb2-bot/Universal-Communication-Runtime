@@ -438,16 +438,25 @@ impl CallStore for MemoryLocalStore {
             // Same canonical Memory mutex as parent/derived termination.
             // Never leave a previously issued bearer live after Hangup.
             // A duplicate terminal signal also repairs older unrevoked grants.
-            for grant in state.conference_join_grants.values_mut() {
-                if grant.scope == direct.scope
-                    && grant.call_id == *derived_call_id
-                    && grant.integration_id.as_opaque().as_str() == "ucr-first-party-direct-media"
-                {
-                    grant.revoked = true;
-                }
-            }
+            revoke_first_party_derived_joins(&mut state, &direct.scope, derived_call_id);
         }
         outcome
+    }
+}
+
+// Runs inside the same MemoryState lock as parent/derived Call termination.
+fn revoke_first_party_derived_joins(
+    state: &mut MemoryState,
+    scope: &TenantScope,
+    derived_call_id: &CallId,
+) {
+    for grant in state.conference_join_grants.values_mut() {
+        if grant.scope == *scope
+            && grant.call_id == *derived_call_id
+            && grant.integration_id.as_opaque().as_str() == "ucr-first-party-direct-media"
+        {
+            grant.revoked = true;
+        }
     }
 }
 
