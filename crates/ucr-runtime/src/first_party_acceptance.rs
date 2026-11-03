@@ -1489,6 +1489,32 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "{level:?}"
     );
 
+    // The same already-admitted Device can inspect MLS while the Call is live.
+    // This positive control prevents a post-Hangup denial from passing merely
+    // because the RPC was never wired or the bearer was always invalid.
+    let mls_lookup = realtime_join_request(&claims[0], &tokens[0]).into_inner();
+    let mut live_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    live_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let live_mls = realtime
+        .get_mls_admission_context(live_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            live_mls.result,
+            Some(pb::realtime_get_mls_admission_context_response::Result::Context(_))
+        ),
+        "active accepted Call must admit the Device MLS context: {live_mls:?}"
+    );
+
     // Hang-up ends the media Call too; no new Join grant and no re-admission.
     let hung = signal(&server, &bob, &call_id, revision, "hangup").expect("hangup");
     assert_eq!(hung["state"], "terminated");
@@ -1541,6 +1567,75 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         ),
         "ended media Call must reject the previously authorized sender: {after_audio:?}"
     );
+    // MLS is an authorization surface too: a terminal Call must not expose
+    // fresh descriptors, accept a KeyPackage, or return encrypted Welcome to
+    // a previously admitted Device. The BFF Hangup and gRPC Realtime share
+    // canonical SQLite state but do not share a lifecycle mutex.
+    let mut stale_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    stale_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let stale_mls = realtime
+        .get_mls_admission_context(stale_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            stale_mls.result,
+            Some(pb::realtime_get_mls_admission_context_response::Result::Error(_))
+        ),
+        "terminated Call must deny MLS admission descriptors: {stale_mls:?}"
+    );
+    let mut stale_register = tonic::Request::new(pb::RealtimeRegisterMlsKeyPackageRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+        key_package: vec![0xA5],
+    });
+    stale_register.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let stale_register = realtime
+        .register_mls_key_package(stale_register)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            stale_register.result,
+            Some(pb::realtime_register_mls_key_package_response::Result::Error(_))
+        ),
+        "terminated Call must reject MLS KeyPackage registration: {stale_register:?}"
+    );
+    let mut stale_bootstrap = tonic::Request::new(pb::RealtimeGetMlsBootstrapRequest {
+        scope: mls_lookup.scope,
+        call_id: mls_lookup.call_id,
+        session_id: mls_lookup.session_id,
+    });
+    stale_bootstrap.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let stale_bootstrap = realtime
+        .get_mls_bootstrap(stale_bootstrap)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            stale_bootstrap.result,
+            Some(pb::realtime_get_mls_bootstrap_response::Result::Error(_))
+        ),
+        "terminated Call must deny MLS bootstrap: {stale_bootstrap:?}"
+    );
+
     // An already-open session of the ended Call cannot keep heartbeating.
     let join = realtime_join_request(&claims[1], &tokens[1]).into_inner();
     let mut beat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
