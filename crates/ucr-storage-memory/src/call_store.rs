@@ -434,6 +434,19 @@ impl CallStore for MemoryLocalStore {
                 }
             }
         }
+        if outcome.is_ok() {
+            // Same canonical Memory mutex as parent/derived termination.
+            // Never leave a previously issued bearer live after Hangup.
+            // A duplicate terminal signal also repairs older unrevoked grants.
+            for grant in state.conference_join_grants.values_mut() {
+                if grant.scope == direct.scope
+                    && grant.call_id == *derived_call_id
+                    && grant.integration_id.as_opaque().as_str() == "ucr-first-party-direct-media"
+                {
+                    grant.revoked = true;
+                }
+            }
+        }
         outcome
     }
 }
