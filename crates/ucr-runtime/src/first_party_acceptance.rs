@@ -1519,6 +1519,66 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "active accepted Call must admit the Device MLS context: {live_mls:?}"
     );
 
+    // A second BFF process can revoke Alice's durable Join while the parent
+    // and derived media Calls are STILL ACTIVE. This is a stronger regression
+    // than a denial after Hangup: the live Call cannot mask a missing grant
+    // recheck, and Bob's independent grant must remain usable.
+    other_store
+        .revoke_conference_join_grant(&claims[0].scope, &claims[0].session_id)
+        .expect("cross-connection active Call revoke");
+    assert!(
+        server
+            .store
+            .conference_join_grant(&claims[0].scope, &claims[0].session_id)
+            .unwrap()
+            .unwrap()
+            .revoked,
+        "revoke must be visible through the original SQLite handle"
+    );
+    let mut revoked_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    revoked_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_mls = realtime
+        .get_mls_admission_context(revoked_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_mls.result,
+            Some(pb::realtime_get_mls_admission_context_response::Result::Error(_))
+        ),
+        "revoked Alice must lose MLS admission before Hangup: {revoked_mls:?}"
+    );
+    let bob_lookup = realtime_join_request(&claims[1], &tokens[1]).into_inner();
+    let mut bob_live_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: bob_lookup.scope,
+        call_id: bob_lookup.call_id,
+        session_id: bob_lookup.session_id,
+    });
+    bob_live_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[1]).parse().unwrap(),
+    );
+    let bob_live_mls = realtime
+        .get_mls_admission_context(bob_live_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            bob_live_mls.result,
+            Some(pb::realtime_get_mls_admission_context_response::Result::Context(_))
+        ),
+        "revoking Alice must not revoke Bob's independently admitted Device: {bob_live_mls:?}"
+    );
+
     // Hang-up ends the media Call too; no new Join grant and no re-admission.
     let hung = signal(&server, &bob, &call_id, revision, "hangup").expect("hangup");
     assert_eq!(hung["state"], "terminated");
@@ -1664,12 +1724,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         ),
         "{after:?}"
     );
-    // Revocation on a second SQLite connection must be visible to the
-    // original process even though its compatibility issuer still knows the
-    // signed token. This is durable evidence, not a physical A/B media test.
-    other_store
-        .revoke_conference_join_grant(&claims[0].scope, &claims[0].session_id)
-        .expect("cross-connection canonical revoke");
+    // The cross-connection revocation tombstone must survive Hangup.
     assert!(
         server
             .store
