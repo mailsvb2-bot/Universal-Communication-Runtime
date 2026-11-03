@@ -2892,11 +2892,97 @@ fn html_response(status: StatusCode, html: &'static str) -> HttpResponse {
     html_body_response(status, html.to_owned())
 }
 
+/// Hash the exact inline bootstrap scripts rather than enabling unsafe-inline.
+/// Endpoint MLS needs wasm-unsafe-eval, but arbitrary script evaluation is denied.
+/// Same-origin iframe embedding is the default; only operator-allowlisted
+/// HTTPS origins can frame the call document. Invalid input fails closed.
+fn frame_ancestor_policy(config: Option<&str>) -> (String, bool) {
+    let mut sources = vec!["'self'".to_owned()];
+    let Some(config) = config.filter(|value| !value.trim().is_empty()) else {
+        return ("'self'".to_owned(), false);
+    };
+    if config.len() > 2048 {
+        return ("'self'".to_owned(), false);
+    }
+    for origin in config.split_whitespace() {
+        if sources.len() > 16 || !origin.starts_with("https://") {
+            return ("'self'".to_owned(), false);
+        }
+        let Ok(uri) = origin.parse::<hyper::Uri>() else {
+            return ("'self'".to_owned(), false);
+        };
+        if uri.scheme_str() != Some("https")
+            || uri
+                .authority()
+                .is_none_or(|authority| authority.host().is_empty())
+            || uri
+                .path_and_query()
+                .is_some_and(|path| path.as_str() != "/")
+            || !origin[8..].bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+            })
+        {
+            return ("'self'".to_owned(), false);
+        }
+        if !sources.iter().any(|source| source == origin) {
+            sources.push(origin.to_owned());
+        }
+    }
+    let cross_origin = sources.len() > 1;
+    (sources.join(" "), cross_origin)
+}
+
+fn call_document_csp(html: &str, frame_ancestors: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut hashes = String::new();
+    let mut rest = html;
+    while let Some(open) = rest.find("<script>") {
+        let body_start = open + "<script>".len();
+        let Some(close) = rest[body_start..].find("</script>") else {
+            break;
+        };
+        let body = &rest[body_start..body_start + close];
+        hashes.push_str(" 'sha256-");
+        hashes.push_str(&STANDARD.encode(Sha256::digest(body.as_bytes()).as_slice()));
+        hashes.push('\'');
+        rest = &rest[body_start + close..];
+    }
+    format!(
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'{hashes}; \
+         style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; \
+         media-src 'self' blob:; worker-src 'self' blob:; \
+         connect-src 'self' http://127.0.0.1:* http://localhost:* http://[::1]:*; \
+         object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors {frame_ancestors}"
+    )
+}
+
 fn html_body_response(status: StatusCode, html: String) -> HttpResponse {
-    Response::builder()
+    let configured = std::env::var("UCR_REALTIME_WEB_FRAME_ANCESTORS").ok();
+    html_body_response_with_policy(status, html, frame_ancestor_policy(configured.as_deref()))
+}
+
+fn html_body_response_with_policy(
+    status: StatusCode,
+    html: String,
+    (ancestors, cross_origin): (String, bool),
+) -> HttpResponse {
+    let csp = call_document_csp(&html, &ancestors);
+    let mut builder = Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "text/html; charset=utf-8")
         .header(CACHE_CONTROL, "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .header("X-Content-Type-Options", "nosniff")
+        .header(
+            "Permissions-Policy",
+            "camera=(self), microphone=(self), display-capture=(self), geolocation=()",
+        )
+        .header("Content-Security-Policy", csp);
+    // X-Frame-Options cannot express cross-origin allowlists.
+    if !cross_origin {
+        builder = builder.header("X-Frame-Options", "SAMEORIGIN");
+    }
+    builder
         .body(full_body(Bytes::from(html)))
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
@@ -3458,6 +3544,87 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn call_document_stops_chat_timer_on_leave_and_pauses_hidden_ui_polling() {
+        let html = super::CLIENT_HTML;
+        let leave = html
+            .find("sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;")
+            .expect("leave reset");
+        let line_end = leave + html[leave..].find('\n').expect("eol");
+        assert!(html[leave..line_end].contains("clearInterval(chatTimer);chatTimer=null;"));
+        assert!(!html.contains("setInterval(ucrRenderDiagnostics,1500)"));
+        for poll in ["pollChat", "pollReactions", "pollActiveSpeaker"] {
+            let start = html
+                .find(&format!("async function {poll}(){{"))
+                .expect(poll);
+            assert!(html[start..start + 200].contains("if(document.hidden)return;"));
+        }
+        assert!(html.contains("Private mode could not reach the TURN relay"));
+    }
+
+    #[test]
+    fn call_document_has_strict_csp_and_security_headers() {
+        use base64::Engine as _;
+        use sha2::{Digest as _, Sha256};
+        for response in [
+            super::html_response(hyper::StatusCode::OK, super::CLIENT_HTML),
+            super::html_body_response(hyper::StatusCode::OK, super::room_page()),
+        ] {
+            let headers = response.headers();
+            assert_eq!(headers["Referrer-Policy"], "no-referrer");
+            assert_eq!(headers["X-Content-Type-Options"], "nosniff");
+            assert_eq!(headers["X-Frame-Options"], "SAMEORIGIN");
+            let csp = headers["Content-Security-Policy"].to_str().expect("csp");
+            assert!(csp.contains("frame-ancestors 'self'"));
+            assert!(csp.contains("object-src 'none'"));
+            assert!(!csp.contains("'unsafe-eval'"));
+            assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+        }
+        let html = super::room_page();
+        let start = html.find("<script>").expect("inline script") + "<script>".len();
+        let end = start + html[start..].find("</script>").expect("end");
+        let hash = super::STANDARD.encode(Sha256::digest(&html.as_bytes()[start..end]).as_slice());
+        assert!(super::call_document_csp(&html, "'self'").contains(&format!("'sha256-{hash}'")));
+    }
+
+    #[test]
+    fn configured_iframe_allowlist_never_accepts_wildcards_or_http() {
+        let (ancestors, cross_origin) = super::frame_ancestor_policy(Some(
+            "https://embed.example.com https://another.example.org:8443",
+        ));
+        assert!(cross_origin);
+        assert_eq!(
+            ancestors,
+            "'self' https://embed.example.com https://another.example.org:8443"
+        );
+        let response = super::html_body_response_with_policy(
+            super::StatusCode::OK,
+            super::CLIENT_HTML.to_owned(),
+            (ancestors, cross_origin),
+        );
+        assert!(response.headers().get("X-Frame-Options").is_none());
+        let csp = response.headers()["Content-Security-Policy"]
+            .to_str()
+            .expect("CSP");
+        assert!(csp.contains(
+            "frame-ancestors 'self' https://embed.example.com https://another.example.org:8443"
+        ));
+        assert!(csp.contains("img-src 'self' https: data: blob:"));
+        for invalid in [
+            "http://embed.example.com",
+            "https://embed.example.com/path",
+            "https://embed.example.com@evil.example",
+            "https://*.example.com",
+            "https://embed.example.com;script-src",
+        ] {
+            assert_eq!(
+                super::frame_ancestor_policy(Some(invalid)),
+                ("'self'".to_owned(), false),
+                "{invalid}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn bff_readiness_requires_scoped_bootstrap_http_200() {
         use bytes::Bytes;

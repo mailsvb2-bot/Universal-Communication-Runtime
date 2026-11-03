@@ -1236,12 +1236,24 @@ async function initialize() {
     message("Устройство подтверждено; проверка вызовов завершилась ошибкой: " +
       (error instanceof Error ? error.message : String(error)));
   }
+  let pollTick = 0, pollFailures = 0;
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && !busy && !navigating) {
+      pollTick = 0;
+      void refresh().then(() => { pollFailures = 0; }, err =>
+        authDiagnostic("visibility_refresh", "failed", err));
+    }
+  });
   timer = setInterval(() => {
     // Poll while the page is hidden, too: a remote peer must be able to ring
     // without the recipient watching the foreground tab. Browser suspension
     // still requires a separate platform push delivery mechanism.
     if (busy || navigating) return;
-    void refresh().catch(err => {
+    pollTick += 1;
+    const every = Math.min(8, (document.hidden ? 4 : 1) * (1 << Math.min(pollFailures, 3)));
+    if (pollTick % every !== 0) return;
+    void refresh().then(() => { pollFailures = 0; }, err => {
+      pollFailures += 1;
       authDiagnostic("periodic_refresh","failed",err);
       // Retain the authenticated device and keep polling rather than requiring
       // fresh registration. Do not bypass server-side Call authority.

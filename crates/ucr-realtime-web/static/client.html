@@ -317,7 +317,12 @@ document.getElementById("ucr-diagnostics-save")?.addEventListener("click",()=>{
   link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 });
 // Snapshot after top-level media state has finished initializing.
-setInterval(ucrRenderDiagnostics,1500);
+setInterval(()=>{
+  if(document.hidden)return;
+  const panel=document.getElementById("ucr-diagnostics-live");
+  if(!panel||!panel.offsetParent||panel.closest("details:not([open])"))return;
+  ucrRenderDiagnostics();
+},1500);
 const ui={
   join:$("join"),leave:$("leave"),state:$("state"),webrtcState:$("webrtc-state"),
   packets:$("packets"),expires:$("expires"),status:$("status"),
@@ -2037,6 +2042,10 @@ async function startWebRtcOnce(forceMedia=false){
       ui.state.textContent=e2eeAdapterReady?"Connected":"Securing";
        ui.status.textContent=e2eeAdapterReady?"Encrypted media transport connected.":"WebRTC signalling connected; waiting for authorized encrypted media.";
     }
+    if(state==="failed"&&pc.getConfiguration().iceTransportPolicy==="relay"){
+      ui.status.textContent="Private mode could not reach the TURN relay. Check the relay or switch privacy mode to secure.";
+      ucrRecordDiagnostic("Relay-only ICE failed (TURN unreachable)","webrtc");
+    }
     if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
   };
   try{
@@ -2549,7 +2558,7 @@ async function leave(){
   if(wasActive&&leavingClaims&&leavingSequence>0)
     void api("/v1/realtime/leave",{...leavingClaims,expected_session_sequence:leavingSequence}).catch(()=>{});
   ui.privacyMode.disabled=false;
-  sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
+  sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   // Local capture is already retired. Never silently reuse the same signed
   // session grant while its asynchronous remote Leave may still be pending.
@@ -2830,6 +2839,7 @@ async function reportLocalAudioLevel(){
   }
 }
 async function pollActiveSpeaker(){
+  if(document.hidden)return;
   if(!sessionActive||!mediaActive||activeSpeakerPollInFlight)return;
   activeSpeakerPollInFlight=true;
   try{
@@ -2892,6 +2902,7 @@ async function sendChat(){
   await pollChat();
 }
 async function pollChat(){
+  if(document.hidden)return;
   if(!sessionActive||!mediaActive||chatPollInFlight)return;
   chatPollInFlight=true;
   try{
@@ -2916,6 +2927,7 @@ async function publishReaction(){
   await api("/v1/realtime/reactions/publish",{...body(),reaction});
 }
 async function pollReactions(){
+  if(document.hidden)return;
   if(!sessionActive||!mediaActive||reactionPollInFlight)return;
   reactionPollInFlight=true;
   try{
@@ -3943,7 +3955,13 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){const generation=sessionLifecycleGeneration;ui.webrtcState.textContent="Offline";void endUnverifiedMedia(generation,"Network unavailable; capture stopped until fresh authorization.");}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
-window.addEventListener("pagehide",()=>{releaseRoomPresence();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;++roomGestureEpoch;clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;retireEndpointMlsState();if(sessionActive){ucrFreezePreLeaveSnapshot();closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;stopLocalCapture();});
+document.addEventListener("visibilitychange",()=>{
+  if(!document.hidden&&sessionActive&&mediaActive){
+    void pollChat();void pollReactions();void pollActiveSpeaker();
+    ucrRenderDiagnostics();
+  }
+});
+window.addEventListener("pagehide",()=>{releaseRoomPresence();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;++roomGestureEpoch;clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;retireEndpointMlsState();if(sessionActive){ucrFreezePreLeaveSnapshot();closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);reactionTimer=null;if(chatTimer)clearInterval(chatTimer);chatTimer=null;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;stopLocalCapture();});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>
