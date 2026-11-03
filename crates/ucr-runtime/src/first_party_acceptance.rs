@@ -1528,6 +1528,25 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         context.trusted_device_keys[0].device_id, context.trusted_device_keys[1].device_id,
         "a single Device cannot impersonate both media endpoints"
     );
+    // The realtime trust roster must match the canonical endpoint MLS Add,
+    // not just any currently active Device of each Identity.
+    let committed = realtime_store
+        .endpoint_mls_direct_call_device_pair(&claims[0].scope, &group_id)
+        .unwrap()
+        .expect("committed endpoint-owned Add Device pair");
+    assert_eq!(committed.0, alice.device);
+    assert_eq!(committed.1, bob.device);
+    for expected in [&committed.0, &committed.1] {
+        assert!(
+            context.trusted_device_keys.iter().any(|key| {
+                key.device_id
+                    .as_ref()
+                    .is_some_and(|device| device.value.as_slice() == expected.as_bytes())
+            }),
+            "the committed endpoint Device must be present in realtime trust"
+        );
+    }
+
 
     // A second BFF process can revoke Alice's durable Join while the parent
     // and derived media Calls are STILL ACTIVE. This is a stronger regression
