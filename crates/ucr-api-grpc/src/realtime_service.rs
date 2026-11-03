@@ -4423,41 +4423,44 @@ mod first_party_media_binding_tests {
         }
     }
 
+    fn admitted(
+        binding: Option<&LiveMediaBinding>,
+        device: &DeviceId,
+        pair: &(String, String),
+    ) -> bool {
+        require_complete_first_party_media_binding(binding, device, pair).is_ok()
+    }
+
     #[test]
     fn first_party_mls_context_requires_complete_independent_endpoint_trust() {
         let device_a = DeviceId::from_opaque(OpaqueId::new("device-a").unwrap());
         let device_c = DeviceId::from_opaque(OpaqueId::new("device-c").unwrap());
         let committed = ("device-a".to_owned(), "device-b".to_owned());
-        let allowed = |binding: Option<&LiveMediaBinding>,
-                       device: &DeviceId,
-                       pair: &(String, String)| {
-            require_complete_first_party_media_binding(binding, device, pair).is_ok()
-        };
-        assert!(!allowed(None, &device_a, &committed));
+        assert!(!admitted(None, &device_a, &committed));
         let mut binding = valid_binding();
-        assert!(allowed(Some(&binding), &device_a, &committed));
-        assert!(!allowed(Some(&binding), &device_c, &committed));
+        assert!(admitted(Some(&binding), &device_a, &committed));
+        assert!(!admitted(Some(&binding), &device_c, &committed));
         // An active replacement Device cannot silently substitute for the
         // endpoint MLS member committed to this Group.
         let wrong_pair = ("device-a".to_owned(), "device-c".to_owned());
-        assert!(!allowed(Some(&binding), &device_a, &wrong_pair));
+        assert!(!admitted(Some(&binding), &device_a, &wrong_pair));
         let duplicate_pair = ("device-a".to_owned(), "device-a".to_owned());
-        assert!(!allowed(Some(&binding), &device_a, &duplicate_pair));
+        assert!(!admitted(Some(&binding), &device_a, &duplicate_pair));
         binding.trusted_device_keys.pop();
-        assert!(!allowed(Some(&binding), &device_a, &committed));
+        assert!(!admitted(Some(&binding), &device_a, &committed));
         let mut binding = valid_binding();
         let first_device = binding.trusted_device_keys[0].device_id.clone();
         binding.trusted_device_keys[1].device_id = first_device;
-        assert!(!allowed(Some(&binding), &device_a, &committed));
+        assert!(!admitted(Some(&binding), &device_a, &committed));
         let mut binding = valid_binding();
         binding.trusted_device_keys[1].public_key.clear();
-        assert!(!allowed(Some(&binding), &device_a, &committed));
+        assert!(!admitted(Some(&binding), &device_a, &committed));
         let mut binding = valid_binding();
         binding.negotiation_ref = None;
-        assert!(!allowed(Some(&binding), &device_a, &committed));
+        assert!(!admitted(Some(&binding), &device_a, &committed));
         let mut binding = valid_binding();
         binding.group_crypto_epoch = 0;
-        assert!(!allowed(Some(&binding), &device_a, &committed));
+        assert!(!admitted(Some(&binding), &device_a, &committed));
     }
 }
 
