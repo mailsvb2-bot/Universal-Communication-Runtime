@@ -4096,6 +4096,12 @@ mod tests {
         assert!(js.contains("createUcrBrowserProtectedDeviceVault()"));
         assert!(js.contains("createUcrFirstPartyHttpHost(vault, {origin:location.origin})"));
         assert!(js.contains("createUcrContactCallJourney(host,vault)"));
+        // Recovery button only for a Call whose endpoint MLS state failed
+        // integrity checks, never for an ordinary terminated Call; EN UI.
+        assert!(js.contains("compromisedCalls().has(active.call.callId)"));
+        assert!(js.contains("throw new MlsIntegrityError(\"Corrupt pending MLS Commit journal\")"));
+        assert!(js.contains("error instanceof MlsIntegrityError && active"));
+        assert!(js.contains("\"Новый защищённый звонок\":\"New secure call\""));
         assert!(js.contains("await host.resumeAuthenticatedDevice()"));
         assert!(js.contains("await calls.contacts()"));
         assert!(js.contains("await calls.addContact(name,peer)"));

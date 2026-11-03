@@ -19,17 +19,17 @@ mod universal_conference;
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AttachmentChunk, AttachmentDescriptor, AttachmentId,
     AuthorizationRequest, BridgeActionId, BridgeActionRecord, BridgeActionState,
-    BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState, CapabilityDescriptor,
-    CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
-    DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
-    EndpointAddress, EndpointId, EventConsumerCursor, EventDeadLetter, EventDeliveryFailureKind,
-    EventEnvelope, EventId, EventPollResult, EventReconciliation, EventSubscription,
-    EventSubscriptionId, EventSummary, ExternalIdentityBinding, FederationPeerRecord,
-    FederationTrustState, IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId,
-    MessageEnvelope, MessageId, PermissionGrant, PrincipalIdentityBinding, PrincipalKind,
-    PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
-    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
+    BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState, CallId,
+    CapabilityDescriptor, CommandEnvelope, CommandId, CommunicationIntent, ConversationId,
+    ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
+    DeviceDescriptor, DeviceId, EndpointAddress, EndpointId, EventConsumerCursor, EventDeadLetter,
+    EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult, EventReconciliation,
+    EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding,
+    FederationPeerRecord, FederationTrustState, IdentityId, IdentityRecord, IntegrationId,
+    IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PrincipalIdentityBinding,
+    PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
     ServiceResourceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
     TrustedSigningKeyRecord,
 };
@@ -208,12 +208,59 @@ pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
     /// Returns a canonical error; lack of authority is `PermissionDenied`.
     fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError>;
 
+    /// Evaluates one permission request bound to exactly one Call.
+    ///
+    /// Tenant-scoped grants still apply. Implementations MAY additionally honour
+    /// durable grants bound to `call_id` that are valid only while that Call is
+    /// not terminated and the subject is its current participant. The default is the
+    /// tenant-scoped evaluation only, so unaware evaluators stay deny-by-default.
+    ///
+    /// # Errors
+    /// Returns a canonical error; lack of authority is `PermissionDenied`.
+    fn authorize_in_call(
+        &self,
+        request: &AuthorizationRequest,
+        call_id: &CallId,
+    ) -> Result<(), CanonicalError> {
+        let _ = call_id;
+        self.authorize(request)
+    }
+
     /// Returns the unforgeable Core-owned admission proof required when the subject is a
     /// Service Account. Ordinary authorization evaluators deliberately return `None`.
     #[must_use]
     fn service_principal_admission_proof(&self) -> Option<&ServicePrincipalAdmissionProof> {
         None
     }
+}
+
+/// Durable owner of permissions bound to exactly one Call (never tenant-wide).
+///
+/// A Call-scoped grant authorizes only [`AuthorizationEvaluator::authorize_in_call`]
+/// for that Call, only while the Call is not terminated and the grantee is a
+/// current (not rejected/left) participant. Termination revokes it atomically.
+pub trait CallPermissionGrantStore: StorageProvider {
+    /// Grants `permissions` for `call_id` to each of `grantees`.
+    ///
+    /// # Errors
+    /// `Conflict` unless the Call is not terminated and every grantee is a current participant.
+    fn grant_call_permissions(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        grantees: &[PrincipalRef],
+        permissions: &[&str],
+    ) -> Result<(), DurableStoreError>;
+
+    /// Removes every grant bound to `call_id`. Idempotent.
+    ///
+    /// # Errors
+    /// Explicit storage failures.
+    fn revoke_call_permissions(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<usize, DurableStoreError>;
 }
 
 /// Durable owner for explicit permission grants. Authentication credentials and

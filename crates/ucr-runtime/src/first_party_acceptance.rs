@@ -7,7 +7,10 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
-use ucr_core::{IdentityDeviceLookupStore, TrustedSigningKeyStore};
+use ucr_core::{
+    AuthorizationEvaluator, ConferenceJoinGrantStore, IdentityDeviceLookupStore,
+    TrustedSigningKeyStore,
+};
 use ucr_crypto::{
     SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
 };
@@ -16,6 +19,7 @@ use ucr_group_mls::{
     create_device_key_package, create_group, export_group_media_secret, join_from_welcome,
     merge_pending, stage_transition,
 };
+use ucr_model::AuthorizationRequest;
 use ucr_model::{
     CryptoSuite, GroupId, GroupMediaE2eeContext, GroupMediaFrameHeader, KeyId, MediaKind,
     VideoSourceKind,
@@ -655,12 +659,12 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     use ucr_api_grpc::{
         GrpcRealtimeService, pb, pb::realtime_service_server::RealtimeService as _,
     };
-    use ucr_core::{CallStore, GroupStore};
-    use ucr_model::{GroupMemberState, PrincipalRef};
+    use ucr_core::{CallStore, GroupStore, PermissionGrantStore};
+    use ucr_model::{GroupMemberState, PermissionGrant, PermissionScope, PrincipalRef};
 
     let db = TestDb::new();
     let server = state(&db.0);
-    let (alice, alice_signer, _) = signup(&server, 41);
+    let (alice, alice_signer, alice_recovery) = signup(&server, 41);
     let (bob, bob_signer, _) = signup(&server, 42);
     let (carol, _, _) = signup(&server, 43);
 
@@ -1200,6 +1204,46 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "media ciphertext must remain bound to the admitted MLS epoch"
     );
 
+    // Self-service accounts own NO tenant-wide media permissions. Joining an
+    // accepted direct Call must nevertheless succeed end-to-end (signup -> call
+    // -> join -> media) through durable grants bound to exactly the derived
+    // media Call, and must never mint tenant-wide media grants as a side effect.
+    let subjects = [&alice, &bob].map(|binding| session_of(&server, binding).subject);
+    let media_permission_free = |grants: &[PermissionGrant]| {
+        grants.iter().all(|grant| {
+            !first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS.contains(&grant.permission.as_str())
+        })
+    };
+    for subject in &subjects {
+        assert!(media_permission_free(
+            &server.store.permission_grants_for(subject).unwrap()
+        ));
+    }
+    let derived_media_call_id = first_party_media::media_runtime_ids(
+        &scope,
+        &CallId::from_opaque(opaque(&call_id).unwrap()),
+    )
+    .unwrap()
+    .call_id;
+    // A separate explicit grant must survive the entire Call lifecycle.
+    server
+        .store
+        .grant_permission(&PermissionGrant {
+            grantee: subjects[0].clone(),
+            permission: ucr_protocol::CALL_OBSERVE_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope.clone()),
+        })
+        .unwrap();
+    let grants_before_join = subjects
+        .iter()
+        .map(|subject| server.store.permission_grants_for(subject).unwrap())
+        .collect::<Vec<_>>();
+    let media_request = |subject: &ScopedPrincipal, permission: &str| AuthorizationRequest {
+        subject: subject.clone(),
+        permission: permission.to_owned(),
+        resource_scope: subject.scope.clone(),
+    };
+
     // A third person never sees nor joins the Call.
     assert!(join_accepted(&server, &carol, &call_id, revision).is_err());
 
@@ -1222,6 +1266,41 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             .verify_signed_claims(&token, now_unix_ms().unwrap())
             .expect("first-party grant signed by the realtime issuer")
     });
+    // A separate BFF/realtime process cannot rely on the issuer's in-memory
+    // grants. Both signed Joins must exist in the SAME canonical SQLite owner,
+    // visible through an independent connection and verifiable after restart.
+    let other_store = SqliteLocalStore::open(&db.0).expect("independent SQLite handle");
+    let independent_issuer = JoinTokenIssuer::new(
+        JoinTokenKey::from_bytes([9; 32]),
+        "https://call.example.invalid/client.html",
+    )
+    .expect("independent issuer");
+    for (claim, token) in claims.iter().zip(&tokens) {
+        assert!(
+            independent_issuer
+                .verify(token, now_unix_ms().unwrap())
+                .is_err(),
+            "a new issuer has no process-local grant"
+        );
+        assert_eq!(
+            independent_issuer
+                .verify_signed_claims(token, now_unix_ms().unwrap())
+                .expect("signed claims survive restart"),
+            *claim
+        );
+        let durable = other_store
+            .conference_join_grant(&claim.scope, &claim.session_id)
+            .expect("canonical grant lookup")
+            .expect("first-party Join must be durable");
+        assert_eq!(durable.call_id, claim.call_id);
+        assert_eq!(durable.participant, claim.participant);
+        assert_eq!(durable.device_id, claim.device_id.clone().unwrap());
+        assert_eq!(
+            durable.integration_id.as_opaque().as_str(),
+            "ucr-first-party-direct-media"
+        );
+        assert!(!durable.revoked);
+    }
     // Both grants name ONE derived media Group Call, bound to the exact Device.
     assert_eq!(claims[0].call_id, claims[1].call_id);
     assert!(claims[0].call_id.as_opaque().as_str().starts_with("fp-m-"));
@@ -1265,16 +1344,20 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     assert!(members.contains(&claims[0].participant));
     assert!(members.contains(&claims[1].participant));
 
-    // The real gRPC Realtime owner over the SAME SQLite store and issuer.
+    // Realtime uses a SECOND SQLite connection, not the BFF's in-process
+    // store handle. A Hangup committed by BFF must be observed by the
+    // independently instantiated Realtime owner on its next authorization.
+    let realtime_store =
+        Arc::new(SqliteLocalStore::open(&db.0).expect("independent Realtime SQLite"));
     let realtime = GrpcRealtimeService::new(
         Arc::new(ucr_core::SystemServiceQuotaClock),
-        Arc::clone(&server.store),
-        Arc::clone(&server.store),
+        Arc::clone(&realtime_store),
+        Arc::clone(&realtime_store),
         Arc::clone(&server.issuer),
         Arc::new(ucr_realtime::RealtimeSessionRegistry::new(16, 4)),
         Arc::new(ucr_conference::ConferenceRuntimeState::new()),
     )
-    .with_mls_admission_store(Arc::clone(&server.store));
+    .with_mls_admission_store(Arc::clone(&realtime_store));
     let mut generations = Vec::new();
     for (claim, token) in claims.iter().zip(&tokens) {
         let joined = realtime
@@ -1355,6 +1438,285 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "{level:?}"
     );
 
+    // Media authority exists ONLY inside the derived media Call: it authorizes
+    // the SFU/conference per-call checks, but never tenant-wide nor another Call.
+    let other_call = CallId::from_opaque(opaque("fp-m-unrelated-call").unwrap());
+    for subject in &subjects {
+        for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
+            let request = media_request(subject, permission);
+            server
+                .store
+                .authorize_in_call(&request, &derived_media_call_id)
+                .expect("call-scoped media permission inside the media Call");
+            assert!(
+                server.store.authorize(&request).is_err(),
+                "never tenant-wide"
+            );
+            assert!(
+                server
+                    .store
+                    .authorize_in_call(&request, &other_call)
+                    .is_err(),
+                "never another Call"
+            );
+        }
+        assert!(media_permission_free(
+            &server.store.permission_grants_for(subject).unwrap()
+        ));
+    }
+    // A third person cannot borrow the participants' call-scoped grants.
+    let carol_subject = session_of(&server, &carol).subject;
+    assert!(
+        server
+            .store
+            .authorize_in_call(
+                &media_request(&carol_subject, ucr_protocol::AUDIO_SEND_PERMISSION),
+                &derived_media_call_id
+            )
+            .is_err()
+    );
+
+    // An Identity may own several independently trusted active Devices.
+    // Enrollment of a second Alice Device must not replace the exact Alice
+    // Device committed into the endpoint-owned MLS Group or deny the Call.
+    // This exercises real canonical SQLite Device/Trust state across BFF and
+    // Realtime connections, not a fabricated trust map.
+    let (alice_extra, _, _) = recover(
+        &server,
+        &alice,
+        &alice_recovery,
+        "alice-extra-active-device",
+        44,
+    )
+    .expect("independently authenticated second Alice Device");
+    assert_eq!(
+        server
+            .store
+            .active_devices_for_identity(&scope, &identity(&alice).unwrap(), 8)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // The same already-admitted Device can inspect MLS while the Call is live.
+    // This positive control prevents a post-Hangup denial from passing merely
+    // because the RPC was never wired or the bearer was always invalid.
+    let mls_lookup = realtime_join_request(&claims[0], &tokens[0]).into_inner();
+    let mut live_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    live_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let live_mls = realtime
+        .get_mls_admission_context(live_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(pb::realtime_get_mls_admission_context_response::Result::Context(context)) =
+        live_mls.result.as_ref()
+    else {
+        panic!("active accepted Call must admit the Device MLS context: {live_mls:?}");
+    };
+    assert!(context.media_negotiation_ref.is_some());
+    assert!(context.media_negotiation_generation > 0);
+    assert!(context.group_crypto_epoch > 0);
+    assert_eq!(
+        context.trusted_device_keys.len(),
+        2,
+        "first-party media must bind both independently trusted endpoint Devices"
+    );
+    assert_ne!(
+        context.trusted_device_keys[0].device_id, context.trusted_device_keys[1].device_id,
+        "a single Device cannot impersonate both media endpoints"
+    );
+    // The realtime trust roster must match the canonical endpoint MLS Add,
+    // not just any currently active Device of each Identity.
+    let committed = realtime_store
+        .endpoint_mls_direct_call_device_pair(&claims[0].scope, &group_id)
+        .unwrap()
+        .expect("committed endpoint-owned Add Device pair");
+    assert_eq!(committed.0, alice.device);
+    assert_eq!(committed.1, bob.device);
+    assert!(
+        context.trusted_device_keys.iter().all(|key| {
+            key.device_id
+                .as_ref()
+                .is_some_and(|device| device.value.as_slice() != alice_extra.device.as_bytes())
+        }),
+        "an additional trusted Device must not replace or join the committed MLS pair"
+    );
+    for expected in [&committed.0, &committed.1] {
+        assert!(
+            context.trusted_device_keys.iter().any(|key| {
+                key.device_id
+                    .as_ref()
+                    .is_some_and(|device| device.value.as_slice() == expected.as_bytes())
+            }),
+            "the committed endpoint Device must be present in realtime trust"
+        );
+    }
+
+    // A second BFF process can revoke Alice's durable Join while the parent
+    // and derived media Calls are STILL ACTIVE. This is a stronger regression
+    // than a denial after Hangup: the live Call cannot mask a missing grant
+    // recheck, and Bob's independent grant must remain usable.
+    other_store
+        .revoke_conference_join_grant(&claims[0].scope, &claims[0].session_id)
+        .expect("cross-connection active Call revoke");
+    assert!(
+        server
+            .store
+            .conference_join_grant(&claims[0].scope, &claims[0].session_id)
+            .unwrap()
+            .unwrap()
+            .revoked,
+        "revoke must be visible through the original SQLite handle"
+    );
+    let mut revoked_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    revoked_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_mls = realtime
+        .get_mls_admission_context(revoked_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_mls.result,
+            Some(pb::realtime_get_mls_admission_context_response::Result::Error(_))
+        ),
+        "revoked Alice must lose MLS admission before Hangup: {revoked_mls:?}"
+    );
+    // A revoked Join must also lose its active media-operation authority,
+    // not merely access to MLS descriptors. Audio-level reporting is an
+    // authenticated Realtime operation, NOT proof of physical audio transport.
+    let revoked_audio = realtime
+        .report_audio_level(audio(&claims[0], &tokens[0]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_audio.result,
+            Some(pb::realtime_report_audio_level_response::Result::Error(_))
+        ),
+        "revoked Alice must lose active media-operation authority: {revoked_audio:?}"
+    );
+    // The same cross-process tombstone must fence all MLS mutation/read
+    // surfaces and the active lease, not just the admission descriptor. The
+    // direct Call remains ACTIVE throughout these checks, so its eventual
+    // Hangup cannot accidentally explain the denial.
+    let mut revoked_register = tonic::Request::new(pb::RealtimeRegisterMlsKeyPackageRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+        key_package: vec![0xA5],
+    });
+    revoked_register.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_register = realtime
+        .register_mls_key_package(revoked_register)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_register.result,
+            Some(pb::realtime_register_mls_key_package_response::Result::Error(_))
+        ),
+        "cross-process revoke must deny active-Call MLS KeyPackage writes: {revoked_register:?}"
+    );
+    let mut revoked_bootstrap = tonic::Request::new(pb::RealtimeGetMlsBootstrapRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    revoked_bootstrap.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_bootstrap = realtime
+        .get_mls_bootstrap(revoked_bootstrap)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_bootstrap.result,
+            Some(pb::realtime_get_mls_bootstrap_response::Result::Error(_))
+        ),
+        "cross-process revoke must deny active-Call MLS bootstrap: {revoked_bootstrap:?}"
+    );
+    let mut revoked_heartbeat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+        expected_session_sequence: generations[0],
+    });
+    revoked_heartbeat.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_heartbeat = realtime
+        .heartbeat_realtime(revoked_heartbeat)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_heartbeat.result,
+            Some(pb::realtime_heartbeat_response::Result::Error(_))
+        ),
+        "cross-process revoke must not refresh the active Join lease: {revoked_heartbeat:?}"
+    );
+
+    let bob_audio = realtime
+        .report_audio_level(audio(&claims[1], &tokens[1]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            bob_audio.result,
+            Some(pb::realtime_report_audio_level_response::Result::Acknowledgement(_))
+        ),
+        "revoking Alice must not deny Bob's independent media operation: {bob_audio:?}"
+    );
+    let bob_lookup = realtime_join_request(&claims[1], &tokens[1]).into_inner();
+    let mut bob_live_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: bob_lookup.scope,
+        call_id: bob_lookup.call_id,
+        session_id: bob_lookup.session_id,
+    });
+    bob_live_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[1]).parse().unwrap(),
+    );
+    let bob_live_mls = realtime
+        .get_mls_admission_context(bob_live_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            bob_live_mls.result,
+            Some(pb::realtime_get_mls_admission_context_response::Result::Context(_))
+        ),
+        "revoking Alice must not revoke Bob's independently admitted Device: {bob_live_mls:?}"
+    );
+
     // Hang-up ends the media Call too; no new Join grant and no re-admission.
     let hung = signal(&server, &bob, &call_id, revision, "hangup").expect("hangup");
     assert_eq!(hung["state"], "terminated");
@@ -1364,6 +1726,53 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .unwrap()
         .unwrap();
     assert_eq!(media.signalling_state, CallSignallingState::Terminated);
+    // Hangup must atomically revoke BOTH already-issued durable bearers,
+    // not merely depend on a later Realtime read of the terminal media Call.
+    // A separate SQLite connection must see the tombstones immediately.
+    for (index, claim) in claims.iter().enumerate() {
+        let durable = other_store
+            .conference_join_grant(&claim.scope, &claim.session_id)
+            .unwrap()
+            .expect("canonical first-party Join tombstone");
+        assert!(durable.revoked, "Hangup must revoke each Device's Join");
+        // Model an HTTP issuer that signed before Hangup but persisted late.
+        // It must not resurrect authorization after the terminal transaction.
+        let mut late = durable;
+        late.session_id = ucr_model::SessionId::from_opaque(
+            opaque(&format!("post-hangup-media-join-{index}")).unwrap(),
+        );
+        late.revoked = false;
+        late.redeemed = false;
+        assert_eq!(
+            other_store.persist_conference_join_grant(&late),
+            Err(ucr_core::DurableStoreError::PermissionDenied),
+            "a delayed first-party Join cannot persist after Hangup"
+        );
+        assert!(
+            other_store
+                .conference_join_grant(&late.scope, &late.session_id)
+                .unwrap()
+                .is_none(),
+            "rejected late bearer must not leave a durable grant"
+        );
+    }
+    for (index, subject) in subjects.iter().enumerate() {
+        assert_eq!(
+            server.store.permission_grants_for(subject).unwrap(),
+            grants_before_join[index],
+            "Join and Hangup must neither mint nor revoke tenant-wide grants"
+        );
+        // Termination atomically revoked the call-scoped media grants.
+        for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
+            assert!(
+                server
+                    .store
+                    .authorize_in_call(&media_request(subject, permission), &derived_media_call_id)
+                    .is_err(),
+                "terminated media Call must revoke {permission}"
+            );
+        }
+    }
     assert!(
         join_accepted(
             &server,
@@ -1400,6 +1809,75 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         ),
         "ended media Call must reject the previously authorized sender: {after_audio:?}"
     );
+    // MLS is an authorization surface too: a terminal Call must not expose
+    // fresh descriptors, accept a KeyPackage, or return encrypted Welcome to
+    // a previously admitted Device. The BFF Hangup and gRPC Realtime share
+    // canonical SQLite state but do not share a lifecycle mutex.
+    let mut stale_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    stale_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let stale_mls = realtime
+        .get_mls_admission_context(stale_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            stale_mls.result,
+            Some(pb::realtime_get_mls_admission_context_response::Result::Error(_))
+        ),
+        "terminated Call must deny MLS admission descriptors: {stale_mls:?}"
+    );
+    let mut stale_register = tonic::Request::new(pb::RealtimeRegisterMlsKeyPackageRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+        key_package: vec![0xA5],
+    });
+    stale_register.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let stale_register = realtime
+        .register_mls_key_package(stale_register)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            stale_register.result,
+            Some(pb::realtime_register_mls_key_package_response::Result::Error(_))
+        ),
+        "terminated Call must reject MLS KeyPackage registration: {stale_register:?}"
+    );
+    let mut stale_bootstrap = tonic::Request::new(pb::RealtimeGetMlsBootstrapRequest {
+        scope: mls_lookup.scope,
+        call_id: mls_lookup.call_id,
+        session_id: mls_lookup.session_id,
+    });
+    stale_bootstrap.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let stale_bootstrap = realtime
+        .get_mls_bootstrap(stale_bootstrap)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            stale_bootstrap.result,
+            Some(pb::realtime_get_mls_bootstrap_response::Result::Error(_))
+        ),
+        "terminated Call must deny MLS bootstrap: {stale_bootstrap:?}"
+    );
+
     // An already-open session of the ended Call cannot keep heartbeating.
     let join = realtime_join_request(&claims[1], &tokens[1]).into_inner();
     let mut beat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
@@ -1423,6 +1901,15 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             Some(pb::realtime_heartbeat_response::Result::Error(_))
         ),
         "{after:?}"
+    );
+    // The cross-connection revocation tombstone must survive Hangup.
+    assert!(
+        server
+            .store
+            .conference_join_grant(&claims[0].scope, &claims[0].session_id)
+            .unwrap()
+            .unwrap()
+            .revoked
     );
 }
 

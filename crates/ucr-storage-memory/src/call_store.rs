@@ -1,8 +1,8 @@
 use ucr_core::{CallStore, DurableRecordStatus, DurableStoreError, GroupCallLookupStore};
 use ucr_model::{
     CallId, CallParticipantState, CallParticipantUpdateKind, CallSession, CallSignal,
-    CallSignalKind, CallSignallingState, ConversationKind, GroupId, GroupMemberState,
-    GroupMembership, GroupRecord, PrincipalRef, ScopedPrincipal, TenantScope,
+    CallSignalKind, CallSignallingState, CallTerminationReason, ConversationKind, GroupId,
+    GroupMemberState, GroupMembership, GroupRecord, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     active_call_participant, apply_call_signal, call_creation_fingerprint, call_signal_fingerprint,
@@ -108,49 +108,140 @@ impl GroupCallLookupStore for MemoryLocalStore {
     }
 }
 
+/// One in-memory canonical creation path under the same mutex as Call signals.
+fn create_call_with_parent_guard(
+    store: &MemoryLocalStore,
+    creator: &ScopedPrincipal,
+    session: &CallSession,
+    parent: Option<&CallSession>,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    let session = canonical_call_creation(session, &creator.scope, &creator.principal)
+        .map_err(map_call_error)?;
+    let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
+    let key = call_key(&session.scope, &session.call_id);
+    let conversation_key = conversation_key(&session.scope, &session.conversation.conversation_id);
+    let state = &mut *store
+        .state
+        .lock()
+        .map_err(|_| DurableStoreError::Internal)?;
+    if let Some(parent) = parent {
+        let parent_invalid = parent.scope != session.scope
+            || parent.call_id == session.call_id
+            || parent.initiated_by != creator.principal
+            || session.initiated_by != parent.initiated_by
+            || session.participants.len() != 2
+            || !session.participants.iter().all(|participant| {
+                parent
+                    .participants
+                    .iter()
+                    .any(|member| member.principal == participant.principal)
+            })
+            || parent.conversation.kind != ConversationKind::Direct
+            || parent.signalling_state != CallSignallingState::Active
+            || parent.participants.len() != 2
+            || !parent.participants.iter().all(|participant| {
+                participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            })
+            || validated_call_from_state(state, &parent.scope, &parent.call_id)?.as_ref()
+                != Some(parent);
+        if parent_invalid {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+    }
+    let conversation = state
+        .conversations
+        .get(&conversation_key)
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    if conversation.conversation != session.conversation {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    if let Some(existing) = validated_call_from_state(state, &session.scope, &session.call_id)? {
+        if !group_actor_current_if_needed(state, &existing, &creator.principal) {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let recorded = state
+            .call_creation_fingerprints
+            .get(&key)
+            .ok_or(DurableStoreError::Corrupt)?;
+        return if recorded == &creation_fingerprint && creator.principal == existing.initiated_by {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    require_group_participants_if_needed(state, &session)?;
+    state
+        .call_creation_fingerprints
+        .insert(key.clone(), creation_fingerprint);
+    state.calls.insert(key, session);
+    Ok(DurableRecordStatus::Persisted)
+}
+
+fn apply_call_signal_in_state(
+    state: &mut MemoryState,
+    actor: &ScopedPrincipal,
+    signal: &CallSignal,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    if actor.scope != signal.scope {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
+    let key = call_key(&signal.scope, &signal.call_id);
+    let signal_key = call_signal_key(&signal.scope, signal.event_id.as_opaque().as_str());
+    let current = validated_call_from_state(state, &signal.scope, &signal.call_id)?
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    if !group_actor_current_if_needed(state, &current, &actor.principal) {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    if let Some((recorded_actor, existing, applied_revision)) = state.call_signals.get(&signal_key)
+    {
+        if recorded_actor != &actor.principal
+            || !duplicate_actor_allowed(&current, &actor.principal, *applied_revision)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        return if existing == &fingerprint {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    if !active_call_participant(&current, &actor.principal) {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    require_group_signal_target_if_needed(state, &current, signal)?;
+    let next = apply_call_signal(&current, &actor.scope, &actor.principal, signal)
+        .map_err(map_call_error)?;
+    let event_key = event_key_from_parts(&signal.scope, signal.event_id.as_opaque().as_str());
+    if state.events.contains_key(&event_key) || state.group_changes.contains_key(&event_key) {
+        return Err(DurableStoreError::Conflict);
+    }
+    let applied_revision = next.revision;
+    state.calls.insert(key, next);
+    state.call_signals.insert(
+        signal_key,
+        (actor.principal.clone(), fingerprint, applied_revision),
+    );
+    Ok(DurableRecordStatus::Persisted)
+}
+
 impl CallStore for MemoryLocalStore {
     fn create_call(
         &self,
         creator: &ScopedPrincipal,
         session: &CallSession,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let session = canonical_call_creation(session, &creator.scope, &creator.principal)
-            .map_err(map_call_error)?;
-        let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
-        let key = call_key(&session.scope, &session.call_id);
-        let conversation_key =
-            conversation_key(&session.scope, &session.conversation.conversation_id);
-        let state = &mut *self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        let conversation = state
-            .conversations
-            .get(&conversation_key)
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        if conversation.conversation != session.conversation {
-            return Err(DurableStoreError::InvalidRecord);
-        }
-        if let Some(existing) = validated_call_from_state(state, &session.scope, &session.call_id)?
-        {
-            if !group_actor_current_if_needed(state, &existing, &creator.principal) {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            let recorded = state
-                .call_creation_fingerprints
-                .get(&key)
-                .ok_or(DurableStoreError::Corrupt)?;
-            return if recorded == &creation_fingerprint
-                && creator.principal == existing.initiated_by
-            {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        require_group_participants_if_needed(state, &session)?;
-        state
-            .call_creation_fingerprints
-            .insert(key.clone(), creation_fingerprint);
-        state.calls.insert(key, session);
-        Ok(DurableRecordStatus::Persisted)
+        create_call_with_parent_guard(self, creator, session, None)
+    }
+
+    fn create_call_if_parent_current(
+        &self,
+        creator: &ScopedPrincipal,
+        session: &CallSession,
+        parent: &CallSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        create_call_with_parent_guard(self, creator, session, Some(parent))
     }
 
     fn call(
@@ -232,49 +323,140 @@ impl CallStore for MemoryLocalStore {
         actor: &ScopedPrincipal,
         signal: &CallSignal,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        if actor.scope != signal.scope {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        let fingerprint = call_signal_fingerprint(signal).map_err(map_call_error)?;
-        let key = call_key(&signal.scope, &signal.call_id);
-        let signal_key = call_signal_key(&signal.scope, signal.event_id.as_opaque().as_str());
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        let current = validated_call_from_state(&state, &signal.scope, &signal.call_id)?
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        if !group_actor_current_if_needed(&state, &current, &actor.principal) {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        if let Some((recorded_actor, existing, applied_revision)) =
-            state.call_signals.get(&signal_key)
+        apply_call_signal_in_state(&mut state, actor, signal)
+    }
+
+    fn terminate_direct_call_with_derived(
+        &self,
+        actor: &ScopedPrincipal,
+        direct_signal: &CallSignal,
+        derived_call_id: &CallId,
+        derived_event_id: &ucr_model::EventId,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if actor.scope != direct_signal.scope
+            || derived_call_id == &direct_signal.call_id
+            || !matches!(&direct_signal.kind, CallSignalKind::Terminate { .. })
         {
-            if recorded_actor != &actor.principal
-                || !duplicate_actor_allowed(&current, &actor.principal, *applied_revision)
-            {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            return if existing == &fingerprint {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        if !active_call_participant(&current, &actor.principal) {
             return Err(DurableStoreError::PermissionDenied);
         }
-        require_group_signal_target_if_needed(&state, &current, signal)?;
-        let next = apply_call_signal(&current, &actor.scope, &actor.principal, signal)
-            .map_err(map_call_error)?;
-        let event_key = event_key_from_parts(&signal.scope, signal.event_id.as_opaque().as_str());
-        if state.events.contains_key(&event_key) || state.group_changes.contains_key(&event_key) {
-            return Err(DurableStoreError::Conflict);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let direct =
+            validated_call_from_state(&state, &direct_signal.scope, &direct_signal.call_id)?
+                .ok_or(DurableStoreError::InvalidRecord)?;
+        if direct.conversation.kind != ConversationKind::Direct {
+            return Err(DurableStoreError::PermissionDenied);
         }
-        let applied_revision = next.revision;
-        state.calls.insert(key, next);
-        state.call_signals.insert(
-            signal_key,
-            (actor.principal.clone(), fingerprint, applied_revision),
-        );
-        Ok(DurableRecordStatus::Persisted)
+        // Compute both transitions before modifying the canonical state.
+        // If the derived transition is invalid, the parent must not commit.
+        // The same mutex fences concurrent media creation and Hangup.
+        // Only these two canonical maps can be mutated by the signal helper.
+        // Preserve exact affected entries for rollback without cloning the
+        // entire MemoryState (which also owns unrelated credentials/records).
+        let direct_key = call_key(&direct.scope, &direct.call_id);
+        let media_key = call_key(&direct.scope, derived_call_id);
+        let direct_event_key =
+            call_signal_key(&direct.scope, direct_signal.event_id.as_opaque().as_str());
+        let media_event_key = call_signal_key(&direct.scope, derived_event_id.as_opaque().as_str());
+        let direct_before = state.calls.get(&direct_key).cloned();
+        let media_before = state.calls.get(&media_key).cloned();
+        let direct_event_before = state.call_signals.get(&direct_event_key).cloned();
+        let media_event_before = state.call_signals.get(&media_event_key).cloned();
+        let outcome = (|| {
+            let result = apply_call_signal_in_state(&mut state, actor, direct_signal)?;
+            if result == DurableRecordStatus::Duplicate {
+                return Ok(result);
+            }
+            if let Some(media) = validated_call_from_state(&state, &direct.scope, derived_call_id)?
+            {
+                if media.scope != direct.scope
+                    || media.conversation.kind != ConversationKind::PrivateGroup
+                    || media.initiated_by != direct.initiated_by
+                    || media.participants.len() != direct.participants.len()
+                    || !media.participants.iter().all(|member| {
+                        direct
+                            .participants
+                            .iter()
+                            .any(|p| p.principal == member.principal)
+                    })
+                {
+                    return Err(DurableStoreError::PermissionDenied);
+                }
+                let kind = match media.signalling_state {
+                    CallSignallingState::Terminated => None,
+                    CallSignallingState::Inviting | CallSignallingState::Ringing => {
+                        Some(CallSignalKind::Cancel)
+                    }
+                    CallSignallingState::Active | CallSignallingState::Reconnecting => {
+                        Some(CallSignalKind::Terminate {
+                            reason: CallTerminationReason::Completed,
+                        })
+                    }
+                };
+                if let Some(kind) = kind {
+                    let media_actor = ScopedPrincipal {
+                        scope: direct.scope.clone(),
+                        principal: direct.initiated_by.clone(),
+                    };
+                    let media_signal = CallSignal {
+                        event_id: derived_event_id.clone(),
+                        scope: direct.scope.clone(),
+                        call_id: derived_call_id.clone(),
+                        expected_revision: media.revision,
+                        kind,
+                    };
+                    apply_call_signal_in_state(&mut state, &media_actor, &media_signal)?;
+                }
+            }
+            Ok(result)
+        })();
+        if outcome.is_err() {
+            if let Some(call) = direct_before {
+                state.calls.insert(direct_key, call);
+            }
+            if let Some(call) = media_before {
+                state.calls.insert(media_key, call);
+            }
+            match direct_event_before {
+                Some(record) => {
+                    state.call_signals.insert(direct_event_key, record);
+                }
+                None => {
+                    state.call_signals.remove(&direct_event_key);
+                }
+            }
+            match media_event_before {
+                Some(record) => {
+                    state.call_signals.insert(media_event_key, record);
+                }
+                None => {
+                    state.call_signals.remove(&media_event_key);
+                }
+            }
+        }
+        if outcome.is_ok() {
+            // Same canonical Memory mutex as parent/derived termination.
+            // Never leave a previously issued bearer live after Hangup.
+            // A duplicate terminal signal also repairs older unrevoked grants.
+            revoke_first_party_derived_joins(&mut state, &direct.scope, derived_call_id);
+        }
+        outcome
+    }
+}
+
+// Runs inside the same MemoryState lock as parent/derived Call termination.
+fn revoke_first_party_derived_joins(
+    state: &mut MemoryState,
+    scope: &TenantScope,
+    derived_call_id: &CallId,
+) {
+    for grant in state.conference_join_grants.values_mut() {
+        if grant.scope == *scope
+            && grant.call_id == *derived_call_id
+            && grant.integration_id.as_opaque().as_str() == "ucr-first-party-direct-media"
+        {
+            grant.revoked = true;
+        }
     }
 }
 
@@ -931,6 +1113,130 @@ mod tests {
         assert_eq!(
             ended.termination_reason,
             Some(CallTerminationReason::Rejected)
+        );
+    }
+    #[test]
+    fn parent_fence_is_atomic_with_memory_call_signals() {
+        let store = MemoryLocalStore::default();
+        let (conversation, direct, alice, bob) = fixture();
+        store.persist_conversation(&conversation).unwrap();
+        store.create_call(&alice, &direct).unwrap();
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(&direct, "memory-fence-accept", CallSignalKind::Accept),
+            )
+            .unwrap();
+        let accepted = store.call(&scope(), &direct.call_id).unwrap().unwrap();
+        let mut child = direct.clone();
+        child.call_id = CallId::from_opaque(oid("memory-fence-child"));
+        assert_eq!(
+            store.create_call_if_parent_current(&alice, &child, &accepted),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(
+                    &accepted,
+                    "memory-fence-hangup",
+                    CallSignalKind::Terminate {
+                        reason: CallTerminationReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        let mut late_child = child.clone();
+        late_child.call_id = CallId::from_opaque(oid("memory-fence-late-child"));
+        assert_eq!(
+            store.create_call_if_parent_current(&alice, &late_child, &accepted),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(store.call(&scope(), &late_child.call_id), Ok(None));
+        assert_eq!(
+            store.create_call_if_parent_current(&alice, &child, &accepted),
+            Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn atomic_memory_hangup_rolls_back_on_wrong_derived_binding() {
+        let store = MemoryLocalStore::default();
+        let (conversation, direct, alice, bob) = fixture();
+        store.persist_conversation(&conversation).unwrap();
+        store.create_call(&alice, &direct).unwrap();
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(&direct, "atomic-memory-accept", CallSignalKind::Accept),
+            )
+            .unwrap();
+        let active = store.call(&scope(), &direct.call_id).unwrap().unwrap();
+        let mut impostor = direct.clone();
+        impostor.call_id = CallId::from_opaque(oid("atomic-memory-impostor"));
+        store.create_call(&alice, &impostor).unwrap();
+        let hangup = signal(
+            &active,
+            "atomic-memory-hangup",
+            CallSignalKind::Terminate {
+                reason: CallTerminationReason::Completed,
+            },
+        );
+        assert_eq!(
+            store.terminate_direct_call_with_derived(
+                &bob,
+                &hangup,
+                &impostor.call_id,
+                &EventId::from_opaque(oid("atomic-memory-child-event")),
+            ),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(store.call(&scope(), &direct.call_id).unwrap(), Some(active));
+        assert_eq!(
+            store.apply_call_signal(&bob, &hangup),
+            Ok(DurableRecordStatus::Persisted)
+        );
+    }
+
+    #[test]
+    fn atomic_memory_hangup_without_media_rejects_late_child() {
+        let store = MemoryLocalStore::default();
+        let (conversation, direct, alice, bob) = fixture();
+        store.persist_conversation(&conversation).unwrap();
+        store.create_call(&alice, &direct).unwrap();
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(
+                    &direct,
+                    "atomic-memory-no-media-accept",
+                    CallSignalKind::Accept,
+                ),
+            )
+            .unwrap();
+        let active = store.call(&scope(), &direct.call_id).unwrap().unwrap();
+        let child_id = CallId::from_opaque(oid("atomic-memory-late-media"));
+        let hangup = signal(
+            &active,
+            "atomic-memory-no-media-hangup",
+            CallSignalKind::Terminate {
+                reason: CallTerminationReason::Completed,
+            },
+        );
+        assert_eq!(
+            store.terminate_direct_call_with_derived(
+                &bob,
+                &hangup,
+                &child_id,
+                &EventId::from_opaque(oid("atomic-memory-no-media-event")),
+            ),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let mut child = direct.clone();
+        child.call_id = child_id;
+        assert_eq!(
+            store.create_call_if_parent_current(&alice, &child, &active),
+            Err(DurableStoreError::PermissionDenied)
         );
     }
 }

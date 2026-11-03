@@ -1690,6 +1690,31 @@ where
         Ok(status)
     }
 
+    /// Terminates an authenticated direct Call and its derived media Call in
+    /// one canonical `CallStore` transaction. The same live user permission and
+    /// Device/Trust gates as regular first-party signalling apply on both sides
+    /// of the durable operation; the derived media Call is not a second owner.
+    ///
+    /// # Errors
+    /// Rejects lost Device trust, denied signalling or either failed mutation.
+    pub fn first_party_call_hangup_with_derived(
+        &self,
+        subject: &ScopedPrincipal,
+        device_id: &DeviceId,
+        signal: &CallSignal,
+        derived_call_id: &CallId,
+        derived_event_id: &ucr_model::EventId,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &signal.scope, CALL_SIGNAL_PERMISSION)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        let status = self
+            .store
+            .terminate_direct_call_with_derived(subject, signal, derived_call_id, derived_event_id)
+            .map_err(AuthorizedMutationError::Store)?;
+        self.require_current_first_party_device(subject, device_id)?;
+        Ok(status)
+    }
+
     /// Gates later Conference Join issuance on an already ACTIVE canonical
     /// two-person direct Call, both Accepted participants and current trust.
     /// A successful return is NOT a Join token or proof of media connectivity.

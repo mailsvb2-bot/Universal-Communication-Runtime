@@ -175,6 +175,28 @@ def wait_for_probe(
     return False
 
 
+def validated_safari_evidence(output: Path) -> bool:
+    """Accept only a completed, passing real Safari probe envelope."""
+    try:
+        payload = json.loads(output.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    probe = payload.get("probe") if isinstance(payload, dict) else None
+    return (
+        isinstance(probe, dict)
+        and payload.get("schema") == "ucr.mobile-browser-compatibility.v1"
+        and payload.get("browser_requested") == "ios-safari"
+        and payload.get("evidence_kind") == "real-ios-simulator-safari-self-probe"
+        and payload.get("passed") is True
+        and probe.get("passed") is True
+        and probe.get("browser_requested") == "ios-safari"
+        and probe.get("failures") == []
+        and probe.get("checks", {}).get("browserIdentity") is True
+        and probe.get("endpoint_wasm_execution", {}).get("ok") is True
+        and probe.get("endpoint_state_persistence", {}).get("ok") is True
+    )
+
+
 def probe_device(
     *,
     udid: str,
@@ -237,7 +259,14 @@ def probe_device(
         if not ready:
             raise RuntimeError("mobile probe HTTP listener did not become ready")
         url = f"http://127.0.0.1:{port}/client.html?ucr_mobile_probe=ios-safari"
+        # CoreSimulator's openurl return value is not proof that WebKit has
+        # executed the page. Treat Safari's authenticated self-probe envelope
+        # as the completion event, not a 25-second simctl navigation window.
+        # A healthy slow iOS boot must not be repeatedly killed mid-probe.
+        deadline = time.monotonic() + probe_timeout + 30
         for attempt in range(1, open_attempts + 1):
+            if validated_safari_evidence(output):
+                return True
             try:
                 opened = run(
                     ["xcrun", "simctl", "openurl", udid, url],
@@ -257,21 +286,25 @@ def probe_device(
                     flush=True,
                 )
 
-            if wait_for_probe(process, output, 25):
-                code = process.wait(timeout=10)
-                stdout = process.stdout.read() if process.stdout is not None else ""
-                print(stdout, end="")
-                if code != 0:
-                    raise RuntimeError(f"mobile probe returned {code}")
+            # Give real WebKit enough time to execute WASM and IndexedDB.
+            # Do not terminate a running Safari process between attempts.
+            remaining = deadline - time.monotonic()
+            if remaining > 0 and wait_for_probe(
+                process, output, min(45, int(remaining) + 1)
+            ):
+                if not validated_safari_evidence(output):
+                    raise RuntimeError("Safari returned invalid or failed evidence")
                 return True
+            if remaining <= 0 or process.poll() is not None:
+                break
 
-            best_effort(
-                ["xcrun", "simctl", "terminate", udid, SAFARI_BUNDLE_ID],
-                timeout=8,
-            )
-            time.sleep(2)
-
-        return False
+        # The browser can finish shortly after the final openurl wait. Honor
+        # the probe's complete deadline before recycling an otherwise valid
+        # simulator; do not discard late real evidence.
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            wait_for_probe(process, output, int(remaining) + 1)
+        return validated_safari_evidence(output)
     finally:
         if process.poll() is None:
             stop_process(process)

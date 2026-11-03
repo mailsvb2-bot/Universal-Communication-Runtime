@@ -521,6 +521,21 @@ pub trait EndpointMlsCommitStore {
     ) -> Result<DurableRecordStatus, GroupMlsStoreError>;
 }
 
+/// Read the exact committed endpoint-owned creator/recipient `Device` pair from
+/// the canonical `Group` transition ledger. This is not inferred from active
+/// `Identity` devices, a `Join` token, or an unauthenticated browser hint.
+pub trait EndpointMlsCommittedDevicePairStore {
+    /// Returns `None` before the endpoint's first committed `Add`.
+    ///
+    /// # Errors
+    /// Fail closed on ambiguous, quarantined or corrupt canonical MLS history.
+    fn endpoint_mls_direct_call_device_pair(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<Option<(String, String)>, DurableStoreError>;
+}
+
 pub trait GroupMlsServerCustodyProbe {
     /// Returns true if the server `OpenMLS` provider possesses the exact `Group`.
     /// Errors MUST fail closed; they must never be interpreted as no custody.
@@ -1830,6 +1845,36 @@ mod tests {
         );
     }
 
+    fn assert_previous_group_cannot_open_recovered_video(
+        context: &GroupMediaE2eeContext,
+        wire: &[u8],
+        signer: &ucr_crypto::SigningKeyMaterial,
+    ) {
+        use ucr_crypto::open_endpoint_group_media_wire;
+
+        // Old group keys may have been disclosed to an historic server host.
+        // A new independent endpoint-owned Call must reject that exporter.
+        let old_call = three_member_group();
+        let previous_exporter = export_group_media_secret(
+            &old_call.alice_provider,
+            &old_call.alice_group,
+            &old_call.scope,
+            &old_call.group_id,
+            &old_call.state,
+        )
+        .unwrap();
+        assert!(
+            open_endpoint_group_media_wire(
+                &previous_exporter,
+                context,
+                wire,
+                signer.verifying_key(),
+            )
+            .is_err(),
+            "old compromised MLS exporter cannot decrypt recovered Call video"
+        );
+    }
+
     /// An endpoint-created two-Device group never grants the relay a media leaf.
     /// Unlike host-removal tests, the server is not a member in any epoch.
     /// This is cryptographic fixture evidence, not a live browser/SFU call.
@@ -1919,6 +1964,103 @@ mod tests {
             .unwrap(),
             b"endpoint A to endpoint B only",
         );
+        assert_unadmitted_relay_blind_to_video(
+            &scope,
+            &group_id,
+            &added,
+            &media_context,
+            &wire,
+            &signer,
+        );
+    }
+
+    #[test]
+    fn recovered_independent_group_rejects_old_group_exporter_and_server() {
+        use ucr_crypto::{
+            SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+        };
+        use ucr_model::KeyId;
+
+        let scope = scope();
+        let group_id = GroupId::from_opaque(oid("fp-mg-recovery-new-call"));
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let alice = create_device_key_package(&alice_provider, &scope, &device("alice")).unwrap();
+        let bob = create_device_key_package(&bob_provider, &scope, &device("bob")).unwrap();
+        let (mut alice_group, _) = create_group(
+            &alice_provider,
+            &scope,
+            &group_id,
+            &device("alice"),
+            &alice.signer_public_key,
+        )
+        .unwrap();
+        let bob_package =
+            decode_key_package(&alice_provider, &scope, &device("bob"), &bob.bytes).unwrap();
+        let added = stage_add_member(
+            &alice_provider,
+            &mut alice_group,
+            &scope,
+            &group_id,
+            &bob_package,
+        )
+        .unwrap();
+        merge_pending(
+            &alice_provider,
+            &mut alice_group,
+            &scope,
+            &group_id,
+            &added.next_crypto_state,
+        )
+        .unwrap();
+        let bob_group = join_from_welcome(
+            &bob_provider,
+            &scope,
+            &group_id,
+            added.welcome.as_deref().unwrap(),
+            &added.next_crypto_state,
+        )
+        .unwrap();
+        validate_direct_call_roster(&alice_group, &scope, &device("alice"), &device("bob"))
+            .unwrap();
+        validate_direct_call_roster(&bob_group, &scope, &device("bob"), &device("alice")).unwrap();
+        let state = &added.next_crypto_state;
+        let sender_secret =
+            export_group_media_secret(&alice_provider, &alice_group, &scope, &group_id, state)
+                .unwrap();
+        let receiver_secret =
+            export_group_media_secret(&bob_provider, &bob_group, &scope, &group_id, state).unwrap();
+        let media_context = GroupMediaE2eeContext {
+            scope: scope.clone(),
+            call_id: CallId::from_opaque(oid("fp-m-recovery-new-call")),
+            group_id: group_id.clone(),
+            negotiation_ref: oid("neg"),
+            negotiation_generation: 1,
+            crypto_epoch: state.epoch,
+            crypto_state_ref: state.state_ref.clone().unwrap(),
+            crypto_suite: CryptoSuite::UcrV1,
+        };
+        let signer = SigningKeyMaterial::from_seed([23; 32]);
+        let wire = seal_endpoint_group_media_wire(
+            &sender_secret,
+            &media_context,
+            endpoint_alice_video_header(&media_context),
+            b"video after recovered MLS and new Call",
+            KeyId::from_opaque(oid("alice-trusted-key")),
+            &signer,
+        )
+        .unwrap();
+        assert_eq!(
+            open_endpoint_group_media_wire(
+                &receiver_secret,
+                &media_context,
+                &wire,
+                signer.verifying_key(),
+            )
+            .unwrap(),
+            b"video after recovered MLS and new Call",
+        );
+        assert_previous_group_cannot_open_recovered_video(&media_context, &wire, &signer);
         assert_unadmitted_relay_blind_to_video(
             &scope,
             &group_id,

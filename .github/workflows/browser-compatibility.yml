@@ -352,6 +352,8 @@ jobs:
             --out-name ucr_endpoint_wasm
           test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm.js
           test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm_bg.wasm
+      - name: Verify iOS Safari evidence and runner regressions
+        run: python3 -m unittest tools.test_ios_safari_probe_runner
       - name: Probe iOS Safari on Simulator
         shell: bash
         run: |

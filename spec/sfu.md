@@ -30,7 +30,7 @@ Before any sink side effect, the runtime revalidates the current active Group-ba
 
 Recipients are derived only from current canonical Call participants plus recipient-owned Conference subscription preference. The SFU does not persist a recipient roster.
 
-`ConferenceRuntime` performs the canonical Conference subscription selection first, then `SfuRuntime` produces an immutable validated forward batch after all canonical source and recipient checks pass. The batch constructor is private, so callers cannot manufacture pre-authorized routing work or bypass canonical Conference subscription selection. The existing synchronous `SfuForwardSink` path dispatches that batch locally and preserves exact partial-acceptance semantics. Horizontal transports must consume the same validated batch and await the destination node's concrete receipt; local queue admission or connection write alone must never be reported as remote `Accepted`. Successful sink/node acceptance is infrastructure routing acceptance only. It is not Device receipt, decrypt evidence, canonical Delivery state, user presentation or Read evidence. Partial acceptance is reported truthfully; there is no rollback or exactly-once fan-out claim.
+`ConferenceRuntime` performs the canonical Conference subscription selection first, then `SfuRuntime` produces an immutable validated forward batch after all canonical source and recipient checks pass. The batch constructor is private, so callers cannot manufacture pre-authorized routing work or bypass canonical Conference subscription selection. The existing synchronous `SfuForwardSink` path dispatches through `dispatch_validated_forward_batch(runtime, batch, sink)`, which revalidates canonical Call/Group/MLS/Device and send/receive authority for each recipient immediately before the sink side effect. A prepared batch is not a lasting permission grant: a Hangup or permission revoke between preparation and dispatch must deny the stale batch. Horizontal transports must revalidate at their actual send boundary, consume the same validated ciphertext and await the destination node's concrete receipt; local queue admission or connection write alone must never be reported as remote `Accepted`. This check cannot cancel an already in-flight sink send, so provider close, distributed revocation fencing and physical capture stop remain separate release gates. Successful sink/node acceptance is infrastructure routing acceptance only. It is not Device receipt, decrypt evidence, canonical Delivery state, user presentation or Read evidence. Partial acceptance is reported truthfully; there is no rollback or exactly-once fan-out claim.
 
 ## Horizontal placement foundation
 
@@ -166,8 +166,16 @@ so preferred-region/cross-region rules apply before the first sticky reservation
 introduced after the Call is already placed. The placement-aware router then uses that sticky
 canonical Call placement,
 resolves only the selected live private endpoint, opens the deployment-scoped mTLS node connection,
-and waits for concrete destination-ingress receipts. Local realtime forwarding is unchanged when
-the gate is disabled.
+and waits for concrete destination-ingress receipts. The destination's
+`SfuNodeMediaService::process_node_media_item` independently calls the canonical
+`SfuRuntime::forward_selected`, including live Call/Group/Device/Trust and
+send/receive checks at destination ingress; the source's prepared batch is
+not itself sufficient authorization. After the asynchronous receipt, the
+source realtime service rechecks durable Join/Call/Device authority and the
+active session before reporting success or marking media-ready. This protects
+control-plane state from stale receipts, but does not retroactively cancel an
+already accepted remote frame or prove bounded in-flight WebRTC provider stop.
+Local realtime forwarding is unchanged when the gate is disabled.
 
 Outbound router credentials are deployment infrastructure credentials, not tenant/user authority.
 The runtime requires an explicit client certificate/key, explicit server CA trust material and TLS
