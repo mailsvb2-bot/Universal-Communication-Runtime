@@ -1,7 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{DurableRecordStatus, DurableStoreError};
 use ucr_group_mls::{
-    AtomicMlsGroupChangeResult, DeviceKeyPackage, EndpointMlsCommitStore, GroupMlsAtomicStore,
+    AtomicMlsGroupChangeResult, DeviceKeyPackage, EndpointMlsCommitStore,
+    EndpointMlsCommittedDevicePairStore, GroupMlsAtomicStore,
     GroupMlsBootstrapStore, GroupMlsServerCustodyProbe, GroupMlsStoreError,
     MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS, MlsBootstrapCommit, MlsCommitArtifacts,
     MlsDeviceAdmission, MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput,
@@ -500,6 +501,18 @@ impl EndpointMlsCommitStore for SqliteLocalStore {
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(status)
+    }
+}
+
+impl EndpointMlsCommittedDevicePairStore for SqliteLocalStore {
+    fn endpoint_mls_direct_call_device_pair(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<Option<(String, String)>, DurableStoreError> {
+        // Reuse the existing canonical SQLite transition ledger and quarantine
+        // checks; do not create a second media/Device membership projection.
+        SqliteLocalStore::endpoint_mls_direct_call_device_pair(self, scope, group_id)
     }
 }
 
