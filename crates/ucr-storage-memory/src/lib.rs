@@ -10,6 +10,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     sync::Mutex,
+    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
 
 use ucr_core::{
@@ -243,6 +244,51 @@ struct MemoryState {
 #[derive(Default)]
 pub struct MemoryLocalStore {
     state: Mutex<MemoryState>,
+    /// Bumped after EVERY mutable access, while the lock is still held, so a
+    /// reader that observes revision `r` can never miss a mutation made
+    /// before `r` became visible. Read-only accesses never bump it.
+    authorization_revision: AtomicU64,
+}
+
+/// Mutable state guard that publishes a new authorization revision on drop.
+struct RevisionedStateGuard<'a> {
+    guard: std::sync::MutexGuard<'a, MemoryState>,
+    revision: &'a AtomicU64,
+}
+
+impl core::ops::Deref for RevisionedStateGuard<'_> {
+    type Target = MemoryState;
+    fn deref(&self) -> &MemoryState {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for RevisionedStateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut MemoryState {
+        &mut self.guard
+    }
+}
+
+impl Drop for RevisionedStateGuard<'_> {
+    fn drop(&mut self) {
+        // Runs before `guard` is released: the bump is ordered after the
+        // mutation and before any other thread can observe the new state.
+        self.revision.fetch_add(1, AtomicOrdering::SeqCst);
+    }
+}
+
+impl MemoryLocalStore {
+    fn lock_state_mut(
+        &self,
+    ) -> Result<
+        RevisionedStateGuard<'_>,
+        std::sync::PoisonError<std::sync::MutexGuard<'_, MemoryState>>,
+    > {
+        Ok(RevisionedStateGuard {
+            guard: self.state.lock()?,
+            revision: &self.authorization_revision,
+        })
+    }
 }
 
 impl fmt::Debug for MemoryLocalStore {
@@ -277,7 +323,9 @@ impl AttachmentStore for MemoryLocalStore {
             scope_key(&descriptor.scope),
             descriptor.attachment_id.as_opaque().as_str().to_owned(),
         );
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.attachments.get(&key) {
             return if existing == descriptor {
                 Ok(DurableRecordStatus::Duplicate)
@@ -309,7 +357,9 @@ impl AttachmentStore for MemoryLocalStore {
         scope: &TenantScope,
         chunk: &AttachmentChunk,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let descriptor_key = (
             scope_key(scope),
             chunk.attachment_id.as_opaque().as_str().to_owned(),
@@ -359,7 +409,9 @@ impl AttachmentStore for MemoryLocalStore {
 impl PermissionGrantStore for MemoryLocalStore {
     fn grant_permission(&self, grant: &PermissionGrant) -> Result<(), DurableStoreError> {
         validate_permission_grant(grant).map_err(|_| DurableStoreError::InvalidRecord)?;
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if !state.permission_grants.contains(grant) {
             state.permission_grants.push(grant.clone());
         }
@@ -368,7 +420,9 @@ impl PermissionGrantStore for MemoryLocalStore {
 
     fn revoke_permission(&self, grant: &PermissionGrant) -> Result<(), DurableStoreError> {
         validate_permission_grant(grant).map_err(|_| DurableStoreError::InvalidRecord)?;
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         state.permission_grants.retain(|existing| existing != grant);
         Ok(())
     }
@@ -394,6 +448,10 @@ impl AuthorizationEvaluator for MemoryLocalStore {
             .map_err(map_authorization_store_error)?;
         ucr_protocol::authorize(request, &grants).map_err(CanonicalError::from)
     }
+
+    fn authorization_revision(&self) -> Option<u64> {
+        Some(self.authorization_revision.load(AtomicOrdering::SeqCst))
+    }
 }
 
 impl ServiceCredentialStore for MemoryLocalStore {
@@ -403,7 +461,9 @@ impl ServiceCredentialStore for MemoryLocalStore {
     ) -> Result<(), DurableStoreError> {
         validate_service_credential_record(record)?;
         let key = service_credential_ref(&record.subject.scope, &record.credential_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.service_credentials.get(&key) {
             return if existing == record {
                 Ok(())
@@ -421,7 +481,9 @@ impl ServiceCredentialStore for MemoryLocalStore {
         credential_id: &ServiceCredentialId,
     ) -> Result<(), DurableStoreError> {
         let key = service_credential_ref(scope, credential_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(record) = state.service_credentials.get_mut(&key) {
             record.state = ServiceCredentialState::Revoked;
         }
@@ -446,7 +508,9 @@ impl ServiceQuotaStore for MemoryLocalStore {
     ) -> Result<(), DurableStoreError> {
         validate_service_quota_policy(policy).map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = service_principal_key(&policy.subject);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if state.service_quota_policies.get(&key) == Some(policy) {
             return Ok(());
         }
@@ -486,7 +550,9 @@ impl ServiceQuotaStore for MemoryLocalStore {
         validate_service_resource_quota_policy(policy)
             .map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = service_principal_key(&policy.subject);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         state
             .service_resource_quota_policies
             .insert(key, policy.clone());
@@ -514,8 +580,7 @@ impl ServiceQuotaStore for MemoryLocalStore {
         }
         let key = service_principal_key(subject);
         let mut state = self
-            .state
-            .lock()
+            .lock_state_mut()
             .map_err(|_| ServiceResourceQuotaConsumeError::Store(DurableStoreError::Internal))?;
         let limit_minutes = state
             .service_resource_quota_policies
@@ -563,7 +628,9 @@ impl ServiceQuotaStore for MemoryLocalStore {
     ) -> Result<(), DurableStoreError> {
         validate_service_subject(subject)?;
         let key = service_principal_key(subject);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         state.service_recording_usage_ms.remove(&key);
         Ok(())
     }
@@ -574,7 +641,9 @@ impl ServiceQuotaStore for MemoryLocalStore {
     ) -> Result<(), DurableStoreError> {
         validate_service_rate_limit_policy(policy).map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = (service_principal_key(&policy.subject), policy.rate_class);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if state.service_rate_limit_policies.get(&key) == Some(policy) {
             return Ok(());
         }
@@ -608,8 +677,7 @@ impl ServiceQuotaStore for MemoryLocalStore {
         }
         let key = (service_principal_key(subject), rate_class);
         let mut state = self
-            .state
-            .lock()
+            .lock_state_mut()
             .map_err(|_| ServiceQuotaConsumeError::Store(DurableStoreError::Internal))?;
         let policy = state
             .service_rate_limit_policies
@@ -653,7 +721,9 @@ impl ServiceQuotaStore for MemoryLocalStore {
 impl ServiceAuditStore for MemoryLocalStore {
     fn append_service_audit(&self, record: &ServiceAuditRecord) -> Result<(), DurableStoreError> {
         validate_service_audit_record(record).map_err(|_| DurableStoreError::InvalidRecord)?;
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some((existing, _)) = state
             .service_audit_records
             .iter()
@@ -743,7 +813,9 @@ impl AtomicTrustedDeviceEnrollmentStore for MemoryLocalStore {
         let device_ref = device_key(scope, &device.device_id);
         let signer_ref = trusted_key_ref(scope, &signing_key.key_id);
         let active_ref = trusted_device_ref(scope, &device.device_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if !state
             .identities
             .contains_key(&identity_key(scope, &device.identity_id))
@@ -800,7 +872,9 @@ impl DeviceLifecycleStore for MemoryLocalStore {
         descriptor: &DeviceDescriptor,
     ) -> Result<(), DurableStoreError> {
         let key = device_key(scope, &descriptor.device_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.devices.get(&key) {
             return if existing == descriptor {
                 Ok(())
@@ -839,7 +913,9 @@ impl DeviceLifecycleStore for MemoryLocalStore {
     ) -> Result<(), DurableStoreError> {
         let key = device_key(scope, device_id);
         let trusted_ref = trusted_device_ref(scope, device_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let device = state.devices.get(&key).ok_or(DurableStoreError::Conflict)?;
         if device.identity_id != *expected_identity_id {
             return Err(DurableStoreError::Conflict);
@@ -941,7 +1017,9 @@ impl ReverifiedDeviceActivationStore for MemoryLocalStore {
         proof: &DeviceReverificationProof,
     ) -> Result<(), DurableStoreError> {
         let key = device_key(proof.scope(), proof.device_id());
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let device = state
             .devices
             .get_mut(&key)
@@ -966,7 +1044,9 @@ impl TrustedSigningKeyStore for MemoryLocalStore {
             .map_err(|_| DurableStoreError::InvalidRecord)?;
         let key_ref = trusted_key_ref(scope, &descriptor.key_id);
         let device_ref = trusted_device_ref(scope, &descriptor.device_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if !memory_device_allows_protected_access(&state, scope, &descriptor.device_id, None) {
             return Err(DurableStoreError::PermissionDenied);
         }
@@ -1018,7 +1098,9 @@ impl TrustedSigningKeyStore for MemoryLocalStore {
         let replacement_ref = trusted_key_ref(scope, &replacement.key_id);
         let expected_id = expected_current.as_opaque().as_str();
         let replacement_id = replacement.key_id.as_opaque().as_str();
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if !memory_device_allows_protected_access(&state, scope, device_id, None) {
             return Err(DurableStoreError::PermissionDenied);
         }
@@ -1078,7 +1160,9 @@ impl TrustedSigningKeyStore for MemoryLocalStore {
         let device_ref = trusted_device_ref(scope, device_id);
         let key_ref = trusted_key_ref(scope, expected_current);
         let expected_id = expected_current.as_opaque().as_str();
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         match state.active_trusted_signing_keys.get(&device_ref) {
             Some(active) if active == expected_id => {
                 let current = state
@@ -1188,7 +1272,7 @@ impl ReplayProtector for MemoryLocalStore {
         peer_verifying_key: &VerifyingKeyBytes,
         binding: &TranscriptBinding,
     ) -> Result<(), ReplayError> {
-        let mut state = self.state.lock().map_err(|_| ReplayError::Internal)?;
+        let mut state = self.lock_state_mut().map_err(|_| ReplayError::Internal)?;
         if !state
             .seen_handshakes
             .insert((peer_verifying_key.0, *binding.as_bytes()))
@@ -1204,7 +1288,9 @@ impl RecoveryPlanStore for MemoryLocalStore {
         let plan = canonical_recovery_plan(plan).map_err(|_| DurableStoreError::InvalidRecord)?;
         let plan_id = plan.plan_id.as_opaque().as_str().to_owned();
         let identity_key = recovery_identity_key(&plan.scope, &plan.identity_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.recovery_plans.get(&plan_id) {
             return if existing == &plan
                 && state.active_recovery_plans.get(&identity_key) == Some(&plan_id)
@@ -1232,7 +1318,9 @@ impl RecoveryPlanStore for MemoryLocalStore {
         let expected_id = expected_current.as_opaque().as_str();
         let replacement_id = replacement.plan_id.as_opaque().as_str().to_owned();
         let identity_key = recovery_identity_key(&replacement.scope, &replacement.identity_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .recovery_plans
             .get(expected_id)
@@ -1275,7 +1363,9 @@ impl RecoveryPlanStore for MemoryLocalStore {
     ) -> Result<(), DurableStoreError> {
         let expected_id = expected_current.as_opaque().as_str();
         let identity_key = recovery_identity_key(scope, identity_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         match state.active_recovery_plans.get(&identity_key) {
             Some(active) if active == expected_id => {
                 state.active_recovery_plans.remove(&identity_key);
@@ -1322,7 +1412,9 @@ impl RecoveryDeviceStagingStore for MemoryLocalStore {
         let expected_plan = proof.plan_id().as_opaque().as_str();
         let device_key = device_key(proof.scope(), proof.target_device_id());
         let descriptor = proof.recovered_device();
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if state
             .active_recovery_plans
             .get(&identity_key)
@@ -1505,7 +1597,9 @@ impl IdentityStore for MemoryLocalStore {
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         validate_identity_record(identity).map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = identity_key(&identity.scope, &identity.identity_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.identities.get(&key) {
             return if existing == identity {
                 Ok(DurableRecordStatus::Duplicate)
@@ -1538,7 +1632,9 @@ impl PrincipalIdentityBindingStore for MemoryLocalStore {
         validate_principal_identity_binding(binding)
             .map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = principal_identity_binding_key(&binding.scope, &binding.principal);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.principal_identity_bindings.get(&key) {
             return if existing == binding {
                 Ok(DurableRecordStatus::Duplicate)
@@ -1633,7 +1729,9 @@ impl ExternalIdentityBindingStore for MemoryLocalStore {
             &binding.external_namespace,
             &binding.external_entity_id,
         );
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.external_identity_bindings.get(&key) {
             return if existing == binding {
                 Ok(DurableRecordStatus::Duplicate)
@@ -1690,7 +1788,9 @@ impl FederationPeerStore for MemoryLocalStore {
             &canonical.remote_scope,
             &canonical.remote_endpoint_id,
         );
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.federation_peers.get(&key) {
             return if existing == &canonical {
                 Ok(DurableRecordStatus::Duplicate)
@@ -1728,7 +1828,9 @@ impl FederationPeerStore for MemoryLocalStore {
         next_state: FederationTrustState,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = federation_peer_key(local_scope, remote_scope, remote_endpoint_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .federation_peers
             .get(&key)
@@ -1770,7 +1872,9 @@ impl FederationPeerStore for MemoryLocalStore {
             &current.remote_scope,
             &current.remote_endpoint_id,
         );
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let persisted = state
             .federation_peers
             .get(&key)
@@ -1797,7 +1901,9 @@ impl ConversationStore for MemoryLocalStore {
             &conversation.scope,
             &conversation.conversation.conversation_id,
         );
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(parent_id) = &conversation.parent_conversation_id {
             let parent = state
                 .conversations
@@ -1844,7 +1950,9 @@ impl BridgeRegistrationStore for MemoryLocalStore {
             return Err(DurableStoreError::InvalidRecord);
         }
         let key = bridge_registration_key(&canonical.scope, &canonical.integration_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.bridge_registrations.get(&key) {
             return if existing == &canonical {
                 Ok(DurableRecordStatus::Duplicate)
@@ -1876,7 +1984,9 @@ impl BridgeRegistrationStore for MemoryLocalStore {
         next_state: BridgeRegistrationState,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = bridge_registration_key(scope, integration_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .bridge_registrations
             .get(&key)
@@ -1915,7 +2025,9 @@ impl BridgeActionStore for MemoryLocalStore {
             return Err(DurableStoreError::InvalidRecord);
         }
         let key = bridge_action_key(&record.scope, &record.action_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let registration = state
             .bridge_registrations
             .get(&bridge_registration_key(
@@ -1961,7 +2073,9 @@ impl BridgeActionStore for MemoryLocalStore {
         acceptance: Option<&BridgeProviderAcceptance>,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = bridge_action_key(scope, action_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .bridge_actions
             .get(&key)
@@ -2014,7 +2128,9 @@ impl CommunicationIntentStore for MemoryLocalStore {
         let canonical =
             canonical_communication_intent(intent).map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = intent_key(&canonical.scope, &canonical.intent_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.intents.get(&key) {
             return if existing == &canonical {
                 Ok(DurableRecordStatus::Duplicate)
@@ -2074,7 +2190,9 @@ impl MessageStore for MemoryLocalStore {
         &self,
         message: &MessageEnvelope,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         persist_message_in_state(&mut state, message)
     }
 
@@ -2099,7 +2217,9 @@ impl DeliveryStore for MemoryLocalStore {
             .map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = delivery_key(&attempt.scope, &attempt.delivery_id);
         let message_key = message_key(&attempt.scope, &attempt.message_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let message = state
             .messages
             .get(&message_key)
@@ -2137,7 +2257,9 @@ impl DeliveryStore for MemoryLocalStore {
         evidence: Option<&DeliveryEvidence>,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = delivery_key(scope, delivery_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .deliveries
             .get(&key)
@@ -2173,7 +2295,9 @@ impl DeliveryStore for MemoryLocalStore {
         evidence: &DeliveryEvidence,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = delivery_key(&evidence.scope, &evidence.delivery_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .deliveries
             .get(&key)
@@ -2268,7 +2392,9 @@ impl SyncStore for MemoryLocalStore {
         let canonical = canonical_sync_session(session.clone())
             .map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = sync_key(&canonical.scope, &canonical.session_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.sync_sessions.get(&key) {
             return if existing == &canonical {
                 Ok(DurableRecordStatus::Duplicate)
@@ -2288,7 +2414,9 @@ impl SyncStore for MemoryLocalStore {
         next_state: SyncState,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = sync_key(scope, session_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let session = state
             .sync_sessions
             .get_mut(&key)
@@ -2310,7 +2438,9 @@ impl SyncStore for MemoryLocalStore {
         checkpoint: &SyncCheckpoint,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = sync_key(&checkpoint.scope, &checkpoint.session_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let session = state
             .sync_sessions
             .get(&key)
@@ -2377,7 +2507,9 @@ impl CommandAcceptanceStore for MemoryLocalStore {
         let command_key = command_key(&command)?;
         let command_ref = command_ref_key(&command.scope, &command.command_id);
 
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
 
         if let Some(original) = state.accepted.get(&raw_key) {
             if original.command_type != LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE
@@ -2422,7 +2554,9 @@ impl CommandAcceptanceStore for MemoryLocalStore {
         let command = canonical_command(command).map_err(map_command_error)?;
         let key = command_key(&command)?;
         let command_ref = command_ref_key(&command.scope, &command.command_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
 
         if let Some(original) = state.accepted.get(&key) {
             return receipt_for_existing(original, &command);
@@ -2851,7 +2985,9 @@ fn validate_conference_lifecycle_event(
 
 impl EventJournalStore for MemoryLocalStore {
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         append_event_to_memory_state(&mut state, event)
     }
 
@@ -2866,7 +3002,9 @@ impl EventJournalStore for MemoryLocalStore {
             .iter()
             .map(|event| canonical_event(event).map_err(map_event_error))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let mut staged = HashMap::<EventKey, EventEnvelope>::new();
         let mut staged_order = Vec::new();
         let mut statuses = Vec::with_capacity(canonical.len());
@@ -2993,7 +3131,9 @@ impl EventSubscriptionStore for MemoryLocalStore {
             return Err(DurableStoreError::PermissionDenied);
         }
         let key = event_subscription_key(&canonical.scope, &canonical.subscription_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.event_subscriptions.get(&key) {
             return if existing.subscription == canonical && existing.owner == *owner {
                 Ok(DurableRecordStatus::Duplicate)
@@ -3059,7 +3199,9 @@ impl EventSubscriptionStore for MemoryLocalStore {
             return Err(DurableStoreError::InvalidRecord);
         }
         let key = event_subscription_key(scope, subscription_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let snapshot = state
             .event_subscriptions
             .get(&key)
@@ -3139,7 +3281,9 @@ impl EventSubscriptionStore for MemoryLocalStore {
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         validate_event_consumer_cursor(cursor).map_err(map_event_api_error)?;
         let key = event_subscription_key(scope, subscription_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let snapshot = state
             .event_subscriptions
             .get(&key)
@@ -3189,7 +3333,9 @@ impl EventSubscriptionStore for MemoryLocalStore {
             return Err(DurableStoreError::InvalidRecord);
         }
         let key = event_subscription_key(scope, subscription_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let snapshot = state
             .event_subscriptions
             .get(&key)
@@ -3264,7 +3410,9 @@ impl EventSubscriptionStore for MemoryLocalStore {
         replay_id: &OpaqueId,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = event_subscription_key(scope, subscription_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let subscription = state
             .event_subscriptions
             .get_mut(&key)
@@ -3462,7 +3610,9 @@ impl AntiEntropyStore for MemoryLocalStore {
         if &event.scope != scope {
             return Err(DurableStoreError::InvalidRecord);
         }
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let _session = load_anti_entropy_session(&state, scope, session_id)?;
         let key = event_key(&event);
         if let Some(local) = state.events.get(&key) {
@@ -3498,7 +3648,9 @@ impl CommandOutcomeStore for MemoryLocalStore {
         }
         let command_ref = command_ref_key(scope, command_id);
         let event_key = event_key(&event);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if !state.accepted_by_id.contains_key(&command_ref) {
             return Err(DurableStoreError::InvalidRecord);
         }
@@ -9208,7 +9360,9 @@ impl RecordingStore for MemoryLocalStore {
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         validate_recording_session(recording).map_err(map_recording_protocol_error)?;
         let key = recording_key(&recording.scope, &recording.recording_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.recordings.get(&key) {
             return if existing == recording {
                 Ok(DurableRecordStatus::Duplicate)
@@ -9336,7 +9490,9 @@ impl RecordingStore for MemoryLocalStore {
         consent_state: RecordingConsentState,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9352,7 +9508,9 @@ impl RecordingStore for MemoryLocalStore {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9368,7 +9526,9 @@ impl RecordingStore for MemoryLocalStore {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9384,7 +9544,9 @@ impl RecordingStore for MemoryLocalStore {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9403,7 +9565,9 @@ impl RecordingStore for MemoryLocalStore {
         now_unix_ms: i64,
         event: Option<&EventEnvelope>,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9417,7 +9581,9 @@ impl RecordingStore for MemoryLocalStore {
         &self,
         request: RecordingConsentProviderStopRequest<'_>,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event_and_provider_operation(
             &mut state,
             &recording_key(request.scope, request.recording_id),
@@ -9443,7 +9609,9 @@ impl RecordingStore for MemoryLocalStore {
         now_unix_ms: i64,
         event: &EventEnvelope,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9461,7 +9629,9 @@ impl RecordingStore for MemoryLocalStore {
         now_unix_ms: i64,
         event: &EventEnvelope,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event_and_provider_operation(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9480,7 +9650,9 @@ impl RecordingStore for MemoryLocalStore {
         now_unix_ms: i64,
         event: &EventEnvelope,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9498,7 +9670,9 @@ impl RecordingStore for MemoryLocalStore {
         now_unix_ms: i64,
         event: &EventEnvelope,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event_and_provider_operation(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9517,7 +9691,9 @@ impl RecordingStore for MemoryLocalStore {
         now_unix_ms: i64,
         event: &EventEnvelope,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9535,7 +9711,9 @@ impl RecordingStore for MemoryLocalStore {
         now_unix_ms: i64,
         event: &EventEnvelope,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event_and_provider_operation(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9553,7 +9731,9 @@ impl RecordingStore for MemoryLocalStore {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9570,7 +9750,9 @@ impl RecordingStore for MemoryLocalStore {
         now_unix_ms: i64,
         event: &EventEnvelope,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9587,7 +9769,9 @@ impl RecordingStore for MemoryLocalStore {
         now_unix_ms: i64,
         event: &EventEnvelope,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event_and_provider_operation(
             &mut state,
             &recording_key(scope, recording_id),
@@ -9611,7 +9795,9 @@ impl RecordingProviderOperationStore for MemoryLocalStore {
             return Err(DurableStoreError::InvalidRecord);
         }
         let key = recording_provider_operation_key(&record.request);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.recording_provider_operations.get(&key) {
             return if existing == record {
                 Ok(DurableRecordStatus::Duplicate)
@@ -9705,7 +9891,9 @@ impl RecordingProviderOperationStore for MemoryLocalStore {
         request: &RecordingProviderRequest,
     ) -> Result<(), DurableStoreError> {
         let key = recording_provider_operation_key(request);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let record = state
             .recording_provider_operations
             .get_mut(&key)
@@ -9730,7 +9918,9 @@ impl RecordingProviderOperationStore for MemoryLocalStore {
         next_attempt_unix_ms: i64,
     ) -> Result<(), DurableStoreError> {
         let key = recording_provider_operation_key(request);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let record = state
             .recording_provider_operations
             .get_mut(&key)
@@ -9754,7 +9944,9 @@ impl RecordingProviderOperationStore for MemoryLocalStore {
         request: &RecordingProviderRequest,
     ) -> Result<(), DurableStoreError> {
         let key = recording_provider_operation_key(request);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let record = state
             .recording_provider_operations
             .get_mut(&key)
@@ -9858,7 +10050,9 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
             scope_key(&grant.scope),
             grant.session_id.as_opaque().as_str().to_owned(),
         );
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.conference_join_grants.get(&key) {
             return if existing == grant {
                 Ok(DurableRecordStatus::Duplicate)
@@ -9909,7 +10103,9 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
         scope: &TenantScope,
         session_id: &SessionId,
     ) -> Result<ConferenceJoinGrantRecord, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let grant = state
             .conference_join_grants
             .get_mut(&(scope_key(scope), session_id.as_opaque().as_str().to_owned()))
@@ -9923,7 +10119,9 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
         scope: &TenantScope,
         session_id: &SessionId,
     ) -> Result<ConferenceJoinGrantRecord, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let grant = state
             .conference_join_grants
             .get_mut(&(scope_key(scope), session_id.as_opaque().as_str().to_owned()))
@@ -9945,7 +10143,9 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
         if now_unix_ms < 0 {
             return Err(DurableStoreError::InvalidRecord);
         }
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         // Preserve the exact session ID as an irreversible authorization
         // tombstone. Deleting it would allow idempotent command replay to
         // issue the same credential again with a fresh expiry.
@@ -10159,7 +10359,9 @@ impl UniversalConferenceStore for MemoryLocalStore {
             &profile.integration_id,
             &profile.create_idempotency_key,
         );
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.universal_conferences.get(&key) {
             return if existing == profile {
                 Ok(DurableRecordStatus::Duplicate)
@@ -10235,7 +10437,9 @@ impl UniversalConferenceStore for MemoryLocalStore {
         let metadata = ucr_core::canonical_conference_metadata(metadata)
             .map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = universal_conference_key(scope, conference_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .universal_conferences
             .get(&key)
@@ -10268,7 +10472,9 @@ impl UniversalConferenceStore for MemoryLocalStore {
         entry_open: bool,
     ) -> Result<UniversalConferenceProfile, DurableStoreError> {
         let key = universal_conference_key(scope, conference_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .universal_conferences
             .get(&key)
@@ -10314,7 +10520,9 @@ impl UniversalConferenceStore for MemoryLocalStore {
         event: Option<&EventEnvelope>,
     ) -> Result<UniversalConferenceProfile, DurableStoreError> {
         let key = universal_conference_key(scope, conference_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .universal_conferences
             .get(&key)
@@ -10396,7 +10604,9 @@ impl UniversalConferenceStore for MemoryLocalStore {
             &participant.conference_id,
             &participant.participant,
         );
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if !state.universal_conferences.contains_key(&conference_key) {
             return Err(DurableStoreError::InvalidRecord);
         }
@@ -10568,7 +10778,9 @@ impl UniversalConferenceStore for MemoryLocalStore {
         active: bool,
     ) -> Result<UniversalConferenceParticipantProfile, DurableStoreError> {
         let key = universal_conference_participant_key(scope, conference_id, participant);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current_active = state
             .universal_conference_participants
             .get(&key)

@@ -2,6 +2,7 @@
 
 mod anti_entropy_store;
 mod attachment_store;
+mod authorization_revision_store;
 mod bridge_store;
 mod call_permission_grant_store;
 mod call_store;
@@ -120,7 +121,8 @@ const SQLITE_SCHEMA_V54: u32 = 54;
 const SQLITE_SCHEMA_V55: u32 = 55;
 const SQLITE_SCHEMA_V56: u32 = 56;
 const SQLITE_SCHEMA_V57: u32 = 57;
-pub const SQLITE_SCHEMA_VERSION: u32 = 57;
+const SQLITE_SCHEMA_V58: u32 = 58;
+pub const SQLITE_SCHEMA_VERSION: u32 = 58;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -699,7 +701,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v57(connection);
+        return verify_schema_v58(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -766,11 +768,27 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V54 => migrate_v54_to_v55(connection)?,
             SQLITE_SCHEMA_V55 => migrate_v55_to_v56(connection)?,
             SQLITE_SCHEMA_V56 => migrate_v56_to_v57(connection)?,
+            SQLITE_SCHEMA_V57 => migrate_v57_to_v58(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v57(connection)
+    verify_schema_v58(connection)
+}
+
+fn migrate_v57_to_v58(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v57(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    authorization_revision_store::create_v58_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V58)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v58(connection)
 }
 
 fn migrate_v56_to_v57(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -942,6 +960,11 @@ fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreErr
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v47(connection)
+}
+
+fn verify_schema_v58(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v57(connection)?;
+    authorization_revision_store::verify_v58_objects(connection)
 }
 
 fn verify_schema_v57(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1144,6 +1167,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     conference_join_grant_store::create_v55_objects(&transaction)?;
     call_permission_grant_store::create_v56_objects(&transaction)?;
     first_party_session_store::create_v57_objects(&transaction)?;
+    authorization_revision_store::create_v58_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1155,7 +1179,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
         .map_err(|error| map_sqlite_error(&error))?;
     // Verify the FULL current shape, so a fresh database can never be stamped
     // current while missing a newer object.
-    verify_schema_v57(connection)
+    verify_schema_v58(connection)
 }
 
 fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -2229,7 +2253,13 @@ fn test_restore_v49_mls_transition_shape(connection: &Connection) -> Result<(), 
 }
 
 #[cfg(test)]
+fn test_remove_v58_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(&authorization_revision_store::test_drop_sql())
+}
+
+#[cfg(test)]
 fn test_remove_v57_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v58_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS first_party_sessions;
          DROP TABLE IF EXISTS first_party_signup_admissions;",
@@ -4460,6 +4490,41 @@ mod tests {
                 assert_eq!(mode, 0);
             }
         }
+    }
+
+    #[test]
+    fn authorization_revision_moves_on_grant_and_revoke_and_survives_restart() {
+        use ucr_core::AuthorizationEvaluator;
+        let db = TestDbPath::new();
+        let scope = command("revision-scope", "revision-scope-key", b"", Some("ns-rev")).scope;
+        let subject = ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(opaque("revision-subject")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        let grant = PermissionGrant {
+            grantee: subject,
+            permission: COMMAND_ACCEPT_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope),
+        };
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let initial = store.authorization_revision().expect("sqlite is cacheable");
+        assert_eq!(
+            store.authorization_revision(),
+            Some(initial),
+            "reads never bump"
+        );
+        store.grant_permission(&grant).expect("grant");
+        let granted = store.authorization_revision().expect("revision");
+        assert!(granted > initial, "grant must bump");
+        store.revoke_permission(&grant).expect("revoke");
+        let revoked = store.authorization_revision().expect("revision");
+        assert!(revoked > granted, "revoke must bump");
+        drop(store);
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(reopened.authorization_revision(), Some(revoked), "durable");
     }
 
     #[test]

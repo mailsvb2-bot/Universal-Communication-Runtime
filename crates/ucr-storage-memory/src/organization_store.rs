@@ -25,7 +25,9 @@ impl OrganizationModeStore for MemoryLocalStore {
             return Err(DurableStoreError::InvalidRecord);
         }
         let key = profile_key(&canonical.scope, &canonical.organization);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         match state.organization_profiles.get(&key) {
             Some(existing) if existing == &canonical => Ok(DurableRecordStatus::Duplicate),
             Some(_) => Err(DurableStoreError::Conflict),
@@ -55,7 +57,9 @@ impl OrganizationModeStore for MemoryLocalStore {
         next_state: OrganizationModeState,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = profile_key(scope, organization);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let profile = state
             .organization_profiles
             .get_mut(&key)
@@ -83,7 +87,9 @@ impl OrganizationModeStore for MemoryLocalStore {
         validate_organization_managed_identity_binding(binding)
             .map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = identity_key(&binding.scope, &binding.identity_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let profile = state
             .organization_profiles
             .get(&profile_key(&binding.scope, &binding.organization))
@@ -145,7 +151,9 @@ impl OrganizationModeStore for MemoryLocalStore {
         scope: &TenantScope,
         identity_id: &IdentityId,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         state
             .organization_identities
             .remove(&identity_key(scope, identity_id))
@@ -160,7 +168,9 @@ impl OrganizationModeStore for MemoryLocalStore {
         validate_organization_managed_device_binding(binding)
             .map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = device_key(&binding.scope, &binding.device_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let profile = state
             .organization_profiles
             .get(&profile_key(&binding.scope, &binding.organization))
@@ -218,7 +228,9 @@ impl OrganizationModeStore for MemoryLocalStore {
         scope: &TenantScope,
         device_id: &DeviceId,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         state
             .organization_devices
             .remove(&device_key(scope, device_id))
