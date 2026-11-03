@@ -1525,8 +1525,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "first-party media must bind both independently trusted endpoint Devices"
     );
     assert_ne!(
-        context.trusted_device_keys[0].device_id,
-        context.trusted_device_keys[1].device_id,
+        context.trusted_device_keys[0].device_id, context.trusted_device_keys[1].device_id,
         "a single Device cannot impersonate both media endpoints"
     );
 
