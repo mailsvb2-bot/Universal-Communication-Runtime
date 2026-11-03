@@ -1402,7 +1402,8 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     // Realtime uses a SECOND SQLite connection, not the BFF's in-process
     // store handle. A Hangup committed by BFF must be observed by the
     // independently instantiated Realtime owner on its next authorization.
-    let realtime_store = Arc::new(SqliteLocalStore::open(&db.0).expect("independent Realtime SQLite"));
+    let realtime_store =
+        Arc::new(SqliteLocalStore::open(&db.0).expect("independent Realtime SQLite"));
     let realtime = GrpcRealtimeService::new(
         Arc::new(ucr_core::SystemServiceQuotaClock),
         Arc::clone(&realtime_store),
