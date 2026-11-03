@@ -9866,6 +9866,25 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        // Match the SQLite canonical Call/Group fence. A delayed issuer
+        // cannot persist a reusable first-party Join after Hangup, even when
+        // the signing process still holds an older accepted Call snapshot.
+        if grant.integration_id.as_opaque().as_str() == "ucr-first-party-direct-media" {
+            let media = state
+                .calls
+                .get(&(scope_key(&grant.scope), grant.call_id.as_opaque().as_str().to_owned()))
+                .ok_or(DurableStoreError::PermissionDenied)?;
+            let group = state
+                .groups
+                .get(&(scope_key(&grant.scope), grant.conference_id.as_opaque().as_str().to_owned()))
+                .ok_or(DurableStoreError::PermissionDenied)?;
+            if media.conversation.kind != ucr_model::ConversationKind::PrivateGroup
+                || media.signalling_state == ucr_model::CallSignallingState::Terminated
+                || media.conversation != group.conversation
+            {
+                return Err(DurableStoreError::PermissionDenied);
+            }
+        }
         state.conference_join_grants.insert(key, grant.clone());
         Ok(DurableRecordStatus::Persisted)
     }
