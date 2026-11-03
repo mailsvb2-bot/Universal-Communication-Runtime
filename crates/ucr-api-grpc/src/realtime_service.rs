@@ -1111,6 +1111,26 @@ where
                         .map_err(map_registry_error)?;
                     let (group_id, mode) = self.mls_admission_context(&claims)?;
                     let binding = self.live_media_binding(&claims);
+                    // The direct-call browser must not receive an apparently
+                    // usable MLS admission with a partial or missing canonical
+                    // peer trust roster. Never fill missing identity/Device
+                    // evidence with an empty descriptor and leave a client to
+                    // guess the media signing keys or negotiation epoch.
+                    if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
+                        let current = binding
+                            .as_ref()
+                            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
+                        let keys = &current.trusted_device_keys;
+                        if current.negotiation_ref.is_none()
+                            || current.negotiation_generation == 0
+                            || current.group_crypto_epoch == 0
+                            || keys.len() != 2
+                            || keys.iter().any(|key| key.device_id.is_none() || key.key_id.is_none() || key.public_key.len() != 32)
+                            || keys[0].device_id == keys[1].device_id
+                        {
+                            return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
+                        }
+                    }
                     Ok(pb::RealtimeMlsAdmissionContext {
                         group_id: Some(pb_opaque(group_id.as_opaque())),
                         endpoint_state_mode: mode as i32,
