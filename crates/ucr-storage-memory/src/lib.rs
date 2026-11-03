@@ -9870,13 +9870,16 @@ impl ConferenceJoinGrantStore for MemoryLocalStore {
         // cannot persist a reusable first-party Join after Hangup, even when
         // the signing process still holds an older accepted Call snapshot.
         if grant.integration_id.as_opaque().as_str() == "ucr-first-party-direct-media" {
+            let scope = scope_key(&grant.scope);
+            let media_key = (scope.clone(), grant.call_id.as_opaque().as_str().to_owned());
+            let group_key = (scope, grant.conference_id.as_opaque().as_str().to_owned());
             let media = state
                 .calls
-                .get(&(scope_key(&grant.scope), grant.call_id.as_opaque().as_str().to_owned()))
+                .get(&media_key)
                 .ok_or(DurableStoreError::PermissionDenied)?;
             let group = state
                 .groups
-                .get(&(scope_key(&grant.scope), grant.conference_id.as_opaque().as_str().to_owned()))
+                .get(&group_key)
                 .ok_or(DurableStoreError::PermissionDenied)?;
             if media.conversation.kind != ucr_model::ConversationKind::PrivateGroup
                 || media.signalling_state == ucr_model::CallSignallingState::Terminated
