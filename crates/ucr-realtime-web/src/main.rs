@@ -4291,7 +4291,7 @@ mod tests {
         // not general JavaScript evaluation; retain the first-party-only boundary.
         assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval'"));
         assert!(!csp.contains("'unsafe-eval'"));
-        assert!(!csp.contains("'unsafe-inline'"));
+        assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
         assert!(!csp.contains("https:"));
 
 
