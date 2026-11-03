@@ -1117,10 +1117,9 @@ where
                     // evidence with an empty descriptor and leave a client to
                     // guess the media signing keys or negotiation epoch.
                     if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
-                        let authenticated_device = claims
-                            .device_id
-                            .as_ref()
-                            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+                        let authenticated_device = claims.device_id.as_ref().ok_or_else(|| {
+                            CanonicalError::new(CanonicalErrorCode::Unauthenticated)
+                        })?;
                         require_complete_first_party_media_binding(
                             binding.as_ref(),
                             authenticated_device,
@@ -4364,7 +4363,9 @@ fn require_complete_first_party_media_binding(
             key.device_id.is_none() || key.key_id.is_none() || key.public_key.len() != 32
         })
         || keys[0].device_id == keys[1].device_id
-        || !keys.iter().any(|key| key.device_id.as_ref() == Some(&authenticated_device))
+        || !keys
+            .iter()
+            .any(|key| key.device_id.as_ref() == Some(&authenticated_device))
     {
         return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
     }
