@@ -22,8 +22,7 @@ use ucr_core::{
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_group_mls::{
     EndpointMlsCommittedDevicePairStore, GroupMlsAtomicStore, GroupMlsBootstrapStore,
-    GroupMlsStoreError, MAX_MLS_KEY_PACKAGE_BYTES,
-    MlsDeviceAdmission, MlsDeviceBootstrap,
+    GroupMlsStoreError, MAX_MLS_KEY_PACKAGE_BYTES, MlsDeviceAdmission, MlsDeviceBootstrap,
 };
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
@@ -4429,31 +4428,36 @@ mod first_party_media_binding_tests {
         let device_a = DeviceId::from_opaque(OpaqueId::new("device-a").unwrap());
         let device_c = DeviceId::from_opaque(OpaqueId::new("device-c").unwrap());
         let committed = ("device-a".to_owned(), "device-b".to_owned());
-        assert!(require_complete_first_party_media_binding(None, &device_a, &committed).is_err());
+        let allowed = |binding: Option<&LiveMediaBinding>,
+                       device: &DeviceId,
+                       pair: &(String, String)| {
+            require_complete_first_party_media_binding(binding, device, pair).is_ok()
+        };
+        assert!(!allowed(None, &device_a, &committed));
         let mut binding = valid_binding();
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_ok());
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_c, &committed).is_err());
-        // A new active Device for the same Identity cannot silently replace
-        // the endpoint MLS member that committed the Group epoch.
+        assert!(allowed(Some(&binding), &device_a, &committed));
+        assert!(!allowed(Some(&binding), &device_c, &committed));
+        // An active replacement Device cannot silently substitute for the
+        // endpoint MLS member committed to this Group.
         let wrong_pair = ("device-a".to_owned(), "device-c".to_owned());
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &wrong_pair).is_err());
+        assert!(!allowed(Some(&binding), &device_a, &wrong_pair));
         let duplicate_pair = ("device-a".to_owned(), "device-a".to_owned());
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &duplicate_pair).is_err());
+        assert!(!allowed(Some(&binding), &device_a, &duplicate_pair));
         binding.trusted_device_keys.pop();
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_err());
+        assert!(!allowed(Some(&binding), &device_a, &committed));
         let mut binding = valid_binding();
         let first_device = binding.trusted_device_keys[0].device_id.clone();
         binding.trusted_device_keys[1].device_id = first_device;
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_err());
+        assert!(!allowed(Some(&binding), &device_a, &committed));
         let mut binding = valid_binding();
         binding.trusted_device_keys[1].public_key.clear();
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_err());
+        assert!(!allowed(Some(&binding), &device_a, &committed));
         let mut binding = valid_binding();
         binding.negotiation_ref = None;
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_err());
+        assert!(!allowed(Some(&binding), &device_a, &committed));
         let mut binding = valid_binding();
         binding.group_crypto_epoch = 0;
-        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a, &committed).is_err());
+        assert!(!allowed(Some(&binding), &device_a, &committed));
     }
 }
 
