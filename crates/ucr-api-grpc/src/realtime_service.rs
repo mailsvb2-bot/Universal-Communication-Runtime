@@ -1117,7 +1117,14 @@ where
                     // evidence with an empty descriptor and leave a client to
                     // guess the media signing keys or negotiation epoch.
                     if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
-                        require_complete_first_party_media_binding(binding.as_ref())?;
+                        let authenticated_device = claims
+                            .device_id
+                            .as_ref()
+                            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+                        require_complete_first_party_media_binding(
+                            binding.as_ref(),
+                            authenticated_device,
+                        )?;
                     }
                     Ok(pb::RealtimeMlsAdmissionContext {
                         group_id: Some(pb_opaque(group_id.as_opaque())),
@@ -4343,10 +4350,12 @@ struct LiveMediaBinding {
 
 fn require_complete_first_party_media_binding(
     binding: Option<&LiveMediaBinding>,
+    authenticated_device_id: &DeviceId,
 ) -> Result<(), CanonicalError> {
     let current =
         binding.ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
     let keys = &current.trusted_device_keys;
+    let authenticated_device = pb_opaque(authenticated_device_id.as_opaque());
     if current.negotiation_ref.is_none()
         || current.negotiation_generation == 0
         || current.group_crypto_epoch == 0
@@ -4355,6 +4364,7 @@ fn require_complete_first_party_media_binding(
             key.device_id.is_none() || key.key_id.is_none() || key.public_key.len() != 32
         })
         || keys[0].device_id == keys[1].device_id
+        || !keys.iter().any(|key| key.device_id.as_ref() == Some(&authenticated_device))
     {
         return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
     }
@@ -4382,24 +4392,27 @@ mod first_party_media_binding_tests {
 
     #[test]
     fn first_party_mls_context_requires_complete_independent_endpoint_trust() {
-        assert!(require_complete_first_party_media_binding(None).is_err());
+        let device_a = DeviceId::from_opaque(OpaqueId::new("device-a").unwrap());
+        let device_c = DeviceId::from_opaque(OpaqueId::new("device-c").unwrap());
+        assert!(require_complete_first_party_media_binding(None, &device_a).is_err());
         let mut binding = valid_binding();
-        assert!(require_complete_first_party_media_binding(Some(&binding)).is_ok());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_ok());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_c).is_err());
         binding.trusted_device_keys.pop();
-        assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_err());
         let mut binding = valid_binding();
         let first_device = binding.trusted_device_keys[0].device_id.clone();
         binding.trusted_device_keys[1].device_id = first_device;
-        assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_err());
         let mut binding = valid_binding();
         binding.trusted_device_keys[1].public_key.clear();
-        assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_err());
         let mut binding = valid_binding();
         binding.negotiation_ref = None;
-        assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_err());
         let mut binding = valid_binding();
         binding.group_crypto_epoch = 0;
-        assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
+        assert!(require_complete_first_party_media_binding(Some(&binding), &device_a).is_err());
     }
 }
 
