@@ -303,6 +303,40 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
             };
         }
         let namespace = namespace_storage_key(&grant.scope);
+        // The first-party Join bearer must be persisted under the SAME SQLite
+        // writer fence as parent/derived Hangup. A late HTTP issuer must never
+        // publish a new reusable credential for an already terminated media Call.
+        // The existing canonical Call and Group tables are the only authority.
+        if grant.integration_id.as_opaque().as_str() == FIRST_PARTY_MEDIA_JOIN_INTEGRATION {
+            let media_live: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM calls c
+                         JOIN groups g
+                           ON g.tenant_id=c.tenant_id
+                          AND g.namespace_present=c.namespace_present
+                          AND g.namespace_id=c.namespace_id
+                          AND g.conversation_id=c.conversation_id
+                         WHERE c.tenant_id=?1 AND c.namespace_present=?2
+                           AND c.namespace_id=?3 AND c.call_id=?4
+                           AND g.group_id=?5
+                           AND c.conversation_kind='private_group'
+                           AND c.signalling_state IN ('inviting','ringing','active','reconnecting')
+                     )",
+                    params![
+                        grant.scope.tenant_id.as_opaque().as_str(),
+                        namespace.present,
+                        namespace.value,
+                        grant.call_id.as_opaque().as_str(),
+                        grant.conference_id.as_opaque().as_str(),
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|error| map_sqlite_error(&error))?;
+            if !media_live {
+                return Err(DurableStoreError::PermissionDenied);
+            }
+        }
         let group_id = grant.conference_id.as_opaque().as_str();
         let (conference_id, media_group_id) =
             if grant.integration_id.as_opaque().as_str() == FIRST_PARTY_MEDIA_JOIN_INTEGRATION {
