@@ -1116,7 +1116,8 @@ where
                     // Resolve the exact two committed MLS Devices BEFORE reading
                     // signing keys; selecting the sole active Device would deny
                     // legitimate calls or substitute a different trusted Device.
-                    let committed_pair = if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
+                    let committed_pair = if claims.call_id.as_opaque().as_str().starts_with("fp-m-")
+                    {
                         Some(
                             self.mls_admission_store
                                 .as_ref()
