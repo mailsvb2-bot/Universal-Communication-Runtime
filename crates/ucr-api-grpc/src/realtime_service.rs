@@ -1117,19 +1117,7 @@ where
                     // evidence with an empty descriptor and leave a client to
                     // guess the media signing keys or negotiation epoch.
                     if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
-                        let current = binding
-                            .as_ref()
-                            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
-                        let keys = &current.trusted_device_keys;
-                        if current.negotiation_ref.is_none()
-                            || current.negotiation_generation == 0
-                            || current.group_crypto_epoch == 0
-                            || keys.len() != 2
-                            || keys.iter().any(|key| key.device_id.is_none() || key.key_id.is_none() || key.public_key.len() != 32)
-                            || keys[0].device_id == keys[1].device_id
-                        {
-                            return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
-                        }
+                        require_complete_first_party_media_binding(binding.as_ref())?;
                     }
                     Ok(pb::RealtimeMlsAdmissionContext {
                         group_id: Some(pb_opaque(group_id.as_opaque())),
@@ -4351,6 +4339,67 @@ struct LiveMediaBinding {
     group_crypto_epoch: u64,
     group_crypto_state_ref: OpaqueId,
     trusted_device_keys: Vec<pb::RealtimeEndpointTrustKey>,
+}
+
+fn require_complete_first_party_media_binding(
+    binding: Option<&LiveMediaBinding>,
+) -> Result<(), CanonicalError> {
+    let current =
+        binding.ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
+    let keys = &current.trusted_device_keys;
+    if current.negotiation_ref.is_none()
+        || current.negotiation_generation == 0
+        || current.group_crypto_epoch == 0
+        || keys.len() != 2
+        || keys.iter().any(|key| {
+            key.device_id.is_none() || key.key_id.is_none() || key.public_key.len() != 32
+        })
+        || keys[0].device_id == keys[1].device_id
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod first_party_media_binding_tests {
+    use super::*;
+
+    fn valid_binding() -> LiveMediaBinding {
+        let endpoint = |device: &str, key: &str| pb::RealtimeEndpointTrustKey {
+            device_id: Some(pb_opaque(&OpaqueId::new(device).unwrap())),
+            key_id: Some(pb_opaque(&OpaqueId::new(key).unwrap())),
+            public_key: vec![7; 32],
+        };
+        LiveMediaBinding {
+            negotiation_ref: Some(OpaqueId::new("negotiation-1").unwrap()),
+            negotiation_generation: 1,
+            group_crypto_epoch: 1,
+            group_crypto_state_ref: OpaqueId::new("state-1").unwrap(),
+            trusted_device_keys: vec![endpoint("device-a", "key-a"), endpoint("device-b", "key-b")],
+        }
+    }
+
+    #[test]
+    fn first_party_mls_context_requires_complete_independent_endpoint_trust() {
+        assert!(require_complete_first_party_media_binding(None).is_err());
+        let mut binding = valid_binding();
+        assert!(require_complete_first_party_media_binding(Some(&binding)).is_ok());
+        binding.trusted_device_keys.pop();
+        assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
+        let mut binding = valid_binding();
+        binding.trusted_device_keys[1].device_id = binding.trusted_device_keys[0].device_id.clone();
+        assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
+        let mut binding = valid_binding();
+        binding.trusted_device_keys[1].public_key.clear();
+        assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
+        let mut binding = valid_binding();
+        binding.negotiation_ref = None;
+        assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
+        let mut binding = valid_binding();
+        binding.group_crypto_epoch = 0;
+        assert!(require_complete_first_party_media_binding(Some(&binding)).is_err());
+    }
 }
 
 fn canonical_negotiation_ref(call_id: &CallId) -> Result<OpaqueId, CanonicalError> {
