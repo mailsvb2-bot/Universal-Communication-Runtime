@@ -2913,7 +2913,7 @@ fn frame_ancestor_policy(config: Option<&str>) -> (String, bool) {
         };
         if uri.scheme_str() != Some("https")
             || uri.authority().is_none_or(|authority| authority.host().is_empty())
-            || uri.path_and_query().is_some()
+            || uri.path_and_query().is_some_and(|path| path.as_str() != "/")
             || !origin[8..].bytes().all(|byte| {
                 byte.is_ascii_alphanumeric()
                     || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
