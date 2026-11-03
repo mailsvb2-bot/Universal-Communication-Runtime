@@ -316,6 +316,12 @@ document.getElementById("ucr-diagnostics-save")?.addEventListener("click",()=>{
   const link=document.createElement("a");link.href=url;link.download="ucr-call-diagnostics.json";
   link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 });
+// UI-only polling (chat, reactions, active speaker, roster) is skipped while
+// the tab is hidden; media, heartbeat, presence and membership refresh are NOT
+// affected so a call keeps running in a background tab. Everything skipped is
+// fetched once on visibilitychange. Browsers additionally clamp hidden-tab
+// timers, so skipping avoids bursts of queued requests on return.
+function ucrBackgroundIdle(){return typeof document!=="undefined"&&document.hidden===true;}
 // Snapshot after top-level media state has finished initializing.
 setInterval(()=>{
   if(document.hidden)return;
@@ -2200,8 +2206,8 @@ async function activateAdmittedMedia(){
   if(typeof startRoomViewingCopy==="function")startRoomViewingCopy();
   if(typeof startRoomRoster==="function")startRoomRoster();
   ui.state.textContent="Connecting";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
-  if(!reactionTimer){reactionTimer=setInterval(()=>{pollReactions().catch(()=>{});},1000);}
-  if(!chatTimer){chatTimer=setInterval(()=>{pollChat().catch(()=>{});},1000);}
+  if(!reactionTimer){reactionTimer=setInterval(()=>{if(ucrBackgroundIdle())return;pollReactions().catch(()=>{});},1000);}
+  if(!chatTimer){chatTimer=setInterval(()=>{if(ucrBackgroundIdle())return;pollChat().catch(()=>{});},1000);}
   pollReactions().catch(()=>{});
   pollChat().catch(()=>{});
   // Quality sampling must start only after activateE2eeAdapter succeeds.
@@ -2870,7 +2876,7 @@ async function startActiveSpeakerMonitoring(){
     audioLevelSource.connect(audioLevelAnalyser);
   }
   audioLevelTimer=setInterval(()=>{reportLocalAudioLevel().catch(()=>{});},750);
-  activeSpeakerTimer=setInterval(()=>{pollActiveSpeaker().catch(()=>{});},1000);
+  activeSpeakerTimer=setInterval(()=>{if(ucrBackgroundIdle())return;pollActiveSpeaker().catch(()=>{});},1000);
   reportLocalAudioLevel().catch(()=>{});
   pollActiveSpeaker().catch(()=>{});
 }
@@ -3523,7 +3529,7 @@ function startRoomRoster(){
   if(typeof sessionStorage==="undefined"||sessionStorage.getItem("ucrLocalRoom")!=="1")return;
   if(roomRosterTimer)return;
   refreshRoomRoster().catch(()=>{});
-  roomRosterTimer=setInterval(()=>{refreshRoomRoster().catch(()=>{});},3000);
+  roomRosterTimer=setInterval(()=>{if(ucrBackgroundIdle())return;refreshRoomRoster().catch(()=>{});},3000);
 }
 async function refreshRoomRoster(){
   if(!token)return;
@@ -3957,7 +3963,9 @@ window.addEventListener("offline",()=>{if(sessionActive){const generation=sessio
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
 document.addEventListener("visibilitychange",()=>{
   if(!document.hidden&&sessionActive&&mediaActive){
-    void pollChat();void pollReactions();void pollActiveSpeaker();
+    // Catch up immediately on everything skipped while hidden.
+    pollChat().catch(()=>{});pollReactions().catch(()=>{});pollActiveSpeaker().catch(()=>{});
+    if(typeof refreshRoomRoster==="function"&&roomRosterTimer)refreshRoomRoster().catch(()=>{});
     ucrRenderDiagnostics();
   }
 });
