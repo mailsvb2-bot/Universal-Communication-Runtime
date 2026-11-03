@@ -268,6 +268,37 @@ export function ucrAdaptiveVideoStep(
     {stage: stage - 1, healthySamples: 0} :
     {stage, healthySamples: Math.min(5, next)};
 }
+/**
+ * Item C5: optional loss/RTT signal for the existing stage controller.
+ * Thresholds follow the loss-based controller of draft-ietf-rmcat-gcc
+ * (decrease above 10% loss, no increase between 2% and 10%); the RTT rule
+ * treats a doubling of the smoothed RTT over the lowest observed RTT as
+ * queue build-up. These are tunable defaults, not measured results.
+ * Enabled only with globalThis.ucrLossRttBwe === true (default off) AND a
+ * transport-installed globalThis.ucrEncryptedTransportPathStats() returning
+ * measured {lossFraction, rttMs}; missing/invalid stats change nothing.
+ */
+export const UCR_BWE_LOSS_DECREASE = 0.1;
+export const UCR_BWE_LOSS_HOLD = 0.02;
+export const UCR_BWE_RTT_FACTOR = 2;
+export interface UcrBweState { minRttMs: number; smoothedRttMs: number }
+export function ucrLossRttPressure(
+  state: UcrBweState, sample: {lossFraction: number; rttMs: number} | null,
+): {pressure: boolean; hold: boolean; state: UcrBweState} {
+  if (!sample || !Number.isFinite(sample.lossFraction) || !Number.isFinite(sample.rttMs) ||
+      sample.lossFraction < 0 || sample.lossFraction > 1 || sample.rttMs <= 0) {
+    return {pressure: false, hold: false, state};
+  }
+  const minRttMs = Math.min(state.minRttMs, sample.rttMs);
+  const smoothedRttMs = state.smoothedRttMs > 0 ?
+    state.smoothedRttMs * 0.875 + sample.rttMs * 0.125 : sample.rttMs;
+  const next = {minRttMs, smoothedRttMs};
+  const rttPressure = smoothedRttMs > minRttMs * UCR_BWE_RTT_FACTOR;
+  if (sample.lossFraction > UCR_BWE_LOSS_DECREASE || rttPressure) {
+    return {pressure: true, hold: false, state: next};
+  }
+  return {pressure: false, hold: sample.lossFraction >= UCR_BWE_LOSS_HOLD, state: next};
+}
 // Aggregate quality telemetry exposed to privacy-safe call diagnostics.
 const ucrVideoAdaptation = {stage: 0, changes: 0, bufferedBytes: 0, encoderQueued: 0, encodeLatencyMs: 0, encodeLatencyMaxMs: 0};
 (globalThis as unknown as {__ucrVideoAdaptation?: typeof ucrVideoAdaptation})
@@ -595,6 +626,19 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         return Number.isFinite(measured) && measured >= 0 ? measured : 1_048_577;
       } catch { return 1_048_577; }
     };
+    let bweState: UcrBweState = {minRttMs: Number.POSITIVE_INFINITY, smoothedRttMs: 0};
+    const readLossRtt = (): {pressure: boolean; hold: boolean} => {
+      const g = globalThis as unknown as {ucrLossRttBwe?: unknown;
+        ucrEncryptedTransportPathStats?: () => {lossFraction: number; rttMs: number} | null};
+      if (g.ucrLossRttBwe !== true || typeof g.ucrEncryptedTransportPathStats !== "function") {
+        return {pressure: false, hold: false};
+      }
+      let sample: {lossFraction: number; rttMs: number} | null = null;
+      try { sample = g.ucrEncryptedTransportPathStats(); } catch { sample = null; }
+      const result = ucrLossRttPressure(bweState, sample);
+      bweState = result.state;
+      return result;
+    };
     const reader = processor.readable.getReader();
     this.#readers.push(reader);
     const pump = async () => {
@@ -638,10 +682,11 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             // CPU/GPU contention even when the network DataChannel is empty.
             // Recover only after sustained healthy samples.
             const devicePressure = videoPressureSamples >= 3;
+            const bwe = readLossRtt();
             const next = ucrAdaptiveVideoStep(qualityStage, readBuffered(),
-              encoder.encodeQueueSize, healthySamples, devicePressure);
+              encoder.encodeQueueSize, healthySamples, devicePressure || bwe.pressure);
             videoPressureSamples = 0;
-            healthySamples = next.healthySamples;
+            healthySamples = bwe.hold ? 0 : next.healthySamples;
             ucrVideoAdaptation.bufferedBytes = readBuffered();
             ucrVideoAdaptation.encoderQueued = encoder.encodeQueueSize;
             if (next.stage !== qualityStage) {
