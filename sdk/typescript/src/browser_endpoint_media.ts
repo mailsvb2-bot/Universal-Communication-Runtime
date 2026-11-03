@@ -8,6 +8,7 @@ import {
 import {
   UcrBrowserWebCodecsConsumer,
   UcrBrowserWebCodecsProducer,
+  ucrBrowserMediaPath,
   ucrWebCodecsSupported,
 } from "./browser_webcodecs_media.ts";
 
@@ -45,8 +46,10 @@ export function createUcrBrowserEndpointMediaAdapter(
   options: UcrBrowserEndpointMediaOptions,
 ): UcrEndpointE2eeAdapterV1 {
   if (!ucrWebCodecsSupported()) {
+    const diagnosis = ucrBrowserMediaPath();
     throw new Error(
-      "WebCodecs audio/video capture and playback unavailable; install a supported platform codec adapter",
+      "WebCodecs audio/video capture and playback unavailable; install a supported platform codec adapter" +
+        (diagnosis.path === "webcodecs" ? "" : ` (${diagnosis.reason})`),
     );
   }
   if (!options.bridge || !options.trustedKeys ||

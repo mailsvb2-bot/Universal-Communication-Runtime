@@ -86,6 +86,55 @@ export function ucrWebCodecsSupported(): boolean {
     b.AudioDecoder && b.VideoDecoder && b.EncodedAudioChunk && b.EncodedVideoChunk);
 }
 
+/**
+ * Item C4: explains WHY the main-thread WebCodecs path is unavailable and
+ * which existing UCR path can still run. Pure feature detection; no UA sniff.
+ * - "webcodecs": MediaStreamTrackProcessor on the window plus all codecs.
+ * - "native-rtp": no window MSTP (Firefox; Safari exposes MSTP only in
+ *   dedicated workers) but RTCRtpScriptTransform exists, so the native
+ *   encrypted RTP path (native_rtp_media.ts) can carry media.
+ * - "unsupported": neither; the caller must show a clear error.
+ */
+export type UcrBrowserMediaPath =
+  | {readonly path: "webcodecs"}
+  | {readonly path: "native-rtp"; readonly reason: string}
+  | {readonly path: "unsupported"; readonly reason: string};
+
+export function ucrBrowserMediaPath(globals: object = globalThis): UcrBrowserMediaPath {
+  const g = globals as WebCodecsGlobals & {RTCRtpScriptTransform?: unknown; RTCPeerConnection?: unknown};
+  const codecs = !!(g.AudioEncoder && g.VideoEncoder && g.AudioDecoder && g.VideoDecoder &&
+    g.EncodedAudioChunk && g.EncodedVideoChunk);
+  if (codecs && g.MediaStreamTrackProcessor) return {path: "webcodecs"};
+  const missing = !g.MediaStreamTrackProcessor ? "MediaStreamTrackProcessor" : "WebCodecs encoders/decoders";
+  if (typeof g.RTCPeerConnection === "function" && typeof g.RTCRtpScriptTransform === "function") {
+    return {path: "native-rtp", reason: `${missing} unavailable in this browser window; use the native encrypted RTP path (RTCRtpScriptTransform)`};
+  }
+  return {path: "unsupported", reason: `${missing} and RTCRtpScriptTransform unavailable; this browser cannot run end-to-end encrypted media. Use a current Chrome/Edge/Firefox/Safari`};
+}
+
+/**
+ * Item C3 (preparatory): picks ONE encoder configuration with temporal
+ * scalability (L1T3, then L1T2) so a single encode can feed both full and
+ * reduced-frame-rate receivers, preferring hardware. Returns null when the
+ * browser supports neither, so callers keep the existing path. Not yet wired
+ * into the producer (needs SFU temporal-layer selection).
+ */
+export async function ucrSelectTemporalScalableConfig(
+  encoderClass: {isConfigSupported?(config: unknown): Promise<{supported?: boolean}>} | undefined,
+  base: Readonly<Record<string, unknown>>,
+): Promise<Record<string, unknown> | null> {
+  if (!encoderClass?.isConfigSupported) return null;
+  for (const scalabilityMode of ["L1T3", "L1T2"]) {
+    for (const hardwareAcceleration of ["prefer-hardware", "no-preference"]) {
+      const config = {...base, scalabilityMode, hardwareAcceleration};
+      try {
+        if ((await encoderClass.isConfigSupported(config)).supported === true) return config;
+      } catch { /* rejected config: try the next one */ }
+    }
+  }
+  return null;
+}
+
 const AUDIO_CODEC = "opus";
 const VIDEO_CODEC = "vp8";
 const VIDEO_CODEC_H264 = "avc1.42002a";
