@@ -1399,16 +1399,19 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     assert!(members.contains(&claims[0].participant));
     assert!(members.contains(&claims[1].participant));
 
-    // The real gRPC Realtime owner over the SAME SQLite store and issuer.
+    // Realtime uses a SECOND SQLite connection, not the BFF's in-process
+    // store handle. A Hangup committed by BFF must be observed by the
+    // independently instantiated Realtime owner on its next authorization.
+    let realtime_store = Arc::new(SqliteLocalStore::open(&db.0).expect("independent Realtime SQLite"));
     let realtime = GrpcRealtimeService::new(
         Arc::new(ucr_core::SystemServiceQuotaClock),
-        Arc::clone(&server.store),
-        Arc::clone(&server.store),
+        Arc::clone(&realtime_store),
+        Arc::clone(&realtime_store),
         Arc::clone(&server.issuer),
         Arc::new(ucr_realtime::RealtimeSessionRegistry::new(16, 4)),
         Arc::new(ucr_conference::ConferenceRuntimeState::new()),
     )
-    .with_mls_admission_store(Arc::clone(&server.store));
+    .with_mls_admission_store(Arc::clone(&realtime_store));
     let mut generations = Vec::new();
     for (claim, token) in claims.iter().zip(&tokens) {
         let joined = realtime
