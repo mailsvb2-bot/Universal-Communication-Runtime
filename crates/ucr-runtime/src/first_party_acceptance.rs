@@ -1511,12 +1511,23 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .await
         .unwrap()
         .into_inner();
-    assert!(
-        matches!(
-            live_mls.result,
-            Some(pb::realtime_get_mls_admission_context_response::Result::Context(_))
-        ),
-        "active accepted Call must admit the Device MLS context: {live_mls:?}"
+    let Some(pb::realtime_get_mls_admission_context_response::Result::Context(context)) =
+        live_mls.result
+    else {
+        panic!("active accepted Call must admit the Device MLS context: {live_mls:?}");
+    };
+    assert!(context.media_negotiation_ref.is_some());
+    assert!(context.media_negotiation_generation > 0);
+    assert!(context.group_crypto_epoch > 0);
+    assert_eq!(
+        context.trusted_device_keys.len(),
+        2,
+        "first-party media must bind both independently trusted endpoint Devices"
+    );
+    assert_ne!(
+        context.trusted_device_keys[0].device_id,
+        context.trusted_device_keys[1].device_id,
+        "a single Device cannot impersonate both media endpoints"
     );
 
     // A second BFF process can revoke Alice's durable Join while the parent
