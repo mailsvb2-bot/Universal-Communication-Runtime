@@ -2894,7 +2894,42 @@ fn html_response(status: StatusCode, html: &'static str) -> HttpResponse {
 
 /// Hash the exact inline bootstrap scripts rather than enabling unsafe-inline.
 /// Endpoint MLS needs wasm-unsafe-eval, but arbitrary script evaluation is denied.
-fn call_document_csp(html: &str) -> String {
+/// Same-origin iframe embedding is the default; only operator-allowlisted
+/// HTTPS origins can frame the call document. Invalid input fails closed.
+fn frame_ancestor_policy(config: Option<&str>) -> (String, bool) {
+    let mut sources = vec!["'self'".to_owned()];
+    let Some(config) = config.filter(|value| !value.trim().is_empty()) else {
+        return ("'self'".to_owned(), false);
+    };
+    if config.len() > 2048 {
+        return ("'self'".to_owned(), false);
+    }
+    for origin in config.split_whitespace() {
+        if sources.len() > 16 || !origin.starts_with("https://") {
+            return ("'self'".to_owned(), false);
+        }
+        let Ok(uri) = origin.parse::<hyper::Uri>() else {
+            return ("'self'".to_owned(), false);
+        };
+        if uri.scheme_str() != Some("https")
+            || uri.authority().is_none_or(|authority| authority.host().is_empty())
+            || uri.path_and_query().is_some()
+            || !origin[8..].bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+            })
+        {
+            return ("'self'".to_owned(), false);
+        }
+        if !sources.iter().any(|source| source == origin) {
+            sources.push(origin.to_owned());
+        }
+    }
+    let cross_origin = sources.len() > 1;
+    (sources.join(" "), cross_origin)
+}
+
+fn call_document_csp(html: &str, frame_ancestors: &str) -> String {
     use sha2::{Digest as _, Sha256};
     let mut hashes = String::new();
     let mut rest = html;
@@ -2911,27 +2946,44 @@ fn call_document_csp(html: &str) -> String {
     }
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'{hashes}; \
-         style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
+         style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; \
          media-src 'self' blob:; worker-src 'self' blob:; \
          connect-src 'self' http://127.0.0.1:* http://localhost:* http://[::1]:*; \
-         object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+         object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors {frame_ancestors}"
     )
 }
 
 fn html_body_response(status: StatusCode, html: String) -> HttpResponse {
-    let csp = call_document_csp(&html);
-    Response::builder()
+    let configured = std::env::var("UCR_REALTIME_WEB_FRAME_ANCESTORS").ok();
+    html_body_response_with_policy(
+        status,
+        html,
+        frame_ancestor_policy(configured.as_deref()),
+    )
+}
+
+fn html_body_response_with_policy(
+    status: StatusCode,
+    html: String,
+    (ancestors, cross_origin): (String, bool),
+) -> HttpResponse {
+    let csp = call_document_csp(&html, &ancestors);
+    let mut builder = Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "text/html; charset=utf-8")
         .header(CACHE_CONTROL, "no-store")
         .header("Referrer-Policy", "no-referrer")
         .header("X-Content-Type-Options", "nosniff")
-        .header("X-Frame-Options", "DENY")
         .header(
             "Permissions-Policy",
             "camera=(self), microphone=(self), display-capture=(self), geolocation=()",
         )
-        .header("Content-Security-Policy", csp)
+        .header("Content-Security-Policy", csp);
+    // X-Frame-Options cannot express cross-origin allowlists.
+    if !cross_origin {
+        builder = builder.header("X-Frame-Options", "SAMEORIGIN");
+    }
+    builder
         .body(full_body(Bytes::from(html)))
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
@@ -3522,9 +3574,9 @@ mod tests {
             let headers = response.headers();
             assert_eq!(headers["Referrer-Policy"], "no-referrer");
             assert_eq!(headers["X-Content-Type-Options"], "nosniff");
-            assert_eq!(headers["X-Frame-Options"], "DENY");
+            assert_eq!(headers["X-Frame-Options"], "SAMEORIGIN");
             let csp = headers["Content-Security-Policy"].to_str().expect("csp");
-            assert!(csp.contains("frame-ancestors 'none'"));
+            assert!(csp.contains("frame-ancestors 'self'"));
             assert!(csp.contains("object-src 'none'"));
             assert!(!csp.contains("'unsafe-eval'"));
             assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
@@ -3533,7 +3585,7 @@ mod tests {
         let start = html.find("<script>").expect("inline script") + "<script>".len();
         let end = start + html[start..].find("</script>").expect("end");
         let hash = super::STANDARD.encode(Sha256::digest(&html.as_bytes()[start..end]).as_slice());
-        assert!(super::call_document_csp(&html).contains(&format!("'sha256-{hash}'")));
+        assert!(super::call_document_csp(&html, "'self'").contains(&format!("'sha256-{hash}'")));
     }
 
     #[tokio::test]
