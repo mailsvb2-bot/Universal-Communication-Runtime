@@ -2045,6 +2045,40 @@ where
     E: GroupMediaE2eeCapabilityProvider,
     C: SfuCapabilityProvider,
 {
+    let store = runtime.store;
+    dispatch_validated_forward_batch_cached_with(
+        runtime,
+        cache,
+        &|| store.authorization_revision(),
+        batch,
+        sink,
+    )
+}
+
+/// Same as [`dispatch_validated_forward_batch_cached`] for embedders whose
+/// store type is not statically an [`AuthorizationEvaluator`]: the caller
+/// supplies the store's monotonic authorization revision. `None` bypasses
+/// the cache.
+///
+/// # Errors
+/// Same as [`dispatch_validated_forward_batch`].
+pub fn dispatch_validated_forward_batch_cached_with<A, S, E, C>(
+    runtime: &SfuRuntime<'_, A, S, E, C>,
+    cache: &SfuAuthorizationCache,
+    store_revision: &dyn Fn() -> Option<u64>,
+    batch: &SfuValidatedForwardBatch,
+    sink: &dyn SfuForwardSink,
+) -> Result<SfuForwardOutcome, SfuError>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+    E: GroupMediaE2eeCapabilityProvider,
+    C: SfuCapabilityProvider,
+{
     let header = &batch.envelope.frame.header;
     let source = ScopedPrincipal {
         scope: header.scope.clone(),
@@ -2056,7 +2090,7 @@ where
         let revision = runtime
             .authorization
             .authorization_revision()
-            .zip(runtime.store.authorization_revision());
+            .zip(store_revision());
         let key = SfuAuthorityKey {
             target: target.clone(),
             scope: header.scope.clone(),

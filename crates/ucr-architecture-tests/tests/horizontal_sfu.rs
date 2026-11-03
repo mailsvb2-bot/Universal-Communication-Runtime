@@ -202,8 +202,16 @@ fn local_sfu_sink_receipt_rechecks_live_claims_before_media_ready() {
         .nth(1)
         .expect("local encrypted SFU media route");
     let dispatch = local
-        .find("dispatch_validated_forward_batch(&sfu, &batch, sink)")
+        .find("self.dispatch_forward(&sfu, &batch, sink)")
         .expect("live SFU dispatch boundary");
+    // The dispatch helper re-checks authority per target on every frame
+    // unless the opt-in revision cache proves nothing changed (item C1).
+    let helper = realtime
+        .split("    fn dispatch_forward(")
+        .nth(1)
+        .expect("dispatch helper");
+    assert!(helper.contains("dispatch_validated_forward_batch_cached_with("));
+    assert!(helper.contains("None => dispatch_validated_forward_batch(sfu, batch, sink)"));
     let ready = local[dispatch..]
         .find(".mark_media_ready(claims, self.now()?)")
         .expect("local media-ready transition");

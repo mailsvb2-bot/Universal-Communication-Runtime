@@ -19,7 +19,7 @@ use ucr_protocol::{
 use ucr_sfu::{
     PreparedSfuCapabilities, SfuAuthorizationCache, SfuError, SfuForwardOutcome, SfuForwardSink,
     SfuForwardSinkError, SfuRuntime, dispatch_validated_forward_batch,
-    dispatch_validated_forward_batch_cached,
+    dispatch_validated_forward_batch_cached, dispatch_validated_forward_batch_cached_with,
 };
 use ucr_storage_memory::MemoryLocalStore;
 
@@ -1592,4 +1592,34 @@ fn auth_cache_is_invalidated_by_canonical_call_termination() {
         "store revision moved: cached proof must not survive Hangup"
     );
     assert_eq!(sink.forwarded().len(), 1);
+}
+
+#[test]
+fn auth_cache_with_external_store_revision_bypasses_on_none_and_reuses_on_stable() {
+    let fixture = build_fixture();
+    let authorization = RevisionedRevocableAuthorization::default();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&authorization, &fixture.store, &e2ee, &sfu);
+    let cache = SfuAuthorizationCache::new();
+    let batch = bob_batch(&runtime, &fixture);
+    let sink = CaptureSink::default();
+    let none = || None;
+    for _ in 0..2 {
+        dispatch_validated_forward_batch_cached_with(&runtime, &cache, &none, &batch, &sink)
+            .expect("unrevisioned store");
+    }
+    assert_eq!(cache.hits(), 0, "None store revision bypasses the cache");
+    let stable = || Some(7);
+    for _ in 0..2 {
+        dispatch_validated_forward_batch_cached_with(&runtime, &cache, &stable, &batch, &sink)
+            .expect("stable store revision");
+    }
+    assert_eq!(cache.hits(), 1);
+    authorization.revoke();
+    assert!(
+        dispatch_validated_forward_batch_cached_with(&runtime, &cache, &stable, &batch, &sink)
+            .is_err()
+    );
+    assert_eq!(sink.forwarded().len(), 4);
 }

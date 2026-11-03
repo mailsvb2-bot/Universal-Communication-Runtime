@@ -373,6 +373,14 @@ pub struct GrpcRealtimeService<C, A, S> {
     mls_bootstrap_store: Option<Arc<dyn GroupMlsBootstrapStore + Send + Sync>>,
     mls_admission_store: Option<Arc<dyn RealtimeMlsAdmissionStore>>,
     sfu_placement_transition: Arc<[Arc<tokio::sync::Mutex<()>>]>,
+    sfu_authorization_cache: Option<SfuAuthorizationCacheWiring>,
+}
+
+/// Item C1 hot-path wiring: cache + the store's revision source.
+#[derive(Clone)]
+struct SfuAuthorizationCacheWiring {
+    cache: Arc<ucr_sfu::SfuAuthorizationCache>,
+    store_revision: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S> {
@@ -424,6 +432,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             sfu_placement_transition: (0..SFU_PLACEMENT_LOCK_STRIPES)
                 .map(|_| Arc::new(tokio::sync::Mutex::new(())))
                 .collect(),
+            sfu_authorization_cache: None,
         }
     }
 
@@ -453,6 +462,22 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         observer: Arc<dyn RealtimeValidatedMediaObserver>,
     ) -> Self {
         self.validated_media_observer = Some(observer);
+        self
+    }
+
+    /// Enables the per-target SFU authorization cache (item C1). The caller
+    /// supplies the store's monotonic authorization revision (e.g.
+    /// `AuthorizationEvaluator::authorization_revision` of the canonical
+    /// store). Without this call (default) every frame re-checks authority.
+    #[must_use]
+    pub fn with_sfu_authorization_cache(
+        mut self,
+        store_revision: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
+    ) -> Self {
+        self.sfu_authorization_cache = Some(SfuAuthorizationCacheWiring {
+            cache: Arc::new(ucr_sfu::SfuAuthorizationCache::new()),
+            store_revision,
+        });
         self
     }
 
@@ -910,6 +935,7 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             mls_bootstrap_store: self.mls_bootstrap_store.clone(),
             mls_admission_store: self.mls_admission_store.clone(),
             sfu_placement_transition: Arc::clone(&self.sfu_placement_transition),
+            sfu_authorization_cache: self.sfu_authorization_cache.clone(),
         }
     }
 }
@@ -2429,6 +2455,30 @@ where
         + ConferenceJoinGrantStore
         + ServiceQuotaStore,
 {
+    fn dispatch_forward(
+        &self,
+        sfu: &ucr_sfu::SfuRuntime<
+            '_,
+            A,
+            S,
+            PreparedGroupMediaE2eeCapabilities,
+            PreparedSfuCapabilities,
+        >,
+        batch: &SfuValidatedForwardBatch,
+        sink: &dyn SfuForwardSink,
+    ) -> Result<ucr_sfu::SfuForwardOutcome, ucr_sfu::SfuError> {
+        match &self.sfu_authorization_cache {
+            Some(wiring) => ucr_sfu::dispatch_validated_forward_batch_cached_with(
+                sfu,
+                &wiring.cache,
+                &*wiring.store_revision,
+                batch,
+                sink,
+            ),
+            None => dispatch_validated_forward_batch(sfu, batch, sink),
+        }
+    }
+
     fn prepare_observed_forward(
         &self,
         claims: &RealtimeSessionClaims,
@@ -2625,7 +2675,7 @@ where
                 now_unix_ms,
                 quota_error: Mutex::new(None),
             };
-            match dispatch_validated_forward_batch(&sfu, &batch, &quota_sink) {
+            match self.dispatch_forward(&sfu, &batch, &quota_sink) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     if let Some(quota_error) = quota_sink.quota_error()? {
@@ -2635,7 +2685,7 @@ where
                 }
             }
         } else {
-            dispatch_validated_forward_batch(&sfu, &batch, sink)
+            self.dispatch_forward(&sfu, &batch, sink)
                 .map_err(|error| map_conference_error(&ConferenceError::Sfu(error)))?
         };
         // The synchronous sink can finish after a concurrent Hangup, Device revoke,
