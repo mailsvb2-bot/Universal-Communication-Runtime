@@ -724,6 +724,7 @@ mod media_join_grant_tests {
         drop(store);
         {
             let mut connection = Connection::open(db.path()).expect("historical fixture");
+            crate::test_remove_v56_objects(&connection).expect("remove v56 objects");
             connection
                 .execute_batch("DROP TABLE conference_join_grants;")
                 .expect("remove v55 table");

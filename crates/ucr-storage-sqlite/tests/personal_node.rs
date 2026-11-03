@@ -179,6 +179,9 @@ fn v29_migration_adds_empty_personal_node_state_without_inference() {
                  DROP TABLE IF EXISTS service_resource_quota_policies;
                  DROP TABLE IF EXISTS service_rate_limit_usage;
                  DROP TABLE IF EXISTS service_rate_limit_policies;
+                 DROP TRIGGER IF EXISTS call_permission_grants_revoke_on_terminate;
+                 DROP TRIGGER IF EXISTS call_permission_grants_revoke_on_leave;
+                 DROP TABLE IF EXISTS call_permission_grants;
                  DROP TABLE IF EXISTS event_subscription_owners;\n                 DROP INDEX IF EXISTS conference_join_grants_conference;
                  DROP TABLE IF EXISTS conference_join_grants;
                  DROP TABLE recording_consents;

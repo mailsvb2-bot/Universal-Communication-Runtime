@@ -7,7 +7,10 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
-use ucr_core::{ConferenceJoinGrantStore, IdentityDeviceLookupStore, TrustedSigningKeyStore};
+use ucr_core::{
+    AuthorizationEvaluator, ConferenceJoinGrantStore, IdentityDeviceLookupStore,
+    TrustedSigningKeyStore,
+};
 use ucr_crypto::{
     SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
 };
@@ -16,6 +19,7 @@ use ucr_group_mls::{
     create_device_key_package, create_group, export_group_media_secret, join_from_welcome,
     merge_pending, stage_transition,
 };
+use ucr_model::AuthorizationRequest;
 use ucr_model::{
     CryptoSuite, GroupId, GroupMediaE2eeContext, GroupMediaFrameHeader, KeyId, MediaKind,
     VideoSourceKind,
@@ -1200,91 +1204,27 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "media ciphertext must remain bound to the admitted MLS epoch"
     );
 
-    // A successful endpoint-owned MLS exchange is NOT authority to mint
-    // permanent tenant-wide media permissions. Without independently
-    // provisioned grants, even a fully accepted Call fails closed, and the
-    // denied Join cannot create a media Call or permission side effects.
+    // Self-service accounts own NO tenant-wide media permissions. Joining an
+    // accepted direct Call must nevertheless succeed end-to-end (signup -> call
+    // -> join -> media) through durable grants bound to exactly the derived
+    // media Call, and must never mint tenant-wide media grants as a side effect.
     let subjects = [&alice, &bob].map(|binding| session_of(&server, binding).subject);
-    let no_grants = subjects
-        .iter()
-        .map(|subject| server.store.permission_grants_for(subject).unwrap())
-        .collect::<Vec<_>>();
-    // Self-service signup legitimately provisions canonical Call permissions,
-    // but never any of the five durable media permissions.
-    assert!(no_grants.iter().all(|grants| {
+    let media_permission_free = |grants: &[PermissionGrant]| {
         grants.iter().all(|grant| {
             !first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS.contains(&grant.permission.as_str())
         })
-    }));
-    assert_eq!(
-        join_accepted(&server, &alice, &call_id, revision).err(),
-        Some(StatusCode::FORBIDDEN)
-    );
-    assert_eq!(
-        server
-            .store
-            .call(
-                &scope,
-                &first_party_media::media_runtime_ids(
-                    &scope,
-                    &CallId::from_opaque(opaque(&call_id).unwrap()),
-                )
-                .unwrap()
-                .call_id,
-            )
-            .unwrap(),
-        None,
-        "permission-denied Join must not create the derived media Call"
-    );
-    for (index, subject) in subjects.iter().enumerate() {
-        assert_eq!(
-            server.store.permission_grants_for(subject).unwrap(),
-            no_grants[index]
-        );
+    };
+    for subject in &subjects {
+        assert!(media_permission_free(
+            &server.store.permission_grants_for(subject).unwrap()
+        ));
     }
-    // Provision only the caller: this must NOT authorize a two-person media
-    // Call or mint its durable child while the recipient lacks media rights.
-    for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
-        server
-            .store
-            .grant_permission(&PermissionGrant {
-                grantee: subjects[0].clone(),
-                permission: permission.to_owned(),
-                scope: PermissionScope::Exact(scope.clone()),
-            })
-            .expect("caller-only explicit grant");
-    }
-    assert_eq!(
-        join_accepted(&server, &alice, &call_id, revision).err(),
-        Some(StatusCode::FORBIDDEN),
-        "caller permissions must not confer rights on recipient"
-    );
-    assert_eq!(
-        server
-            .store
-            .call(
-                &scope,
-                &first_party_media::media_runtime_ids(
-                    &scope,
-                    &CallId::from_opaque(opaque(&call_id).unwrap())
-                )
-                .unwrap()
-                .call_id,
-            )
-            .unwrap(),
-        None,
-        "denied recipient cannot leave a derived Call behind"
-    );
-    for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
-        server
-            .store
-            .grant_permission(&PermissionGrant {
-                grantee: subjects[1].clone(),
-                permission: permission.to_owned(),
-                scope: PermissionScope::Exact(scope.clone()),
-            })
-            .expect("recipient explicit grant");
-    }
+    let derived_media_call_id = first_party_media::media_runtime_ids(
+        &scope,
+        &CallId::from_opaque(opaque(&call_id).unwrap()),
+    )
+    .unwrap()
+    .call_id;
     // A separate explicit grant must survive the entire Call lifecycle.
     server
         .store
@@ -1298,6 +1238,11 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .iter()
         .map(|subject| server.store.permission_grants_for(subject).unwrap())
         .collect::<Vec<_>>();
+    let media_request = |subject: &ScopedPrincipal, permission: &str| AuthorizationRequest {
+        subject: subject.clone(),
+        permission: permission.to_owned(),
+        resource_scope: subject.scope.clone(),
+    };
 
     // A third person never sees nor joins the Call.
     assert!(join_accepted(&server, &carol, &call_id, revision).is_err());
@@ -1493,6 +1438,43 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "{level:?}"
     );
 
+
+    // Media authority exists ONLY inside the derived media Call: it authorizes
+    // the SFU/conference per-call checks, but never tenant-wide nor another Call.
+    let other_call = CallId::from_opaque(opaque("fp-m-unrelated-call").unwrap());
+    for subject in &subjects {
+        for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
+            let request = media_request(subject, permission);
+            server
+                .store
+                .authorize_in_call(&request, &derived_media_call_id)
+                .expect("call-scoped media permission inside the media Call");
+            assert!(
+                server.store.authorize(&request).is_err(),
+                "never tenant-wide"
+            );
+            assert!(
+                server
+                    .store
+                    .authorize_in_call(&request, &other_call)
+                    .is_err(),
+                "never another Call"
+            );
+        }
+        assert!(media_permission_free(
+            &server.store.permission_grants_for(subject).unwrap()
+        ));
+    }
+    // A third person cannot borrow the participants' call-scoped grants.
+    let carol_subject = session_of(&server, &carol).subject;
+    assert!(
+        server
+            .store
+            .authorize_in_call(
+                &media_request(&carol_subject, ucr_protocol::AUDIO_SEND_PERMISSION),
+                &derived_media_call_id
+            )
+            .is_err()
     // An Identity may own several independently trusted active Devices.
     // Enrollment of a second Alice Device must not replace the exact Alice
     // Device committed into the endpoint-owned MLS Group or deny the Call.
@@ -1732,6 +1714,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             Some(pb::realtime_get_mls_admission_context_response::Result::Context(_))
         ),
         "revoking Alice must not revoke Bob's independently admitted Device: {bob_live_mls:?}"
+
     );
 
     // Hang-up ends the media Call too; no new Join grant and no re-admission.
@@ -1777,8 +1760,18 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         assert_eq!(
             server.store.permission_grants_for(subject).unwrap(),
             grants_before_join[index],
-            "Join and Hangup must neither mint nor revoke durable media grants"
+            "Join and Hangup must neither mint nor revoke tenant-wide grants"
         );
+        // Termination atomically revoked the call-scoped media grants.
+        for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
+            assert!(
+                server
+                    .store
+                    .authorize_in_call(&media_request(subject, permission), &derived_media_call_id)
+                    .is_err(),
+                "terminated media Call must revoke {permission}"
+            );
+        }
     }
     assert!(
         join_accepted(
