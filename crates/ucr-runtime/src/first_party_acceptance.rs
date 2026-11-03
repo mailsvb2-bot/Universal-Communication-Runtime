@@ -660,7 +660,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
 
     let db = TestDb::new();
     let server = state(&db.0);
-    let (alice, alice_signer, _) = signup(&server, 41);
+    let (alice, alice_signer, alice_recovery) = signup(&server, 41);
     let (bob, bob_signer, _) = signup(&server, 42);
     let (carol, _, _) = signup(&server, 43);
 
@@ -1493,6 +1493,28 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "{level:?}"
     );
 
+    // An Identity may own several independently trusted active Devices.
+    // Enrollment of a second Alice Device must not replace the exact Alice
+    // Device committed into the endpoint-owned MLS Group or deny the Call.
+    // This exercises real canonical SQLite Device/Trust state across BFF and
+    // Realtime connections, not a fabricated trust map.
+    let (alice_extra, _, _) = recover(
+        &server,
+        &alice,
+        &alice_recovery,
+        "alice-extra-active-device",
+        44,
+    )
+    .expect("independently authenticated second Alice Device");
+    assert_eq!(
+        server
+            .store
+            .active_devices_for_identity(&scope, &identity(&alice).unwrap(), 8)
+            .unwrap()
+            .len(),
+        2
+    );
+
     // The same already-admitted Device can inspect MLS while the Call is live.
     // This positive control prevents a post-Hangup denial from passing merely
     // because the RPC was never wired or the bearer was always invalid.
@@ -1536,6 +1558,14 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .expect("committed endpoint-owned Add Device pair");
     assert_eq!(committed.0, alice.device);
     assert_eq!(committed.1, bob.device);
+    assert!(
+        context.trusted_device_keys.iter().all(|key| {
+            key.device_id
+                .as_ref()
+                .is_some_and(|device| device.value.as_slice() != alice_extra.device.as_bytes())
+        }),
+        "an additional trusted Device must not replace or join the committed MLS pair"
+    );
     for expected in [&committed.0, &committed.1] {
         assert!(
             context.trusted_device_keys.iter().any(|key| {
