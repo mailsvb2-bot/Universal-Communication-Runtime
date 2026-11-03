@@ -172,7 +172,8 @@ export function ucrVideoSoftwareFrameRate(frameRate: number, software: boolean):
 }
 /** One source-owned rate for encoder configuration and actual capture pacing. */
 export function ucrVideoStageTargetFrameRate(sourceFps: number, stage: number, software: boolean): number {
-  return ucrVideoSoftwareFrameRate(Math.min(sourceFps, ucrVideoStageProfile(stage).frameRate), software);
+  return ucrVideoSoftwareFrameRate(Math.min(Math.max(1, sourceFps),
+    ucrVideoStageProfile(stage).frameRate), software);
 }
 let ucrVideoH264Hardware: boolean | null = null;
 const ucrVideoUsesH264 = (): boolean =>
