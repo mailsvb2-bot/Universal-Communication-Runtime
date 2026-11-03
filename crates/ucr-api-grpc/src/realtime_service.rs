@@ -1112,35 +1112,37 @@ where
                         .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     let (group_id, mode) = self.mls_admission_context(&claims)?;
-                    let binding = self.live_media_binding(&claims);
-                    // The direct-call browser must not receive an apparently
-                    // usable MLS admission with a partial or missing canonical
-                    // peer trust roster. Never fill missing identity/Device
-                    // evidence with an empty descriptor and leave a client to
-                    // guess the media signing keys or negotiation epoch.
-                    if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
+                    // A person may have multiple independently trusted Devices.
+                    // Resolve the exact two committed MLS Devices BEFORE reading
+                    // signing keys; selecting the sole active Device would deny
+                    // legitimate calls or substitute a different trusted Device.
+                    let committed_pair = if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
+                        Some(
+                            self.mls_admission_store
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)
+                                })?
+                                .endpoint_mls_direct_call_device_pair(&claims.scope, &group_id)
+                                .map_err(map_store_error)?
+                                .ok_or_else(|| {
+                                    CanonicalError::new(CanonicalErrorCode::IntegrityFailure)
+                                })?,
+                        )
+                    } else {
+                        None
+                    };
+                    let binding = self.live_media_binding(&claims, committed_pair.as_ref());
+                    // No partial roster, substituted Device, or missing current
+                    // negotiation may be exposed as an admissible MLS context.
+                    if let Some(committed_pair) = committed_pair.as_ref() {
                         let authenticated_device = claims.device_id.as_ref().ok_or_else(|| {
                             CanonicalError::new(CanonicalErrorCode::Unauthenticated)
                         })?;
-                        // The current Identity's sole active Device is not
-                        // necessarily the Device that joined the endpoint MLS
-                        // Group. Resolve the exact committed pair from the
-                        // canonical MLS transition ledger, not from Join hints.
-                        let committed_pair = self
-                            .mls_admission_store
-                            .as_ref()
-                            .ok_or_else(|| {
-                                CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)
-                            })?
-                            .endpoint_mls_direct_call_device_pair(&claims.scope, &group_id)
-                            .map_err(map_store_error)?
-                            .ok_or_else(|| {
-                                CanonicalError::new(CanonicalErrorCode::IntegrityFailure)
-                            })?;
                         require_complete_first_party_media_binding(
                             binding.as_ref(),
                             authenticated_device,
-                            &committed_pair,
+                            committed_pair,
                         )?;
                     }
                     Ok(pb::RealtimeMlsAdmissionContext {
@@ -2897,7 +2899,11 @@ where
         Err(CanonicalError::new(CanonicalErrorCode::Conflict))
     }
 
-    fn live_media_binding(&self, claims: &RealtimeSessionClaims) -> Option<LiveMediaBinding> {
+    fn live_media_binding(
+        &self,
+        claims: &RealtimeSessionClaims,
+        committed_devices: Option<&(String, String)>,
+    ) -> Option<LiveMediaBinding> {
         let snapshot = conference_runtime(self)
             .snapshot(&actor_for(claims), &claims.scope, &claims.call_id)
             .ok()?;
@@ -2918,18 +2924,41 @@ where
             else {
                 continue;
             };
-            let Ok(devices) =
-                self.store
-                    .active_devices_for_identity(&claims.scope, &binding.identity_id, 2)
-            else {
-                continue;
-            };
-            let [device] = devices.as_slice() else {
-                continue;
+            let device_id = if let Some((creator, recipient)) = committed_devices {
+                // Only the canonical MLS Add pair is eligible. Resolve each
+                // exact Device through the existing lifecycle owner and check
+                // its Identity and active state, even if that Identity owns
+                // additional active Devices. Never infer a key from a Join URL.
+                let matches = [creator, recipient]
+                    .iter()
+                    .filter_map(|raw| {
+                        let id = DeviceId::from_opaque(OpaqueId::new((*raw).clone()).ok()?);
+                        let descriptor = self.store.device(&claims.scope, &id).ok()??;
+                        (descriptor.identity_id == binding.identity_id
+                            && descriptor.state == DeviceLifecycleState::Active)
+                            .then_some(id)
+                    })
+                    .collect::<Vec<_>>();
+                let [device_id] = matches.as_slice() else {
+                    continue;
+                };
+                device_id.clone()
+            } else {
+                // Legacy non-first-party conference behaviour is unchanged.
+                let Ok(devices) =
+                    self.store
+                        .active_devices_for_identity(&claims.scope, &binding.identity_id, 2)
+                else {
+                    continue;
+                };
+                let [device] = devices.as_slice() else {
+                    continue;
+                };
+                device.device_id.clone()
             };
             let Some(key) = self
                 .store
-                .active_trusted_signing_key(&claims.scope, &device.device_id)
+                .active_trusted_signing_key(&claims.scope, &device_id)
                 .ok()
                 .flatten()
             else {
@@ -2939,7 +2968,7 @@ where
                 continue;
             }
             trusted_device_keys.push(pb::RealtimeEndpointTrustKey {
-                device_id: Some(pb_opaque(device.device_id.as_opaque())),
+                device_id: Some(pb_opaque(device_id.as_opaque())),
                 key_id: Some(pb_opaque(key.key_id.as_opaque())),
                 public_key: key.public_key,
             });
