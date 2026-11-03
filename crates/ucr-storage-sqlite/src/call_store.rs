@@ -653,6 +653,9 @@ impl CallStore for SqliteLocalStore {
         // ONE SQLite IMMEDIATE transaction, shared with Join's parent fence.
         let outcome = apply_call_signal_in_transaction(&transaction, actor, direct_signal)?;
         if outcome == DurableRecordStatus::Duplicate {
+            // Retry after a historical/uncertain response still retires any
+            // canonical Join credentials for this ended direct Call.
+            revoke_direct_media_join_grants(&transaction, &direct.scope, derived_call_id)?;
             transaction
                 .commit()
                 .map_err(|error| map_sqlite_error(&error))?;
@@ -698,11 +701,38 @@ impl CallStore for SqliteLocalStore {
                 apply_call_signal_in_transaction(&transaction, &media_actor, &media_signal)?;
             }
         }
+        // Retire all previously issued first-party media bearers atomically
+        // with the canonical parent and child Call termination. A separate
+        // Realtime process observes the same durable revocation tombstones.
+        revoke_direct_media_join_grants(&transaction, &direct.scope, derived_call_id)?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(outcome)
     }
+}
+
+fn revoke_direct_media_join_grants(
+    transaction: &Transaction<'_>,
+    scope: &TenantScope,
+    media_call_id: &CallId,
+) -> Result<(), DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    transaction
+        .execute(
+            "UPDATE conference_join_grants SET revoked=1
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+               AND call_id=?4 AND integration_id='ucr-first-party-direct-media'
+               AND revoked=0",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                media_call_id.as_opaque().as_str(),
+            ],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    Ok(())
 }
 
 pub(super) fn reconcile_group_calls_after_membership_change(
