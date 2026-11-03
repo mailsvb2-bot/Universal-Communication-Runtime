@@ -134,6 +134,8 @@ fn sqlite_v44_migrates_to_v45_without_inventing_attachment_state() {
                  -- silently accepting it would bypass the v51->v52 migration.
                  DROP TABLE IF EXISTS endpoint_mls_key_package_offers;
                  DROP TABLE IF EXISTS first_party_recovery_credentials;
+                 DROP TABLE IF EXISTS first_party_sessions;
+                 DROP TABLE IF EXISTS first_party_signup_admissions;
                  DROP TRIGGER IF EXISTS call_permission_grants_revoke_on_terminate;
                  DROP TRIGGER IF EXISTS call_permission_grants_revoke_on_leave;
                  DROP TABLE IF EXISTS call_permission_grants;

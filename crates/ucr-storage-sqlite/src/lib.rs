@@ -14,6 +14,7 @@ mod event_journal;
 mod event_subscription_store;
 mod federation_store;
 mod first_party_account_store;
+mod first_party_session_store;
 mod group_mls_store;
 mod group_store;
 mod identity_binding_store;
@@ -39,6 +40,7 @@ mod trusted_key_store;
 mod universal_conference_store;
 
 pub use endpoint_mls_offer_store::EndpointMlsKeyPackageOffer;
+pub use first_party_session_store::{FirstPartySessionRecord, NewFirstPartySession};
 
 pub use runtime_worker_store::{
     RECORDING_PROVIDER_WORKER_KIND, RECORDING_RETENTION_WORKER_KIND, RuntimeWorkerLease,
@@ -117,7 +119,8 @@ const SQLITE_SCHEMA_V53: u32 = 53;
 const SQLITE_SCHEMA_V54: u32 = 54;
 const SQLITE_SCHEMA_V55: u32 = 55;
 const SQLITE_SCHEMA_V56: u32 = 56;
-pub const SQLITE_SCHEMA_VERSION: u32 = 56;
+const SQLITE_SCHEMA_V57: u32 = 57;
+pub const SQLITE_SCHEMA_VERSION: u32 = 57;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -696,7 +699,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v56(connection);
+        return verify_schema_v57(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -762,11 +765,27 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V53 => migrate_v53_to_v54(connection)?,
             SQLITE_SCHEMA_V54 => migrate_v54_to_v55(connection)?,
             SQLITE_SCHEMA_V55 => migrate_v55_to_v56(connection)?,
+            SQLITE_SCHEMA_V56 => migrate_v56_to_v57(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v56(connection)
+    verify_schema_v57(connection)
+}
+
+fn migrate_v56_to_v57(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v56(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    first_party_session_store::create_v57_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V57)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v57(connection)
 }
 
 fn migrate_v55_to_v56(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -923,6 +942,11 @@ fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreErr
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v47(connection)
+}
+
+fn verify_schema_v57(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v56(connection)?;
+    first_party_session_store::verify_v57_objects(connection)
 }
 
 fn verify_schema_v56(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1119,6 +1143,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     group_mls_store::create_v54_objects(&transaction)?;
     conference_join_grant_store::create_v55_objects(&transaction)?;
     call_permission_grant_store::create_v56_objects(&transaction)?;
+    first_party_session_store::create_v57_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1128,7 +1153,9 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
-    verify_schema_v53(connection)
+    // Verify the FULL current shape, so a fresh database can never be stamped
+    // current while missing a newer object.
+    verify_schema_v57(connection)
 }
 
 fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -2202,7 +2229,16 @@ fn test_restore_v49_mls_transition_shape(connection: &Connection) -> Result<(), 
 }
 
 #[cfg(test)]
+fn test_remove_v57_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS first_party_sessions;
+         DROP TABLE IF EXISTS first_party_signup_admissions;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v56_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v57_objects(connection)?;
     connection.execute_batch(
         "DROP TRIGGER IF EXISTS call_permission_grants_revoke_on_terminate;
          DROP TRIGGER IF EXISTS call_permission_grants_revoke_on_leave;

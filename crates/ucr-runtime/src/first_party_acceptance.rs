@@ -69,7 +69,6 @@ fn state(path: &PathBuf) -> State {
         consumed: Mutex::new(Vec::new()),
         untrusted_consumed: Mutex::new(Vec::new()),
         recovery_consumed: Mutex::new(Vec::new()),
-        signup_admissions: Mutex::new(Vec::new()),
         sessions: Mutex::new(SessionLedger::default()),
         protected_actions: Mutex::new(HashMap::new()),
     }
@@ -248,13 +247,22 @@ fn anonymous_signup_replay_and_write_limits_preserve_existing_device_login() {
     );
 
     server.untrusted_consumed.lock().unwrap().clear();
-    {
-        let mut admitted = server.signup_admissions.lock().unwrap();
-        admitted.extend(std::iter::repeat_n(
-            Instant::now(),
-            MAX_SELF_SERVICE_SIGNUPS,
-        ));
-    }
+    let quota_now = now_unix_ms().unwrap();
+    while server
+        .store
+        .admit_first_party_signup(
+            quota_now,
+            i64::try_from(SIGNUP_WINDOW.as_millis()).unwrap(),
+            u32::try_from(MAX_SELF_SERVICE_SIGNUPS).unwrap(),
+        )
+        .unwrap()
+    {}
+    // The durable quota survives a BFF restart on the same SQLite file.
+    assert_eq!(
+        admit_signup(&state(&db.0)),
+        Err(StatusCode::TOO_MANY_REQUESTS),
+        "a restart must not reset the anonymous signup quota"
+    );
     let (issued, _) = account_route(&server, "/v1/first-party/signup/begin", b"{}").unwrap();
     let denied_binding: Binding = serde_json::from_value(issued["binding"].clone()).unwrap();
     let denied_signer = SigningKey::from_bytes(&[63; 32]);
@@ -280,11 +288,8 @@ fn anonymous_signup_replay_and_write_limits_preserve_existing_device_login() {
 
     // Expired quota entries are removed; the process-local gate is not a
     // permanent lockout after a burst.
-    let after_window = Instant::now()
-        .checked_add(SIGNUP_WINDOW + Duration::from_secs(1))
-        .expect("bounded monotonic test clock advance");
+    let after_window = quota_now + i64::try_from(SIGNUP_WINDOW.as_millis()).unwrap() + 1_000;
     admit_signup_at(&server, after_window).expect("expired quota entries must be pruned");
-    assert_eq!(server.signup_admissions.lock().unwrap().len(), 1);
     signup(&server, 65);
 }
 
@@ -2298,4 +2303,65 @@ fn cross_device_revoke_waits_for_target_protected_action_gate() {
         Some(StatusCode::FORBIDDEN),
         "an unregistered target remains forbidden after its gate is released"
     );
+}
+
+#[test]
+fn logout_revocation_and_live_cookies_survive_server_restart() {
+    let db = TestDb::new();
+    let server = state(&db.0);
+    let (alice, alice_signer, _) = signup(&server, 111);
+    let (bob, bob_signer, _) = signup(&server, 112);
+    signed_login(&server, &alice, &alice_signer);
+    signed_login(&server, &bob, &bob_signer);
+    let alice_session = session_of(&server, &alice);
+    let bob_session = session_of(&server, &bob);
+    let (response, _) = dispatch_post(
+        &server,
+        "/v1/first-party/logout",
+        &serde_json::to_vec(&json!({"binding": alice})).unwrap(),
+        Some(&alice_session),
+    )
+    .unwrap();
+    assert_eq!(response["signedOut"], true);
+    drop(server);
+
+    // A brand-new process on the same canonical SQLite file: the in-memory
+    // ledger is empty, so only durable state decides.
+    let restarted = state(&db.0);
+    assert_eq!(
+        authenticate_token(&restarted, &alice_session.token).err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a logged-out cookie must stay dead after a restart"
+    );
+    let bob_again = authenticate_token(&restarted, &bob_session.token)
+        .expect("an unrevoked cookie survives a restart");
+    assert_eq!(bob_again.binding, bob);
+    assert_eq!(
+        dispatch_post(
+            &restarted,
+            "/v1/first-party/logout",
+            &serde_json::to_vec(&json!({"binding": alice})).unwrap(),
+            Some(&alice_session),
+        )
+        .err(),
+        Some(StatusCode::UNAUTHORIZED),
+        "a stale cloned session cannot act after restart"
+    );
+
+    // Cross-process revocation: a second live process sharing the file sees
+    // Bob's logout even though its own cache still holds the session.
+    let peer = state(&db.0);
+    authenticate_token(&peer, &bob_session.token).expect("peer caches Bob");
+    dispatch_post(
+        &restarted,
+        "/v1/first-party/logout",
+        &serde_json::to_vec(&json!({"binding": bob})).unwrap(),
+        Some(&bob_again),
+    )
+    .unwrap();
+    assert_eq!(
+        authenticate_token(&peer, &bob_session.token).err(),
+        Some(StatusCode::UNAUTHORIZED)
+    );
+    signed_login(&restarted, &alice, &alice_signer);
 }
