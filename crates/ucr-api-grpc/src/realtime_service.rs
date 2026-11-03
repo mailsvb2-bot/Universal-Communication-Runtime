@@ -5137,8 +5137,11 @@ mod sfu_placement_lifecycle_tests {
             .persist_conference_join_grant(&ConferenceJoinGrantRecord {
                 scope: claims.scope.clone(),
                 conference_id: GroupId::from_opaque(id("fp-durable-media-group")),
+                // This test verifies the durable-token requirement only.
+                // A first-party issuer is separately fenced by an ACTIVE
+                // canonical derived Call and Group, covered by other tests.
                 integration_id: ucr_model::IntegrationId::from_opaque(id(
-                    "ucr-first-party-direct-media",
+                    "ucr-durable-grant-regression",
                 )),
                 call_id: claims.call_id.clone(),
                 participant: claims.participant.clone(),
