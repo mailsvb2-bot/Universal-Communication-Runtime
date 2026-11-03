@@ -1556,6 +1556,33 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         ),
         "revoked Alice must lose MLS admission before Hangup: {revoked_mls:?}"
     );
+    // A revoked Join must also lose its active media-operation authority,
+    // not merely access to MLS descriptors. Audio-level reporting is an
+    // authenticated Realtime operation, NOT proof of physical audio transport.
+    let revoked_audio = realtime
+        .report_audio_level(audio(&claims[0], &tokens[0]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_audio.result,
+            Some(pb::realtime_report_audio_level_response::Result::Error(_))
+        ),
+        "revoked Alice must lose active media-operation authority: {revoked_audio:?}"
+    );
+    let bob_audio = realtime
+        .report_audio_level(audio(&claims[1], &tokens[1]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            bob_audio.result,
+            Some(pb::realtime_report_audio_level_response::Result::Acknowledgement(_))
+        ),
+        "revoking Alice must not deny Bob's independent media operation: {bob_audio:?}"
+    );
     let bob_lookup = realtime_join_request(&claims[1], &tokens[1]).into_inner();
     let mut bob_live_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
         scope: bob_lookup.scope,
