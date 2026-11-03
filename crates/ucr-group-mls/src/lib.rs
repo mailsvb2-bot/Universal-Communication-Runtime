@@ -521,6 +521,21 @@ pub trait EndpointMlsCommitStore {
     ) -> Result<DurableRecordStatus, GroupMlsStoreError>;
 }
 
+/// Read the exact committed endpoint-owned creator/recipient Device pair from
+/// the canonical Group transition ledger. This is not inferred from active
+/// Identity devices, a Join token, or an unauthenticated browser hint.
+pub trait EndpointMlsCommittedDevicePairStore {
+    /// Returns None before the endpoint's first committed Add.
+    ///
+    /// # Errors
+    /// Fail closed on ambiguous, quarantined or corrupt canonical MLS history.
+    fn endpoint_mls_direct_call_device_pair(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<Option<(String, String)>, DurableStoreError>;
+}
+
 pub trait GroupMlsServerCustodyProbe {
     /// Returns true if the server `OpenMLS` provider possesses the exact `Group`.
     /// Errors MUST fail closed; they must never be interpreted as no custody.
