@@ -2333,6 +2333,8 @@ assert.equal(ucrVideoStageTargetFrameRate(30, 2, true), 24);
 assert.equal(ucrVideoStageTargetFrameRate(30, 0, false), 30);
 assert.equal(ucrVideoStageTargetFrameRate(15, 0, true), 15,
   "do not oversample a slower camera");
+assert.equal(ucrVideoStageTargetFrameRate(0, 0, true), 1,
+  "a reported zero capture FPS must not produce an invalid encoder or pacing interval");
 assert.equal(ucrVideoStageProfile(2).frameRate, 24);
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0, 0, 0, 1, 0x65, 0x88])), "avc1.42002a");
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0, 0, 1, 0x65, 0x88])), "avc1.42002a");
