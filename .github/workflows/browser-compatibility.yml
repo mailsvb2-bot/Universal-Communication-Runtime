@@ -508,5 +508,3 @@ jobs:
           path: dist/browser-compatibility/safari-attempts/*.json
           if-no-files-found: error
           retention-days: 14
-
-[executed on device: spb-3-vm-mimb (a42a0407-3edd-4787-aae0-130c3c4db839)]
