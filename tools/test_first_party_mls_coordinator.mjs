@@ -6,6 +6,13 @@ import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
 
 const source=readFileSync("crates/ucr-realtime-web/static/start.js","utf8");
+// A recipient KeyPackage offer carries an Ed25519 signature of EXACTLY 64 bytes.
+// Omitting the length argument silently rejects every otherwise canonical offer.
+const firstPartyHttp=readFileSync("sdk/typescript/src/first_party_browser_http.ts","utf8");
+assert.match(firstPartyHttp,/decodeBase64Url\(recipientSignatureBase64Url,\s*64\)/,
+  "MLS offer signatures must be checked against the explicit 64-byte Ed25519 length");
+assert.doesNotMatch(firstPartyHttp,/decodeBase64Url\(recipientSignatureBase64Url\s*\)/,
+  "omitted decoder length strands accepted calls at MLS epoch zero");
 const begin=source.indexOf("async function prepareFirstPartyEndpointMls(");
 const end=source.indexOf("async function beginMedia(",begin);
 assert.ok(begin>=0&&end>begin,"real pre-Join MLS coordinator is missing");
