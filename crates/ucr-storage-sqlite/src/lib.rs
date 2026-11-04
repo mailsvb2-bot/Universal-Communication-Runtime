@@ -3153,6 +3153,66 @@ mod tests {
     }
 
     #[test]
+    fn v56_to_v58_first_party_session_and_auth_revision_migration_reopens() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create canonical current store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open v56 fixture");
+            super::test_remove_v57_objects(&connection).expect("remove post-v56 objects");
+            connection
+                .pragma_update(None, "user_version", super::SQLITE_SCHEMA_V56)
+                .expect("stamp v56 fixture");
+            assert_eq!(super::verify_schema_v56(&connection), Ok(()));
+        }
+        {
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v56 to v58");
+            assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+            let connection = migrated.lock_connection().expect("lock migrated store");
+            assert_eq!(super::verify_schema_v58(&connection), Ok(()));
+            assert_eq!(
+                super::first_party_session_store::verify_v57_objects(&connection),
+                Ok(())
+            );
+            assert_eq!(
+                super::authorization_revision_store::verify_v58_objects(&connection),
+                Ok(())
+            );
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen v58 migration");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        assert_eq!(reopened.health(), Ok(StorageHealth::Healthy));
+    }
+
+    #[test]
+    fn v57_to_v58_auth_revision_migration_reopens() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create canonical current store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open v57 fixture");
+            super::test_remove_v58_objects(&connection).expect("remove v58 objects");
+            connection
+                .pragma_update(None, "user_version", super::SQLITE_SCHEMA_V57)
+                .expect("stamp v57 fixture");
+            assert_eq!(super::verify_schema_v57(&connection), Ok(()));
+        }
+        {
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v57 to v58");
+            assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+            let connection = migrated.lock_connection().expect("lock migrated store");
+            assert_eq!(super::verify_schema_v58(&connection), Ok(()));
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen v58 migration");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        assert_eq!(reopened.health(), Ok(StorageHealth::Healthy));
+    }
+
+    #[test]
     fn v52_to_v53_endpoint_mls_schema_migration_is_atomic_and_reopens() {
         let db = TestDbPath::new();
         {
