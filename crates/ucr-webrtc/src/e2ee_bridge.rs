@@ -196,16 +196,30 @@ impl LiveWebRtcE2eeChannel {
                     .map_err(|_| crate::WebRtcProviderError::Internal)?,
             ),
         };
-        if channel.buffered_amount().await > MAX_WEBRTC_E2EE_BUFFERED_BYTES {
+        // This channel is driven by the single canonical WebRTC worker.
+        // Awaiting a stale/disconnected DataChannel without a deadline blocks
+        // EVERY later Create, ICE and Close operation in that worker.
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?
+            .min(std::time::Duration::from_millis(250));
+        let buffered = tokio::time::timeout(remaining, channel.buffered_amount())
+            .await
+            .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?;
+        if buffered > MAX_WEBRTC_E2EE_BUFFERED_BYTES {
             return Err(crate::WebRtcProviderError::CapacityExceeded);
         }
         for chunk in chunks {
             if Instant::now() >= deadline {
                 return Err(crate::WebRtcProviderError::TemporarilyUnavailable);
             }
-            channel
-                .send(&Bytes::from(chunk))
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?
+                .min(std::time::Duration::from_millis(250));
+            tokio::time::timeout(remaining, channel.send(&Bytes::from(chunk)))
                 .await
+                .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?
                 .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?;
         }
         Ok(())
