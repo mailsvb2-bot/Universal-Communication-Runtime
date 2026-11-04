@@ -831,11 +831,32 @@ function endpointBase64ToBytes(value){
   return bytes;
 }
 async function fetchEndpointMlsContext(signal){
-  const response=await api("/v1/realtime/mls-context",body(),signal);
-  const context=await response.json();
-  if(!context||context.ok!==true||typeof context.group_id!=="string"||context.group_id.length===0)throw new Error("Invalid MLS admission context");
-  if(!["register","restore","legacy_server_owned"].includes(context.endpoint_state_mode))throw new Error("Invalid MLS endpoint state mode");
-  return context;
+  // Both signed first-party grants may be issued before both realtime Join
+  // requests finish. The server returns 503 (not a grant) while waiting for
+  // the peer to join; retry only this bounded pending-peer condition. Every
+  // attempt rechecks canonical Call, Device, roster and MLS state server-side.
+  const firstParty=claims?.call_id?.startsWith("fp-m-") &&
+    sessionStorage.getItem("ucrFirstPartyDirectCall");
+  const deadline=Date.now()+Math.min(7000,Math.max(0,claims.expires-Date.now()));
+  for(;;){
+    if(signal?.aborted)throw new DOMException("MLS admission cancelled","AbortError");
+    try{
+      const response=await api("/v1/realtime/mls-context",body(),signal);
+      const context=await response.json();
+      if(!context||context.ok!==true||typeof context.group_id!=="string"||context.group_id.length===0)
+        throw new Error("Invalid MLS admission context");
+      if(!["register","restore","legacy_server_owned"].includes(context.endpoint_state_mode))
+        throw new Error("Invalid MLS endpoint state mode");
+      return context;
+    }catch(error){
+      // Never retry revoked grants, 401/403, malformed contexts or non-first-
+      // party calls. No microphone/camera permission while the peer is pending.
+      if(!firstParty||error?.status!==503||Date.now()+350>=deadline||signal?.aborted)
+        throw error;
+      ui.status.textContent="Собеседник подключается. Проверяем защищённый доступ…";
+      await new Promise(resolve=>setTimeout(resolve,350));
+    }
+  }
 }
 async function fetchEndpointMlsBootstrap(signal){
   const response=await api("/v1/realtime/mls-bootstrap",body(),signal);
@@ -3971,7 +3992,20 @@ try{
   installLocalRoomMediaHost();
   if(sessionStorage.getItem("ucrLocalRoom")==="1"){
     if(!scheduleWaitingRoom())join().catch(e=>{fail(e.message);});
-  }else if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
+  }else if(!scheduleWaitingRoom()){
+    // /start already obtained explicit acceptance and a Device-bound signed
+    // Join. Continue that SAME first-party Call without a redundant click.
+    // A pasted conference grant alone MUST NOT trigger microphone/camera.
+    const directCall=sessionStorage.getItem("ucrFirstPartyDirectCall");
+    const acceptedFirstPartyHandoff=claims.call_id.startsWith("fp-m-")&&
+      /^fp-[av]-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(directCall||"");
+    if(acceptedFirstPartyHandoff){
+      ui.status.textContent="Принятый вызов: проверяем защищённый допуск и подключаем медиа…";
+      void join().catch(error=>fail(error.message));
+    }else{
+      ui.status.textContent="Signed grant loaded. Ready to join.";
+    }
+  }
   }
 }catch(e){fail(e.message);}
 // Hosts installing trust before client startup benefit from an idle preload.
