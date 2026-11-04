@@ -483,7 +483,7 @@ Promise.resolve()
             """
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(async () => {
-  const module = await import("./endpoint-media/reference_browser_media_installer.js");
+  const module = await import(new URL("/endpoint-media/reference_browser_media_installer.js", window.location.href).href);
   let denied = "";
   try {
     await module.installUcrReferenceBrowserMedia({
@@ -640,7 +640,7 @@ Promise.resolve()
             """
 const done=arguments[arguments.length-1], deviceId=arguments[0];
 (async()=>{
- const mod=await import("./endpoint-media/reference_browser_media_installer.js");
+ const mod=await import(new URL("/endpoint-media/reference_browser_media_installer.js", window.location.href).href);
  const vault=mod.createUcrBrowserProtectedDeviceVault();
  const scope={tenantId:"browser-probe",namespaceId:null,deviceId};
  const first=await vault.stageNew(scope);
@@ -664,7 +664,7 @@ const done=arguments[arguments.length-1], deviceId=arguments[0];
             """
 const done=arguments[arguments.length-1], deviceId=arguments[0], expected=arguments[1];
 (async()=>{
- const mod=await import("./endpoint-media/reference_browser_media_installer.js");
+ const mod=await import(new URL("/endpoint-media/reference_browser_media_installer.js", window.location.href).href);
  const vault=mod.createUcrBrowserProtectedDeviceVault();
  const scope={tenantId:"browser-probe",namespaceId:null,deviceId};
  const restored=await vault.load(scope);
@@ -1435,7 +1435,7 @@ const done = arguments[arguments.length - 1];
   ]);
   let rejected = false;
   try {
-    const mod = await import("./endpoint-media/reference_browser_media_installer.js");
+    const mod = await import(new URL("/endpoint-media/reference_browser_media_installer.js", window.location.href).href);
     const vault = mod.createUcrBrowserProtectedDeviceVault();
     try {
       await Promise.race([
