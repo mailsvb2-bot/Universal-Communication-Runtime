@@ -885,7 +885,7 @@ export function createUcrFirstPartyHttpHost(
         const recipientKeyPackageBase64Url = String(offer.recipientKeyPackageBase64Url);
         const recipientSignatureBase64Url = String(offer.recipientSignatureBase64Url);
         decodeBase64Url(recipientKeyPackageBase64Url, null, 8192);
-        if (decodeBase64Url(recipientSignatureBase64Url).length !== 64) {
+        if (decodeBase64Url(recipientSignatureBase64Url, 64).length !== 64) {
           throw new Error("invalid recipient MLS offer signature");
         }
         return Object.freeze({
