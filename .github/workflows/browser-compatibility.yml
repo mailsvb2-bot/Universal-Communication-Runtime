@@ -26,8 +26,6 @@ jobs:
             browser: edge
           - runner: ubuntu-24.04
             browser: firefox
-          - runner: macos-15
-            browser: safari
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -376,6 +374,36 @@ jobs:
         if: always()
         shell: bash
         run: xcrun simctl shutdown all >/dev/null 2>&1 || true
+      # Do not require a SECOND scarce macOS runner for Desktop Safari.
+      # After authentic iOS Safari evidence, test real Desktop Safari using
+      # this SAME macOS runner and publish its own distinct WebDriver proof.
+      # A failed/missing desktop probe is NOT considered successful evidence.
+      - name: Enable Desktop Safari WebDriver
+        shell: bash
+        run: sudo safaridriver --enable
+      - name: Probe real Desktop Safari
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if python3 tools/browser_compatibility_probe.py \
+              --browser safari \
+              --output "dist/browser-compatibility/safari-${{ matrix.runner }}.json"; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              echo "real Desktop Safari failed twice on iOS-evidence macOS runner" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+      - name: Upload real Desktop Safari evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ucr-browser-compatibility-safari-attempt-${{ matrix.runner }}-${{ github.sha }}
+          path: dist/browser-compatibility/safari-${{ matrix.runner }}.json
+          if-no-files-found: error
+          retention-days: 14
 
   ios-safari:
     name: mobile-ios-safari
@@ -390,6 +418,38 @@ jobs:
           pattern: ucr-browser-compatibility-ios-safari-attempt-*-${{ github.sha }}
           path: dist/browser-compatibility/ios-safari-attempts
           merge-multiple: true
+      - name: Download real Desktop Safari evidence attempts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: ucr-browser-compatibility-safari-attempt-*-${{ github.sha }}
+          path: dist/browser-compatibility/safari-attempts
+          merge-multiple: true
+      - name: Require real Desktop Safari WebDriver evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("dist/browser-compatibility/safari-attempts")
+          files = sorted(root.rglob("*.json")) if root.exists() else []
+          valid = []
+          for path in files:
+              try:
+                  data = json.loads(path.read_text(encoding="utf-8"))
+                  if (
+                      data.get("schema") == "ucr.browser-compatibility.v1"
+                      and data.get("browser_requested") == "safari"
+                      and data.get("evidence_kind") == "real-desktop-browser-webdriver-smoke"
+                      and data.get("passed") is True
+                  ):
+                      valid.append(path)
+              except (ValueError, OSError):
+                  continue
+          if not valid:
+              raise SystemExit("no successful REAL Desktop Safari WebDriver evidence")
+          print("validated real Desktop Safari evidence:", *valid)
+          PY
       - name: Require at least one valid real iOS Safari evidence artifact
         shell: bash
         run: |
@@ -441,3 +501,12 @@ jobs:
           path: dist/browser-compatibility/ios-safari-attempts/*.json
           if-no-files-found: error
           retention-days: 14
+      - name: Publish canonical Desktop Safari evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ucr-browser-compatibility-safari-${{ github.sha }}
+          path: dist/browser-compatibility/safari-attempts/*.json
+          if-no-files-found: error
+          retention-days: 14
+
+[executed on device: spb-3-vm-mimb (a42a0407-3edd-4787-aae0-130c3c4db839)]
