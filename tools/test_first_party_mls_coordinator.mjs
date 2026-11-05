@@ -98,6 +98,14 @@ function createEndpoint(user){
   const scope=JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]);
   const context={
     atob:globalThis.atob,
+    // The coordinator runs in isolation: stage diagnostics do not own trust.
+    rememberCallInfo(){},
+    authDiagnostic(){},
+    callRoleOf(snapshot){
+      if(snapshot?.identity===snapshot?.call?.callerIdentityId)return "caller";
+      if(snapshot?.identity===snapshot?.call?.calleeIdentityId)return "callee";
+      return null;
+    },
     accountScope:scope,navigating:false,
     active:{call:{...directCall},terminating:false},
     activeCallLocator:()=>"call-hint",
