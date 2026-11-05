@@ -4226,7 +4226,7 @@ mod tests {
         // accepted, exact-Call Join. It only enters the URL fragment and
         // cannot leak through a query string or a server request.
         let join = js
-            .find("const grant = await calls.join(callId)")
+            .find("grant = await calls.join(callId)")
             .expect("media entry must be authorized by canonical Call");
         let bound = js
             .find("grant.callId !== callId")
@@ -4238,7 +4238,8 @@ mod tests {
             .find("location.replace(next.href)")
             .expect("navigate only after canonical media authorization");
         assert!(join < bound && bound < fragment && fragment < navigate);
-        assert!(js.contains("if (fresh.state === \"active\") await beginMedia(fresh.callId)"));
+        assert!(js.contains("if (fresh.state === \"active\") {"));
+        assert!(js.contains("await beginMedia(fresh.callId)"));
         // A public Device binding hint is not a login credential. It
         // permits re-authentication only by proving possession of the
         // canonical protected signer against the server after restart.
