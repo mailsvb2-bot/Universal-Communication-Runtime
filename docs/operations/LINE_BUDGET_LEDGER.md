@@ -40,3 +40,24 @@ The rows below are call-survival fixes ON TOP of that PR, not bare main
 
 Congestion/retry safety are correctness fixes, not new default-on risky flags.
 `ucrSoftNetworkRecovery` still defaults off.
+
+## Series 4 on PR #344 head `6bc5f8deb8d4c39b21671e7e5436b1d5d563249b`
+
+Series 3 (DC congestion, rejoin/grant retirement, offered ICE, Close-before-Leave)
+was already integrated. These fixes target phone↔PC media survival.
+`metrics_baseline.json` stays unchanged. Anti-replay rejects duplicate and
+far-behind sequence resets; risky feature flags remain default **off**.
+
+| File | Approx. delta | Justification |
+|---|---|---|
+| `sdk/typescript/src/portable_endpoint_media.ts` | +~70 lines | Authenticated 64-frame reorder; replay counters, closed DataChannel backpressure |
+| `sdk/typescript/src/browser_webcodecs_media.ts` | +~90 lines | Session-scoped stream IDs, hidden-tab decode skip, stale frame drop, peak-hold |
+| `crates/ucr-realtime-web/static/client.html` | +~80 lines | Preserve live epoch signer on DC rebuild, bounded replay diagnostics, conference-active flag |
+| `crates/ucr-realtime-web/static/start.js` | +~12 lines | Reflect already active conference instead of stale waiting message |
+| `sdk/typescript/endpoint_e2ee_conformance.ts` | expanded | Authenticate reorder, fail closed on stale/double replay, smoke tests |
+| `tools/test_encrypted_media_survival.mjs` | new | Media reconnect must retain signer and /start flag |
+| `crates/ucr-architecture-tests/tests/webrtc_provider.rs` | +~12 lines | Static gates for detach/keepAdapter and replay telemetry |
+| `crates/ucr-realtime-web/src/main.rs` | +~10 lines | WebRTC/crypto state diagnostic requirements |
+
+No new default-on flags. `ucrSoftNetworkRecovery`, unordered DC v2,
+SFU cache and loss/RTT BWE remain off.
