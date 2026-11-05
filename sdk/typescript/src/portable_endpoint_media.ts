@@ -89,6 +89,49 @@ export interface UcrEndpointPipelineOptions {
 
 type InboundHeader = SfuForwardEnvelopeWire["frame"]["header"];
 
+/** Inclusive bitmap window behind the highest successfully opened sequence. */
+export const UCR_MEDIA_REPLAY_WINDOW = 64n;
+type UcrReplayCursor = {highest: bigint; bits: bigint};
+type UcrReplayDecision = "accept-new" | "accept-reorder" | "duplicate" | "stale";
+function ucrReplayDecide(cursor: UcrReplayCursor | undefined, sequence: bigint): UcrReplayDecision {
+  if (sequence < 1n) return "stale";
+  if (!cursor) return "accept-new";
+  if (sequence > cursor.highest) return "accept-new";
+  const delta = cursor.highest - sequence;
+  if (delta >= UCR_MEDIA_REPLAY_WINDOW) return "stale";
+  return (cursor.bits & (1n << delta)) !== 0n ? "duplicate" : "accept-reorder";
+}
+function ucrReplayCommit(cursors: Map<string, UcrReplayCursor>, key: string, sequence: bigint): void {
+  const cursor = cursors.get(key);
+  if (!cursor || sequence > cursor.highest) {
+    const shift = cursor ? sequence - cursor.highest : 0n;
+    let bits = 1n;
+    if (cursor && shift > 0n && shift < UCR_MEDIA_REPLAY_WINDOW) {
+      bits = (cursor.bits << shift) | 1n;
+      bits &= (1n << UCR_MEDIA_REPLAY_WINDOW) - 1n;
+    }
+    cursors.set(key, {highest: sequence, bits});
+    return;
+  }
+  const delta = cursor.highest - sequence;
+  if (delta < UCR_MEDIA_REPLAY_WINDOW) cursor.bits |= 1n << delta;
+}
+function ucrReplayReject(decision: "duplicate" | "stale"): never {
+  if (decision === "duplicate") ucrMediaStageMetrics.replayDuplicate++;
+  else ucrMediaStageMetrics.replayStale++;
+  ucrMediaStageMetrics.replayRejected++;
+  throw new Error("replayed endpoint media frame");
+}
+function ucrRecordLastRx(mediaKind: string, sequence: bigint): void {
+  const value = sequence > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(sequence);
+  if (mediaKind === "audio") {
+    if (value > ucrMediaStageMetrics.lastRxAudio) ucrMediaStageMetrics.lastRxAudio = value;
+  } else if (mediaKind === "video") {
+    if (value > ucrMediaStageMetrics.lastRxVideo) ucrMediaStageMetrics.lastRxVideo = value;
+  }
+}
+
+
 // Aggregate endpoint stage counters. Never expose plaintext, peer IDs or keys.
 const ucrMediaStageMetrics = {
   authorizationMs: 0, authorizationMaxMs: 0, expiredBeforeSeal: 0,
@@ -98,6 +141,8 @@ const ucrMediaStageMetrics = {
   videoExpired: 0, videoQueueFull: 0, videoKeyframeRequests: 0,
   sendChannelClosed: 0, sendQueueCongested: 0, sendInvalidEnvelope: 0,
   sendUnexpectedFailure: 0, sendUnavailable: 0,
+  replayRejected: 0, replayDuplicate: 0, replayStale: 0,
+  lastRxAudio: 0, lastRxVideo: 0,
 };
 (globalThis as unknown as {__ucrMediaStageMetrics?: typeof ucrMediaStageMetrics})
   .__ucrMediaStageMetrics = ucrMediaStageMetrics;
@@ -117,7 +162,9 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   readonly #maxPendingFrames: number;
   readonly #maxReplayStreams: number;
   readonly #sequences = new Map<string, bigint>();
-  readonly #received = new Map<string, bigint>();
+  /** Per sender/stream/epoch: highest authenticated sequence and 64-frame bitmap.
+   * Only opened, authenticated frames advance the anti-replay cursor. */
+  readonly #received = new Map<string, UcrReplayCursor>();
   readonly #reserved = new Set<string>();
   // Auth/key lookups are asynchronous. Preserve ciphertext DataChannel arrival
   // order PER verified stream while allowing distinct speakers to progress in
@@ -271,8 +318,9 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         header.mediaKind, header.videoSourceKind ?? "", header.streamId].join("\u0000");
       const last = this.#received.get(replayKey);
       const reservation = replayKey + "\u0000" + header.sequence.toString();
-      if ((last !== undefined && header.sequence <= last) || this.#reserved.has(reservation)) {
-        throw new Error("replayed endpoint media frame");
+      const early = ucrReplayDecide(last, header.sequence);
+      if (early === "duplicate" || early === "stale" || this.#reserved.has(reservation)) {
+        ucrReplayReject(early === "stale" ? "stale" : "duplicate");
       }
       if (this.#reserved.size >= this.#maxPendingFrames) {
         throw new Error("endpoint verification queue capacity exceeded");
@@ -299,10 +347,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       }
       if (!this.#active || this.#generation !== generation) return;
       const latest = this.#received.get(replayKey);
-      if (latest !== undefined && header.sequence <= latest) {
-        throw new Error("replayed endpoint media frame");
-      }
-      this.#received.set(replayKey, header.sequence);
+      const opened = ucrReplayDecide(latest, header.sequence);
+      if (opened === "duplicate" || opened === "stale") ucrReplayReject(opened);
+      ucrReplayCommit(this.#received, replayKey, header.sequence);
+      ucrRecordLastRx(header.mediaKind, header.sequence);
       inboundStage = "DECODE_AND_PLAY";
       await this.#consumer.play({
         mediaKind: header.mediaKind,
@@ -493,15 +541,18 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         else if (transportCode === "UCR_TRANSPORT_INVALID_ENVELOPE") ucrMediaStageMetrics.sendInvalidEnvelope++;
         else ucrMediaStageMetrics.sendUnexpectedFailure++;
       }
-      // Outbound DataChannel congestion is backpressure, never an MLS/Join failure.
-      // Do not close an authorized peer or request a larger keyframe into a full buffer.
+      // Congestion and transient closed DataChannel are transport backpressure:
+      // keep the authenticated epoch signer and its monotonically increasing sequences.
       if (outboundStage === "DATACHANNEL_SEND" &&
-          transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED") {
-        const notice = (globalThis as unknown as {
-          ucrEndpointMediaCongestion?: (kind: string) => void;
-        }).ucrEndpointMediaCongestion;
-        if (typeof notice === "function") {
-          try { notice(frame.mediaKind); } catch { /* diagnostic is best effort */ }
+          (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED" ||
+           transportCode === "UCR_TRANSPORT_CHANNEL_CLOSED")) {
+        if (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED") {
+          const notice = (globalThis as unknown as {
+            ucrEndpointMediaCongestion?: (kind: string) => void;
+          }).ucrEndpointMediaCongestion;
+          if (typeof notice === "function") {
+            try { notice(frame.mediaKind); } catch { /* diagnostic is best effort */ }
+          }
         }
         return;
       }
