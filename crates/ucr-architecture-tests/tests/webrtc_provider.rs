@@ -259,3 +259,38 @@ fn cross_device_call_path_keeps_mobile_recovery_and_ice_diagnostics() {
     assert!(browser.contains("ucrSessionMediaDiagnostics"));
     assert!(browser.contains("localCandidateType"));
 }
+
+
+#[test]
+fn cross_device_call_survives_congestion_and_keeps_rejoin() {
+    let browser = read("crates/ucr-realtime-web/static/client.html");
+    let adapter = read("sdk/typescript/src/portable_endpoint_media.ts");
+
+    // ICE: distinguish "start not reached" from "start returned empty servers".
+    assert!(browser.contains("let ucrOfferedIceKinds=\"pending\""));
+    assert!(browser.contains("function ucrResolvedIceServerKinds(pc)"));
+    assert!(browser.contains("offeredIceServerKinds:ucrOfferedIceKinds||\"pending\""));
+    assert!(browser.contains("lastFailure:ucrLastFailure"));
+    assert!(browser.contains("ucrOfferedIceKinds=ucrIceServerKinds(offer.ice_servers||[])"));
+
+    // Failed Join / Access ended must not retire a still-valid grant.
+    assert!(browser.contains("leave({retireGrant:false})"));
+    assert!(browser.contains("const retireGrant=!(options&&options.retireGrant===false)"));
+    assert!(browser.contains("if(wasActive&&retireGrant)signedGrantRetired=true"));
+    assert!(browser.contains("signedGrantRetired=true;"));
+    assert!(browser.contains("if(!retireGrant)await leaving"));
+    assert!(browser.contains(r"\b401\b|\b403\b|not_found|offer_not_found"));
+    assert!(browser.contains("ucrJoinFailureMessage"));
+
+    // Congestion is backpressure, not conference suicide.
+    assert!(browser.contains("window.ucrEndpointMediaCongestion"));
+    assert!(browser.contains("MEDIA_TRANSPORT_CONGESTION"));
+    assert!(adapter.contains("ucrEndpointMediaCongestion"));
+    assert!(adapter.contains("UCR_TRANSPORT_QUEUE_CONGESTED"));
+    assert!(adapter.contains(r#"transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED""#));
+
+    // Series C still checks accepted-first-party auto-Join; only resumes AudioContext.
+    assert!(browser.contains(r#"sessionStorage.getItem("ucrFirstPartyDirectCall")"#));
+    assert!(browser.contains("claims.call_id.startsWith(\"fp-m-\")"));
+    assert!(browser.contains("resumeRoomAudio(window.ucrLocalRoomAudioContext)"));
+}
