@@ -482,15 +482,28 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         metrics.sealAndSendMs = Math.round(performance.now() - queuedAt);
       }
     }).catch((_error: unknown) => {
+      let transportCode: unknown = null;
       if (outboundStage === "DATACHANNEL_SEND" && this.#sender) {
         // Only codes issued by the first-party transport are trusted.
         // Do not expose arbitrary exception text, URLs, devices or identifiers.
-        const code = (_error && typeof _error === "object" &&
+        transportCode = (_error && typeof _error === "object" &&
           "code" in _error) ? (_error as {code?: unknown}).code : null;
-        if (code === "UCR_TRANSPORT_CHANNEL_CLOSED") ucrMediaStageMetrics.sendChannelClosed++;
-        else if (code === "UCR_TRANSPORT_QUEUE_CONGESTED") ucrMediaStageMetrics.sendQueueCongested++;
-        else if (code === "UCR_TRANSPORT_INVALID_ENVELOPE") ucrMediaStageMetrics.sendInvalidEnvelope++;
+        if (transportCode === "UCR_TRANSPORT_CHANNEL_CLOSED") ucrMediaStageMetrics.sendChannelClosed++;
+        else if (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED") ucrMediaStageMetrics.sendQueueCongested++;
+        else if (transportCode === "UCR_TRANSPORT_INVALID_ENVELOPE") ucrMediaStageMetrics.sendInvalidEnvelope++;
         else ucrMediaStageMetrics.sendUnexpectedFailure++;
+      }
+      // Outbound DataChannel congestion is backpressure, never an MLS/Join failure.
+      // Do not close an authorized peer or request a larger keyframe into a full buffer.
+      if (outboundStage === "DATACHANNEL_SEND" &&
+          transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED") {
+        const notice = (globalThis as unknown as {
+          ucrEndpointMediaCongestion?: (kind: string) => void;
+        }).ucrEndpointMediaCongestion;
+        if (typeof notice === "function") {
+          try { notice(frame.mediaKind); } catch { /* diagnostic is best effort */ }
+        }
+        return;
       }
       if (frame.mediaKind === "audio") {
         if (outboundStage === "PUBLISH_AUTHORIZATION") ucrMediaStageMetrics.audioAuthorizationRejected++;
