@@ -15,10 +15,11 @@ import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1, UcrVerified
  * Designed to be replaceable by native codecs on Android/iOS/desktop.
  */
 // Aggregate-only observability: no media samples, participant identities or keys.
+const ucrMediaVisibilityRecoveries = new Set<() => void>();
 const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0, playoutQueuedMs: 0, playoutJitterMs: 0, playoutRebases: 0};
 // Count actual encoded and rendered video separately; a connected DataChannel
 // and encrypted packet count are not evidence of remote picture delivery.
-const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
+const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
 // Background rendering is intentionally suppressed. Track that time separately
 // so diagnostics never attribute hidden-tab inactivity to decoder failure.
 if (typeof document !== "undefined") {
@@ -39,8 +40,30 @@ if (typeof document !== "undefined") {
       ucrVideoCounters.hiddenSince = 0;
       ucrVideoCounters.firstVisibleUnrenderedDecodeAt = 0;
       ucrVideoCounters.visibleSince = now;
+      for (const recover of ucrMediaVisibilityRecoveries) {
+        try { recover(); } catch { /* best effort */ }
+      }
     }
   });
+}
+export function ucrHoldPeak(held: number, sample: number, decay = 0.92): number {
+  if (!Number.isFinite(held) || !Number.isFinite(sample) || held < 0 || sample < 0) return 0;
+  const peak = Math.max(0, Math.min(1, sample));
+  const previous = Math.max(0, Math.min(1, held));
+  return Math.round(Math.max(peak, previous * decay) * 1000) / 1000;
+}
+export function ucrNewMediaSessionId(): string {
+  const bytes = new Uint8Array(4);
+  const cryptoObj = globalThis.crypto as {getRandomValues?: (v: Uint8Array) => Uint8Array} | undefined;
+  if (typeof cryptoObj?.getRandomValues !== "function") throw new Error("media session identity requires CSPRNG");
+  cryptoObj.getRandomValues(bytes);
+  return Array.from(bytes, byte => byte.toString(16).padStart(2,"0")).join("");
+}
+export function ucrQualifyMediaStreamId(trackId: string, sessionId: string): string {
+  if (typeof sessionId !== "string" || !/^[a-f0-9]{8}$/.test(sessionId)) throw new Error("invalid media session identity");
+  if (typeof trackId !== "string" || trackId.length < 1 || trackId.length > 100 ||
+      trackId.includes("-m") || !/^[a-zA-Z0-9_-]+$/.test(trackId)) throw new Error("invalid authenticated media track identity");
+  return trackId + "-m" + sessionId;
 }
 (globalThis as unknown as {__ucrVideoCounters?: typeof ucrVideoCounters}).__ucrVideoCounters = ucrVideoCounters;
 (globalThis as unknown as {__ucrAudioCounters?: typeof ucrAudioCounters}).__ucrAudioCounters = ucrAudioCounters;
@@ -395,6 +418,8 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
   #lastCodecFailureAt = 0;
   #codecRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   readonly #keyframeRequests = new Map<string, () => void>();
+  #mediaSessionId = "";
+  #visibilityRecovery: (() => void) | null = null;
 
   constructor(
     onError: (error: unknown) => void = () => {},
@@ -413,6 +438,12 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     this.#emit = emit;
     this.#currentSources = sources;
     this.#codecRecoveryAttempts = 0;
+    this.#mediaSessionId = ucrNewMediaSessionId();
+    if (this.#visibilityRecovery) ucrMediaVisibilityRecoveries.delete(this.#visibilityRecovery);
+    this.#visibilityRecovery = () => {
+      for (const request of this.#keyframeRequests.values()) request();
+    };
+    ucrMediaVisibilityRecoveries.add(this.#visibilityRecovery);
     try {
       await this.#attach(sources, ++this.#generation);
     } catch (error) {
@@ -459,11 +490,20 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     ++this.#generation;
     this.#emit = null;
     this.#currentSources = null;
+    if (this.#visibilityRecovery) {
+      ucrMediaVisibilityRecoveries.delete(this.#visibilityRecovery);
+      this.#visibilityRecovery = null;
+    }
     if (this.#codecRecoveryTimer !== null) clearTimeout(this.#codecRecoveryTimer);
     this.#codecRecoveryTimer = null;
     // No post-stop update may reattach an encoder after cleanup has finished.
     await this.#sourceUpdateTail.catch(() => {});
     await this.#reset();
+  }
+
+  #qualifyStream(trackId: string): string {
+    if (!this.#mediaSessionId) this.#mediaSessionId = ucrNewMediaSessionId();
+    return ucrQualifyMediaStreamId(trackId, this.#mediaSessionId);
   }
 
   async #reset(): Promise<void> {
@@ -495,7 +535,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
   ): void {
     const b = browser();
     const processor = new b.MediaStreamTrackProcessor!({track});
-    const streamId = track.id;
+    const streamId = this.#qualifyStream(track.id);
     if (!streamId) throw new Error("media track must have stream identity");
     let forceKeyframe = false;
     let forceLowKeyframe = false;
@@ -673,6 +713,10 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         if (result.done) break;
         const frame = result.value;
         try {
+          if (!Number.isFinite(readBuffered())) {
+            if (kind === "video") forceKeyframe = true;
+            continue;
+          }
           if (kind === "video") ucrVideoCounters.captured++;
           if (kind === "video" && Number.isFinite(frame.timestamp)) {
             // Detect a stalled local capture/encode loop: compare media capture
@@ -746,7 +790,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
                   pcm.copyTo(samples, {planeIndex: 0, format: "f32-planar"});
                   let peak = 0;
                   for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
-                  ucrAudioCounters.inputPeak = Math.round(peak * 1000) / 1000;
+                  ucrAudioCounters.inputPeak = ucrHoldPeak(ucrAudioCounters.inputPeak, peak);
                 }
                 encoder.encode(pcm);
               }
@@ -836,11 +880,32 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   #pendingVisibleVideoDecoderKey: string | null = null;
   #visibleVideoKind: "camera" | "screen_share" | null = null;
   #lastScreenVideoAt = 0;
+  readonly #lastVideoTimestampUs = new Map<string, number>();
+  #visibilityRecovery: (() => void) | null = null;
 
   constructor(options: UcrBrowserCodecOptions = {}) {
     this.#videoCanvas = options.videoCanvas;
     this.#audioContext = options.audioContext;
     this.#onError = options.onError ?? (() => {});
+    this.#visibilityRecovery = () => this.#recoverVisiblePlayback();
+    ucrMediaVisibilityRecoveries.add(this.#visibilityRecovery);
+  }
+
+  #recoverVisiblePlayback(): void {
+    const context = this.#audioContext;
+    if (context && context.state === "suspended") {
+      try { void context.resume(); } catch { /* gesture may still be required */ }
+    }
+    for (const key of [...this.#decoders.keys()]) {
+      if (!key.startsWith("video:")) continue;
+      const decoder = this.#decoders.get(key);
+      if (decoder) {
+        try { decoder.close(); } catch { /* already closed */ }
+        this.#decoders.delete(key);
+      }
+      this.#awaitVideoKeyframe.add(key);
+    }
+    this.#lastVideoTimestampUs.clear();
   }
 
   /** Receiver-only downgrade: video decoding stops at the local endpoint.
@@ -919,6 +984,27 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   ): void {
     if (frame.mediaKind === "video" && !this.#videoEnabled) return;
     const key = this.#decoderKey(frame.mediaKind, frame.videoSourceKind, frame.streamId, source);
+    const doc = (globalThis as {document?: {hidden?: boolean}}).document;
+    const timestampUs = Number(frame.timestamp);
+    if (frame.mediaKind === "video") {
+      if (doc?.hidden) {
+        const existing = this.#decoders.get(key);
+        if (existing) {
+          try { existing.close(); } catch { /* already closed */ }
+          this.#decoders.delete(key);
+        }
+        this.#awaitVideoKeyframe.add(key);
+        ucrVideoCounters.hiddenRenderSkips++;
+        return;
+      }
+      const lastTs = this.#lastVideoTimestampUs.get(key);
+      if (lastTs !== undefined && Number.isFinite(timestampUs) &&
+          lastTs - timestampUs > 250_000 && !frame.keyframe) {
+        this.#awaitVideoKeyframe.add(key);
+        ucrVideoCounters.droppedStale++;
+        return;
+      }
+    }
     let videoSourceKey: string | null = null;
     if (frame.mediaKind === "video") {
       const videoKind = frame.videoSourceKind === "screen_share" ? "screen_share" : "camera";
@@ -1111,6 +1197,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         decoder.decode(new b.EncodedVideoChunk!({
           type: frame.keyframe ? "key" : "delta", timestamp, data,
         }));
+        if (Number.isFinite(timestampUs)) this.#lastVideoTimestampUs.set(key, timestampUs);
       } catch (error) {
         this.#awaitVideoKeyframe.add(key);
         const failed = this.#decoders.get(key);
@@ -1155,7 +1242,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         framePeak = Math.max(framePeak, peak);
         buffer.copyToChannel(pcm, ch);
       }
-      ucrAudioCounters.outputPeak = Math.round(framePeak * 1000) / 1000;
+      ucrAudioCounters.outputPeak = ucrHoldPeak(ucrAudioCounters.outputPeak, framePeak);
       const node = context.createBufferSource();
       node.buffer = buffer;
       node.connect(context.destination);
@@ -1221,6 +1308,11 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   }
 
   stop(): void {
+    if (this.#visibilityRecovery) {
+      ucrMediaVisibilityRecoveries.delete(this.#visibilityRecovery);
+      this.#visibilityRecovery = null;
+    }
+    this.#lastVideoTimestampUs.clear();
     ucrVideoCounters.firstVisibleUnrenderedDecodeAt = 0;
     ++this.#renderGeneration;
     for (const decoder of this.#decoders.values()) decoder.close();
