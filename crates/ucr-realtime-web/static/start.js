@@ -973,7 +973,7 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
             BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef);
         }
         if(descriptor.cryptoEpoch===0){
-          const offers=await host.listEndpointMlsOffers(live.user,request);
+          const offers=await host.listEndpointMlsOffers(live.user,requestOf());
           live=await check();
           if(offers.length===0){authDiagnostic("mls_prepare","pending",null,{mlsPhase:"wait_offer"});return false;}
           if(offers.length!==1||offers[0].recipientDeviceId===live.user.deviceId)
@@ -1057,7 +1057,7 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
           state=module.EndpointMlsState.restore_unjoined_key_package(
             live.user.tenantId,live.user.namespaceId??undefined,descriptor.groupId,
             live.user.deviceId,wrapping,sealed);
-          const bootstrap=await host.fetchEndpointMlsBootstrap(live.user,request);
+          const bootstrap=await host.fetchEndpointMlsBootstrap(live.user,requestOf());
           live=await check();
           if(bootstrap.groupId!==descriptor.groupId||
              bootstrap.cryptoEpoch!==descriptor.cryptoEpoch||
