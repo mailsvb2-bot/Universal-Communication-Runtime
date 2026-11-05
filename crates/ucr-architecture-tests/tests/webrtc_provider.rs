@@ -252,4 +252,10 @@ fn cross_device_call_path_keeps_mobile_recovery_and_ice_diagnostics() {
     assert!(media.contains("context.state === \"suspended\""));
     assert!(cascade.contains("ucrRecommendedTurnCascade"));
     assert!(cascade.contains("turns:${host}:${turnsPort}?transport=tcp"));
+    let start = read("crates/ucr-realtime-web/static/start.js");
+    assert!(start.contains("const requestOf=()=>({callId,expectedRevision:live.call.revision})"));
+    assert!(start.contains("schema:\"ucr-session-diagnostics-v2\""));
+    assert!(start.contains("mls_prepare"));
+    assert!(browser.contains("ucrSessionMediaDiagnostics"));
+    assert!(browser.contains("localCandidateType"));
 }
