@@ -1138,6 +1138,16 @@ async function beginMedia(callId) {
   }
   finally{if(mlsPreparation===preparation)mlsPreparation=null;}
   if(!mlsReady){
+    let conferenceActive=false;
+    try{conferenceActive=sessionStorage.getItem("ucrConferenceMediaActive")==="1";}catch(_){}
+    if(conferenceActive){
+      message("Защищённый звонок уже открыт на экране конференции.");
+      authDiagnostic("begin_media","pending",null,{
+        callState:selected.call.state,role:callRoleOf(selected),
+        mlsPhase:sessionCallInfo.mlsPhase||"ready",grantPresent:true
+      });
+      return;
+    }
     const phase=sessionCallInfo.mlsPhase;
     if(phase==="wait_group")message("Звонок принят. Ждём криптогруппу собеседника…");
     else if(phase==="wait_offer"||phase==="published_group")message("Криптогруппа создана. Ждём ключ собеседника…");
