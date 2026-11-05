@@ -79,6 +79,7 @@ canvas.remote-media.hidden{display:none}
 <div class="metric"><span id="packets-label">Encrypted packets</span><b id="packets">0</b></div>
 <div class="metric"><span id="expires-label">Expires</span><b id="expires">—</b></div>
 </div>
+<div id="status" role="status" aria-live="polite">Reading signed join grant…</div>
 <div class="media">
 <div class="video-card"><header id="local-label">You</header><video id="local-video" autoplay muted playsinline></video></div>
 <div id="screen-card" class="video-card hidden"><header id="screen-label">Your screen</header><video id="screen-video" autoplay muted playsinline></video></div>
@@ -115,7 +116,7 @@ canvas.remote-media.hidden{display:none}
 <button id="join" class="primary">Join conference</button>
 <button id="leave" class="secondary" disabled>Leave</button>
 </div>
-<div id="status" role="status" aria-live="polite">Reading signed join grant…</div>
+
 <details id="ucr-diagnostics" open>
   <summary>Диагностика звонка — состояние и ошибки</summary>
   <p class="small">Без паролей, токенов, ключей, содержимого сообщений и идентификаторов участников. Работает без F12.</p>
@@ -170,6 +171,42 @@ function ucrIceServerKinds(servers){
   }
   return turn&&stun?"both":turn?"turn":stun?"stun":"none";
 }
+// "pending" means WebRTC start has not supplied iceServers yet.
+// "none" means a real offer/configuration returned no ICE servers.
+let ucrOfferedIceKinds="pending";
+let ucrLastFailure=null;
+function ucrRememberFailure(category){
+  const safe=String(category||"unknown").replace(/[^A-Z0-9_]/g,"").slice(0,80);
+  ucrLastFailure={category:safe||"unknown",at:new Date().toISOString()};
+}
+function ucrResolvedIceServerKinds(pc){
+  if(pc&&typeof pc.getConfiguration==="function"){
+    const live=ucrIceServerKinds(pc.getConfiguration()?.iceServers);
+    if(live!=="none")return live;
+  }
+  return ucrOfferedIceKinds||"pending";
+}
+function ucrJoinFailureMessage(error){
+  const raw=String(error&&error.message||error||"");
+  const category=ucrDiagnosticReason(raw);
+  if(category==="MEDIA_MODULE_LOAD_FAILURE")
+    return "Не удалось загрузить модуль защиты звонка. На компьютере первая загрузка может занять до минуты. Нажмите «Войти в конференцию» ещё раз.";
+  if(/not saved before Join|handoff unavailable|Initiator MLS|sealed local snapshot/i.test(raw))
+    return "На этом устройстве нет сохранённой защиты звонка. Вернитесь на страницу начала звонка и войдите снова, затем нажмите «Войти в конференцию».";
+  if(category==="MLS_EPOCH_MISMATCH"||/epoch|revision|canonical Group|canonical epoch/i.test(raw))
+    return "Защита звонка не совпала с другой стороной. Нажмите «Войти в конференцию» ещё раз.";
+  if(category==="GRANT_INVALID_OR_EXPIRED")
+    return "Срок ссылки входа истёк. Откройте новое приглашение или вернитесь на страницу начала звонка.";
+  if(category==="DEVICE_PERMISSION_DENIED")
+    return "Нет доступа к камере или микрофону. Разрешите устройства в браузере и нажмите «Войти в конференцию».";
+  if(category==="SESSION_CONFLICT")
+    return "Сессия уже используется. Подождите секунду и нажмите «Войти в конференцию» ещё раз.";
+  if(category==="WEBRTC_CONNECTION_FAILURE")
+    return "Не удалось установить защищённое соединение. Проверьте сеть и повторите вход.";
+  if(category==="MEDIA_TRANSPORT_CONGESTION")
+    return "Канал передачи занят: снижаем видео, звук сохраняем. Звонок не прерывается.";
+  return "Вход в конференцию не завершился ("+category+"). Можно нажать «Войти в конференцию» ещё раз.";
+}
 const UCR_CANDIDATE_TYPES=new Set(["host","srflx","prflx","relay"]);
 function ucrSanitizeCandidateType(value){
   return UCR_CANDIDATE_TYPES.has(value)?value:null;
@@ -201,7 +238,8 @@ async function ucrCaptureIceStats(pc){
       iceConnectionState:pc.iceConnectionState||null,
       iceGatheringState:pc.iceGatheringState||null,
       sdpComplete:!!(pc.localDescription&&pc.remoteDescription),
-      iceServerKinds:ucrIceServerKinds(pc.getConfiguration?.().iceServers),
+      iceServerKinds:ucrResolvedIceServerKinds(pc),
+      offeredIceServerKinds:ucrOfferedIceKinds||"pending",
       localCandidateType:selectedLocal,
       remoteCandidateType:selectedRemote,
       gatheredLocalTypes:gathered
@@ -242,9 +280,26 @@ function ucrDiagnosticReason(value){
 // exception strings: they may contain sensitive internal context.
 let ucrLastMediaError="",ucrLastMediaErrorAt=0;
 let ucrMediaFailureCount=0,ucrMediaFailureWindowStart=0,ucrMediaFailureStopped=false;
+let ucrCongestionNoticeAt=0;
+window.ucrEndpointMediaCongestion=kind=>{
+  const now=Date.now();
+  if(now-ucrCongestionNoticeAt<3000)return;
+  ucrCongestionNoticeAt=now;
+  const media=kind==="audio"||kind==="video"?kind:"media";
+  ucrRecordDiagnostic("Encrypted media backpressure ("+media+"); call stays connected","media");
+  const status=document.getElementById("status");
+  if(status)status.textContent=kind==="audio"
+    ?"Канал передачи занят: часть звука временно не отправлена, звонок продолжается."
+    :"Канал передачи занят: снижаем видео, звук сохраняем. Звонок не прерывается.";
+};
 window.ucrEndpointMediaError=error=>{
   const category=ucrDiagnosticReason(error?.message||"");
   const now=Date.now();
+  // Congestion is backpressure, not an authentication or E2EE failure.
+  if(category==="MEDIA_TRANSPORT_CONGESTION"){
+    window.ucrEndpointMediaCongestion("media");
+    return;
+  }
   if(now-ucrMediaFailureWindowStart>20000){ucrMediaFailureWindowStart=now;ucrMediaFailureCount=0;}
   ucrMediaFailureCount++;
   if(ucrMediaFailureCount>=8&&!ucrMediaFailureStopped){
@@ -281,11 +336,13 @@ function ucrDiagnosticReport(){
       iceConnectionState:typeof peer!=="undefined"&&peer?peer.iceConnectionState||null:null,
       iceGatheringState:typeof peer!=="undefined"&&peer?peer.iceGatheringState||null:null,
       sdpComplete:typeof peer!=="undefined"&&peer?!!(peer.localDescription&&peer.remoteDescription):false,
-      iceServerKinds:typeof peer!=="undefined"&&peer?ucrIceServerKinds(peer.getConfiguration?.().iceServers):"none",
+      iceServerKinds:typeof peer!=="undefined"&&peer?ucrResolvedIceServerKinds(peer):ucrOfferedIceKinds||"pending",
+      offeredIceServerKinds:ucrOfferedIceKinds||"pending",
       localCandidateType:null,
       remoteCandidateType:null,
       gatheredLocalTypes:null
     },
+    lastFailure:ucrLastFailure,
     state:document.getElementById("state")?.textContent||"unknown",
     webrtc:document.getElementById("webrtc-state")?.textContent||"unknown",
     encryptedPackets:Number(document.getElementById("packets")?.textContent)||0,
@@ -1505,6 +1562,10 @@ function sendE2eeEnvelope(wire,mediaKind){
     chunk.set(bytes.subarray(start,end),E2EE_CHUNK_HEADER_BYTES);
     e2eeChannel.send(chunk);
   }
+  if(typeof packetCount==="number"){
+    packetCount++;
+    if(typeof ui!=="undefined"&&ui.packets)ui.packets.textContent=String(packetCount);
+  }
   if(mediaKind==="audio"&&window.__ucrAudioCounters)window.__ucrAudioCounters.transportQueued++;
 }
 function endpointMediaSources(){
@@ -2065,7 +2126,7 @@ async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims
     }
   }catch(error){
     const message=String(error?.message||error);
-    if(/\b404\b|not_found|offer_not_found/i.test(message)){
+    if(/\b404\b|\b401\b|\b403\b|not_found|offer_not_found|unauthorized|forbidden/i.test(message)){
       ucrRecordDiagnostic("WebRTC offer already retired on close","webrtc");
       if(startWebRtc.offerId===offerId){
         startWebRtc.offerId=null;
@@ -2160,6 +2221,12 @@ async function startWebRtcOnce(forceMedia=false){
       offerId:offer.offer_id,claims:Object.freeze({...startingClaims}),token:startingToken
     });
     startingOwner=startWebRtc.offerOwner;
+    if(typeof ucrIceServerKinds==="function"){
+      ucrOfferedIceKinds=ucrIceServerKinds(offer.ice_servers||[]);
+      if(ucrOfferedIceKinds==="none"&&typeof ucrRecordDiagnostic==="function"){
+        ucrRecordDiagnostic("WebRTC start returned no STUN/TURN; only same-LAN host candidates","webrtc");
+      }
+    }
     rtcConfig=rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value);
     await ensureLocalMedia(forceMedia);
     ensureCurrent();
@@ -2392,6 +2459,7 @@ async function activateAdmittedMedia(){
   if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
   if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=true;
   if(typeof ensureLocalMedia==="function")ensureLocalMedia(false).catch(()=>{});
+  ui.status.textContent="Загружаем защиту звонка. На компьютере первая загрузка модуля может занять до минуты…";
   await ensureEndpointMlsReady();
   if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive){
     if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=false;
@@ -2682,8 +2750,12 @@ async function join(){
     // The server may already have accepted the join when MLS or admission
     // activation fails. Never leave heartbeat, camera or an authorized
     // session running behind a misleading "Rejected" Join button.
+    const category=typeof ucrDiagnosticReason==="function"
+      ?ucrDiagnosticReason(e.message):"MEDIA_ACTIVATION_FAILURE";
+    if(typeof ucrRememberFailure==="function")ucrRememberFailure(category);
+    if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Join failed: "+category,"lifecycle");
     if(sessionActive){
-      try{await leave();}catch(cleanupError){
+      try{await leave({retireGrant:false});}catch(cleanupError){
         // Local revocation must precede any best-effort remote Leave.
         ++sessionLifecycleGeneration;++mediaCaptureGeneration;
         mediaActive=false;sessionActive=false;
@@ -2692,7 +2764,13 @@ async function join(){
         ui.leave.disabled=true;ui.privacyMode.disabled=false;
       }
     }
-    ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=signedGrantRetired;
+    const grantExpired=claims&&typeof claims.expires==="number"&&Date.now()>=claims.expires;
+    if(grantExpired)signedGrantRetired=true;
+    ui.state.textContent="Rejected";
+    ui.status.textContent=grantExpired
+      ?"Срок ссылки входа истёк. Откройте новое приглашение или вернитесь на страницу начала звонка."
+      :(typeof ucrJoinFailureMessage==="function"?ucrJoinFailureMessage(e):String(e&&e.message||e));
+    ui.join.disabled=signedGrantRetired||grantExpired;
   }finally{
     // SDP negotiation may finish while the encrypted DataChannel and MLS
     // adapter are still pending. Keep the deadline armed across asynchronous
@@ -2716,30 +2794,33 @@ function scheduleEntryRetry(){
 }
 async function endUnverifiedMedia(generation,message){
   if(!sessionActive||generation!==sessionLifecycleGeneration)return;
-  // leave() synchronously invalidates authority and stops all local tracks.
-  const cleanup=leave();
-  ui.state.textContent="Access ended";ui.status.textContent=message;
+  const grantExpired=claims&&typeof claims.expires==="number"&&Date.now()>=claims.expires;
+  // Only explicit Leave or expired authority retires a signed grant.
+  const cleanup=leave({retireGrant:grantExpired});
+  const status=grantExpired?message:String(message||"")+" Нажмите «Войти в конференцию», чтобы подключиться снова.";
+  ui.state.textContent="Access ended";ui.status.textContent=status;
   await cleanup;
-  // The retired-grant Join guard may have already told the user to obtain a
-  // fresh link. Do not overwrite that security decision with a late watchdog
-  // completion (or with a stale session's status after a new admission).
-  if(generation+1===sessionLifecycleGeneration&&
-     ui.status.textContent===message){
-    ui.state.textContent="Access ended";
-  }
+  if(generation+1!==sessionLifecycleGeneration)return;
+  ui.state.textContent="Access ended";
+  ui.join.disabled=signedGrantRetired||grantExpired;
+  if(signedGrantRetired)return;
+  ui.status.textContent=status;
 }
 async function leave(){
   if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Leave requested","lifecycle");
   cancelSoftNetworkGrace();
   const wasActive=sessionActive;
+  // DOM click events must never opt out of grant retirement.
+  const options=arguments[0];
+  const retireGrant=!(options&&options.retireGrant===false);
   if(wasActive)ucrFreezePreLeaveSnapshot();
   const leavingClaims=wasActive?body():null;
   const leavingSequence=activeSessionSequence;
   const leavingOfferId=startWebRtc.offerId;
   cancelMediaStartupWatchdog();
   // A late Leave from this grant must never compete with another Join using
-  // the same session identity. Only the first-party host can issue a new grant.
-  if(wasActive)signedGrantRetired=true;
+  // the same session identity. Explicit Leave retires; retryable local failures do not.
+  if(wasActive&&retireGrant)signedGrantRetired=true;
   activeSessionSequence=0;
   sessionActive=false; // Revoke local authority before any awaited cleanup.
   // Invalidate late joins, heartbeats and permission prompts synchronously.
@@ -2755,11 +2836,17 @@ async function leave(){
   stopLocalCapture();
   // Stop screen tracks synchronously, even if remote cleanup never resolves.
   if(screenStream){screenStream.getTracks().forEach(track=>track.stop());screenStream=null;setScreenUi(false);}
-  if(leavingOfferId&&leavingClaims)void closeServerPeer(false,leavingOfferId,leavingClaims).catch(()=>{});
+  if(leavingOfferId&&leavingClaims){
+    try{await closeServerPeer(false,leavingOfferId,leavingClaims);}catch(_){}
+  }
   // Remote Leave is independent of cosmetic/UI cleanup. Submit it as soon as
   // physical capture has stopped, even if later controls fail to reset.
-  if(wasActive&&leavingClaims&&leavingSequence>0)
-    void api("/v1/realtime/leave",{...leavingClaims,expected_session_sequence:leavingSequence}).catch(()=>{});
+  // Close the WebRTC offer while this grant is valid; only then submit Leave.
+  if(wasActive&&leavingClaims&&leavingSequence>0){
+    const leaving=api("/v1/realtime/leave",{...leavingClaims,expected_session_sequence:leavingSequence}).catch(()=>{});
+    if(!retireGrant)await leaving;
+    else void leaving;
+  }
   ui.privacyMode.disabled=false;
   sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
@@ -4144,7 +4231,10 @@ try{
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
   installLocalRoomMediaHost();
   if(sessionStorage.getItem("ucrLocalRoom")==="1"){
-    if(!scheduleWaitingRoom())join().catch(e=>{fail(e.message);});
+    if(!scheduleWaitingRoom()){
+      resumeRoomAudio(window.ucrLocalRoomAudioContext);
+      join().catch(e=>{fail(e.message);});
+    }
   }else if(!scheduleWaitingRoom()){
     // /start already obtained explicit acceptance and a Device-bound signed
     // Join. Continue that SAME first-party Call without a redundant click.
@@ -4154,6 +4244,7 @@ try{
       /^fp-[av]-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(directCall||"");
     if(acceptedFirstPartyHandoff){
       ui.status.textContent="Принятый вызов: проверяем защищённый допуск и подключаем медиа…";
+      resumeRoomAudio(window.ucrLocalRoomAudioContext);
       void join().catch(error=>fail(error.message));
     }else{
       ui.status.textContent="Signed grant loaded. Ready to join.";
@@ -4165,7 +4256,10 @@ try{
 // Hosts installing trust later may call this hook once authorized.
 window.ucrPrewarmAuthorizedMediaRuntime=prewarmAuthorizedMediaRuntime;
 prewarmAuthorizedMediaRuntime();
-ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);
+ui.join.addEventListener("click",()=>{
+  resumeRoomAudio(window.ucrLocalRoomAudioContext);
+  join();
+});ui.leave.addEventListener("click",leave);
 if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="function"){
   navigator.mediaDevices.addEventListener("devicechange",()=>{handleMediaDeviceChange();});
 }
