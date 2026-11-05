@@ -275,7 +275,8 @@ fn cross_device_call_survives_congestion_and_keeps_rejoin() {
     // Failed Join / Access ended must not retire a still-valid grant.
     assert!(browser.contains("leave({retireGrant:false})"));
     assert!(browser.contains("const retireGrant=!(options&&options.retireGrant===false)"));
-    assert!(browser.contains("if(wasActive&&retireGrant)signedGrantRetired=true"));
+    // Explicit Leave must retire authority even before media becomes active.
+    assert!(browser.contains("if(retireGrant)signedGrantRetired=true"));
     assert!(browser.contains("signedGrantRetired=true;"));
     assert!(browser.contains("if(!retireGrant)await leaving"));
     assert!(browser.contains(r"\b401\b|\b403\b|not_found|offer_not_found"));
