@@ -22,3 +22,21 @@ growth of hot call-path files for the phone↔PC call fix series on top of
 | `crates/ucr-architecture-tests/tests/webrtc_provider.rs` | +~10 lines | Gates for revision refresh and diagnostics |
 
 Session diagnostics fields are allowlisted; never record grants, SDP or keys. Risky behavior (`ucrSoftNetworkRecovery`) defaults **off**.
+
+## Series 3 on PR #344 head `4d7fc7d`
+
+The rows above document series 1–2 work already folded into PR #344
+(`review/ucr-series-c-20261104`, base `4d7fc7d32cd6e28c0562a8020210da25e51e9d93`).
+The rows below are call-survival fixes ON TOP of that PR, not bare main
+`842ba25`. `metrics_baseline.json` remains unchanged.
+
+| File | Approx. delta | Justification |
+|---|---|---|
+| `sdk/typescript/src/portable_endpoint_media.ts` | +~20 lines | Congestion is backpressure: count sendQueueCongested, notify page, don't fail-close or request keyframe |
+| `crates/ucr-realtime-web/static/client.html` | +~120 lines | ICE pending vs none, retry Join without retiring live grant, close before Leave, outgoing encryptedPackets, congestion UX, AudioContext resume |
+| `sdk/typescript/endpoint_e2ee_conformance.ts` | +~65 lines | Verify congestion does not terminate E2EE or request larger keyframe; count outgoing sealed packets |
+| `crates/ucr-architecture-tests/tests/webrtc_provider.rs` | +~40 lines | Static gates for Join, ICE, congestion, first-party handoff |
+| `crates/ucr-realtime-web/src/main.rs` | +~3 lines | Diagnostics export remains bounded, with offeredIceServerKinds and lastFailure |
+
+Congestion/retry safety are correctness fixes, not new default-on risky flags.
+`ucrSoftNetworkRecovery` still defaults off.
