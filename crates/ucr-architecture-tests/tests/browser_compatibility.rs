@@ -9,7 +9,8 @@ fn read(path: &str) -> String {
 }
 
 fn assert_browser_workflow(workflow: &str) {
-    for browser in ["chrome", "edge", "firefox", "safari"] {
+    // Safari runs on macOS in ios-safari-attempts, not the Linux desktop matrix.
+    for browser in ["chrome", "edge", "firefox"] {
         assert!(
             workflow.contains(&format!("browser: {browser}")),
             "missing desktop browser matrix row {browser}"
@@ -34,6 +35,8 @@ fn assert_browser_workflow(workflow: &str) {
         "--navigation-attempts 4",
         "--evidence-wait-seconds 40",
         "name: mobile-ios-safari",
+        "Probe real Desktop Safari",
+        "Require real Desktop Safari WebDriver evidence",
         "ios-safari-attempts",
         "macos-15-intel",
         "DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer",

@@ -232,6 +232,20 @@ pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
     fn service_principal_admission_proof(&self) -> Option<&ServicePrincipalAdmissionProof> {
         None
     }
+
+    /// Monotonic revision of every durable fact this evaluator AND its backing
+    /// store consult for authorization (grants, Call participation, Group/MLS
+    /// membership, Devices, trusted keys, identity bindings).
+    ///
+    /// Contract: any change that could turn an `Ok` into an error MUST make a
+    /// later call return a different value, and the change must be visible to
+    /// readers no later than the new revision. `None` (the default) means
+    /// "not cacheable": callers MUST re-evaluate every time. Wrappers that add
+    /// their own policy must return `None` unless they fold that policy in.
+    #[must_use]
+    fn authorization_revision(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Durable owner of permissions bound to exactly one Call (never tenant-wide).

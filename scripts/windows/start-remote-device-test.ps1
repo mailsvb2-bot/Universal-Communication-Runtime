@@ -97,10 +97,24 @@ if ([string]::IsNullOrWhiteSpace($PublicOrigin)) {
 if ([string]::IsNullOrWhiteSpace($TurnUrl)) {
     $blockers.Add('TURN_RELAY_NOT_CONFIGURED: different mobile networks need a reachable ICE relay or verified publicly reachable media endpoint.')
 } else {
-    if ($TurnUrl -notmatch '^turns:[^/?#:@]+(:[0-9]{1,5})?(\?transport=tcp)?$') {
-        $blockers.Add('TURN_RELAY_INVALID: use turns:hostname:port?transport=tcp, and provision credentials separately.')
-    } elseif ($TurnUrl -match '^turns:([^:/?]+)' -and (Is-PrivateHost $Matches[1])) {
-        $blockers.Add('TURN_RELAY_INVALID: relay host cannot be loopback or private.')
+    $turnParts = @($TurnUrl.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $sawTurns = $false
+    $turnInvalid = $false
+    foreach ($part in $turnParts) {
+        if ($part -notmatch '^(turns?):([^:/?#@]+)(:[0-9]{1,5})?(\?transport=(udp|tcp))?$') {
+            $blockers.Add("TURN_RELAY_INVALID: '$part' — use turn:/turns:hostname:port?transport=udp|tcp (CSV cascade OK).")
+            $turnInvalid = $true
+            break
+        }
+        if ($Matches[1] -ieq 'turns') { $sawTurns = $true }
+        if (Is-PrivateHost $Matches[2]) {
+            $blockers.Add("TURN_RELAY_INVALID: relay host in '$part' cannot be loopback or private.")
+            $turnInvalid = $true
+            break
+        }
+    }
+    if (-not $turnInvalid -and -not $sawTurns) {
+        $blockers.Add('TURN_RELAY_INVALID: cascade must include at least one turns: URL (TCP/TLS, preferably port 443) for carrier NAT.')
     }
 }
 # Domain + TURN configuration alone cannot prove that the BFF/Join advertised origin,

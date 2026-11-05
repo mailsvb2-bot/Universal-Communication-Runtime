@@ -50,6 +50,7 @@ jobs:
               node --experimental-strip-types sdk/typescript/first_party_account_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_embed_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_client_conformance.ts
+              node --experimental-strip-types sdk/typescript/browser_media_path_conformance.ts
               ;;
             kotlin)
               kotlinc \

@@ -219,3 +219,87 @@ fn webrtc_e2ee_uses_protocol_owned_sfu_wire_codec() {
     assert!(typescript_sfu_wire.contains("\"screen_share\""));
     assert!(conformance_workflow.contains("sfu_forward_wire_conformance.ts"));
 }
+
+#[test]
+fn cross_device_call_path_keeps_mobile_recovery_and_ice_diagnostics() {
+    let browser = read("crates/ucr-realtime-web/static/client.html");
+    let launcher = read("scripts/windows/start-local-first-party-https.ps1");
+    let remote = read("scripts/windows/start-remote-device-test.ps1");
+    let android = read("docs/testing/android-cellular-remote-call.md");
+    let media = read("sdk/typescript/src/browser_webcodecs_media.ts");
+    let cascade = read("sdk/typescript/src/ice_cascade.ts");
+
+    // Soft recovery stays opt-in; default offline path still retires the grant.
+    assert!(browser.contains("function ucrSoftNetworkRecoveryEnabled()"));
+    assert!(browser.contains("localStorage.getItem(\"ucrSoftNetworkRecovery\")===\"1\""));
+    assert!(browser.contains("beginSoftNetworkGrace"));
+    assert!(browser.contains("Network unavailable; capture stopped until fresh authorization."));
+    assert!(browser.contains("resumeRoomAudio(window.ucrLocalRoomAudioContext)"));
+    assert!(browser.contains("facingMode:{ideal:\"user\"}"));
+    assert!(browser.contains("ucrMobileCaptureHost"));
+    assert!(browser.contains("id=\"remote-video\" autoplay muted playsinline webkit-playsinline"));
+    assert!(browser.contains("ICE failed with only host candidates"));
+    assert!(browser.contains("Carrier/symmetric NAT often needs TURN"));
+
+    assert!(launcher.contains("[string]$TurnUrls = ''"));
+    assert!(launcher.contains("[string]$StunUrls = ''"));
+    assert!(launcher.contains("turns:host:443?transport=tcp"));
+    assert!(remote.contains("cascade must include at least one turns:"));
+    assert!(android.contains("ICE / TURN cascade for phone"));
+
+    assert!(media.contains("VIDEO_CODEC_H264_BASELINE_31"));
+    assert!(media.contains("avc1.42001f"));
+    assert!(media.contains("context.state === \"suspended\""));
+    assert!(cascade.contains("ucrRecommendedTurnCascade"));
+    assert!(cascade.contains("turns:${host}:${turnsPort}?transport=tcp"));
+    let start = read("crates/ucr-realtime-web/static/start.js");
+    assert!(start.contains("const requestOf=()=>({callId,expectedRevision:live.call.revision})"));
+    assert!(start.contains("schema:\"ucr-session-diagnostics-v2\""));
+    assert!(start.contains("mls_prepare"));
+    assert!(browser.contains("ucrSessionMediaDiagnostics"));
+    assert!(browser.contains("localCandidateType"));
+}
+
+#[test]
+fn cross_device_call_survives_congestion_and_keeps_rejoin() {
+    let browser = read("crates/ucr-realtime-web/static/client.html");
+    let adapter = read("sdk/typescript/src/portable_endpoint_media.ts");
+
+    // ICE: distinguish "start not reached" from "start returned empty servers".
+    assert!(browser.contains("let ucrOfferedIceKinds=\"pending\""));
+    assert!(browser.contains("function ucrResolvedIceServerKinds(pc)"));
+    assert!(browser.contains("offeredIceServerKinds:ucrOfferedIceKinds||\"pending\""));
+    assert!(browser.contains("lastFailure:ucrLastFailure"));
+    assert!(browser.contains("ucrOfferedIceKinds=ucrIceServerKinds(offer.ice_servers||[])"));
+
+    // Failed Join / Access ended must not retire a still-valid grant.
+    assert!(browser.contains("leave({retireGrant:false})"));
+    assert!(browser.contains("const retireGrant=!(options&&options.retireGrant===false)"));
+    // Explicit Leave must retire authority even before media becomes active.
+    assert!(browser.contains("if(retireGrant)signedGrantRetired=true"));
+    assert!(browser.contains("signedGrantRetired=true;"));
+    assert!(browser.contains("if(!retireGrant)await leaving"));
+    assert!(browser.contains(r"\b401\b|\b403\b|not_found|offer_not_found"));
+    assert!(browser.contains("ucrJoinFailureMessage"));
+
+    // Congestion is backpressure, not conference suicide.
+    assert!(browser.contains("window.ucrEndpointMediaCongestion"));
+    assert!(browser.contains("MEDIA_TRANSPORT_CONGESTION"));
+    assert!(browser.contains("MEDIA_REPLAY_REJECTED"));
+    assert!(browser.contains("function detachE2eeChannel(){"));
+    assert!(browser.contains("teardownPeer({keepAdapter:true})"));
+    assert!(browser.contains("ucrConferenceMediaActive"));
+    assert!(adapter.contains("ucrEndpointMediaCongestion"));
+    assert!(adapter.contains("UCR_TRANSPORT_QUEUE_CONGESTED"));
+    assert!(adapter.contains("UCR_TRANSPORT_CHANNEL_CLOSED"));
+    assert!(adapter.contains("UCR_MEDIA_REPLAY_WINDOW"));
+    assert!(adapter.contains(r#"transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED""#));
+
+    // Series C still checks accepted-first-party auto-Join; only resumes AudioContext.
+    assert!(browser.contains(r#"sessionStorage.getItem("ucrFirstPartyDirectCall")"#));
+    assert!(browser.contains("claims.call_id.startsWith(\"fp-m-\")"));
+    assert!(browser.contains("resumeRoomAudio(window.ucrLocalRoomAudioContext)"));
+    let start = read("crates/ucr-realtime-web/static/start.js");
+    assert!(start.contains("ucrConferenceMediaActive"));
+    assert!(start.contains("Защищённый звонок уже открыт на экране конференции."));
+}

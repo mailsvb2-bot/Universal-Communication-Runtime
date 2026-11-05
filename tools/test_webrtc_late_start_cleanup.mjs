@@ -6,6 +6,20 @@ import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
 
 const source=readFileSync("crates/ucr-realtime-web/static/client.html","utf8");
+// This test is already wired into Windows First-Party UI Contract CI.
+// Keep the single canonical WebRTC worker responsive when stale encrypted
+// media frames flood its bounded queue: control must be queued independently
+// and polled BEFORE media. A timed-out Close retains a quarantined peer.
+const engine=readFileSync("crates/ucr-webrtc/src/lib.rs","utf8");
+const e2ee=readFileSync("crates/ucr-webrtc/src/e2ee_bridge.rs","utf8");
+assert.match(engine,/media_tx: Option<tokio::sync::mpsc::Sender<LiveWebRtcCommand>>/);
+assert.match(engine,/self\.request_media\(\|reply, deadline\| LiveWebRtcCommand::SendE2ee/);
+assert.match(engine,/biased;[\s\S]*?commands\.recv\(\)[\s\S]*?media_commands\.recv\(\)/);
+assert.match(engine,/async fn bounded_peer_close\(/);
+assert.match(engine,/session\.shutdown_pending = true;[\s\S]*?bounded_peer_close\(&session\.peer_connection\)\.await/);
+assert.match(e2ee,/tokio::time::timeout\(remaining, channel\.send\(/);
+assert.match(e2ee,/tokio::time::timeout\(remaining, channel\.buffered_amount\(\)\)/);
+
 function section(begin,end){
   const from=source.indexOf(begin),to=source.indexOf(end,from+begin.length);
   assert.ok(from>=0&&to>from,`Missing actual browser function: ${begin}`);
@@ -30,7 +44,7 @@ async function exercise({withdraw=false,replace=false,permissionDenied=false,pee
     navigator:{onLine:true},claims:{expires:Date.now()+60000},
     ui:{privacyMode:{value:"secure"}},
     token:"old-grant",startWebRtc:{offerId:replace?newOffer:null},peer:null,
-    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{},
+    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{}, ucrCaptureIceStats:async()=>{},
     body:()=>context.token==="old-grant"?oldClaims:newClaims,
     requireCanonicalMediaHostReady:()=>{},
     rtcNetworkConfiguration:()=>({}),
@@ -100,7 +114,7 @@ async function exerciseNegotiation({failAt=null,replace=false,rotateToken=false}
     ui:{privacyMode:{value:"secure"},remoteVideo:{srcObject:null},
       webrtcState:{textContent:""},state:{textContent:""},status:{textContent:""}},
     token:"original-grant",startWebRtc:{offerId:null},peer:null,
-    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{},
+    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{}, ucrCaptureIceStats:async()=>{},
     body:()=>context.token==="original-grant"?oldClaims:newClaims,
     requireCanonicalMediaHostReady:()=>{},
     rtcNetworkConfiguration:()=>({}),
@@ -257,7 +271,7 @@ async function exerciseIceOwnership({replace=false,rotatedOffer=false}={}){
     ui:{webrtcState:{textContent:""},status:{textContent:""},privacyMode:{value:"secure"}},
     body:()=>context.token==="old-grant"?oldClaims:newClaims,
     rtcNetworkConfiguration:()=>({}),
-    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{},
+    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{}, ucrCaptureIceStats:async()=>{},
     fetch:async(path,options)=>{
       calls.push({path,auth:options.headers.Authorization,payload:JSON.parse(options.body)});
       if(path==="/v1/realtime/webrtc/restart")return pendingRestart;

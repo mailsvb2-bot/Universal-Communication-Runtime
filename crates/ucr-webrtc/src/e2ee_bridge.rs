@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
+};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -143,6 +149,28 @@ impl WebRtcE2eeReassembler {
 pub(crate) struct LiveWebRtcE2eeChannel {
     channel: Arc<RTCDataChannel>,
     next_message_id: u64,
+    /// Item C2: optional unordered/no-retransmit channel. Used for sending
+    /// only after the peer proved v2 support by sending a valid v2 chunk;
+    /// until then (or forever, for v1-only peers) the reliable v1 channel is
+    /// used — that is the version negotiation and fallback.
+    unordered: Option<UnorderedE2eeChannel>,
+}
+
+struct UnorderedE2eeChannel {
+    channel: Arc<RTCDataChannel>,
+    peer_speaks_v2: Arc<AtomicBool>,
+    keyframe_wanted: Arc<AtomicBool>,
+}
+
+impl LiveWebRtcE2eeChannel {
+    /// Returns (and clears) a pending request for a keyframe caused by an
+    /// unrecoverable loss on the unordered channel.
+    #[allow(dead_code)] // Consumed once the media source path is wired.
+    pub(crate) fn take_keyframe_request(&self) -> bool {
+        self.unordered
+            .as_ref()
+            .is_some_and(|u| u.keyframe_wanted.swap(false, Ordering::SeqCst))
+    }
 }
 
 impl LiveWebRtcE2eeChannel {
@@ -151,23 +179,47 @@ impl LiveWebRtcE2eeChannel {
         envelope: &SfuForwardEnvelope,
         deadline: Instant,
     ) -> Result<(), crate::WebRtcProviderError> {
-        if self.channel.buffered_amount().await > MAX_WEBRTC_E2EE_BUFFERED_BYTES {
-            return Err(crate::WebRtcProviderError::CapacityExceeded);
-        }
         let message_id = self.next_message_id;
         self.next_message_id = self
             .next_message_id
             .checked_add(1)
             .ok_or(crate::WebRtcProviderError::CapacityExceeded)?;
-        let chunks = encode_webrtc_e2ee_chunks(envelope, message_id)
-            .map_err(|_| crate::WebRtcProviderError::Internal)?;
+        let (channel, chunks) = match &self.unordered {
+            Some(unordered) if unordered.peer_speaks_v2.load(Ordering::SeqCst) => (
+                &unordered.channel,
+                encode_webrtc_e2ee_chunks_v2(envelope, message_id)
+                    .map_err(|_| crate::WebRtcProviderError::Internal)?,
+            ),
+            _ => (
+                &self.channel,
+                encode_webrtc_e2ee_chunks(envelope, message_id)
+                    .map_err(|_| crate::WebRtcProviderError::Internal)?,
+            ),
+        };
+        // This channel is driven by the single canonical WebRTC worker.
+        // Awaiting a stale/disconnected DataChannel without a deadline blocks
+        // EVERY later Create, ICE and Close operation in that worker.
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?
+            .min(std::time::Duration::from_millis(250));
+        let buffered = tokio::time::timeout(remaining, channel.buffered_amount())
+            .await
+            .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?;
+        if buffered > MAX_WEBRTC_E2EE_BUFFERED_BYTES {
+            return Err(crate::WebRtcProviderError::CapacityExceeded);
+        }
         for chunk in chunks {
             if Instant::now() >= deadline {
                 return Err(crate::WebRtcProviderError::TemporarilyUnavailable);
             }
-            self.channel
-                .send(&Bytes::from(chunk))
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?
+                .min(std::time::Duration::from_millis(250));
+            tokio::time::timeout(remaining, channel.send(&Bytes::from(chunk)))
                 .await
+                .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?
                 .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?;
         }
         Ok(())
@@ -179,6 +231,7 @@ pub(crate) async fn create_live_e2ee_data_channel(
     session_id: &SessionId,
     ingress_tx: mpsc::Sender<WebRtcE2eeIngressFrame>,
 ) -> Result<LiveWebRtcE2eeChannel, crate::WebRtcProviderError> {
+    let ingress_tx_v2 = ingress_tx.clone();
     let channel = peer_connection
         .create_data_channel(WEBRTC_E2EE_DATA_CHANNEL_LABEL, None)
         .await
@@ -206,9 +259,86 @@ pub(crate) async fn create_live_e2ee_data_channel(
             }
         })
     }));
+    let unordered = if unordered_e2ee_enabled_from_env() {
+        Some(create_unordered_channel(peer_connection, session_id, ingress_tx_v2).await?)
+    } else {
+        None
+    };
     Ok(LiveWebRtcE2eeChannel {
         channel,
         next_message_id: 1,
+        unordered,
+    })
+}
+
+/// `UCR_WEBRTC_E2EE_UNORDERED=1` (default off) additionally offers the
+/// unordered, `maxRetransmits=0` v2 channel.
+#[must_use]
+pub fn unordered_e2ee_enabled_from_env() -> bool {
+    std::env::var("UCR_WEBRTC_E2EE_UNORDERED").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on"
+        )
+    })
+}
+
+async fn create_unordered_channel(
+    peer_connection: &RTCPeerConnection,
+    session_id: &SessionId,
+    ingress_tx: mpsc::Sender<WebRtcE2eeIngressFrame>,
+) -> Result<UnorderedE2eeChannel, crate::WebRtcProviderError> {
+    let init = webrtc::data_channel::data_channel_init::RTCDataChannelInit {
+        ordered: Some(false),
+        max_retransmits: Some(0),
+        ..Default::default()
+    };
+    let channel = peer_connection
+        .create_data_channel(WEBRTC_E2EE_UNORDERED_DATA_CHANNEL_LABEL, Some(init))
+        .await
+        .map_err(|_| crate::WebRtcProviderError::Internal)?;
+    let peer_speaks_v2 = Arc::new(AtomicBool::new(false));
+    let keyframe_wanted = Arc::new(AtomicBool::new(false));
+    let reassembler = Arc::new(tokio::sync::Mutex::new(WebRtcE2eeLossyReassembler::new()));
+    let (cb_v2, cb_key, cb_session) = (
+        Arc::clone(&peer_speaks_v2),
+        Arc::clone(&keyframe_wanted),
+        session_id.clone(),
+    );
+    channel.on_message(Box::new(move |message| {
+        let reassembler = Arc::clone(&reassembler);
+        let ingress_tx = ingress_tx.clone();
+        let session_id = cb_session.clone();
+        let (peer_speaks_v2, keyframe_wanted) = (Arc::clone(&cb_v2), Arc::clone(&cb_key));
+        Box::pin(async move {
+            if message.is_string {
+                return;
+            }
+            let (decoded, wants_keyframe) = {
+                let mut reassembler = reassembler.lock().await;
+                let decoded = reassembler.push_chunk(&message.data);
+                (decoded, reassembler.take_keyframe_request())
+            };
+            if wants_keyframe {
+                keyframe_wanted.store(true, Ordering::SeqCst);
+            }
+            match decoded {
+                Ok(Some(envelope)) => {
+                    peer_speaks_v2.store(true, Ordering::SeqCst);
+                    let _ = ingress_tx.try_send(WebRtcE2eeIngressFrame {
+                        session_id,
+                        envelope,
+                    });
+                }
+                Ok(None) => peer_speaks_v2.store(true, Ordering::SeqCst),
+                Err(_) => {}
+            }
+        })
+    }));
+    Ok(UnorderedE2eeChannel {
+        channel,
+        peer_speaks_v2,
+        keyframe_wanted,
     })
 }
 
@@ -281,6 +411,202 @@ pub fn decode_webrtc_e2ee_envelope(
     bytes: &[u8],
 ) -> Result<SfuForwardEnvelope, WebRtcE2eeWireError> {
     decode_sfu_forward_envelope(bytes).map_err(Into::into)
+}
+
+/// Item C2 v2 chunk format for the unordered, no-retransmit channel:
+/// `UCRCHK02 | seq u64 | index u16 | count u16 | total u32 | flags u8 | payload`.
+/// `flags` bit 0 = keyframe. Chunks may arrive in any order or not at all.
+pub const WEBRTC_E2EE_UNORDERED_DATA_CHANNEL_LABEL: &str = "ucr.e2ee.media.v2";
+const WEBRTC_E2EE_CHUNK_MAGIC_V2: &[u8; 8] = b"UCRCHK02";
+const WEBRTC_E2EE_CHUNK_HEADER_BYTES_V2: usize = 25;
+const WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES_V2: usize =
+    MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES - WEBRTC_E2EE_CHUNK_HEADER_BYTES_V2;
+/// Messages concurrently under reassembly; older incomplete ones are lost.
+const WEBRTC_E2EE_LOSSY_WINDOW: usize = 4;
+const WEBRTC_E2EE_FLAG_KEYFRAME: u8 = 1;
+
+/// Splits an envelope into v2 chunks carrying sequence, keyframe flag and
+/// fragmentation metadata.
+///
+/// # Errors
+/// Rejects an invalid envelope or excessive chunk count.
+pub fn encode_webrtc_e2ee_chunks_v2(
+    envelope: &SfuForwardEnvelope,
+    sequence: u64,
+) -> Result<Vec<Vec<u8>>, WebRtcE2eeWireError> {
+    let wire = encode_webrtc_e2ee_envelope(envelope)?;
+    let chunk_count = u16::try_from(wire.len().div_ceil(WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES_V2))
+        .map_err(|_| WebRtcE2eeWireError::TooLarge)?;
+    let total_length = u32::try_from(wire.len()).map_err(|_| WebRtcE2eeWireError::TooLarge)?;
+    let flags = if envelope.frame.header.keyframe {
+        WEBRTC_E2EE_FLAG_KEYFRAME
+    } else {
+        0
+    };
+    wire.chunks(WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES_V2)
+        .enumerate()
+        .map(|(index, payload)| {
+            let index = u16::try_from(index).map_err(|_| WebRtcE2eeWireError::TooLarge)?;
+            let mut chunk = Vec::with_capacity(WEBRTC_E2EE_CHUNK_HEADER_BYTES_V2 + payload.len());
+            chunk.extend_from_slice(WEBRTC_E2EE_CHUNK_MAGIC_V2);
+            chunk.extend_from_slice(&sequence.to_be_bytes());
+            chunk.extend_from_slice(&index.to_be_bytes());
+            chunk.extend_from_slice(&chunk_count.to_be_bytes());
+            chunk.extend_from_slice(&total_length.to_be_bytes());
+            chunk.push(flags);
+            chunk.extend_from_slice(payload);
+            Ok(chunk)
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct LossyPending {
+    sequence: u64,
+    total_length: usize,
+    keyframe: bool,
+    parts: Vec<Option<Vec<u8>>>,
+    received: usize,
+}
+
+/// Reassembles v2 chunks arriving unordered and with loss. A message that
+/// can no longer complete (evicted from the bounded window or overtaken by a
+/// completed newer one) is counted as lost and raises a keyframe request
+/// that stays pending until a keyframe is delivered.
+#[derive(Debug, Default)]
+pub struct WebRtcE2eeLossyReassembler {
+    pending: Vec<LossyPending>,
+    last_delivered: Option<u64>,
+    keyframe_needed: bool,
+    keyframe_request: bool,
+    lost: u64,
+}
+
+impl WebRtcE2eeLossyReassembler {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of messages known to be lost.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))] // Diagnostics hook; read by tests.
+    pub const fn lost(&self) -> u64 {
+        self.lost
+    }
+
+    /// Returns (and clears) a new keyframe request.
+    pub fn take_keyframe_request(&mut self) -> bool {
+        std::mem::take(&mut self.keyframe_request)
+    }
+
+    fn mark_lost(&mut self, count: u64) {
+        if count > 0 {
+            self.lost = self.lost.saturating_add(count);
+            if !self.keyframe_needed {
+                self.keyframe_request = true;
+            }
+            self.keyframe_needed = true;
+        }
+    }
+
+    /// Accepts one v2 chunk in any order.
+    ///
+    /// # Errors
+    /// Rejects malformed or oversized chunks (the chunk is ignored; other
+    /// in-flight messages are kept).
+    pub fn push_chunk(
+        &mut self,
+        chunk: &[u8],
+    ) -> Result<Option<SfuForwardEnvelope>, WebRtcE2eeWireError> {
+        if chunk.len() > MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES
+            || chunk.len() <= WEBRTC_E2EE_CHUNK_HEADER_BYTES_V2
+        {
+            return Err(WebRtcE2eeWireError::Malformed);
+        }
+        let mut reader = WireReader::new(chunk);
+        if reader.take(WEBRTC_E2EE_CHUNK_MAGIC_V2.len())? != WEBRTC_E2EE_CHUNK_MAGIC_V2 {
+            return Err(WebRtcE2eeWireError::UnsupportedVersion);
+        }
+        let sequence = reader.u64()?;
+        let index = usize::from(reader.u16()?);
+        let count = usize::from(reader.u16()?);
+        let total_length =
+            usize::try_from(reader.u32()?).map_err(|_| WebRtcE2eeWireError::TooLarge)?;
+        let flags = reader.take(1)?[0];
+        let payload = &chunk[reader.cursor..];
+        if count == 0
+            || index >= count
+            || total_length == 0
+            || total_length > MAX_WEBRTC_E2EE_WIRE_BYTES
+            || count != total_length.div_ceil(WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES_V2)
+            || flags & !WEBRTC_E2EE_FLAG_KEYFRAME != 0
+        {
+            return Err(WebRtcE2eeWireError::Malformed);
+        }
+        let expected = if index + 1 == count {
+            total_length - index * WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES_V2
+        } else {
+            WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES_V2
+        };
+        if payload.len() != expected {
+            return Err(WebRtcE2eeWireError::Malformed);
+        }
+        if self.last_delivered.is_some_and(|last| sequence <= last) {
+            return Ok(None); // Late duplicate / straggler of a resolved message.
+        }
+        let position =
+            if let Some(position) = self.pending.iter().position(|p| p.sequence == sequence) {
+                position
+            } else {
+                if self.pending.len() == WEBRTC_E2EE_LOSSY_WINDOW {
+                    let oldest = (0..self.pending.len())
+                        .min_by_key(|&i| self.pending[i].sequence)
+                        .unwrap_or(0);
+                    if self.pending[oldest].sequence > sequence {
+                        return Ok(None); // Older than everything in flight: already lost.
+                    }
+                    self.pending.swap_remove(oldest);
+                    self.mark_lost(1);
+                }
+                self.pending.push(LossyPending {
+                    sequence,
+                    total_length,
+                    keyframe: flags & WEBRTC_E2EE_FLAG_KEYFRAME != 0,
+                    parts: vec![None; count],
+                    received: 0,
+                });
+                self.pending.len() - 1
+            };
+        let entry = &mut self.pending[position];
+        if entry.total_length != total_length || entry.parts.len() != count {
+            return Err(WebRtcE2eeWireError::Malformed);
+        }
+        if entry.parts[index].is_some() {
+            return Ok(None);
+        }
+        entry.parts[index] = Some(payload.to_vec());
+        entry.received += 1;
+        if entry.received != count {
+            return Ok(None);
+        }
+        let done = self.pending.swap_remove(position);
+        let before = self.pending.len();
+        self.pending.retain(|p| p.sequence > sequence);
+        let skipped_gap = self
+            .last_delivered
+            .map_or(0, |last| sequence.saturating_sub(last).saturating_sub(1));
+        let dropped_pending = u64::try_from(before - self.pending.len()).unwrap_or(u64::MAX);
+        // Every sequence between the previous delivery and this one is gone.
+        self.mark_lost(skipped_gap.max(dropped_pending));
+        self.last_delivered = Some(sequence);
+        if done.keyframe {
+            self.keyframe_needed = false;
+            self.keyframe_request = false;
+        }
+        let bytes: Vec<u8> = done.parts.into_iter().flatten().flatten().collect();
+        decode_webrtc_e2ee_envelope(&bytes).map(Some)
+    }
 }
 
 struct WireReader<'a> {
@@ -379,6 +705,84 @@ mod tests {
                     signature: vec![5_u8; 64],
                 },
             },
+        }
+    }
+
+    #[test]
+    fn v2_unordered_reassembly_tolerates_reorder_and_requests_keyframe_on_loss() {
+        let mut big = envelope();
+        big.frame.ciphertext = vec![9_u8; 40 * 1024];
+        big.frame.header.keyframe = false;
+        let mut key = envelope();
+        key.frame.header.keyframe = true;
+        let mut r = WebRtcE2eeLossyReassembler::new();
+
+        // Out-of-order chunks of one message still reassemble.
+        let mut chunks = encode_webrtc_e2ee_chunks_v2(&big, 1).unwrap();
+        assert!(chunks.len() > 2);
+        chunks.reverse();
+        let last = chunks.pop().unwrap();
+        for c in &chunks {
+            assert_eq!(r.push_chunk(c).unwrap(), None);
+        }
+        assert_eq!(r.push_chunk(&last).unwrap(), Some(big.clone()));
+        assert!(!r.take_keyframe_request());
+
+        // Message 2 loses a chunk; message 3 completes -> loss + keyframe request once.
+        let two = encode_webrtc_e2ee_chunks_v2(&big, 2).unwrap();
+        r.push_chunk(&two[0]).unwrap();
+        for c in encode_webrtc_e2ee_chunks_v2(&big, 3).unwrap() {
+            r.push_chunk(&c).unwrap();
+        }
+        assert_eq!(r.lost(), 1);
+        assert!(r.take_keyframe_request());
+        assert!(!r.take_keyframe_request(), "request is edge-triggered");
+        // Straggler of the lost message is ignored.
+        assert_eq!(r.push_chunk(&two[1]).unwrap(), None);
+        // Further loss before a keyframe does not spam requests.
+        for c in encode_webrtc_e2ee_chunks_v2(&big, 5).unwrap() {
+            r.push_chunk(&c).unwrap();
+        }
+        assert_eq!(r.lost(), 2);
+        assert!(!r.take_keyframe_request());
+        // Keyframe clears the need; next loss raises a new request.
+        for c in encode_webrtc_e2ee_chunks_v2(&key, 6).unwrap() {
+            assert!(r.push_chunk(&c).is_ok());
+        }
+        for c in encode_webrtc_e2ee_chunks_v2(&big, 8).unwrap() {
+            r.push_chunk(&c).unwrap();
+        }
+        assert!(r.take_keyframe_request());
+        // A gap healed by a keyframe itself needs no request.
+        for c in encode_webrtc_e2ee_chunks_v2(&key, 10).unwrap() {
+            r.push_chunk(&c).unwrap();
+        }
+        assert!(!r.take_keyframe_request());
+    }
+
+    #[test]
+    fn v2_rejects_v1_chunks_and_malformed_headers_without_dropping_state() {
+        let mut r = WebRtcE2eeLossyReassembler::new();
+        let v1 = encode_webrtc_e2ee_chunks(&envelope(), 1).unwrap();
+        assert_eq!(
+            r.push_chunk(&v1[0]),
+            Err(WebRtcE2eeWireError::UnsupportedVersion)
+        );
+        let mut bad = encode_webrtc_e2ee_chunks_v2(&envelope(), 1)
+            .unwrap()
+            .remove(0);
+        bad[24] = 0x80; // unknown flag bit
+        assert_eq!(r.push_chunk(&bad), Err(WebRtcE2eeWireError::Malformed));
+        let good = encode_webrtc_e2ee_chunks_v2(&envelope(), 1).unwrap();
+        assert_eq!(r.push_chunk(&good[0]).unwrap(), Some(envelope()));
+        // v1 reassembler likewise ignores v2 chunks (fallback stays isolated).
+        assert!(WebRtcE2eeReassembler::new().push_chunk(&good[0]).is_err());
+    }
+
+    #[test]
+    fn unordered_flag_defaults_off() {
+        if std::env::var_os("UCR_WEBRTC_E2EE_UNORDERED").is_none() {
+            assert!(!unordered_e2ee_enabled_from_env());
         }
     }
 

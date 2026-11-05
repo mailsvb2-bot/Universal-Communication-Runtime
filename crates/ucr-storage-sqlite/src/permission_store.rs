@@ -168,6 +168,11 @@ impl AuthorizationEvaluator for SqliteLocalStore {
             Err(denied)
         }
     }
+
+    fn authorization_revision(&self) -> Option<u64> {
+        // A read failure must never be cached as "unchanged".
+        self.authorization_revision_value().ok()
+    }
 }
 
 fn load_permission_grants(

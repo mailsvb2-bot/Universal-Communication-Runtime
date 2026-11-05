@@ -2545,6 +2545,7 @@ impl ProductionRuntime {
         .with_mls_bootstrap_store(Arc::clone(&store))
         .with_mls_admission_store(Arc::clone(&store))
         .with_validated_media_observer(recording_media_observer);
+        let realtime_service = configure_sfu_authorization_cache(realtime_service, &store);
         let (realtime_service, sfu_expiry_task) = configure_sfu_placement_lifecycle(
             realtime_service,
             &sfu_placement_service,
@@ -3486,6 +3487,21 @@ const fn health_label(health: StorageHealth) -> &'static str {
         StorageHealth::Unavailable => "unavailable",
         StorageHealth::Corrupt => "corrupt",
     }
+}
+
+/// Item C1: opt-in per-target SFU authorization cache (`UCR_SFU_AUTH_CACHE`,
+/// default off). Reuse requires the canonical store revision to be unchanged.
+fn configure_sfu_authorization_cache<C, A>(
+    service: GrpcRealtimeService<C, A, SqliteLocalStore>,
+    store: &Arc<SqliteLocalStore>,
+) -> GrpcRealtimeService<C, A, SqliteLocalStore> {
+    if !ucr_sfu::SfuAuthorizationCache::enabled_from_env() {
+        return service;
+    }
+    let revision_store = Arc::clone(store);
+    service.with_sfu_authorization_cache(Arc::new(move || {
+        ucr_core::AuthorizationEvaluator::authorization_revision(&*revision_store)
+    }))
 }
 
 #[cfg(test)]

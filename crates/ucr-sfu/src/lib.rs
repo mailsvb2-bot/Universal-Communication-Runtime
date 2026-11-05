@@ -1925,3 +1925,209 @@ mod horizontal_placement_tests {
         );
     }
 }
+
+/// Authority facts of one fan-out target that a successful re-check proved at a
+/// given authorization revision. Everything the per-target re-check depends on
+/// besides durable state is part of the key; durable state is covered by the
+/// revision pair (evaluator, store).
+#[derive(Debug, Clone, PartialEq)]
+struct SfuAuthorityKey {
+    target: SfuForwardTarget,
+    scope: ucr_model::TenantScope,
+    call_id: ucr_model::CallId,
+    group_id: ucr_model::GroupId,
+    source: ucr_model::PrincipalRef,
+    source_device_id: DeviceId,
+    negotiation_ref: ucr_model::OpaqueId,
+    negotiation_generation: u64,
+    crypto_epoch: u64,
+    crypto_state_ref: ucr_model::OpaqueId,
+}
+
+/// Opt-in per-target authorization cache for SFU fan-out (flag
+/// `UCR_SFU_AUTH_CACHE`, default off).
+///
+/// An entry is reused only while BOTH the evaluator and the store report the
+/// exact same monotonic `authorization_revision()` they reported when the
+/// entry was proved. Any revoke, Leave, Hangup/Call end, Group membership or
+/// MLS transition, Device revocation or trusted-key change bumps a revision,
+/// so the very next frame takes the full re-check path again. If either side
+/// returns `None` the cache is bypassed entirely.
+#[derive(Debug, Default)]
+pub struct SfuAuthorizationCache {
+    entries: std::sync::Mutex<SfuAuthorizationCacheState>,
+}
+
+#[derive(Debug, Default)]
+struct SfuAuthorizationCacheState {
+    revision: Option<(u64, u64)>,
+    proved: Vec<SfuAuthorityKey>,
+    hits: u64,
+}
+
+impl SfuAuthorizationCache {
+    /// Bound on remembered targets; one Call never has more recipients.
+    const MAX_ENTRIES: usize = MAX_CALL_PARTICIPANTS * 4;
+
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reads `UCR_SFU_AUTH_CACHE` (`1`/`true`/`on` enables). Default: off.
+    #[must_use]
+    pub fn enabled_from_env() -> bool {
+        std::env::var("UCR_SFU_AUTH_CACHE").is_ok_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on"
+            )
+        })
+    }
+
+    /// Number of re-checks skipped so far (diagnostics/tests).
+    #[must_use]
+    pub fn hits(&self) -> u64 {
+        self.entries.lock().map_or(0, |state| state.hits)
+    }
+
+    fn lookup(&self, revision: (u64, u64), key: &SfuAuthorityKey) -> bool {
+        let Ok(mut state) = self.entries.lock() else {
+            return false;
+        };
+        if state.revision != Some(revision) {
+            state.revision = Some(revision);
+            state.proved.clear();
+            return false;
+        }
+        let hit = state.proved.iter().any(|proved| proved == key);
+        if hit {
+            state.hits = state.hits.saturating_add(1);
+        }
+        hit
+    }
+
+    fn remember(&self, revision: (u64, u64), key: SfuAuthorityKey) {
+        let Ok(mut state) = self.entries.lock() else {
+            return;
+        };
+        if state.revision != Some(revision) {
+            // Authority moved while we were checking: do not remember a proof
+            // made against an older snapshot.
+            return;
+        }
+        if state.proved.len() >= Self::MAX_ENTRIES {
+            state.proved.clear();
+        }
+        state.proved.push(key);
+    }
+}
+
+/// Same contract as [`dispatch_validated_forward_batch`], but skips the
+/// per-target authority re-check when `cache` proves nothing relevant changed.
+///
+/// # Errors
+/// Same as [`dispatch_validated_forward_batch`].
+pub fn dispatch_validated_forward_batch_cached<A, S, E, C>(
+    runtime: &SfuRuntime<'_, A, S, E, C>,
+    cache: &SfuAuthorizationCache,
+    batch: &SfuValidatedForwardBatch,
+    sink: &dyn SfuForwardSink,
+) -> Result<SfuForwardOutcome, SfuError>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver
+        + AuthorizationEvaluator,
+    E: GroupMediaE2eeCapabilityProvider,
+    C: SfuCapabilityProvider,
+{
+    let store = runtime.store;
+    dispatch_validated_forward_batch_cached_with(
+        runtime,
+        cache,
+        &|| store.authorization_revision(),
+        batch,
+        sink,
+    )
+}
+
+/// Same as [`dispatch_validated_forward_batch_cached`] for embedders whose
+/// store type is not statically an [`AuthorizationEvaluator`]: the caller
+/// supplies the store's monotonic authorization revision. `None` bypasses
+/// the cache.
+///
+/// # Errors
+/// Same as [`dispatch_validated_forward_batch`].
+pub fn dispatch_validated_forward_batch_cached_with<A, S, E, C>(
+    runtime: &SfuRuntime<'_, A, S, E, C>,
+    cache: &SfuAuthorizationCache,
+    store_revision: &dyn Fn() -> Option<u64>,
+    batch: &SfuValidatedForwardBatch,
+    sink: &dyn SfuForwardSink,
+) -> Result<SfuForwardOutcome, SfuError>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+    E: GroupMediaE2eeCapabilityProvider,
+    C: SfuCapabilityProvider,
+{
+    let header = &batch.envelope.frame.header;
+    let source = ScopedPrincipal {
+        scope: header.scope.clone(),
+        principal: header.source.clone(),
+    };
+    for (accepted, target) in batch.targets.iter().enumerate() {
+        // Read the revision BEFORE checking: a concurrent revoke then makes
+        // the stored revision stale rather than masking the revoke.
+        let revision = runtime
+            .authorization
+            .authorization_revision()
+            .zip(store_revision());
+        let key = SfuAuthorityKey {
+            target: target.clone(),
+            scope: header.scope.clone(),
+            call_id: header.call_id.clone(),
+            group_id: header.group_id.clone(),
+            source: header.source.clone(),
+            source_device_id: header.source_device_id.clone(),
+            negotiation_ref: header.negotiation_ref.clone(),
+            negotiation_generation: header.negotiation_generation,
+            crypto_epoch: header.crypto_epoch,
+            crypto_state_ref: header.crypto_state_ref.clone(),
+        };
+        let cached = revision.is_some_and(|revision| cache.lookup(revision, &key));
+        if !cached {
+            let current = runtime.prepare_forward_selected(
+                &source,
+                &header.source_device_id,
+                &batch.envelope,
+                std::slice::from_ref(&target.recipient),
+            )?;
+            if current.targets.as_slice() != std::slice::from_ref(target)
+                || current.envelope != batch.envelope
+            {
+                return Err(SfuError::SourceMismatch);
+            }
+            if let Some(revision) = revision {
+                cache.remember(revision, key);
+            }
+        }
+        if let Err(error) = sink.forward_encrypted(target, &batch.envelope) {
+            return Err(SfuError::Sink {
+                accepted_before_failure: accepted,
+                error,
+            });
+        }
+    }
+    Ok(SfuForwardOutcome {
+        accepted_recipients: batch.targets.len(),
+    })
+}

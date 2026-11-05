@@ -24,7 +24,9 @@ impl StoreForwardStore for MemoryLocalStore {
         }
         let fingerprint =
             store_forward_job_fingerprint(job).map_err(|_| DurableStoreError::InvalidRecord)?;
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if !state
             .intents
             .contains_key(&intent_key(&job.scope, &job.intent_id))
@@ -126,7 +128,9 @@ impl StoreForwardStore for MemoryLocalStore {
         now_unix_ms: i64,
         lease_until_unix_ms: i64,
     ) -> Result<Option<StoreForwardLease>, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let key = store_forward_key(scope, store_forward_id);
         let snapshot = match state.store_forward_jobs.get(&key) {
             Some(value) => value.clone(),
@@ -175,7 +179,9 @@ impl StoreForwardStore for MemoryLocalStore {
         attempts_used: u16,
         now_unix_ms: i64,
     ) -> Result<StoreForwardJob, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let key = store_forward_key(&lease.job.scope, &lease.job.store_forward_id);
         let snapshot = state
             .store_forward_jobs
@@ -219,7 +225,9 @@ impl StoreForwardStore for MemoryLocalStore {
         next_attempt_at_unix_ms: i64,
         now_unix_ms: i64,
     ) -> Result<StoreForwardJob, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let key = store_forward_key(&lease.job.scope, &lease.job.store_forward_id);
         let value = state
             .store_forward_jobs
@@ -237,7 +245,9 @@ impl StoreForwardStore for MemoryLocalStore {
         lease: &StoreForwardLease,
         now_unix_ms: i64,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let key = store_forward_key(&lease.job.scope, &lease.job.store_forward_id);
         let value = state
             .store_forward_jobs

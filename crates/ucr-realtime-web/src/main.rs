@@ -4023,7 +4023,8 @@ mod tests {
         let script = super::FIRST_PARTY_START_JS;
         assert!(page.contains("id=\"auth-diagnostics-report\""));
         assert!(page.contains("id=\"auth-diagnostics-save\""));
-        assert!(script.contains("schema:\"ucr-auth-diagnostics-v1\""));
+        assert!(script.contains("schema:\"ucr-session-diagnostics-v2\""));
+        assert!(script.contains("authSchema:\"ucr-auth-diagnostics-v1\""));
         assert!(script.contains("authDiagnostics.length>60"));
         assert!(script.contains("HTTP_401_AUTHORITY_REJECTED"));
         assert!(script.contains("authTrace(\"resume_session\""));
@@ -4031,6 +4032,12 @@ mod tests {
         assert!(script.contains("authTrace(\"list_contacts\""));
         assert!(script.contains("authTrace(\"list_devices\""));
         assert!(script.contains("authTrace(\"incoming_calls\""));
+        assert!(
+            script.contains("const requestOf=()=>({callId,expectedRevision:live.call.revision})")
+        );
+        assert!(script.contains("\"mls_prepare\""));
+        assert!(script.contains("mlsPhase"));
+        assert!(script.contains("grantPresent"));
         assert!(!script.contains("authDiagnostics.push({error:"));
     }
 
@@ -4042,7 +4049,18 @@ mod tests {
         assert!(client.contains("id=\"ucr-diagnostics-copy\""));
         assert!(client.contains("ucrDiagnosticsEvents.length>80"));
         assert!(client.contains("schema:\"ucr-local-diagnostics-v1\""));
+        assert!(client.contains("ucrSessionMediaDiagnostics"));
+        assert!(client.contains("iceServerKinds"));
+        assert!(client.contains("offeredIceServerKinds"));
+        assert!(client.contains("lastFailure:ucrLastFailure"));
+        assert!(client.contains("ucrOfferedIceKinds||\"pending\""));
+        assert!(client.contains("localCandidateType"));
+        assert!(client.contains("sdpComplete"));
+        assert!(client.contains("grantPresent"));
         assert!(client.contains("hiddenRenderSkips"));
+        assert!(client.contains("droppedStale:window.__ucrVideoCounters.droppedStale"));
+        assert!(client.contains("lastRxAudio:window.__ucrMediaStageMetrics.lastRxAudio"));
+        assert!(client.contains("replayRejected:window.__ucrMediaStageMetrics.replayRejected"));
         assert!(client.contains("videoVisibility:{"));
         assert!(client.contains("renderStallMs:document.hidden?null:"));
         assert!(client.contains("hiddenTotalMs:"));
@@ -4216,7 +4234,7 @@ mod tests {
         // accepted, exact-Call Join. It only enters the URL fragment and
         // cannot leak through a query string or a server request.
         let join = js
-            .find("const grant = await calls.join(callId)")
+            .find("grant = await calls.join(callId)")
             .expect("media entry must be authorized by canonical Call");
         let bound = js
             .find("grant.callId !== callId")
@@ -4228,7 +4246,8 @@ mod tests {
             .find("location.replace(next.href)")
             .expect("navigate only after canonical media authorization");
         assert!(join < bound && bound < fragment && fragment < navigate);
-        assert!(js.contains("if (fresh.state === \"active\") await beginMedia(fresh.callId)"));
+        assert!(js.contains("if (fresh.state === \"active\") {"));
+        assert!(js.contains("await beginMedia(fresh.callId)"));
         // A public Device binding hint is not a login credential. It
         // permits re-authentication only by proving possession of the
         // canonical protected signer against the server after restart.
@@ -4435,7 +4454,10 @@ mod tests {
             "if(e2eeChannel!==channel||terminalHandled)return;",
             "if(sessionActive&&mediaActive){",
             "webrtcNeedsPeerRebuild=true;",
-            "closeE2eeTransport();",
+            "function detachE2eeChannel(){",
+            "detachE2eeChannel();",
+            "teardownPeer({keepAdapter:true})",
+            "e2eeAdapterStarted&&e2eeAdapter()",
             "scheduleWebRtcRetry();",
             "if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}",
             "webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;",

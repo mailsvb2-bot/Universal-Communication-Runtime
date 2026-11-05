@@ -22,7 +22,8 @@ use ucr_core::{
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_group_mls::{
     EndpointMlsCommittedDevicePairStore, GroupMlsAtomicStore, GroupMlsBootstrapStore,
-    GroupMlsStoreError, MAX_MLS_KEY_PACKAGE_BYTES, MlsDeviceAdmission, MlsDeviceBootstrap,
+    GroupMlsServerCustodyProbe, GroupMlsStoreError, MAX_MLS_KEY_PACKAGE_BYTES, MlsDeviceAdmission,
+    MlsDeviceBootstrap,
 };
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
@@ -272,6 +273,7 @@ pub trait RealtimeMlsAdmissionStore:
     + EndpointMlsCommittedDevicePairStore
     + GroupMlsAtomicStore
     + GroupMlsBootstrapStore
+    + GroupMlsServerCustodyProbe
     + PrincipalIdentityBindingStore
     + IdentityDeviceLookupStore
     + Send
@@ -284,6 +286,7 @@ impl<T> RealtimeMlsAdmissionStore for T where
         + EndpointMlsCommittedDevicePairStore
         + GroupMlsAtomicStore
         + GroupMlsBootstrapStore
+        + GroupMlsServerCustodyProbe
         + PrincipalIdentityBindingStore
         + IdentityDeviceLookupStore
         + Send
@@ -373,6 +376,14 @@ pub struct GrpcRealtimeService<C, A, S> {
     mls_bootstrap_store: Option<Arc<dyn GroupMlsBootstrapStore + Send + Sync>>,
     mls_admission_store: Option<Arc<dyn RealtimeMlsAdmissionStore>>,
     sfu_placement_transition: Arc<[Arc<tokio::sync::Mutex<()>>]>,
+    sfu_authorization_cache: Option<SfuAuthorizationCacheWiring>,
+}
+
+/// Item C1 hot-path wiring: cache + the store's revision source.
+#[derive(Clone)]
+struct SfuAuthorizationCacheWiring {
+    cache: Arc<ucr_sfu::SfuAuthorizationCache>,
+    store_revision: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S> {
@@ -424,6 +435,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             sfu_placement_transition: (0..SFU_PLACEMENT_LOCK_STRIPES)
                 .map(|_| Arc::new(tokio::sync::Mutex::new(())))
                 .collect(),
+            sfu_authorization_cache: None,
         }
     }
 
@@ -453,6 +465,22 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         observer: Arc<dyn RealtimeValidatedMediaObserver>,
     ) -> Self {
         self.validated_media_observer = Some(observer);
+        self
+    }
+
+    /// Enables the per-target SFU authorization cache (item C1). The caller
+    /// supplies the store's monotonic authorization revision (e.g.
+    /// `AuthorizationEvaluator::authorization_revision` of the canonical
+    /// store). Without this call (default) every frame re-checks authority.
+    #[must_use]
+    pub fn with_sfu_authorization_cache(
+        mut self,
+        store_revision: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
+    ) -> Self {
+        self.sfu_authorization_cache = Some(SfuAuthorizationCacheWiring {
+            cache: Arc::new(ucr_sfu::SfuAuthorizationCache::new()),
+            store_revision,
+        });
         self
     }
 
@@ -910,6 +938,7 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             mls_bootstrap_store: self.mls_bootstrap_store.clone(),
             mls_admission_store: self.mls_admission_store.clone(),
             sfu_placement_transition: Arc::clone(&self.sfu_placement_transition),
+            sfu_authorization_cache: self.sfu_authorization_cache.clone(),
         }
     }
 }
@@ -1212,6 +1241,15 @@ where
                     self.registry
                         .require_active_session(&claims, self.now()?)
                         .map_err(map_registry_error)?;
+                    // Two Device-bound first-party Join requests race when
+                    // the Call has just become Active. The initial Join may
+                    // observe an accepted, not-yet-Active Call and therefore
+                    // cannot create the media negotiation. Before projecting
+                    // its MLS context, retry the SAME idempotent canonical
+                    // negotiation event. No independent media or MLS state.
+                    if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
+                        self.ensure_canonical_media_negotiation(&claims)?;
+                    }
                     let (group_id, mode) = self.mls_admission_context(&claims)?;
                     // A person may have multiple independently trusted Devices.
                     // Resolve the exact two committed MLS Devices BEFORE reading
@@ -2429,6 +2467,30 @@ where
         + ConferenceJoinGrantStore
         + ServiceQuotaStore,
 {
+    fn dispatch_forward(
+        &self,
+        sfu: &ucr_sfu::SfuRuntime<
+            '_,
+            A,
+            S,
+            PreparedGroupMediaE2eeCapabilities,
+            PreparedSfuCapabilities,
+        >,
+        batch: &SfuValidatedForwardBatch,
+        sink: &dyn SfuForwardSink,
+    ) -> Result<ucr_sfu::SfuForwardOutcome, ucr_sfu::SfuError> {
+        match &self.sfu_authorization_cache {
+            Some(wiring) => ucr_sfu::dispatch_validated_forward_batch_cached_with(
+                sfu,
+                &wiring.cache,
+                &*wiring.store_revision,
+                batch,
+                sink,
+            ),
+            None => dispatch_validated_forward_batch(sfu, batch, sink),
+        }
+    }
+
     fn prepare_observed_forward(
         &self,
         claims: &RealtimeSessionClaims,
@@ -2625,7 +2687,7 @@ where
                 now_unix_ms,
                 quota_error: Mutex::new(None),
             };
-            match dispatch_validated_forward_batch(&sfu, &batch, &quota_sink) {
+            match self.dispatch_forward(&sfu, &batch, &quota_sink) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     if let Some(quota_error) = quota_sink.quota_error()? {
@@ -2635,7 +2697,7 @@ where
                 }
             }
         } else {
-            dispatch_validated_forward_batch(&sfu, &batch, sink)
+            self.dispatch_forward(&sfu, &batch, sink)
                 .map_err(|error| map_conference_error(&ConferenceError::Sfu(error)))?
         };
         // The synchronous sink can finish after a concurrent Hangup, Device revoke,
@@ -3113,6 +3175,35 @@ where
         let membership = store
             .group_membership(&claims.scope, &snapshot.group_id, &claims.participant)
             .map_err(map_store_error)?;
+        // First-party Calls use their endpoint-owned signed Add/Welcome
+        // ledger, not the legacy realtime rkp- admission mechanism. Creator
+        // has no Welcome; recipient's Welcome has a canonical fp- event.
+        // Fail closed on a missing pair, stale membership/epoch or server
+        // custody rather than re-registering or accepting server MLS.
+        if claims.call_id.as_opaque().as_str().starts_with("fp-m-") {
+            let active_member = membership
+                .as_ref()
+                .is_some_and(|member| member.state == ucr_model::GroupMemberState::Active);
+            let device = claims
+                .device_id
+                .as_ref()
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+            let pair = store
+                .endpoint_mls_direct_call_device_pair(&claims.scope, &snapshot.group_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
+            if !active_member
+                || snapshot.group_crypto_epoch == 0
+                || !snapshot.group_id.as_opaque().as_str().starts_with("fp-mg-")
+                || (device.as_opaque().as_str() != pair.0 && device.as_opaque().as_str() != pair.1)
+                || store
+                    .server_possesses_mls_group(&claims.scope, &snapshot.group_id)
+                    .map_err(|error| map_group_mls_store_error(&error))?
+            {
+                return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
+            }
+            return Ok((snapshot.group_id, pb::RealtimeMlsEndpointStateMode::Restore));
+        }
         let bootstrap = store
             .mls_bootstrap_for_device(&claims.scope, &snapshot.group_id, device_id)
             .map_err(|error| map_group_mls_store_error(&error))?;
@@ -4517,6 +4608,25 @@ fn require_complete_first_party_media_binding(
         .map_err(|_| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
     let committed_creator = pb_opaque(&committed_creator);
     let committed_recipient = pb_opaque(&committed_recipient);
+    // The initiator may complete its signed Join before the recipient joins.
+    // Until both join, media negotiation is absent and the complete two-key
+    // roster cannot be projected. This is ONLY a pending peer rendezvous, not
+    // authorization: no MLS context or media capability is returned.
+    if committed_creator != committed_recipient
+        && current.negotiation_ref.is_none()
+        && current.negotiation_generation == 0
+        && current.group_crypto_epoch > 0
+        && keys.len() == 1
+        && keys[0].device_id.as_ref() == Some(&authenticated_device)
+        && keys[0].key_id.is_some()
+        && keys[0].public_key.len() == 32
+        && (keys[0].device_id.as_ref() == Some(&committed_creator)
+            || keys[0].device_id.as_ref() == Some(&committed_recipient))
+    {
+        return Err(CanonicalError::new(
+            CanonicalErrorCode::TemporarilyUnavailable,
+        ));
+    }
     if committed_creator == committed_recipient
         || current.negotiation_ref.is_none()
         || current.negotiation_generation == 0
@@ -4595,6 +4705,17 @@ mod first_party_media_binding_tests {
         let mut binding = valid_binding();
         binding.negotiation_ref = None;
         assert!(!admitted(Some(&binding), &device_a, &committed));
+        // First Join has only its own trusted Device and no negotiation.
+        // Retry later, but NEVER return an authorized MLS context yet.
+        binding.negotiation_generation = 0;
+        binding.trusted_device_keys.pop();
+        assert!(matches!(
+            require_complete_first_party_media_binding(Some(&binding), &device_a, &committed),
+            Err(CanonicalError {
+                code: CanonicalErrorCode::TemporarilyUnavailable,
+                ..
+            })
+        ));
         let mut binding = valid_binding();
         binding.group_crypto_epoch = 0;
         assert!(!admitted(Some(&binding), &device_a, &committed));

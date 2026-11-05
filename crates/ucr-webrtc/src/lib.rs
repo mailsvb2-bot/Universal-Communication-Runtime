@@ -437,6 +437,9 @@ enum LiveWebRtcCommand {
 
 pub struct LiveWebRtcProvider {
     command_tx: Option<tokio::sync::mpsc::Sender<LiveWebRtcCommand>>,
+    // Media frames share the SAME worker/session map, but cannot starve
+    // security-critical Join, Close or ICE control operations.
+    media_tx: Option<tokio::sync::mpsc::Sender<LiveWebRtcCommand>>,
     worker: Option<thread::JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<tokio::sync::Notify>,
@@ -491,6 +494,7 @@ impl LiveWebRtcProvider {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (command_tx, command_rx) =
             tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
+        let (media_tx, media_rx) = tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
@@ -508,6 +512,7 @@ impl LiveWebRtcProvider {
                         let _ = ready_tx.send(Ok(()));
                         runtime.block_on(run_live_webrtc_worker(
                             command_rx,
+                            media_rx,
                             worker_shutdown,
                             worker_shutdown_notify,
                             e2ee_ingress,
@@ -522,6 +527,7 @@ impl LiveWebRtcProvider {
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => Ok(Self {
                 command_tx: Some(command_tx),
+                media_tx: Some(media_tx),
                 worker: Some(worker),
                 shutdown,
                 shutdown_notify,
@@ -533,6 +539,7 @@ impl LiveWebRtcProvider {
             }
             Err(_) => {
                 drop(command_tx);
+                drop(media_tx);
                 let _ = worker.join();
                 Err(WebRtcProviderError::TemporarilyUnavailable)
             }
@@ -546,10 +553,34 @@ impl LiveWebRtcProvider {
             Instant,
         ) -> LiveWebRtcCommand,
     ) -> Result<T, WebRtcProviderError> {
-        let sender = self
-            .command_tx
-            .as_ref()
-            .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
+        self.request_on(command, false)
+    }
+
+    fn request_media<T>(
+        &self,
+        command: impl FnOnce(
+            std_mpsc::Sender<Result<T, WebRtcProviderError>>,
+            Instant,
+        ) -> LiveWebRtcCommand,
+    ) -> Result<T, WebRtcProviderError> {
+        self.request_on(command, true)
+    }
+
+    fn request_on<T>(
+        &self,
+        command: impl FnOnce(
+            std_mpsc::Sender<Result<T, WebRtcProviderError>>,
+            Instant,
+        ) -> LiveWebRtcCommand,
+        media: bool,
+    ) -> Result<T, WebRtcProviderError> {
+        let sender = if media {
+            &self.media_tx
+        } else {
+            &self.command_tx
+        }
+        .as_ref()
+        .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
         if self.shutdown.load(Ordering::Acquire) {
             return Err(WebRtcProviderError::TemporarilyUnavailable);
         }
@@ -581,6 +612,10 @@ impl LiveWebRtcProvider {
                 .as_ref()
                 .is_some_and(|sender| !sender.is_closed())
             && self
+                .media_tx
+                .as_ref()
+                .is_some_and(|sender| !sender.is_closed())
+            && self
                 .worker
                 .as_ref()
                 .is_some_and(|worker| !worker.is_finished())
@@ -596,7 +631,7 @@ impl LiveWebRtcProvider {
         session_id: &SessionId,
         envelope: &SfuForwardEnvelope,
     ) -> Result<(), WebRtcProviderError> {
-        self.request(|reply, deadline| LiveWebRtcCommand::SendE2ee {
+        self.request_media(|reply, deadline| LiveWebRtcCommand::SendE2ee {
             session_id: session_id.clone(),
             envelope: Box::new(envelope.clone()),
             deadline,
@@ -610,6 +645,7 @@ impl Drop for LiveWebRtcProvider {
         self.shutdown.store(true, Ordering::Release);
         self.shutdown_notify.notify_one();
         self.command_tx.take();
+        self.media_tx.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -790,13 +826,15 @@ impl fmt::Debug for LiveWebRtcCreateFailure {
 
 async fn run_live_webrtc_worker(
     mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
+    mut media_commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<tokio::sync::Notify>,
     e2ee_ingress: Option<tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
 ) {
     let mut sessions = HashMap::<String, LiveWebRtcSession>::new();
     loop {
-        if shutdown.load(Ordering::Acquire) {
+        if shutdown.load(Ordering::Acquire) || (commands.is_closed() && media_commands.is_closed())
+        {
             break;
         }
         let command = tokio::select! {
@@ -807,10 +845,11 @@ async fn run_live_webrtc_worker(
                 }
                 continue;
             }
-            command = commands.recv() => command,
+            command = commands.recv(), if !commands.is_closed() => command,
+            command = media_commands.recv(), if !media_commands.is_closed() => command,
         };
         let Some(command) = command else {
-            break;
+            continue;
         };
         if shutdown.load(Ordering::Acquire) {
             break;
@@ -886,8 +925,9 @@ async fn run_live_webrtc_worker(
         }
     }
     commands.close();
+    media_commands.close();
     for (_, session) in sessions {
-        let _ = session.peer_connection.close().await;
+        let _ = bounded_peer_close(&session.peer_connection).await;
     }
 }
 
@@ -923,10 +963,7 @@ async fn handle_live_create(
                 if let Some(retained) = sessions.get_mut(&key) {
                     retained.shutdown_pending = true;
                 }
-                let result = peer_connection
-                    .close()
-                    .await
-                    .map_err(|_| WebRtcProviderError::Internal);
+                let result = bounded_peer_close(&peer_connection).await;
                 let _ = retire_peer_only_after_confirmed_close(sessions, &key, result);
                 let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
                 return;
@@ -935,10 +972,7 @@ async fn handle_live_create(
                 if let Some(retained) = sessions.get_mut(&key) {
                     retained.shutdown_pending = true;
                 }
-                let result = peer_connection
-                    .close()
-                    .await
-                    .map_err(|_| WebRtcProviderError::Internal);
+                let result = bounded_peer_close(&peer_connection).await;
                 let _ = retire_peer_only_after_confirmed_close(sessions, &key, result);
             }
         }
@@ -961,10 +995,7 @@ async fn retire_failed_live_create(
     if let Some(session) = retained_peer {
         let peer = Arc::clone(&session.peer_connection);
         sessions.insert(key.clone(), session);
-        let result = peer
-            .close()
-            .await
-            .map_err(|_| WebRtcProviderError::Internal);
+        let result = bounded_peer_close(&peer).await;
         let _ = retire_peer_only_after_confirmed_close(sessions, &key, result);
     }
     // A failed setup is never acknowledged while its transport is still
@@ -1022,11 +1053,7 @@ async fn handle_live_restart(
             retire_restart_before_reporting_error(
                 sessions,
                 &key,
-                async move {
-                    peer.close()
-                        .await
-                        .map_err(|_| WebRtcProviderError::Internal)
-                },
+                async move { bounded_peer_close(&peer).await },
                 reply,
                 reply_result,
             )
@@ -1046,11 +1073,7 @@ async fn handle_live_restart(
     // mutated peer. Retire it before allowing any subsequent worker command.
     if let Some(session) = sessions.get_mut(&key) {
         session.shutdown_pending = true;
-        let closed = session
-            .peer_connection
-            .close()
-            .await
-            .map_err(|_| WebRtcProviderError::Internal);
+        let closed = bounded_peer_close(&session.peer_connection).await;
         let _ = retire_peer_only_after_confirmed_close(sessions, &key, closed);
     }
 }
@@ -1182,11 +1205,7 @@ async fn handle_live_close(
         Some(session) => {
             // Quarantine BEFORE the fallible close: a retained peer is retry-only.
             session.shutdown_pending = true;
-            session
-                .peer_connection
-                .close()
-                .await
-                .map_err(|_| WebRtcProviderError::Internal)
+            bounded_peer_close(&session.peer_connection).await
         }
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
@@ -1219,6 +1238,19 @@ pub fn webrtc_offer_id(sdp: &str) -> String {
 
 fn command_expired(deadline: Instant) -> bool {
     Instant::now() >= deadline
+}
+
+// A peer can wait forever inside its WebRTC library's close future after a
+// broken SCTP/DTLS transport. The sole worker must not hang behind that peer.
+// Callers quarantine the existing session BEFORE this attempt and remove its
+// handle ONLY if close completes successfully. A timeout is NOT a success.
+const LIVE_WEBRTC_CLOSE_WAIT: Duration = Duration::from_secs(3);
+
+async fn bounded_peer_close(peer: &RTCPeerConnection) -> Result<(), WebRtcProviderError> {
+    tokio::time::timeout(LIVE_WEBRTC_CLOSE_WAIT, peer.close())
+        .await
+        .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?
+        .map_err(|_| WebRtcProviderError::Internal)
 }
 
 fn live_webrtc_ice_configuration(config: &WebRtcSessionConfig) -> RTCConfiguration {
@@ -1254,7 +1286,6 @@ async fn create_live_peer_connection(
     let peer_connection = Arc::new(api.new_peer_connection(engine_config).await.map_err(|_| {
         LiveWebRtcCreateFailure::before_peer(WebRtcProviderError::TemporarilyUnavailable)
     })?);
-
     let e2ee_channel = match e2ee_ingress {
         Some(ingress_tx) => {
             match create_live_e2ee_data_channel(&peer_connection, &config.session_id, ingress_tx)
@@ -1276,7 +1307,6 @@ async fn create_live_peer_connection(
         }
         None => None,
     };
-
     let result = async {
         peer_connection
             .add_transceiver_from_kind(RTPCodecType::Audio, None)

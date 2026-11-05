@@ -49,7 +49,9 @@ impl GroupStore for MemoryLocalStore {
             &conversation.scope,
             &conversation.conversation.conversation_id,
         );
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.groups.get(&group_key) {
             let existing_creator = state.group_memberships.get(&creator_key);
             let duplicate = existing_creator.is_some_and(|persisted| {
@@ -240,7 +242,9 @@ impl GroupStore for MemoryLocalStore {
         actor: &ScopedPrincipal,
         change: &GroupChange,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         apply_group_change_in_state(&mut state, actor, change, true)
     }
 }
@@ -416,7 +420,9 @@ impl GroupMessageStore for MemoryLocalStore {
         {
             return Err(DurableStoreError::PermissionDenied);
         }
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let group = state
             .groups
             .values()
@@ -487,7 +493,9 @@ impl GroupMessageStore for MemoryLocalStore {
             return Err(DurableStoreError::PermissionDenied);
         }
 
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let group = state
             .groups
             .values()
@@ -790,7 +798,9 @@ impl OfflineGroupStore for MemoryLocalStore {
         if recipient.scope != record.change.scope {
             return Err(DurableStoreError::PermissionDenied);
         }
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let group = state
             .groups
             .get(&group_key(&record.change.scope, &record.change.group_id))
@@ -833,7 +843,9 @@ impl OfflineGroupStore for MemoryLocalStore {
         if recipient.scope != record.message.scope {
             return Err(DurableStoreError::PermissionDenied);
         }
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let group = state
             .groups
             .get(&group_key(&record.message.scope, &record.group_id))
@@ -976,7 +988,9 @@ impl MeshGroupStore for MemoryLocalStore {
         if recipient.scope != extended.record.message.scope {
             return Err(DurableStoreError::PermissionDenied);
         }
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let group = state
             .groups
             .get(&group_key(
