@@ -3261,6 +3261,62 @@ assert.match(ucrNewMediaSessionId(), /^[a-f0-9]{8}$/);
   await closed.stop();
 }
 
+// Hidden tabs skip GPU decode, and old delta frames do not replay into visible video.
+{
+  const previousDocument=Object.getOwnPropertyDescriptor(globalThis,"document");
+  const fakeDoc={hidden:true};
+  Object.defineProperty(globalThis,"document",{configurable:true,value:fakeDoc});
+  const counters=(globalThis as unknown as {__ucrVideoCounters:{
+    hiddenRenderSkips:number;droppedStale:number;
+  }}).__ucrVideoCounters;
+  const skips=counters.hiddenRenderSkips;
+  const hiddenConsumer=new UcrBrowserWebCodecsConsumer({
+    videoCanvas:{width:0,height:0,getContext(){return {drawImage(){throw new Error("hidden draw");}};}} as unknown as HTMLCanvasElement
+  });
+  hiddenConsumer.play({mediaKind:"video",videoSourceKind:"camera",
+    streamId:"hidden-skip",timestamp:1n,keyframe:true,bytes:Uint8Array.of(1,2)});
+  assert.equal(counters.hiddenRenderSkips,skips+1,"hidden tab must not decode video");
+  hiddenConsumer.stop();
+  const codecKeys=["MediaStreamTrackProcessor","AudioEncoder","VideoEncoder",
+    "AudioDecoder","VideoDecoder","EncodedAudioChunk","EncodedVideoChunk"] as const;
+  const savedCodecs=codecKeys.map(key=>({key,original:Object.getOwnPropertyDescriptor(globalThis,key)}));
+  for(const key of codecKeys){
+    Object.defineProperty(globalThis,key,{configurable:true,writable:true,value:class{}});
+  }
+  Object.defineProperty(globalThis,"VideoDecoder",{
+    configurable:true,writable:true,
+    value:class {
+      constructor(options:{output:(frame:{displayWidth:number;displayHeight:number;close():void})=>void}){
+        this.output=options.output;
+      }
+      output:(frame:{displayWidth:number;displayHeight:number;close():void})=>void;
+      configure(){}
+      decode(){this.output({displayWidth:320,displayHeight:240,close(){}});}
+      close(){}
+    }
+  });
+  Object.defineProperty(globalThis,"EncodedVideoChunk",{
+    configurable:true,writable:true,value:class{constructor(_input:unknown){}}
+  });
+  fakeDoc.hidden=false;
+  const visibleConsumer=new UcrBrowserWebCodecsConsumer({
+    videoCanvas:{width:0,height:0,getContext(){return {drawImage(){}};}} as unknown as HTMLCanvasElement
+  });
+  const before=counters.droppedStale;
+  visibleConsumer.play({mediaKind:"video",videoSourceKind:"camera",
+    streamId:"stale-drop",timestamp:1_000_000n,keyframe:true,bytes:Uint8Array.of(1,2)});
+  visibleConsumer.play({mediaKind:"video",videoSourceKind:"camera",
+    streamId:"stale-drop",timestamp:100n,keyframe:false,bytes:Uint8Array.of(1,2)});
+  assert.ok(counters.droppedStale>before,"old delta must be dropped");
+  visibleConsumer.stop();
+  for(const {key,original} of savedCodecs){
+    if(original)Object.defineProperty(globalThis,key,original);
+    else delete (globalThis as Record<string,unknown>)[key];
+  }
+  if(previousDocument)Object.defineProperty(globalThis,"document",previousDocument);
+  else delete (globalThis as {document?:unknown}).document;
+}
+
 // 180 s of bidirectional sealed media on the real portable adapter.
 // Uses media-clock frames, not wall-clock and not physical A↔B evidence.
 // The established epoch signer continues sequences; a new authenticated
