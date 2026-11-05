@@ -4051,6 +4051,9 @@ mod tests {
         assert!(client.contains("schema:\"ucr-local-diagnostics-v1\""));
         assert!(client.contains("ucrSessionMediaDiagnostics"));
         assert!(client.contains("iceServerKinds"));
+        assert!(client.contains("offeredIceServerKinds"));
+        assert!(client.contains("lastFailure:ucrLastFailure"));
+        assert!(client.contains("ucrOfferedIceKinds||\"pending\""));
         assert!(client.contains("localCandidateType"));
         assert!(client.contains("sdpComplete"));
         assert!(client.contains("grantPresent"));
