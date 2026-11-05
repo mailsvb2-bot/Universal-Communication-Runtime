@@ -137,7 +137,11 @@ export async function ucrSelectTemporalScalableConfig(
 
 const AUDIO_CODEC = "opus";
 const VIDEO_CODEC = "vp8";
-const VIDEO_CODEC_H264 = "avc1.42002a";
+/** Baseline 4.2 — preferred when HW encode/decode both report support. */
+const VIDEO_CODEC_H264_BASELINE_42 = "avc1.42002a";
+/** Baseline 3.1 — broader mobile decoder coverage (≤720p30). */
+const VIDEO_CODEC_H264_BASELINE_31 = "avc1.42001f";
+let VIDEO_CODEC_H264 = VIDEO_CODEC_H264_BASELINE_42;
 /** H.264 Annex B start codes are carried inside authenticated E2EE frames. */
 export function ucrDetectVideoCodec(bytes: Uint8Array): string {
   return bytes.length >= 5 && bytes[0] === 0 && bytes[1] === 0 &&
@@ -238,14 +242,22 @@ async function ucrProbeH264Hardware(): Promise<void> {
   ucrVideoH264Hardware = false;
   const b = browser() as {VideoEncoder?: {isConfigSupported?(c: unknown): Promise<{supported?: boolean}>};
     VideoDecoder?: {isConfigSupported?(c: unknown): Promise<{supported?: boolean}>}};
-  try {
-    const enc = await b.VideoEncoder?.isConfigSupported?.({codec: VIDEO_CODEC_H264,
-      width: 1280, height: 720, framerate: 30, bitrate: 2_500_000,
-      bitrateMode: "variable", latencyMode: "realtime", avc: {format: "annexb"},
-      hardwareAcceleration: "prefer-hardware"});
-    const dec = await b.VideoDecoder?.isConfigSupported?.({codec: VIDEO_CODEC_H264});
-    ucrVideoH264Hardware = enc?.supported === true && dec?.supported === true;
-  } catch { ucrVideoH264Hardware = false; }
+  const candidates = [VIDEO_CODEC_H264_BASELINE_42, VIDEO_CODEC_H264_BASELINE_31];
+  for (const codec of candidates) {
+    try {
+      const enc = await b.VideoEncoder?.isConfigSupported?.({codec,
+        width: 1280, height: 720, framerate: 30, bitrate: 2_500_000,
+        bitrateMode: "variable", latencyMode: "realtime", avc: {format: "annexb"},
+        hardwareAcceleration: "prefer-hardware"});
+      const dec = await b.VideoDecoder?.isConfigSupported?.({codec,
+        hardwareAcceleration: "prefer-hardware"});
+      if (enc?.supported === true && dec?.supported === true) {
+        VIDEO_CODEC_H264 = codec;
+        ucrVideoH264Hardware = true;
+        return;
+      }
+    } catch { /* try next profile-level-id */ }
+  }
 }
 /** Source-owned congestion adaptation. Only verified encrypted transport queue
  * depth and local encoder pressure influence publish quality. Never change MLS
@@ -1128,6 +1140,11 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     ucrAudioCounters.decoded++;
     try {
       const context = this.#audioContext!;
+      // iOS/Android often leave AudioContext suspended after backgrounding or
+      // a network switch; scheduling BufferSource while suspended is silent.
+      if (context.state === "suspended") {
+        try { void context.resume(); } catch { /* gesture may still be required */ }
+      }
       const buffer = context.createBuffer(data.numberOfChannels, data.numberOfFrames, data.sampleRate);
       let framePeak = 0;
       for (let ch = 0; ch < data.numberOfChannels; ch++) {

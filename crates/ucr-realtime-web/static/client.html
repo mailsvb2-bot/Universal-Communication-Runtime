@@ -82,7 +82,7 @@ canvas.remote-media.hidden{display:none}
 <div class="media">
 <div class="video-card"><header id="local-label">You</header><video id="local-video" autoplay muted playsinline></video></div>
 <div id="screen-card" class="video-card hidden"><header id="screen-label">Your screen</header><video id="screen-video" autoplay muted playsinline></video></div>
-<div class="video-card"><header id="remote-label">Remote</header><video id="remote-video" autoplay playsinline></video><canvas id="remote-e2ee-canvas" class="remote-media hidden" width="640" height="360" aria-label="Decrypted endpoint-only video"></canvas></div>
+<div class="video-card"><header id="remote-label">Remote</header><video id="remote-video" autoplay muted playsinline webkit-playsinline></video><canvas id="remote-e2ee-canvas" class="remote-media hidden" width="640" height="360" aria-label="Decrypted endpoint-only video"></canvas></div>
 </div>
 <div class="controls">
 <select id="privacy-mode" aria-label="Network privacy mode"><option value="secure">Protected call (normal network)</option><option value="private">Higher privacy (TURN relay only)</option><option value="maximum" disabled>Maximum privacy (independent relay not configured)</option></select>
@@ -1765,16 +1765,63 @@ async function openStream(){
     if(streamAbort===controller){streamAbort=null;if(sessionActive&&!openStream.missing)scheduleStreamRetry();}
   }
 }
+// Opt-in soft network recovery for brief mobile offline blips. Default off:
+// production security still retires the signed grant on navigator offline.
+function ucrSoftNetworkRecoveryEnabled(){
+  try{
+    const root=typeof window!=="undefined"?window:undefined;
+    if(root&&root.ucrSoftNetworkRecovery===true)return true;
+    if(root&&root.ucrSoftNetworkRecovery===false)return false;
+    if(typeof localStorage==="undefined")return false;
+    return localStorage.getItem("ucrSoftNetworkRecovery")==="1";
+  }catch(_){return false;}
+}
+const UCR_SOFT_NETWORK_GRACE_MS=20000;
+let ucrSoftNetworkTimer=null,ucrSoftNetworkGeneration=0;
+function cancelSoftNetworkGrace(){
+  if(ucrSoftNetworkTimer){clearTimeout(ucrSoftNetworkTimer);ucrSoftNetworkTimer=null;}
+}
+function beginSoftNetworkGrace(generation){
+  cancelSoftNetworkGrace();
+  ucrSoftNetworkGeneration=generation;
+  ui.webrtcState.textContent="Offline";
+  ui.state.textContent="Reconnecting";
+  ui.status.textContent="Network interrupted. Waiting briefly before ending the call…";
+  ucrSoftNetworkTimer=setTimeout(()=>{
+    ucrSoftNetworkTimer=null;
+    if(!sessionActive||generation!==sessionLifecycleGeneration)return;
+    if(navigator.onLine)return;
+    void endUnverifiedMedia(generation,
+      "Network unavailable; capture stopped until fresh authorization.");
+  },UCR_SOFT_NETWORK_GRACE_MS);
+}
+// Coarse mobile heuristic for capture caps. Override with window.ucrMobileCaptureCaps.
+function ucrMobileCaptureHost(){
+  try{
+    const root=typeof window!=="undefined"?window:undefined;
+    if(root&&typeof root.ucrMobileCaptureCaps==="boolean")return root.ucrMobileCaptureCaps;
+    const touch=(typeof navigator!=="undefined"&&(navigator.maxTouchPoints||0)>1);
+    const coarse=!!(root&&root.matchMedia&&root.matchMedia("(pointer:coarse)").matches);
+    return !!(touch&&coarse);
+  }catch(_){return false;}
+}
 // Prefer real Full HD source capture where the camera and browser can provide it.
 // 'ideal' is deliberately non-mandatory: a 720p-only camera must still work.
+// Mobile defaults stay lower to limit heat and CPU with software VP8 fallback.
 function preferredCameraCapture(deviceId){
-  const video={width:{ideal:1280,max:1920},height:{ideal:720,max:1080},frameRate:{ideal:30,max:30}};
+  const mobile=ucrMobileCaptureHost();
+  const video=mobile
+    ?{width:{ideal:960,max:1280},height:{ideal:540,max:720},frameRate:{ideal:24,max:30},facingMode:{ideal:"user"}}
+    :{width:{ideal:1280,max:1920},height:{ideal:720,max:1080},frameRate:{ideal:30,max:30}};
   if(deviceId)video.deviceId={exact:deviceId};
   return video;
 }
-// Request voice-friendly mono 48 kHz capture with browser processing.
+// Request voice-friendly mono 48 kHz capture with browser AEC/NS/AGC.
 function preferredMicCapture(){
-  return {echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:{ideal:1},sampleRate:{ideal:48000}};
+  return {echoCancellation:true,noiseSuppression:true,autoGainControl:true,
+    channelCount:{ideal:1},sampleRate:{ideal:48000},
+    // voiceIsolation is ignored when unsupported; helps some Chromium mobile builds.
+    voiceIsolation:true};
 }
 // One click should establish an audio conversation even when a user's camera
 // is absent, disconnected, or held by another application. Never reinterpret
@@ -1978,8 +2025,17 @@ function rtcNetworkConfiguration(iceServers,mode){
     const urls=typeof server.urls==="string"?[server.urls]:server.urls;
     return Array.isArray(urls)&&urls.some(url=>typeof url==="string"&&/^turns?:/i.test(url));
   });
+  const hasStun=iceServers.some(server=>{
+    const urls=typeof server.urls==="string"?[server.urls]:server.urls;
+    return Array.isArray(urls)&&urls.some(url=>typeof url==="string"&&/^stuns?:/i.test(url));
+  });
   if(mode==="private"&&!hasTurn)throw new Error("Higher privacy requires configured TURN relay; refusing direct network fallback");
-  return {iceServers,iceTransportPolicy:mode==="private"?"relay":"all",bundlePolicy:"max-bundle"};
+  if(mode==="secure"&&!hasTurn&&!hasStun){
+    ucrRecordDiagnostic("Secure mode ICE has no STUN/TURN; only same-LAN host candidates will work","webrtc");
+  }
+  return {iceServers,iceTransportPolicy:mode==="private"?"relay":"all",bundlePolicy:"max-bundle",
+    // Continuously gather so mobile network switches can surface new candidates.
+    iceCandidatePoolSize:0};
 }
 // Serialize complete offer ownership, including asynchronous orphan cleanup.
 // A close RPC is session-scoped and must finish before another start creates
@@ -2095,6 +2151,24 @@ async function startWebRtcOnce(forceMedia=false){
     if(state==="failed"&&pc.getConfiguration().iceTransportPolicy==="relay"){
       ui.status.textContent="Private mode could not reach the TURN relay. Check the relay or switch privacy mode to secure.";
       ucrRecordDiagnostic("Relay-only ICE failed (TURN unreachable)","webrtc");
+    }else if(state==="failed"){
+      const cfg=pc.getConfiguration();
+      const servers=Array.isArray(cfg.iceServers)?cfg.iceServers:[];
+      const hasTurn=servers.some(server=>{
+        const urls=typeof server.urls==="string"?[server.urls]:server.urls;
+        return Array.isArray(urls)&&urls.some(url=>typeof url==="string"&&/^turns?:/i.test(url));
+      });
+      const hasStun=servers.some(server=>{
+        const urls=typeof server.urls==="string"?[server.urls]:server.urls;
+        return Array.isArray(urls)&&urls.some(url=>typeof url==="string"&&/^stuns?:/i.test(url));
+      });
+      if(!hasTurn&&!hasStun){
+        ui.status.textContent="ICE failed with only host candidates. Cross-network (phone↔PC) calls need STUN/TURN (UDP + TCP, preferably turns:443).";
+        ucrRecordDiagnostic("ICE failed without STUN/TURN servers","webrtc");
+      }else if(!hasTurn){
+        ui.status.textContent="ICE failed after STUN. Carrier/symmetric NAT often needs TURN (UDP + TCP/TLS 443).";
+        ucrRecordDiagnostic("ICE failed with STUN but no TURN","webrtc");
+      }
     }
     if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
   };
@@ -2578,6 +2652,7 @@ async function endUnverifiedMedia(generation,message){
 }
 async function leave(){
   if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Leave requested","lifecycle");
+  cancelSoftNetworkGrace();
   const wasActive=sessionActive;
   if(wasActive)ucrFreezePreLeaveSnapshot();
   const leavingClaims=wasActive?body():null;
@@ -4016,17 +4091,37 @@ ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);
 if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="function"){
   navigator.mediaDevices.addEventListener("devicechange",()=>{handleMediaDeviceChange();});
 }
-window.addEventListener("offline",()=>{if(sessionActive){const generation=sessionLifecycleGeneration;ui.webrtcState.textContent="Offline";void endUnverifiedMedia(generation,"Network unavailable; capture stopped until fresh authorization.");}});
-window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
+window.addEventListener("offline",()=>{
+  if(!sessionActive)return;
+  const generation=sessionLifecycleGeneration;
+  ui.webrtcState.textContent="Offline";
+  if(ucrSoftNetworkRecoveryEnabled()){
+    beginSoftNetworkGrace(generation);
+    return;
+  }
+  void endUnverifiedMedia(generation,"Network unavailable; capture stopped until fresh authorization.");
+});
+window.addEventListener("online",()=>{
+  if(!sessionActive)return;
+  cancelSoftNetworkGrace();
+  resumeRoomAudio(window.ucrLocalRoomAudioContext);
+  ui.status.textContent="Network restored. Reconnecting media…";
+  scheduleStreamRetry();
+  scheduleWebRtcRetry(true);
+});
 document.addEventListener("visibilitychange",()=>{
   if(!document.hidden&&sessionActive&&mediaActive){
+    resumeRoomAudio(window.ucrLocalRoomAudioContext);
     // Catch up immediately on everything skipped while hidden.
     pollChat().catch(()=>{});pollReactions().catch(()=>{});pollActiveSpeaker().catch(()=>{});
     if(typeof refreshRoomRoster==="function"&&roomRosterTimer)refreshRoomRoster().catch(()=>{});
     ucrRenderDiagnostics();
   }
 });
-window.addEventListener("pagehide",()=>{releaseRoomPresence();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;++roomGestureEpoch;clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;retireEndpointMlsState();if(sessionActive){ucrFreezePreLeaveSnapshot();closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);reactionTimer=null;if(chatTimer)clearInterval(chatTimer);chatTimer=null;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;stopLocalCapture();});
+window.addEventListener("pageshow",()=>{
+  if(sessionActive&&mediaActive)resumeRoomAudio(window.ucrLocalRoomAudioContext);
+});
+window.addEventListener("pagehide",()=>{cancelSoftNetworkGrace();releaseRoomPresence();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;++roomGestureEpoch;clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;retireEndpointMlsState();if(sessionActive){ucrFreezePreLeaveSnapshot();closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);reactionTimer=null;if(chatTimer)clearInterval(chatTimer);chatTimer=null;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;stopLocalCapture();});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>

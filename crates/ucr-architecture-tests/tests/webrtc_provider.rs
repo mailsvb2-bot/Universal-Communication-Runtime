@@ -219,3 +219,37 @@ fn webrtc_e2ee_uses_protocol_owned_sfu_wire_codec() {
     assert!(typescript_sfu_wire.contains("\"screen_share\""));
     assert!(conformance_workflow.contains("sfu_forward_wire_conformance.ts"));
 }
+
+#[test]
+fn cross_device_call_path_keeps_mobile_recovery_and_ice_diagnostics() {
+    let browser = read("crates/ucr-realtime-web/static/client.html");
+    let launcher = read("scripts/windows/start-local-first-party-https.ps1");
+    let remote = read("scripts/windows/start-remote-device-test.ps1");
+    let android = read("docs/testing/android-cellular-remote-call.md");
+    let media = read("sdk/typescript/src/browser_webcodecs_media.ts");
+    let cascade = read("sdk/typescript/src/ice_cascade.ts");
+
+    // Soft recovery stays opt-in; default offline path still retires the grant.
+    assert!(browser.contains("function ucrSoftNetworkRecoveryEnabled()"));
+    assert!(browser.contains("localStorage.getItem(\"ucrSoftNetworkRecovery\")===\"1\""));
+    assert!(browser.contains("beginSoftNetworkGrace"));
+    assert!(browser.contains("Network unavailable; capture stopped until fresh authorization."));
+    assert!(browser.contains("resumeRoomAudio(window.ucrLocalRoomAudioContext)"));
+    assert!(browser.contains("facingMode:{ideal:\"user\"}"));
+    assert!(browser.contains("ucrMobileCaptureHost"));
+    assert!(browser.contains("id=\"remote-video\" autoplay muted playsinline webkit-playsinline"));
+    assert!(browser.contains("ICE failed with only host candidates"));
+    assert!(browser.contains("Carrier/symmetric NAT often needs TURN"));
+
+    assert!(launcher.contains("[string]$TurnUrls = ''"));
+    assert!(launcher.contains("[string]$StunUrls = ''"));
+    assert!(launcher.contains("turns:host:443?transport=tcp"));
+    assert!(remote.contains("cascade must include at least one turns:"));
+    assert!(android.contains("ICE / TURN cascade for phone"));
+
+    assert!(media.contains("VIDEO_CODEC_H264_BASELINE_31"));
+    assert!(media.contains("avc1.42001f"));
+    assert!(media.contains("context.state === \"suspended\""));
+    assert!(cascade.contains("ucrRecommendedTurnCascade"));
+    assert!(cascade.contains("turns:${host}:${turnsPort}?transport=tcp"));
+}

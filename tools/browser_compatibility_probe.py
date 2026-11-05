@@ -1313,6 +1313,8 @@ injected.remove();
 
     // Dispatch the browser's actual offline event, including a busy screen
     // capture. Local tracks and the peer must stop before HTTP completes.
+    // Soft mobile recovery (window.ucrSoftNetworkRecovery) is opt-in and is
+    // covered by architecture string gates; default remains fail-closed Leave.
     api = async (path, payload) => {
       if (path === "/v1/realtime/webrtc/close") {
         closeOffer = payload.offer_id;

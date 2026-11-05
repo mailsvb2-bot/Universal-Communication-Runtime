@@ -27,6 +27,10 @@ import {
   ucrAdaptiveVideoStep,
   ucrNormalizeOpusAudio,
 } from "./src/browser_webcodecs_media.ts";
+import {
+  ucrOptionalStunUrls,
+  ucrRecommendedTurnCascade,
+} from "./src/ice_cascade.ts";
 import { createUcrCanonicalBrowserMediaFactory } from "./src/canonical_browser_media_factory.ts";
 import { createUcrCanonicalDevicePreparation } from "./src/canonical_device_enrollment.ts";
 import { encodeSfuForwardEnvelopeWire } from "./src/sfu_forward_wire.ts";
@@ -1236,10 +1240,12 @@ assert.equal(persistedFrameCount, 0,
 // A real browser permission dialog can resolve AFTER Leave/host withdrawal.
 // Execute the actual browser functions rather than asserting only code strings.
 const captureCode = browser.slice(
-  browser.indexOf("function preferredCameraCapture("),
+  browser.indexOf("function ucrSoftNetworkRecoveryEnabled("),
   browser.indexOf("async function replaceLocalTrack("),
 );
-assert.ok(captureCode.startsWith("function preferredCameraCapture("));
+assert.ok(captureCode.startsWith("function ucrSoftNetworkRecoveryEnabled("));
+assert.match(captureCode, /function preferredCameraCapture\(/);
+assert.match(captureCode, /function ucrMobileCaptureHost\(/);
 const capturedResolvers: Array<(stream: any) => void> = [];
 let stoppedCaptureTracks = 0;
 const capturedTrack = () => ({
@@ -2338,6 +2344,13 @@ assert.equal(ucrVideoStageTargetFrameRate(0, 0, true), 1,
 assert.equal(ucrVideoStageProfile(2).frameRate, 24);
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0, 0, 0, 1, 0x65, 0x88])), "avc1.42002a");
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0, 0, 1, 0x65, 0x88])), "avc1.42002a");
+assert.equal(
+  ucrRecommendedTurnCascade({turnHost: "turn.example.org", turnsPort: 443}),
+  "turn:turn.example.org:3478?transport=udp,turn:turn.example.org:3478?transport=tcp,turns:turn.example.org:443?transport=tcp",
+);
+assert.equal(ucrOptionalStunUrls({turnHost: "turn.example.org", stunHost: "stun.example.org"}), "stun:stun.example.org:3478");
+assert.throws(() => ucrRecommendedTurnCascade({turnHost: "127.0.0.1"}), /DNS hostname/);
+assert.throws(() => ucrRecommendedTurnCascade({turnHost: "localhost"}), /localhost/);
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0x10, 0x00, 0x00, 0x9d, 0x01])), "vp8");
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
 assert.deepEqual(ucrAdaptiveVideoStep(0, 1_500_000, 0, 0), {stage:1, healthySamples:0});
