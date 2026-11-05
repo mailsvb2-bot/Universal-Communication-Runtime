@@ -93,9 +93,9 @@ assert 'sendQueueCongested' in pipeline
 assert 'sendInvalidEnvelope' in pipeline
 assert 'sendUnexpectedFailure' in pipeline
 assert 'sendUnavailable' in pipeline
-assert 'code === "UCR_TRANSPORT_CHANNEL_CLOSED"' in pipeline
-assert 'code === "UCR_TRANSPORT_QUEUE_CONGESTED"' in pipeline
-assert 'code === "UCR_TRANSPORT_INVALID_ENVELOPE"' in pipeline
+assert 'transportCode === "UCR_TRANSPORT_CHANNEL_CLOSED"' in pipeline
+assert 'transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED"' in pipeline
+assert 'transportCode === "UCR_TRANSPORT_INVALID_ENVELOPE"' in pipeline
 assert 'ui.webrtcState.textContent=pc.connectionState||"Connecting";' in client
 assert 'UCR_TRANSPORT_CHANNEL_CLOSED' in client
 assert 'UCR_TRANSPORT_QUEUE_CONGESTED' in client
