@@ -1276,6 +1276,12 @@ injected.remove();
     check(closeOffer === "A".repeat(43), "old owned WebRTC offer not closed");
     check(startWebRtc.offerOwner?.token === "fixture-old-grant",
       "old close must retain original grant while HTTP is pending");
+    // Actual Leave must wait for the original offer's server-side close,
+    // while capture and the consumed grant are revoked synchronously.
+    check(oldLeaveSequence === null,
+      "Leave overtook the original WebRTC close");
+    oldClose.resolve({ok:true});
+    for (let i = 0; i < 8; i++) await Promise.resolve();
     check(oldLeaveSequence === 1, "retired Leave missing original server generation");
 
     // Emulate a separate, independently issued signed grant with a new
@@ -1296,7 +1302,6 @@ injected.remove();
     ui.state.textContent = "New joined";
     ui.status.textContent = "New session active";
     ui.join.disabled = true;
-    oldClose.resolve({ok:true});
     oldLeave.resolve({ok:true});
     oldHeartbeat.resolve({json: async () => ({
       admission_state:"admitted",media_policy:null
@@ -1330,13 +1335,16 @@ injected.remove();
     screenShareBusy = true;
     window.dispatchEvent(new Event("offline"));
     check(!sessionActive && !mediaActive, "offline retained media authorization");
-    check(offlineLeaveSequence === 2, "offline Leave did not use new Join generation");
+    // No HTTP wait is allowed before stopping physical tracks. Since Close
+    // finishes asynchronously, Leave is checked after an event-loop turn.
     for (const name of ["microphone","camera","screen"]) {
       check(events.includes("stop:offline:" + name), "offline kept " + name + " capturing");
     }
     check(events.includes("peer:offline"), "offline left WebRTC peer open");
     check(closeOffer === "B".repeat(43),
       "offline must close the replacement session's own WebRTC offer");
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    check(offlineLeaveSequence === 2, "offline Leave did not use new Join generation");
     window.dispatchEvent(new Event("online"));
     check(!sessionActive, "online silently reauthorized revoked session");
     check(signedGrantRetired && ui.join.disabled,
