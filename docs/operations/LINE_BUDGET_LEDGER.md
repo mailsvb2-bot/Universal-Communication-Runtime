@@ -15,4 +15,10 @@ growth of hot call-path files for the phone↔PC call fix series on top of
 | `crates/ucr-architecture-tests/tests/webrtc_provider.rs` | +~45 lines | String gates for the above invariants |
 | `sdk/typescript/endpoint_e2ee_conformance.ts` | +~15 lines | Cascade helper + codec detect still Baseline 4.2 by default |
 
-Risky behavior (`ucrSoftNetworkRecovery`) defaults **off**.
+| `crates/ucr-realtime-web/static/start.js` | +~165 lines | Fresh MLS expectedRevision after WASM, isolate Join/MLS errors from session refresh, session diagnostics v2 |
+| `crates/ucr-realtime-web/static/start.html` | +~2 lines | Diagnostics panel describes MLS/ICE |
+| `crates/ucr-realtime-web/static/client.html` | +~80 lines | Sanitized ICE candidate types, SDP completion, ICE server types, sessionStorage snapshot |
+| `crates/ucr-realtime-web/src/main.rs` | +~15 lines | Gates for session diagnostics and ICE |
+| `crates/ucr-architecture-tests/tests/webrtc_provider.rs` | +~10 lines | Gates for revision refresh and diagnostics |
+
+Session diagnostics fields are allowlisted; never record grants, SDP or keys. Risky behavior (`ucrSoftNetworkRecovery`) defaults **off**.
