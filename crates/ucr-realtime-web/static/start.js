@@ -858,19 +858,19 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
   let live=null;
   const requestOf=()=>({callId,expectedRevision:live.call.revision});
   const pullDescriptor=async()=>{
-    live=live=await check();
+    live=await check();
     const next=await host.describeAcceptedCallMls(live.user,requestOf());
-    live=live=await check();
-    if(next.callId!==callId||next.deviceId!==live.live.user.deviceId||
+    live=await check();
+    if(next.callId!==callId||next.deviceId!==live.user.deviceId||
        next.requiresEndpointOwnedCommit!==true)
       throw Error("Untrusted first-party MLS descriptor");
     return next;
   };
   let descriptor=await pullDescriptor();
-  const creator=descriptor.creatorPrincipalId===live.live.user.participantId;
+  const creator=descriptor.creatorPrincipalId===live.user.participantId;
   const key=mlsStateKey(live.user,descriptor);
   rememberCallInfo({callState:live.call.state,
-    role:callRoleOf({call:live.call,identity:live.live.user.participantId}),
+    role:callRoleOf({call:live.call,identity:live.user.participantId}),
     mlsPhase:"prepare",grantPresent:false});
   const operation=async()=>{
     const module=await mlsWasm();
