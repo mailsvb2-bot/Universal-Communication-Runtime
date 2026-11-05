@@ -2795,9 +2795,10 @@ function scheduleEntryRetry(){
 async function endUnverifiedMedia(generation,message){
   if(!sessionActive||generation!==sessionLifecycleGeneration)return;
   const grantExpired=claims&&typeof claims.expires==="number"&&Date.now()>=claims.expires;
-  // Only explicit Leave or expired authority retires a signed grant.
-  const cleanup=leave({retireGrant:grantExpired});
-  const status=grantExpired?message:String(message||"")+" Нажмите «Войти в конференцию», чтобы подключиться снова.";
+  // Loss of verified admission is terminal for this signed grant. A hung
+  // heartbeat or Leave must never allow same-token Join to regain media.
+  const cleanup=leave({retireGrant:true});
+  const status=String(message||"Authorization ended.")+" Open a fresh authorized call link.";
   ui.state.textContent="Access ended";ui.status.textContent=status;
   await cleanup;
   if(generation+1!==sessionLifecycleGeneration)return;
