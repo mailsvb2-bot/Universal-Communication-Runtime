@@ -4032,7 +4032,9 @@ mod tests {
         assert!(script.contains("authTrace(\"list_contacts\""));
         assert!(script.contains("authTrace(\"list_devices\""));
         assert!(script.contains("authTrace(\"incoming_calls\""));
-        assert!(script.contains("const requestOf=()=>({callId,expectedRevision:live.call.revision})"));
+        assert!(
+            script.contains("const requestOf=()=>({callId,expectedRevision:live.call.revision})")
+        );
         assert!(script.contains("\"mls_prepare\""));
         assert!(script.contains("mlsPhase"));
         assert!(script.contains("grantPresent"));
