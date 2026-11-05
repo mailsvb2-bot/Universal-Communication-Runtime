@@ -3235,6 +3235,69 @@ assert.match(ucrNewMediaSessionId(), /^[a-f0-9]{8}$/);
   await adapter.stop();
 }
 
+// 180 s of bidirectional sealed media on the real portable adapter.
+// Uses media-clock frames, not wall-clock and not physical A↔B evidence.
+// The established epoch signer continues sequences; a new authenticated
+// stream ID may start at 1 without colliding with an earlier replay cursor.
+{
+  const alicePlayed: string[] = [], bobPlayed: string[] = [];
+  const binding = {tenantId: "tenant", namespaceId: null, callId: "call",
+    groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+    negotiationGeneration: 1n};
+  const envelope = (sequence: bigint, principalId: string,
+    mediaKind: "audio" | "video", streamId: string) =>
+    encodeSfuForwardEnvelopeWire({frame: {
+      header: {
+        tenantId: "tenant", namespaceId: null, callId: "call", groupId: "group",
+        source: {principalId, kind: "person"}, sourceDeviceId: principalId + "-dev",
+        streamId, negotiationRef: "current", negotiationGeneration: 1n,
+        cryptoEpoch: 3n, cryptoStateRef: "state", cryptoSuite: "ucr.v1",
+        headerVersion: 2, mediaKind, videoSourceKind: mediaKind === "video" ? "camera" : null,
+        sequence, mediaTimestamp: sequence * 20_000n,
+        keyframe: mediaKind === "video" && sequence % 15n === 1n,
+      },
+      nonce: new Uint8Array(24), ciphertext: Uint8Array.of(1),
+      sourceSignature: {keyId: "trusted", algorithmId: "ed25519",
+        algorithmVersion: 1, signature: new Uint8Array(64)},
+    }});
+  const peer = (played: string[]) => new UcrPortableEndpointMediaAdapter({
+    bridge: {seal_wire() {return Uint8Array.of(1);},
+      open_wire() {return Uint8Array.of(8);}, revoke() {}},
+    producer: {start() {}, stop() {}},
+    consumer: {play(_frame, header) {
+      played.push(header.mediaKind + ":" + header.streamId + ":" + header.sequence.toString());
+    }, stop() {}},
+    trustedKeys: {resolve() {return new Uint8Array(32).fill(3);}},
+    binding, authorizeFrame: () => true, authorizePublish: () => true,
+  });
+  const alice = peer(alicePlayed), bob = peer(bobPlayed);
+  await alice.start({...src, sendEnvelope() {}});
+  await bob.start({...src, sendEnvelope() {}});
+  const audioFrames = 180 * 50, videoFrames = 180 * 5;
+  for (let i = 1; i <= audioFrames; i++) {
+    const sequence = BigInt(i);
+    await bob.onEnvelope(envelope(sequence, "alice", "audio", "mic-a"));
+    await alice.onEnvelope(envelope(sequence, "bob", "audio", "mic-b"));
+    if (i % 10 === 0) {
+      const vs = BigInt(i / 10);
+      await bob.onEnvelope(envelope(vs, "alice", "video", "cam-a"));
+      await alice.onEnvelope(envelope(vs, "bob", "video", "cam-b"));
+    }
+    if (i === 90 * 50) {
+      await assert.rejects(bob.onEnvelope(envelope(sequence, "alice", "audio", "mic-a")),
+        /replayed endpoint media frame/, "duplicate after 90 s must reject");
+    }
+  }
+  assert.equal(alicePlayed.filter(row => row.startsWith("audio:")).length, audioFrames);
+  assert.equal(bobPlayed.filter(row => row.startsWith("audio:")).length, audioFrames);
+  assert.equal(alicePlayed.filter(row => row.startsWith("video:")).length, videoFrames);
+  assert.equal(bobPlayed.filter(row => row.startsWith("video:")).length, videoFrames);
+  await bob.onEnvelope(envelope(1n, "alice", "audio", "mic-a-rejoin"));
+  assert.ok(bobPlayed.includes("audio:mic-a-rejoin:1"),
+    "new authenticated stream must have separate replay cursor");
+  await alice.stop();await bob.stop();
+}
+
 // Verify the inbound pipeline identifies authorization, key resolution, authenticated
 // decryption and decoder/playout failures without exposing private exception strings.
 for (const stage of ["RECEIVE_AUTHORIZATION", "SIGNING_KEY_RESOLUTION",
