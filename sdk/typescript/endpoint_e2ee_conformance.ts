@@ -3235,6 +3235,32 @@ assert.match(ucrNewMediaSessionId(), /^[a-f0-9]{8}$/);
   await adapter.stop();
 }
 
+// Closed DataChannel is transient backpressure, not a fatal crypto failure.
+{
+  const errors:string[]=[];
+  const closed = new UcrPortableEndpointMediaAdapter({
+    bridge:{seal_wire(){return Uint8Array.of(3);},open_wire(){return Uint8Array.of(2);},revoke(){}},
+    producer:{
+      async start(_sources,emit){
+        await emit({mediaKind:"audio",streamId:"mic",timestamp:1n,
+          keyframe:false,bytes:Uint8Array.of(4)});
+      },stop(){}
+    },
+    consumer:{play(){},stop(){}},trustedKeys:{resolve(){return new Uint8Array(32);}},
+    binding:{tenantId:"tenant",namespaceId:null,callId:"call",groupId:"group",
+      cryptoEpoch:3n,negotiationRef:"current",negotiationGeneration:1n},
+    authorizeFrame:()=>true,authorizePublish:()=>true,
+    onError(error){errors.push((error as Error).message);}
+  });
+  await closed.start({...src,sendEnvelope(){
+    const error=new Error("Encrypted media channel is not open") as Error & {code?:string};
+    error.code="UCR_TRANSPORT_CHANNEL_CLOSED";
+    throw error;
+  }});
+  assert.deepEqual(errors,[],"closed DC must not revoke the epoch signer");
+  await closed.stop();
+}
+
 // 180 s of bidirectional sealed media on the real portable adapter.
 // Uses media-clock frames, not wall-clock and not physical A↔B evidence.
 // The established epoch signer continues sequences; a new authenticated
