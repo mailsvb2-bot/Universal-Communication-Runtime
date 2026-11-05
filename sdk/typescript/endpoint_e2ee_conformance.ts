@@ -1039,6 +1039,10 @@ assert.equal(acceptedJoinCleanup, 1, "accepted session is retired on activation 
 assert.equal(acceptedJoinCtx.sessionActive, false, "no orphan active session");
 assert.equal(acceptedJoinHeartbeats, 0, "no heartbeat before failed policy activation");
 assert.equal(acceptedJoinCtx.ui.state.textContent, "Rejected");
+assert.equal(acceptedJoinCtx.signedGrantRetired, false,
+  "activation failure must not retire a still-valid grant");
+assert.equal(acceptedJoinCtx.ui.join.disabled, false,
+  "Join can be retried after failed activation");
 
 // The old grant's expiry must stop a pending/untrusted replacement, but it
 // must NOT terminate an independently authorized replacement Join whose
@@ -2930,15 +2934,19 @@ try {
     E2EE_MAX_BUFFERED_SEND_BYTES: 2 * 1024 * 1024,
     E2EE_CHUNK_HEADER_BYTES: 24, E2EE_CHUNK_PAYLOAD_BYTES: 16000 - 24,
     E2EE_CHUNK_MAGIC: "UCRCHK01", window: {__ucrAudioCounters: {transportQueued: 0}},
+    packetCount: 0, ui: {packets: {textContent: "0"}},
     BigInt, Uint8Array, TextEncoder, DataView, Math, Error,
   };
   runInNewContext(browser.slice(start,end) +
     "\nthis.publish = sendE2eeEnvelope;",context);
   assert.throws(()=>context.publish(Uint8Array.of(7,8), "video"),/congested/);
   assert.equal(sentChunks.length,0,"congested camera must not starve protected audio");
+  assert.equal(context.packetCount,0,"refused frame must not count as encrypted packet");
   context.publish(Uint8Array.of(1,2), "audio");
   assert.equal(sentChunks.length,1,"encrypted Opus must use reserved channel capacity");
   assert.equal(context.window.__ucrAudioCounters.transportQueued,1);
+  assert.equal(context.packetCount,1,"successful outbound seal must increment encryptedPackets");
+  assert.equal(context.ui.packets.textContent,"1");
   // Bounded latency is more important than accepting ever-growing Opus
   // backlog: above the audio limit even voice frames must be refused.
   context.e2eeChannel.bufferedAmount = 400_000;
@@ -3053,6 +3061,66 @@ for (const [name, publish, seal, transport] of [
   assert.deepEqual(errors, ["UCR_MEDIA_OUTBOUND_" + name],
     "outbound failure must identify the exact failing stage without leaking details");
   await stageAdapter.stop();
+}
+
+// Outbound DataChannel congestion must be backpressure rather than a failure
+// of cryptographic authority, and never request a bigger video keyframe.
+{
+  const metrics = (globalThis as unknown as {
+    __ucrMediaStageMetrics?: {sendQueueCongested: number; videoKeyframeRequests: number};
+  }).__ucrMediaStageMetrics;
+  const congestedBefore = metrics?.sendQueueCongested ?? 0;
+  const keyframesBefore = metrics?.videoKeyframeRequests ?? 0;
+  const notices: string[] = [];
+  const previousNotice = (globalThis as unknown as {
+    ucrEndpointMediaCongestion?: (kind: string) => void;
+  }).ucrEndpointMediaCongestion;
+  (globalThis as unknown as {ucrEndpointMediaCongestion?: (kind: string) => void})
+    .ucrEndpointMediaCongestion = (kind) => {notices.push(kind);};
+  const errors: string[] = [];
+  const keyframeRequests: string[] = [];
+  const congested = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire() { return Uint8Array.of(3); },
+      open_wire() { return Uint8Array.of(2); },
+      revoke() {},
+    },
+    producer: {
+      async start(_sources, emit) {
+        await emit({mediaKind: "video", videoSourceKind: "camera", streamId: "camera",
+          timestamp: 1n, keyframe: false, bytes: Uint8Array.of(4)});
+      },
+      requestVideoKeyframe(streamId) { keyframeRequests.push(streamId); },
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() { return new Uint8Array(32); }},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => true,
+    authorizePublish: () => true,
+    onError(error) { errors.push((error as Error).message); },
+  });
+  await congested.start({...src, sendEnvelope() {
+    const error = Object.assign(new Error("DataChannel send buffer congested"),
+      {code: "UCR_TRANSPORT_QUEUE_CONGESTED"});
+    throw error;
+  }});
+  assert.deepEqual(errors, [],
+    "outbound congestion must not fail-close the protected media pipeline");
+  assert.deepEqual(keyframeRequests, [],
+    "congested video must not request a larger keyframe");
+  assert.deepEqual(notices, ["video"],
+    "the page may display congestion without ending the call");
+  assert.equal(metrics?.sendQueueCongested, congestedBefore + 1);
+  assert.equal(metrics?.videoKeyframeRequests, keyframesBefore);
+  await congested.stop();
+  const noticeHolder = globalThis as unknown as {
+    ucrEndpointMediaCongestion?: (kind: string) => void;
+  };
+  if (previousNotice) noticeHolder.ucrEndpointMediaCongestion = previousNotice;
+  else Reflect.deleteProperty(globalThis, "ucrEndpointMediaCongestion");
 }
 
 // Different frames on one DataChannel may finish async trust lookups out of
