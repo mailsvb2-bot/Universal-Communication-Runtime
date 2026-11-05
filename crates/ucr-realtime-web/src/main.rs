@@ -4058,6 +4058,9 @@ mod tests {
         assert!(client.contains("sdpComplete"));
         assert!(client.contains("grantPresent"));
         assert!(client.contains("hiddenRenderSkips"));
+        assert!(client.contains("droppedStale:window.__ucrVideoCounters.droppedStale"));
+        assert!(client.contains("lastRxAudio:window.__ucrMediaStageMetrics.lastRxAudio"));
+        assert!(client.contains("replayRejected:window.__ucrMediaStageMetrics.replayRejected"));
         assert!(client.contains("videoVisibility:{"));
         assert!(client.contains("renderStallMs:document.hidden?null:"));
         assert!(client.contains("hiddenTotalMs:"));
@@ -4451,7 +4454,10 @@ mod tests {
             "if(e2eeChannel!==channel||terminalHandled)return;",
             "if(sessionActive&&mediaActive){",
             "webrtcNeedsPeerRebuild=true;",
-            "closeE2eeTransport();",
+            "function detachE2eeChannel(){",
+            "detachE2eeChannel();",
+            "teardownPeer({keepAdapter:true})",
+            "e2eeAdapterStarted&&e2eeAdapter()",
             "scheduleWebRtcRetry();",
             "if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}",
             "webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;",
