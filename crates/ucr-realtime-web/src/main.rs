@@ -4023,7 +4023,8 @@ mod tests {
         let script = super::FIRST_PARTY_START_JS;
         assert!(page.contains("id=\"auth-diagnostics-report\""));
         assert!(page.contains("id=\"auth-diagnostics-save\""));
-        assert!(script.contains("schema:\"ucr-auth-diagnostics-v1\""));
+        assert!(script.contains("schema:\"ucr-session-diagnostics-v2\""));
+        assert!(script.contains("authSchema:\"ucr-auth-diagnostics-v1\""));
         assert!(script.contains("authDiagnostics.length>60"));
         assert!(script.contains("HTTP_401_AUTHORITY_REJECTED"));
         assert!(script.contains("authTrace(\"resume_session\""));
@@ -4031,6 +4032,10 @@ mod tests {
         assert!(script.contains("authTrace(\"list_contacts\""));
         assert!(script.contains("authTrace(\"list_devices\""));
         assert!(script.contains("authTrace(\"incoming_calls\""));
+        assert!(script.contains("const requestOf=()=>({callId,expectedRevision:live.call.revision})"));
+        assert!(script.contains("\"mls_prepare\""));
+        assert!(script.contains("mlsPhase"));
+        assert!(script.contains("grantPresent"));
         assert!(!script.contains("authDiagnostics.push({error:"));
     }
 
@@ -4042,6 +4047,11 @@ mod tests {
         assert!(client.contains("id=\"ucr-diagnostics-copy\""));
         assert!(client.contains("ucrDiagnosticsEvents.length>80"));
         assert!(client.contains("schema:\"ucr-local-diagnostics-v1\""));
+        assert!(client.contains("ucrSessionMediaDiagnostics"));
+        assert!(client.contains("iceServerKinds"));
+        assert!(client.contains("localCandidateType"));
+        assert!(client.contains("sdpComplete"));
+        assert!(client.contains("grantPresent"));
         assert!(client.contains("hiddenRenderSkips"));
         assert!(client.contains("videoVisibility:{"));
         assert!(client.contains("renderStallMs:document.hidden?null:"));
