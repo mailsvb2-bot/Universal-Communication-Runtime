@@ -12,11 +12,15 @@ import {
 import { createUcrEndpointWasmPersistence } from "./src/endpoint_wasm_persistence.ts";
 import {
   UcrPortableEndpointMediaAdapter,
+  UCR_MEDIA_REPLAY_WINDOW,
 } from "./src/portable_endpoint_media.ts";
 import {
   UcrBrowserWebCodecsConsumer,
   UcrBrowserWebCodecsProducer,
   ucrCameraLayerStreamId,
+  ucrQualifyMediaStreamId,
+  ucrNewMediaSessionId,
+  ucrHoldPeak,
   ucrVideoEncodingTarget,
   ucrVideoEncodeSize,
   ucrVideoSoftwareFrameRate,
@@ -1140,6 +1144,14 @@ const lifecycleCtx: Record<string, any> = {
   e2eeActivationGeneration: 0,
   e2eeChannel: lifecycleChannel,
   e2eeAdapterReady: false,
+  e2eeAdapterStarted: false,
+  detachE2eeChannel() {
+    lifecycleCtx.e2eeActivationGeneration++;
+    lifecycleCtx.e2eeChannel = null;
+    lifecycleCtx.e2eePending = null;
+    lifecycleCtx.e2eeAdapterReady = false;
+  },
+  ucrMarkConferenceMediaActive() {},
   e2eeManagedAdapter: null,
   e2eePending: null,
   appliedAdaptiveQuality: null,
@@ -1186,6 +1198,10 @@ assert.equal(lifecycleCtx.ui.state.textContent, "Connected",
   "the reference UI becomes connected only after protected endpoint startup");
 assert.deepEqual(protectedLifecycleEvents.slice(0, 3),
   ["start-begins", "start-completes", "monitor-starts"]);
+lifecycleCtx.e2eeChannel = lifecycleChannel;
+await lifecycleCtx.activate();
+assert.equal(protectedLifecycleEvents.filter((event: string) => event === "start-begins").length, 1,
+  "DataChannel reconnection must retain epoch signer");
 lifecycleCtx.close();
 assert.equal(lifecycleCtx.e2eeAdapterReady, false);
 assert.ok(protectedLifecycleEvents.includes("monitor-stops"),
@@ -1212,6 +1228,8 @@ let lastChannel: Record<string, any> | null = null;
 const frameCtx: Record<string, any> = {
   E2EE_CHANNEL_LABEL: "ucr.e2ee.media.v1",
   closeE2eeTransport() {},
+  detachE2eeChannel() {},
+  ucrDiagnosticReason: (message: string) => /replayed/.test(String(message||"")) ? "MEDIA_REPLAY_REJECTED" : "OTHER",
   receiveE2eeChunk: (wire: unknown) => wire,
   packetCount: 0,
   ui: {packets: {textContent: ""}, status: {textContent: ""},
@@ -1600,7 +1618,7 @@ assert.equal(fencedCtx.startWebRtc.offerId, "C".repeat(43), "refused close prese
 // camera/microphone capture, not only close the encrypted DataChannel.
 const captureStopCode = browser.slice(
   browser.indexOf("function stopLocalCapture(){"),
-  browser.indexOf("function teardownPeer(){"),
+  browser.indexOf("function teardownPeer("),
 );
 const admissionCode = browser.slice(
   browser.indexOf("async function activateAdmittedMedia(){"),
@@ -2869,11 +2887,15 @@ try {
     [[960, 540], [640, 360]]);
   assert.equal((producerConfigured[0] as {framerate: number}).framerate, 24,
     "software encoder configuration must be capped to 24 fps");
-  assert.equal(outputFrames.filter(f => f.streamId === "camera123").length, 9,
+  const fullLayer = outputFrames.filter(f => /^camera123-m[a-f0-9]{8}$/.test(f.streamId));
+  const lowLayer = outputFrames.filter(f => /^camera123-m[a-f0-9]{8}-low$/.test(f.streamId));
+  assert.equal(fullLayer.length, 9,
     "software producer must actually pace 30 fps capture down to 24 fps");
-  assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length >= 3);
-  assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length <= 6);
-  assert.equal(lowDraws, outputFrames.filter(f => f.streamId === "camera123-low").length);
+  assert.ok(lowLayer.length >= 3);
+  assert.ok(lowLayer.length <= 6);
+  assert.equal(lowDraws, lowLayer.length);
+  assert.equal(new Set(fullLayer.map(f => f.streamId)).size, 1,
+    "one producer start uses one authenticated media-session identity");
 
   // A revoked screen source must never re-attach after an earlier async reader
   // cancellation finishes. This exercises the real producer's updateSources.
@@ -3181,6 +3203,37 @@ assert.deepEqual(receivedSequences, ["bob:1", "alice:1", "alice:2", "alice:1"],
 await assert.rejects(inbound.onEnvelope(inboundWire(1n, "alice", "audio")),
   /replayed endpoint media frame/);
 await inbound.stop();
+
+assert.equal(UCR_MEDIA_REPLAY_WINDOW, 64n);
+assert.equal(ucrHoldPeak(0, 0.5), 0.5);
+assert.ok(ucrHoldPeak(0.5, 0) > 0.4);
+assert.equal(ucrQualifyMediaStreamId("camera123", "abcd1234"), "camera123-mabcd1234");
+assert.throws(() => ucrQualifyMediaStreamId("camera123-mab", "abcd1234"));
+assert.match(ucrNewMediaSessionId(), /^[a-f0-9]{8}$/);
+{
+  const m = (globalThis as unknown as {__ucrMediaStageMetrics: {
+    replayRejected:number;replayDuplicate:number;replayStale:number;lastRxVideo:number;
+  }}).__ucrMediaStageMetrics;
+  const played:bigint[]=[];
+  const adapter = new UcrPortableEndpointMediaAdapter({
+    bridge:{seal_wire(){return Uint8Array.of(1);},open_wire(){return Uint8Array.of(8);},revoke(){}},
+    producer:{start(){},stop(){}},consumer:{play(_frame,header){played.push(header.sequence);},stop(){}},
+    trustedKeys:{resolve(){return new Uint8Array(32).fill(3);}},
+    binding:{tenantId:"tenant",namespaceId:null,callId:"call",groupId:"group",
+      cryptoEpoch:3n,negotiationRef:"current",negotiationGeneration:1n},
+    authorizeFrame:()=>true,authorizePublish:()=>true
+  });
+  await adapter.start({...src,sendEnvelope(){}});
+  await adapter.onEnvelope(inboundWire(100n,"alice"));
+  await adapter.onEnvelope(inboundWire(99n,"alice"));
+  assert.deepEqual(played,[100n,99n],"authenticated reorder within window");
+  await assert.rejects(adapter.onEnvelope(inboundWire(100n,"alice")), replayed endpoint media frame/);
+  await assert.rejects(adapter.onEnvelope(inboundWire(1n,"alice")), replayed endpoint media frame/);
+  assert.ok(m.replayRejected>=2 && m.replayDuplicate>=1 && m.replayStale>=1);
+  assert.equal(m.lastRxVideo,100);
+  await adapter.onEnvelope(inboundWire(101n,"alice"));
+  await adapter.stop();
+}
 
 // Verify the inbound pipeline identifies authorization, key resolution, authenticated
 // decryption and decoder/playout failures without exposing private exception strings.
