@@ -156,6 +156,71 @@ function ucrRecordDiagnostic(event,category="runtime"){
   ucrDiagnosticsEvents.push({time:new Date().toISOString(),category,safe});
   if(ucrDiagnosticsEvents.length>80)ucrDiagnosticsEvents.shift();
 }
+function ucrIceServerKinds(servers){
+  const list=Array.isArray(servers)?servers:[];
+  let stun=false,turn=false;
+  for(const server of list){
+    const urls=typeof server.urls==="string"?[server.urls]:server.urls;
+    if(!Array.isArray(urls))continue;
+    for(const url of urls){
+      if(typeof url!=="string")continue;
+      if(/^turns?:/i.test(url))turn=true;
+      else if(/^stuns?:/i.test(url))stun=true;
+    }
+  }
+  return turn&&stun?"both":turn?"turn":stun?"stun":"none";
+}
+const UCR_CANDIDATE_TYPES=new Set(["host","srflx","prflx","relay"]);
+function ucrSanitizeCandidateType(value){
+  return UCR_CANDIDATE_TYPES.has(value)?value:null;
+}
+async function ucrCaptureIceStats(pc){
+  if(!pc||typeof pc.getStats!=="function")return;
+  try{
+    const stats=await pc.getStats();
+    const locals=Object.create(null),remotes=Object.create(null);
+    let selectedPair=null;
+    stats.forEach(report=>{
+      if(report.type==="local-candidate")locals[report.id]=report;
+      else if(report.type==="remote-candidate")remotes[report.id]=report;
+      else if(report.type==="candidate-pair"&&(report.nominated||report.selected||report.state==="succeeded")){
+        if(!selectedPair||report.nominated||report.selected)selectedPair=report;
+      }
+    });
+    let selectedLocal=null,selectedRemote=null;
+    if(selectedPair){
+      selectedLocal=ucrSanitizeCandidateType(locals[selectedPair.localCandidateId]?.candidateType);
+      selectedRemote=ucrSanitizeCandidateType(remotes[selectedPair.remoteCandidateId]?.candidateType);
+    }
+    const gathered={host:0,srflx:0,prflx:0,relay:0};
+    Object.values(locals).forEach(candidate=>{
+      if(UCR_CANDIDATE_TYPES.has(candidate.candidateType))gathered[candidate.candidateType]++;
+    });
+    window.__ucrIceSnapshot={
+      connectionState:pc.connectionState||null,
+      iceConnectionState:pc.iceConnectionState||null,
+      iceGatheringState:pc.iceGatheringState||null,
+      sdpComplete:!!(pc.localDescription&&pc.remoteDescription),
+      iceServerKinds:ucrIceServerKinds(pc.getConfiguration?.().iceServers),
+      localCandidateType:selectedLocal,
+      remoteCandidateType:selectedRemote,
+      gatheredLocalTypes:gathered
+    };
+    ucrPersistMediaDiagnostics();
+  }catch(_){}
+}
+function ucrPersistMediaDiagnostics(){
+  try{
+    const report=ucrDiagnosticReport();
+    sessionStorage.setItem("ucrSessionMediaDiagnostics",JSON.stringify({
+      schema:"ucr-local-diagnostics-v1",
+      capturedAt:report.capturedAt,
+      webrtc:report.webrtc,
+      grantPresent:report.grantPresent===true,
+      ice:report.ice||null
+    }));
+  }catch(_){}
+}
 function ucrDiagnosticReason(value){
   const message=String(value||"").toLowerCase();
   const stage=message.match(/ucr_media_(outbound|inbound)_(publish_authorization|seal_wire|datachannel_send|receive_authorization|signing_key_resolution|verify_and_decrypt|decode_and_play)/);
@@ -210,6 +275,17 @@ function ucrDiagnosticReport(){
     capturedAt:new Date().toISOString(),
     preDisconnect:ucrPreLeaveSnapshot,
     page:"conference",
+    grantPresent:typeof token==="string"&&token.length>0,
+    ice:window.__ucrIceSnapshot||{
+      connectionState:typeof peer!=="undefined"&&peer?peer.connectionState||null:null,
+      iceConnectionState:typeof peer!=="undefined"&&peer?peer.iceConnectionState||null:null,
+      iceGatheringState:typeof peer!=="undefined"&&peer?peer.iceGatheringState||null:null,
+      sdpComplete:typeof peer!=="undefined"&&peer?!!(peer.localDescription&&peer.remoteDescription):false,
+      iceServerKinds:typeof peer!=="undefined"&&peer?ucrIceServerKinds(peer.getConfiguration?.().iceServers):"none",
+      localCandidateType:null,
+      remoteCandidateType:null,
+      gatheredLocalTypes:null
+    },
     state:document.getElementById("state")?.textContent||"unknown",
     webrtc:document.getElementById("webrtc-state")?.textContent||"unknown",
     encryptedPackets:Number(document.getElementById("packets")?.textContent)||0,
@@ -2142,6 +2218,7 @@ async function startWebRtcOnce(forceMedia=false){
   };
   pc.onconnectionstatechange=()=>{
     if(peer!==pc)return;
+    void ucrCaptureIceStats(pc);
     const state=pc.connectionState;ui.webrtcState.textContent=state||"Connecting";
     if(state==="connected"){
       if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
@@ -2185,6 +2262,7 @@ async function startWebRtcOnce(forceMedia=false){
       undefined,false,startingToken);
     ensureOwnedPeer();
     remoteDescriptionAccepted=true;
+    void ucrCaptureIceStats(pc);
     for(const candidate of pendingCandidates.splice(0)){
       ensureOwnedPeer();
       await sendCandidate(candidate);
