@@ -285,12 +285,21 @@ fn cross_device_call_survives_congestion_and_keeps_rejoin() {
     // Congestion is backpressure, not conference suicide.
     assert!(browser.contains("window.ucrEndpointMediaCongestion"));
     assert!(browser.contains("MEDIA_TRANSPORT_CONGESTION"));
+    assert!(browser.contains("MEDIA_REPLAY_REJECTED"));
+    assert!(browser.contains("function detachE2eeChannel(){"));
+    assert!(browser.contains("teardownPeer({keepAdapter:true})"));
+    assert!(browser.contains("ucrConferenceMediaActive"));
     assert!(adapter.contains("ucrEndpointMediaCongestion"));
     assert!(adapter.contains("UCR_TRANSPORT_QUEUE_CONGESTED"));
+    assert!(adapter.contains("UCR_TRANSPORT_CHANNEL_CLOSED"));
+    assert!(adapter.contains("UCR_MEDIA_REPLAY_WINDOW"));
     assert!(adapter.contains(r#"transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED""#));
 
     // Series C still checks accepted-first-party auto-Join; only resumes AudioContext.
     assert!(browser.contains(r#"sessionStorage.getItem("ucrFirstPartyDirectCall")"#));
     assert!(browser.contains("claims.call_id.startsWith(\"fp-m-\")"));
     assert!(browser.contains("resumeRoomAudio(window.ucrLocalRoomAudioContext)"));
+    let start = read("crates/ucr-realtime-web/static/start.js");
+    assert!(start.contains("ucrConferenceMediaActive"));
+    assert!(start.contains("Защищённый звонок уже открыт на экране конференции."));
 }
