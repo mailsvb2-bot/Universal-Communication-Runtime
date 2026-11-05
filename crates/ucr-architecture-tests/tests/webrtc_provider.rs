@@ -260,7 +260,6 @@ fn cross_device_call_path_keeps_mobile_recovery_and_ice_diagnostics() {
     assert!(browser.contains("localCandidateType"));
 }
 
-
 #[test]
 fn cross_device_call_survives_congestion_and_keeps_rejoin() {
     let browser = read("crates/ucr-realtime-web/static/client.html");
