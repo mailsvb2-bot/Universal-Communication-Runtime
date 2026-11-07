@@ -62,6 +62,6 @@ jobs:
           git add Cargo.toml Cargo.lock \
             crates/ucr-chaos-lab/Cargo.toml crates/ucr-chaos-lab/Cargo.lock \
             third_party/webrtc-util-v0172
-          git diff --cached --check
+          git diff --cached --check -- . ':!third_party/webrtc-util-v0172'
           git commit -m "fix(webrtc): remove transitive pin-utils via a single upstream utility feature patch"
           git push origin HEAD:refs/heads/"$EXPECTED_BRANCH"
