@@ -1,0 +1,13 @@
+# Security review 2026-11-05 — RUSTSEC-2026-0441 only.
+# This advisory is informational (unmaintained), not a reported vulnerability.
+# Exact chain: pin-utils 0.1.1 <- nix 0.26.4 (feature "aio", enabled by
+# nix default features) <- webrtc-util 0.17.2 <- canonical WebRTC worker.
+# The pin-utils dependency is only used by nix's sys::aio API; UCR's
+# WebRTC transport does not invoke that API. We retain deny-warnings for all
+# other advisories. This is a *tracked temporary exception*, not a dependency
+# remediation or a claim that third-party code is maintained.
+# Remove this entry when upstream webrtc-util can select nix without "aio",
+# or when the WebRTC dependency stack has migrated to a maintained nix.
+# Review deadline: 2026-12-05; release owners must revisit before RT1 GA.
+[advisories]
+ignore = ["RUSTSEC-2026-0441"]
