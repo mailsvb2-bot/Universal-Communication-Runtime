@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   resolve-webrtc-utility:
-    if: github.event.head_commit.message == 'build(webrtc): run one-shot upstream dependency repair'
+    if: "github.event.head_commit.message == 'build(webrtc): run one-shot upstream dependency repair'"
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
