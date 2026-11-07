@@ -87,6 +87,8 @@ overflow-checks = true
 strip = "symbols"
 
 [patch.crates-io]
+webrtc-util = { path = "third_party/webrtc-util-v0172" }
+
 # Phase 29: hpke-rs 0.7.0 depends unconditionally on libcrux-sha3 only for
 # SHAKE256-based PQ KEM seed derivation. The local patch preserves SHAKE256
 # semantics with RustCrypto sha3 and removes an unmaintained Hax macro dependency
