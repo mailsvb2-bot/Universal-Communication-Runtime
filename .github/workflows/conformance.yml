@@ -26,6 +26,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Validate common Phase-41 matrix
         run: python3 sdk/conformance/validate.py
+      - name: Enforce one WebRTC dependency owner without pin-utils
+        run: python3 tools/check_webrtc_dependency_ownership.py
       - name: Run language host probe
         shell: bash
         run: |
