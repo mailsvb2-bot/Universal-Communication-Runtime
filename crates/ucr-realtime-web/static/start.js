@@ -589,17 +589,22 @@ function btn(text, callback, style = "") {
   button.addEventListener("click", () => void run(callback));
   return button;
 }
+// Shared fail-closed handling for explicit actions, restored Calls and
+// background inspection. Never treat network or ordinary auth errors as MLS
+// corruption, and never create a replacement Call without user consent.
+function handleMlsIntegrityError(error) {
+  if (!(error instanceof MlsIntegrityError) || !active) return false;
+  markCallCompromised(active.call.callId);
+  message("Защищённый канал этого звонка повреждён. Начните новый защищённый звонок.");
+  showActive();
+  return true;
+}
 async function run(action) {
   if (busy || navigating) return;
   busy = true;
   try {await action();}
   catch(error) {
-    if (error instanceof MlsIntegrityError && active) {
-      markCallCompromised(active.call.callId);
-      message("Защищённый канал этого звонка повреждён. Начните новый защищённый звонок.");
-      showActive();
-      return;
-    }
+    if (handleMlsIntegrityError(error)) return;
     message("Действие не подтверждено: " + (error instanceof Error ? error.message : String(error)));}
   finally {busy = false;}
 }
@@ -1373,15 +1378,19 @@ async function initialize() {
     await refresh();
     message("Устройство подтверждено. Входящие звонки проверяются.");
   } catch (error) {
-    message("Устройство подтверждено; проверка вызовов завершилась ошибкой: " +
-      (error instanceof Error ? error.message : String(error)));
+    if (!handleMlsIntegrityError(error)) {
+      message("Устройство подтверждено; проверка вызовов завершилась ошибкой: " +
+        (error instanceof Error ? error.message : String(error)));
+    }
   }
   let pollTick = 0, pollFailures = 0;
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && !busy && !navigating) {
       pollTick = 0;
-      void refresh().then(() => { pollFailures = 0; }, err =>
-        authDiagnostic("visibility_refresh", "failed", err));
+      void refresh().then(() => { pollFailures = 0; }, err => {
+        authDiagnostic("visibility_refresh", "failed", err);
+        handleMlsIntegrityError(err);
+      });
     }
   });
   timer = setInterval(() => {
@@ -1395,6 +1404,7 @@ async function initialize() {
     void refresh().then(() => { pollFailures = 0; }, err => {
       pollFailures += 1;
       authDiagnostic("periodic_refresh","failed",err);
+      if (handleMlsIntegrityError(err)) return;
       // Retain the authenticated device and keep polling rather than requiring
       // fresh registration. Do not bypass server-side Call authority.
       message("Устройство авторизовано; ошибка проверки вызовов: " +

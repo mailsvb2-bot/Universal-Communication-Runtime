@@ -24,4 +24,6 @@ ucr-webrtc = { path = "../ucr-webrtc" }
 # apply here. Reuse the exact same pinned, audited DTLS migration candidate
 # as the main workspace, rather than resolving legacy crypto-bigint 0.5.5.
 [patch.crates-io]
+webrtc-util = { path = "../../third_party/webrtc-util-v0172" }
+
 dtls = { path = "../../third_party/dtls" }
