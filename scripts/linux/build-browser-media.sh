@@ -32,6 +32,7 @@ PY
 case "${1:-build}" in
   --check)
     verify
+    python3 tools/verify_release_artifacts.py --repo "$ROOT"
     ;;
   build)
     command -v cargo >/dev/null
@@ -62,6 +63,8 @@ case "${1:-build}" in
       --bundle --platform=browser --format=esm --target=es2022 \
       --outfile="$INSTALLER"
     verify
+    python3 tools/verify_release_artifacts.py --repo "$ROOT" --create
+    python3 tools/verify_release_artifacts.py --repo "$ROOT"
     sha256sum "$WASM" "$WASM_JS" "$INSTALLER"
     ;;
   *)
