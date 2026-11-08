@@ -11,15 +11,16 @@ const end=js.indexOf("function authHttpCode(error){",start);
 assert.ok(start>=0&&end>start,"invitation handler must remain first-party");
 const listeners=new Map(), elements=new Map(),messages=[];
 function el(id){
+  if((id==="pl-invite-manual"||id==="pl-invite-manual-url")&&!elements.has(id))return null;
   if(!elements.has(id)){
-    const obj={id,children:[],hidden:false,style:{},dataset:{},append(...v){this.children.push(...v)},addEventListener(event,fn){listeners.set(id+":"+event,fn)},focus(){this.focused=true},select(){this.selected=true},setAttribute(){},value:"",textContent:""};
+    const obj={id,children:[],hidden:false,style:{},dataset:{},append(...v){this.children.push(...v);for(const x of v)if(x.id)elements.set(x.id,x)},addEventListener(event,fn){listeners.set(id+":"+event,fn)},focus(){this.focused=true},select(){this.selected=true},setAttribute(){},value:"",textContent:""};
     elements.set(id,obj);
   }
   return elements.get(id);
 }
 const clipboard=[];
 const ctx={plOwnIdentity:"known-peer",location:{origin:"https://example.test"},navigator:{clipboard:{writeText:async url=>{clipboard.push(url);}}},
-document:{createElement:tag=>({tag,children:[],style:{},append(...v){this.children.push(...v)},setAttribute(){},focus(){this.focused=true},select(){this.selected=true}})},
+document:{createElement:tag=>({tag,children:[],style:{},append(...v){this.children.push(...v);for(const x of v)if(x.id)elements.set(x.id,x)},setAttribute(){},focus(){this.focused=true},select(){this.selected=true}})},
 el,message:v=>messages.push(v),busy:true,navigating:true,run:()=>{throw Error("invitation must not be gated on run()")},URL};
 vm.runInNewContext(js.slice(start,end),ctx);
 listeners.get("pl-copy-invite:click")();
