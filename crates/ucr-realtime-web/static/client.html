@@ -275,6 +275,18 @@ function ucrDiagnosticReason(value){
   if(/publish authorization/.test(message))return "MEDIA_PUBLISH_REJECTED";
   if(/encoded media|opus|microphone|pcm/.test(message))return "AUDIO_ENCODE_OR_PUBLISH_FAILURE";
   if(/permission|notallowed/.test(message))return "DEVICE_PERMISSION_DENIED";
+  // A message alone is not proof of the selected ICE route. Classify only
+  // explicit protocol-stage failures, never infer TURN from generic WebRTC.
+  if(/turn.{0,24}(unauthorized|authentication|credential|401|438)|turn authentication/.test(message))
+    return "TURN_AUTHENTICATION_FAILURE";
+  if(/tls.{0,24}(certificate|handshake|verify)|certificate.{0,24}turn/.test(message))
+    return "TURN_TLS_FAILURE";
+  if(/dtls.{0,24}(handshake|alert|failed)|dtls handshake/.test(message))
+    return "DTLS_HANDSHAKE_FAILURE";
+  if(/sdp.{0,24}(parse|invalid|setlocal|setremote|answer|offer)|invalid session description/.test(message))
+    return "WEBRTC_SDP_NEGOTIATION_FAILURE";
+  if(/ice.{0,25}(failed|timeout|disconnected|gather)|no candidate pair/.test(message))
+    return "WEBRTC_ICE_FAILURE";
   if(/ice|webrtc|peer/.test(message))return "WEBRTC_CONNECTION_FAILURE";
   return "MEDIA_ACTIVATION_FAILURE";
 }
