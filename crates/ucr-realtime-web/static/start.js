@@ -249,16 +249,59 @@ function plInviteUrl(){
   url.searchParams.set("contact",plOwnIdentity);
   return url.href;
 }
-el("pl-copy-invite").addEventListener("click",()=>void run(async()=>{
-  const url=plInviteUrl();if(!url)return;
-  await navigator.clipboard.writeText(url);
-  message("Приглашение скопировано. Попросите знакомого сверить код с вами.");
-}));
-el("pl-share-invite").addEventListener("click",()=>void run(async()=>{
-  const url=plInviteUrl();if(!url)return;
-  if(navigator.share){await navigator.share({title:"PetrelLink — контакт",url});}
-  else{await navigator.clipboard.writeText(url);message("Приглашение скопировано.");}
-}));
+// An invitation is a public contact locator, not a Device credential or Join
+// grant. Keep these user-gesture actions independent of background auth refreshes
+// and the call navigation lock: the generic run() gate silently drops clicks.
+function plShowInviteForManualCopy(url) {
+  let container=el("pl-invite-manual");
+  if(!container){
+    container=document.createElement("div");
+    container.id="pl-invite-manual";
+    container.setAttribute("role","group");
+    container.setAttribute("aria-label","Ссылка для приглашения");
+    const hint=document.createElement("p");
+    hint.textContent="Браузер не разрешил автоматическое копирование. Скопируйте ссылку из поля ниже.";
+    const field=document.createElement("input");
+    field.type="text";field.id="pl-invite-manual-url";field.readOnly=true;
+    field.setAttribute("aria-label","Ссылка приглашения для ручного копирования");
+    field.style.width="100%";
+    container.append(hint,field);
+    el("pl-user-cabinet").append(container);
+  }
+  const field=el("pl-invite-manual-url");
+  field.value=url;
+  container.hidden=false;
+  field.focus();
+  field.select();
+  message("Выделена ссылка приглашения. Нажмите Ctrl+C, чтобы скопировать её.");
+}
+async function plCopyInvite() {
+  const url=plInviteUrl();
+  if(!url){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
+  try{
+    if(!navigator.clipboard?.writeText)throw Error("Clipboard API is unavailable");
+    await navigator.clipboard.writeText(url);
+    message("Приглашение скопировано. Попросите знакомого сверить код с вами.");
+  }catch(_){plShowInviteForManualCopy(url);}
+}
+async function plShareInvite() {
+  const url=plInviteUrl();
+  if(!url){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
+  if(typeof navigator.share==="function"){
+    try{
+      await navigator.share({title:"PetrelLink — контакт",url});
+      return;
+    }catch(error){
+      // A cancelled native share must not leak credentials or trigger a
+      // second prompt. Make the link visibly available for manual sharing.
+      plShowInviteForManualCopy(url);
+      return;
+    }
+  }
+  await plCopyInvite();
+}
+el("pl-copy-invite").addEventListener("click",()=>{void plCopyInvite();});
+el("pl-share-invite").addEventListener("click",()=>{void plShareInvite();});
 function authHttpCode(error){
   const match=String(error instanceof Error?error.message:"").match(/HTTP (401|403|404|409|429|500|502|503)/);
   return match?Number(match[1]):null;
