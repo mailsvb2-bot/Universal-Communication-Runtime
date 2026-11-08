@@ -192,7 +192,16 @@ const ACTIVE_CALL_HINT_KEY = "ucr.first-party.active-call.v1";
 const authDiagnostics=[];
 let plOwnIdentity=null;
 function plSetSignedIn(identity){
-  plOwnIdentity=identity||null;
+  const nextIdentity=identity||null;
+  if(plOwnIdentity!==nextIdentity){
+    // A manual invite is an account-scoped contact locator. Never show the
+    // previous account's link after logout, revocation, or account switching.
+    const manual=document.getElementById("pl-invite-manual");
+    const field=document.getElementById("pl-invite-manual-url");
+    if(manual)manual.hidden=true;
+    if(field)field.value="";
+  }
+  plOwnIdentity=nextIdentity;
   const logged=Boolean(plOwnIdentity);
   el("pl-new-user").hidden=logged;
   el("pl-user-cabinet").hidden=!logged;
