@@ -40,6 +40,16 @@ ctx.navigator.share=undefined;ctx.navigator.clipboard.writeText=async url=>clipb
 listeners.get("pl-share-invite:click")();
 await new Promise(resolve=>setImmediate(resolve));
 assert.equal(clipboard.length,2);
+// Account switches must not re-expose the old public contact locator.
+const accountStart=js.indexOf("function plSetSignedIn(identity){");
+const accountEnd=js.indexOf("// One fail-closed UI reset",accountStart);
+assert.ok(accountStart>=0&&accountEnd>accountStart);
+ctx.document.getElementById=id=>elements.get(id)||null;
+ctx.localize=value=>value;
+vm.runInNewContext(js.slice(accountStart,accountEnd),ctx);
+vm.runInNewContext('plSetSignedIn("another-peer")',ctx);
+assert.equal(el("pl-invite-manual").hidden,true);
+assert.equal(el("pl-invite-manual-url").value,"");
 ctx.plOwnIdentity=null;
 listeners.get("pl-copy-invite:click")();
 await new Promise(resolve=>setImmediate(resolve));
