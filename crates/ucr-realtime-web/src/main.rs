@@ -2854,7 +2854,10 @@ fn browser_media_assets_match_manifest(
         return false;
     };
     if document.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
-        || document.get("source_sha").and_then(serde_json::Value::as_str) != Some(expected_sha)
+        || document
+            .get("source_sha")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected_sha)
     {
         return false;
     }
@@ -2884,8 +2887,7 @@ fn browser_media_assets_match_manifest(
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
-        expected_length == Some(bytes.len() as u64)
-            && expected_hash == Some(actual_hash.as_str())
+        expected_length == Some(bytes.len() as u64) && expected_hash == Some(actual_hash.as_str())
     })
 }
 
