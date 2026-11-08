@@ -1,0 +1,2 @@
+Source: published webrtc-util 0.17.2, SHA256 1beae0b4f24969741c26ca282a257dc5823bd9cbe608f7e3ca3775102d323ad9.
+The only change to upstream crate files is Cargo.toml: nix default features are disabled, all previous default features except aio are explicit. This removes the unmaintained pin-utils transitively without changing Rust media/crypto implementation. The root and excluded chaos-lab share one patched crate. Revisit when upstream is maintained.
