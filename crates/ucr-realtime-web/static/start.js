@@ -1637,10 +1637,22 @@ el("recover-form").addEventListener("submit",event=>{
     await initialize();
   });
 });
-el("copy-recovery").addEventListener("click",()=>void run(async()=>{
-  await navigator.clipboard.writeText(el("recovery-code").value);
-  message("Код скопирован. Сохраните его в защищённом месте.");
-}));
+// A recovery code is a secret: show a manual fallback only in its existing
+// secure form field; never put it in a URL, log, diagnostic, or popup.
+el("copy-recovery").addEventListener("click",()=>{
+  void (async()=>{
+    const field=el("recovery-code");
+    if(!field.value){message("Сначала создайте или обновите код восстановления.");return;}
+    try{
+      if(typeof navigator.clipboard?.writeText!=="function")throw Error("clipboard unavailable");
+      await navigator.clipboard.writeText(field.value);
+      message("Код скопирован. Сохраните его в защищённом месте.");
+    }catch(_){
+      field.focus();field.select();
+      message("Буфер обмена заблокирован. Код выделен: нажмите Ctrl+C или используйте «Копировать».");
+    }
+  })();
+});
 el("rotate-recovery").addEventListener("click",()=>void run(async()=>{
   const code=await host.rotateRecoveryCode();
   showRecovery(code);
