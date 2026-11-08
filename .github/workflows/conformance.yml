@@ -52,6 +52,7 @@ jobs:
               node tools/test_first_party_mls_integrity_handler.mjs
               node tools/test_first_party_invitation_buttons.mjs
               node tools/test_first_party_action_busy_feedback.mjs
+              node tools/test_browser_network_failure_categories.mjs
               node --experimental-strip-types sdk/typescript/first_party_account_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_embed_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_client_conformance.ts
