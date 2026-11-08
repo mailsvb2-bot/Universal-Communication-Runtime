@@ -2883,10 +2883,11 @@ fn browser_media_assets_match_manifest(
         };
         let expected_length = known.get("size").and_then(serde_json::Value::as_u64);
         let expected_hash = known.get("sha256").and_then(serde_json::Value::as_str);
-        let actual_hash: String = Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let mut actual_hash = String::with_capacity(64);
+        for byte in Sha256::digest(&bytes) {
+            use std::fmt::Write as _;
+            let _ = write!(&mut actual_hash, "{byte:02x}");
+        }
         expected_length == Some(bytes.len() as u64) && expected_hash == Some(actual_hash.as_str())
     })
 }
@@ -3876,10 +3877,11 @@ mod tests {
             std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
             let data = format!("asset-owned:{file}");
             std::fs::write(destination, data.as_bytes()).unwrap();
-            let hash: String = Sha256::digest(data.as_bytes())
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
+            let mut hash = String::with_capacity(64);
+            for byte in Sha256::digest(data.as_bytes()) {
+                use std::fmt::Write as _;
+                let _ = write!(&mut hash, "{byte:02x}");
+            }
             assets.insert(
                 file.to_owned(),
                 serde_json::json!({"size": data.len(), "sha256": hash}),
