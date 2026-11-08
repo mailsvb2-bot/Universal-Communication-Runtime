@@ -1,0 +1,60 @@
+name: One-shot Series C canonical integration
+on:
+  push:
+    branches:
+      - review/ucr-series-c-20261104
+permissions:
+  contents: write
+jobs:
+  integrate-canonical-owner:
+    if: "github.event.head_commit.message == 'chore(series-c): integrate verified canonical MLS WebRTC'"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: review/ucr-series-c-20261104
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify strict source and branch lease
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch origin '+refs/heads/fix/first-party-mls-refresh-integrity-20261103:refs/remotes/origin/fix/first-party-mls-refresh-integrity-20261103'
+          test "$(git rev-parse origin/fix/first-party-mls-refresh-integrity-20261103)" = f014256e9f4690801e0fd8f72145098b4186fd7d
+      - name: Reuse single canonical WebRTC and MLS owner; drop temporary RustSec ignore
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge --no-commit --no-ff origin/fix/first-party-mls-refresh-integrity-20261103
+          git rm .cargo/audit.toml
+          git rm .github/workflows/one-shot-series-c-integration.yml
+          python3 tools/check_webrtc_dependency_ownership.py
+          node tools/test_first_party_mls_integrity_handler.mjs
+          node tools/test_first_party_mls_coordinator.mjs
+          node tools/test_incoming_call_wake.mjs
+          node tools/test_hidden_tab_timers.mjs
+          node tools/test_encrypted_media_survival.mjs
+      - name: Verify canonical Rust formatting and dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show
+          cargo fmt --all -- --check
+          cargo metadata --locked --format-version 1 --no-deps >/dev/null
+          cargo metadata --locked --manifest-path crates/ucr-chaos-lab/Cargo.toml --format-version 1 --no-deps >/dev/null
+          cargo check --locked -p ucr-webrtc
+          python3 sdk/conformance/validate.py
+      - name: Publish reviewed combined tree only after passing gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test ! -e .cargo/audit.toml
+          git add -A
+          git diff --cached --check -- . ':!third_party/webrtc-util-v0172'
+          git commit -m "fix(series-c): integrate canonical WebRTC MLS and remove RustSec waiver"
+          git push origin HEAD:refs/heads/review/ucr-series-c-20261104
