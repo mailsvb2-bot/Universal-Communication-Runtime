@@ -3852,6 +3852,51 @@ mod tests {
     }
 
     #[test]
+    fn browser_media_manifest_rejects_tampering_and_source_mismatch() {
+        use sha2::{Digest as _, Sha256};
+        let root = std::env::temp_dir().join(format!(
+            "ucr-browser-manifest-test-{}", std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut assets = serde_json::Map::new();
+        for (_, file, _) in super::REFERENCE_MEDIA_ASSETS {
+            let destination = root.join(file);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            let data = format!("asset-owned:{file}");
+            std::fs::write(destination, data.as_bytes()).unwrap();
+            let hash: String = Sha256::digest(data.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            assets.insert(
+                file.to_owned(),
+                serde_json::json!({"size": data.len(), "sha256": hash}),
+            );
+        }
+        let sha = "a".repeat(40);
+        let manifest = root.join("release-manifest.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "source_sha": sha, "files": assets
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(super::browser_media_assets_match_manifest(&root, &manifest, &sha));
+        assert!(!super::browser_media_assets_match_manifest(
+            &root, &manifest, &"b".repeat(40)
+        ));
+        std::fs::write(
+            root.join("endpoint-wasm/ucr_endpoint_wasm_bg.wasm"),
+            b"tampered",
+        )
+        .unwrap();
+        assert!(!super::browser_media_assets_match_manifest(&root, &manifest, &sha));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn first_party_upstream_rejects_public_and_invalid_addresses() {
         assert!(super::parse_first_party_upstream("127.0.0.1:18081").is_ok());
         assert!(super::parse_first_party_upstream("[::1]:18081").is_ok());
