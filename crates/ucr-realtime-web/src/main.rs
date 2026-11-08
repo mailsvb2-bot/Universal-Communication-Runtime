@@ -2870,7 +2870,7 @@ fn first_party_start_response() -> HttpResponse {
         .header("X-Content-Type-Options", "nosniff")
         .header(
             "Content-Security-Policy",
-            "default-src 'none'; script-src 'self'; style-src 'unsafe-inline';              connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
         )
         .body(full_body(Bytes::from_static(FIRST_PARTY_START_HTML.as_bytes())))
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
@@ -4291,6 +4291,11 @@ mod tests {
         assert!(csp.contains("connect-src 'self'"));
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("base-uri 'none'"));
+        // Endpoint MLS WASM compilation is allowed, but generic JS eval is not.
+        assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval'"));
+        assert!(!csp.contains("'unsafe-eval'"));
+        assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+        assert!(!csp.contains("https:"));
 
         let js = super::first_party_start_js_response();
         assert_eq!(js.status(), super::StatusCode::OK);
