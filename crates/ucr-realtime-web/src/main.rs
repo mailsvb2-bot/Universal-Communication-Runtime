@@ -3854,9 +3854,8 @@ mod tests {
     #[test]
     fn browser_media_manifest_rejects_tampering_and_source_mismatch() {
         use sha2::{Digest as _, Sha256};
-        let root = std::env::temp_dir().join(format!(
-            "ucr-browser-manifest-test-{}", std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ucr-browser-manifest-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut assets = serde_json::Map::new();
         for (_, file, _) in super::REFERENCE_MEDIA_ASSETS {
@@ -3883,16 +3882,22 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert!(super::browser_media_assets_match_manifest(&root, &manifest, &sha));
+        assert!(super::browser_media_assets_match_manifest(
+            &root, &manifest, &sha
+        ));
         assert!(!super::browser_media_assets_match_manifest(
-            &root, &manifest, &"b".repeat(40)
+            &root,
+            &manifest,
+            &"b".repeat(40)
         ));
         std::fs::write(
             root.join("endpoint-wasm/ucr_endpoint_wasm_bg.wasm"),
             b"tampered",
         )
         .unwrap();
-        assert!(!super::browser_media_assets_match_manifest(&root, &manifest, &sha));
+        assert!(!super::browser_media_assets_match_manifest(
+            &root, &manifest, &sha
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 
