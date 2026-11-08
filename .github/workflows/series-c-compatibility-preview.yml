@@ -18,6 +18,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin '+refs/heads/fix/first-party-mls-refresh-integrity-20261103:refs/remotes/origin/fix/first-party-mls-refresh-integrity-20261103'
           if ! git merge --no-commit --no-ff origin/fix/first-party-mls-refresh-integrity-20261103; then
             echo '### Conflicting files (no branch changes published)' >> "$GITHUB_STEP_SUMMARY"
