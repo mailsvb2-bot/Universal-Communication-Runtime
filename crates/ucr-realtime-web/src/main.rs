@@ -2816,7 +2816,77 @@ fn browser_media_assets_present() -> bool {
         || std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
         std::path::PathBuf::from,
     );
-    browser_media_assets_present_in(&root)
+    if !browser_media_assets_present_in(&root) {
+        return false;
+    }
+    // Release builds can pin the exact browser assets to the declared Git
+    // revision. When either half of the policy is configured, require both.
+    let manifest = std::env::var_os("UCR_REALTIME_WEB_RELEASE_MANIFEST");
+    let source = std::env::var("UCR_REALTIME_WEB_EXPECTED_SOURCE_SHA").ok();
+    match (manifest, source) {
+        (None, None) => true, // local/development gateway retains legacy readiness
+        (Some(manifest), Some(source)) => {
+            browser_media_assets_match_manifest(&root, std::path::Path::new(&manifest), &source)
+        }
+        _ => false,
+    }
+}
+
+fn browser_media_assets_match_manifest(
+    root: &std::path::Path,
+    manifest: &std::path::Path,
+    expected_sha: &str,
+) -> bool {
+    use sha2::{Digest as _, Sha256};
+    if expected_sha.len() != 40 || !expected_sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    if manifest.is_symlink() {
+        return false;
+    }
+    let Ok(raw) = std::fs::read(manifest) else {
+        return false;
+    };
+    if raw.len() > 64 * 1024 {
+        return false;
+    }
+    let Ok(document) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    if document.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+        || document.get("source_sha").and_then(serde_json::Value::as_str) != Some(expected_sha)
+    {
+        return false;
+    }
+    let Some(files) = document.get("files").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    if files.len() != REFERENCE_MEDIA_ASSETS.len() {
+        return false;
+    }
+    REFERENCE_MEDIA_ASSETS.iter().all(|(_, filename, _)| {
+        let path = root.join(filename);
+        if path.is_symlink() {
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            return false;
+        };
+        if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
+            return false;
+        }
+        let Some(known) = files.get(*filename) else {
+            return false;
+        };
+        let expected_length = known.get("size").and_then(serde_json::Value::as_u64);
+        let expected_hash = known.get("sha256").and_then(serde_json::Value::as_str);
+        let actual_hash: String = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        expected_length == Some(bytes.len() as u64)
+            && expected_hash == Some(actual_hash.as_str())
+    })
 }
 
 fn browser_media_assets_present_in(root: &std::path::Path) -> bool {
