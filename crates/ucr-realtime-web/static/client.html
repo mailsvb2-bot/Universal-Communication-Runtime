@@ -273,8 +273,9 @@ function ucrDiagnosticReason(value){
   if(/replayed endpoint media frame/.test(message))return "MEDIA_REPLAY_REJECTED";
   if(/channel is not open/.test(message))return "MEDIA_TRANSPORT_CHANNEL_CLOSED";
   if(/publish authorization/.test(message))return "MEDIA_PUBLISH_REJECTED";
-  if(/encoded media|opus|microphone|pcm/.test(message))return "AUDIO_ENCODE_OR_PUBLISH_FAILURE";
+  // Permission errors take priority over generic mention of the microphone.
   if(/permission|notallowed/.test(message))return "DEVICE_PERMISSION_DENIED";
+  if(/encoded media|opus|microphone|pcm/.test(message))return "AUDIO_ENCODE_OR_PUBLISH_FAILURE";
   // A message alone is not proof of the selected ICE route. Classify only
   // explicit protocol-stage failures, never infer TURN from generic WebRTC.
   if(/turn.{0,24}(unauthorized|authentication|credential|401|438)|turn authentication/.test(message))
