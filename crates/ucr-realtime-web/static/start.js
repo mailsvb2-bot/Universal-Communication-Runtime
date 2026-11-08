@@ -652,7 +652,14 @@ function handleMlsIntegrityError(error) {
   return true;
 }
 async function run(action) {
-  if (busy || navigating) return;
+  if (busy || navigating) {
+    // The lock remains authoritative; never start a duplicate call or login.
+    // But user actions must not vanish without acknowledgement.
+    message(navigating
+      ? "Открывается защищённая конференция. Действие сейчас недоступно."
+      : "Предыдущее действие ещё выполняется. Повторите после его завершения.");
+    return;
+  }
   busy = true;
   try {await action();}
   catch(error) {
