@@ -31,7 +31,7 @@ jobs:
           set -euo pipefail
           git merge --no-commit --no-ff origin/fix/first-party-mls-refresh-integrity-20261103
           git rm .cargo/audit.toml
-          git rm .github/workflows/one-shot-series-c-integration.yml
+          # Actions push credential may not modify workflow files; connector does that after commit.
           python3 tools/check_webrtc_dependency_ownership.py
           node tools/test_first_party_mls_integrity_handler.mjs
           node tools/test_first_party_mls_coordinator.mjs
@@ -54,7 +54,9 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test ! -e .cargo/audit.toml
+          git restore --source="$GITHUB_SHA" --staged --worktree .github/workflows/conformance.yml
           git add -A
+          test -z "$(git diff --cached --name-only -- .github/workflows)"
           git diff --cached --check -- . ':!third_party/webrtc-util-v0172'
           git commit -m "fix(series-c): integrate canonical WebRTC MLS and remove RustSec waiver"
           git push origin HEAD:refs/heads/review/ucr-series-c-20261104
