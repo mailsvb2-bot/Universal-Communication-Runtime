@@ -21,7 +21,7 @@ wasm, wasm_js, installer = [Path(arg) for arg in sys.argv[1:]]
 for asset in (wasm, wasm_js, installer):
     if not asset.is_file() or asset.is_symlink() or asset.stat().st_size == 0:
         raise SystemExit(f"UCR_BROWSER_MEDIA_MISSING: {asset.name}")
-if wasm.read_bytes()[:4] != b"\\x00asm":
+if wasm.read_bytes()[:4] != b"\x00asm":
     raise SystemExit("UCR_BROWSER_WASM_INVALID")
 if b"reference_browser" not in installer.read_bytes().lower():
     raise SystemExit("UCR_BROWSER_MEDIA_INSTALLER_INVALID")
