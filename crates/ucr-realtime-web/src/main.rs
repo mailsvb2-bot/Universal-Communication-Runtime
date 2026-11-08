@@ -2910,6 +2910,19 @@ fn serve_reference_media_asset(path: &str) -> HttpResponse {
     let Some((file, mime)) = reference_media_asset(path) else {
         return empty_response(StatusCode::NOT_FOUND);
     };
+    // A configured release manifest must continue to match at the moment of
+    // serving, not only during an earlier readiness probe. Never serve an
+    // unverified E2EE module if a deploy replaces one of its files in-place.
+    if (std::env::var_os("UCR_REALTIME_WEB_RELEASE_MANIFEST").is_some()
+        || std::env::var_os("UCR_REALTIME_WEB_EXPECTED_SOURCE_SHA").is_some())
+        && !browser_media_assets_present()
+    {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "endpoint_media_integrity_mismatch",
+            "Browser E2EE assets do not match the source-bound release manifest",
+        );
+    }
     // A deployment must provide the exact WASM and SDK bundles built for its
     // source revision. Never generate an adapter dynamically or load a remote
     // untrusted CDN script. Missing assets fail closed, not to plaintext media.
