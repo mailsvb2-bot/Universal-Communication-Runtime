@@ -156,29 +156,29 @@ Initialise the database once with `ucr-runtime init --database ucr.sqlite3`.
 
 ## Direct-call media
 
-A first-party direct Call owns invitation, consent and lifecycle. Realtime
-media is admitted only for Group Calls bound to one MLS epoch, so when both
-participants have accepted, `join-accepted` derives (idempotently, with
-domain-separated hashed IDs) a private MLS Group containing exactly the two
-participants plus the tenant media-host committer leaf, and a media Group Call
-with the same two principals. The Join grant names that media Call; Join
-grant, Device trust, accepted-participant, generation/heartbeat fences, MLS
-endpoint admission and SFU authorization apply unchanged. Hang-up ends the
-media Call and Realtime refuses re-admission to a Terminated Call.
+A first-party direct Call owns invitation, consent and lifecycle. Its derived
+media Call uses the existing canonical Conference/SFU and Group-MLS owners; it
+is not permission to bypass Group E2EE. Both participants must independently
+authenticate their Devices and accept the direct Call.
 
-Like every current Conference, the MLS Group is administered by a server-held
-committer leaf: endpoint media keys stay in the browsers, but the host leaf is
-a cryptographic Group member. Trusted endpoint keys require each user to have
-exactly one active Device (existing realtime limitation).
+The **current** `first_party_media.rs` code does **not** create or admit a
+server-held media-host MLS member. It requires an endpoint-published, private
+MLS Group owned by the caller, a committed epoch beyond zero, both authorized
+participants as active members, and no server-custodied OpenMLS private group
+state. A missing endpoint Commit/Welcome or an old group containing the
+legacy media-host identity fails closed; it must not be repaired by adding
+a server signer or falling back to plaintext RTP.
 
-## Anonymous challenge flood
+The derived media Call is created through `create_call_if_parent_current`,
+which checks the accepted parent Call in the canonical durable store.
+Media permissions are bound to that specific Call, not to tenant-wide grants.
+Hangup/termination must invalidate admission and stop provider sessions.
+Verify this across independent BFF processes and restarts; green unit
+and browser tests alone are not evidence of physical two-device E2EE.
 
-Sign-up, login, recovery and device-enrollment challenges are stateless
-(MAC-sealed with a per-process key, bound to binding, purpose and key). Issuing
-one allocates no server memory; only verified proofs are remembered until
-expiry to reject replay. A flood of anonymous challenge requests therefore
-cannot lock other users out. Per-client-IP quotas are not implemented: the
-HTTPS edge is a raw TLS passthrough and the BFF only sees a loopback peer. To
-limit account creation per client, terminate TLS at a reverse proxy that
-rate-limits by client address (for example nginx `limit_req`, see
-`rt0-first-party-https-edge.nginx.conf`).
+**Release block:** the server must not derive the same media exporter as
+the endpoints or decrypt an endpoint-sealed frame. A conclusive executable
+crypto-custody regression and a real A↔B browser/phone call across NAT/TURN
+with two-way encrypted audio/video are still required before calling this
+server-blind production E2EE. Track #328 and #274; never use the historic
+media-host committer topology as a deployment shortcut.
