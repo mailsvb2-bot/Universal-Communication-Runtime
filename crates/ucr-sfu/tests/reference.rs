@@ -1,6 +1,6 @@
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use ucr_core::{
@@ -17,8 +17,9 @@ use ucr_protocol::{
     VIDEO_SEND_PERMISSION, screen_share_v2_negotiation,
 };
 use ucr_sfu::{
-    PreparedSfuCapabilities, SfuError, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
-    SfuRuntime, dispatch_validated_forward_batch,
+    PreparedSfuCapabilities, SfuAuthorizationCache, SfuError, SfuForwardOutcome, SfuForwardSink,
+    SfuForwardSinkError, SfuRuntime, dispatch_validated_forward_batch,
+    dispatch_validated_forward_batch_cached, dispatch_validated_forward_batch_cached_with,
 };
 use ucr_storage_memory::MemoryLocalStore;
 
@@ -1456,4 +1457,169 @@ fn same_principal_multi_device_streams_have_independent_replay_cursors() {
         bob.open_payload(&secondary),
         Err(ucr_media_e2ee::GroupMediaE2eeError::Replay)
     ));
+}
+
+/// Revocable evaluator that honours the `authorization_revision` contract.
+#[derive(Debug, Default)]
+struct RevisionedRevocableAuthorization {
+    revoked: AtomicBool,
+    revision: AtomicU64,
+    checks: AtomicUsize,
+}
+
+impl RevisionedRevocableAuthorization {
+    fn revoke(&self) {
+        self.revoked.store(true, Ordering::SeqCst);
+        self.revision.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl AuthorizationEvaluator for RevisionedRevocableAuthorization {
+    fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError> {
+        self.checks.fetch_add(1, Ordering::SeqCst);
+        if request.permission == VIDEO_SEND_PERMISSION && self.revoked.load(Ordering::SeqCst) {
+            Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn authorization_revision(&self) -> Option<u64> {
+        Some(self.revision.load(Ordering::SeqCst))
+    }
+}
+
+fn bob_batch<A: AuthorizationEvaluator>(
+    runtime: &SfuRuntime<
+        '_,
+        A,
+        MemoryLocalStore,
+        PreparedGroupMediaE2eeCapabilities,
+        PreparedSfuCapabilities,
+    >,
+    fixture: &Fixture,
+) -> ucr_sfu::SfuValidatedForwardBatch {
+    runtime
+        .prepare_forward_selected(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            std::slice::from_ref(&fixture.bob.principal),
+        )
+        .expect("initially authorized batch")
+}
+
+#[test]
+fn auth_cache_skips_recheck_until_revoke_then_frames_do_not_pass() {
+    let fixture = build_fixture();
+    let authorization = RevisionedRevocableAuthorization::default();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&authorization, &fixture.store, &e2ee, &sfu);
+    let cache = SfuAuthorizationCache::new();
+    let batch = bob_batch(&runtime, &fixture);
+    let sink = CaptureSink::default();
+
+    dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).expect("first");
+    let after_first = authorization.checks.load(Ordering::SeqCst);
+    dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).expect("second");
+    assert_eq!(cache.hits(), 1, "unchanged revision reuses the proof");
+    assert_eq!(
+        authorization.checks.load(Ordering::SeqCst),
+        after_first,
+        "cache hit performs no authorization call"
+    );
+    assert_eq!(sink.forwarded().len(), 2);
+
+    authorization.revoke();
+    assert!(matches!(
+        dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink),
+        Err(SfuError::Authorization(error))
+            if error.code == CanonicalErrorCode::PermissionDenied
+    ));
+    assert_eq!(sink.forwarded().len(), 2, "no frame passes after revoke");
+}
+
+#[test]
+fn auth_cache_is_bypassed_when_evaluator_is_not_revisioned() {
+    let fixture = build_fixture();
+    let authorization = RevocableSendAuthorization::default();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&authorization, &fixture.store, &e2ee, &sfu);
+    let cache = SfuAuthorizationCache::new();
+    let batch = bob_batch(&runtime, &fixture);
+    let sink = CaptureSink::default();
+    dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).expect("first");
+    // Revoke WITHOUT any revision signal: must still be caught.
+    authorization.revoked.store(true, Ordering::SeqCst);
+    assert!(dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).is_err());
+    assert_eq!(cache.hits(), 0);
+    assert_eq!(sink.forwarded().len(), 1);
+}
+
+#[test]
+fn auth_cache_is_invalidated_by_canonical_call_termination() {
+    let fixture = build_fixture();
+    let authorization = RevisionedRevocableAuthorization::default();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&authorization, &fixture.store, &e2ee, &sfu);
+    let cache = SfuAuthorizationCache::new();
+    let batch = bob_batch(&runtime, &fixture);
+    let sink = CaptureSink::default();
+    dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).expect("warm");
+    let current = fixture
+        .store
+        .call(&scope(), &fixture.call.call_id)
+        .expect("read current Call")
+        .expect("existing Call");
+    fixture
+        .store
+        .apply_call_signal(
+            &fixture.alice,
+            &signal(
+                &current,
+                "terminate-after-cache-warm",
+                CallSignalKind::Terminate {
+                    reason: CallTerminationReason::Completed,
+                },
+            ),
+        )
+        .expect("canonical Hangup");
+    assert!(
+        dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).is_err(),
+        "store revision moved: cached proof must not survive Hangup"
+    );
+    assert_eq!(sink.forwarded().len(), 1);
+}
+
+#[test]
+fn auth_cache_with_external_store_revision_bypasses_on_none_and_reuses_on_stable() {
+    let fixture = build_fixture();
+    let authorization = RevisionedRevocableAuthorization::default();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&authorization, &fixture.store, &e2ee, &sfu);
+    let cache = SfuAuthorizationCache::new();
+    let batch = bob_batch(&runtime, &fixture);
+    let sink = CaptureSink::default();
+    let none = || None;
+    for _ in 0..2 {
+        dispatch_validated_forward_batch_cached_with(&runtime, &cache, &none, &batch, &sink)
+            .expect("unrevisioned store");
+    }
+    assert_eq!(cache.hits(), 0, "None store revision bypasses the cache");
+    let stable = || Some(7);
+    for _ in 0..2 {
+        dispatch_validated_forward_batch_cached_with(&runtime, &cache, &stable, &batch, &sink)
+            .expect("stable store revision");
+    }
+    assert_eq!(cache.hits(), 1);
+    authorization.revoke();
+    assert!(
+        dispatch_validated_forward_batch_cached_with(&runtime, &cache, &stable, &batch, &sink)
+            .is_err()
+    );
+    assert_eq!(sink.forwarded().len(), 4);
 }

@@ -12,11 +12,15 @@ import {
 import { createUcrEndpointWasmPersistence } from "./src/endpoint_wasm_persistence.ts";
 import {
   UcrPortableEndpointMediaAdapter,
+  UCR_MEDIA_REPLAY_WINDOW,
 } from "./src/portable_endpoint_media.ts";
 import {
   UcrBrowserWebCodecsConsumer,
   UcrBrowserWebCodecsProducer,
   ucrCameraLayerStreamId,
+  ucrQualifyMediaStreamId,
+  ucrNewMediaSessionId,
+  ucrHoldPeak,
   ucrVideoEncodingTarget,
   ucrVideoEncodeSize,
   ucrVideoSoftwareFrameRate,
@@ -27,6 +31,10 @@ import {
   ucrAdaptiveVideoStep,
   ucrNormalizeOpusAudio,
 } from "./src/browser_webcodecs_media.ts";
+import {
+  ucrOptionalStunUrls,
+  ucrRecommendedTurnCascade,
+} from "./src/ice_cascade.ts";
 import { createUcrCanonicalBrowserMediaFactory } from "./src/canonical_browser_media_factory.ts";
 import { createUcrCanonicalDevicePreparation } from "./src/canonical_device_enrollment.ts";
 import { encodeSfuForwardEnvelopeWire } from "./src/sfu_forward_wire.ts";
@@ -1035,6 +1043,10 @@ assert.equal(acceptedJoinCleanup, 1, "accepted session is retired on activation 
 assert.equal(acceptedJoinCtx.sessionActive, false, "no orphan active session");
 assert.equal(acceptedJoinHeartbeats, 0, "no heartbeat before failed policy activation");
 assert.equal(acceptedJoinCtx.ui.state.textContent, "Rejected");
+assert.equal(acceptedJoinCtx.signedGrantRetired, false,
+  "activation failure must not retire a still-valid grant");
+assert.equal(acceptedJoinCtx.ui.join.disabled, false,
+  "Join can be retried after failed activation");
 
 // The old grant's expiry must stop a pending/untrusted replacement, but it
 // must NOT terminate an independently authorized replacement Join whose
@@ -1132,6 +1144,14 @@ const lifecycleCtx: Record<string, any> = {
   e2eeActivationGeneration: 0,
   e2eeChannel: lifecycleChannel,
   e2eeAdapterReady: false,
+  e2eeAdapterStarted: false,
+  detachE2eeChannel() {
+    lifecycleCtx.e2eeActivationGeneration++;
+    lifecycleCtx.e2eeChannel = null;
+    lifecycleCtx.e2eePending = null;
+    lifecycleCtx.e2eeAdapterReady = false;
+  },
+  ucrMarkConferenceMediaActive() {},
   e2eeManagedAdapter: null,
   e2eePending: null,
   appliedAdaptiveQuality: null,
@@ -1178,6 +1198,10 @@ assert.equal(lifecycleCtx.ui.state.textContent, "Connected",
   "the reference UI becomes connected only after protected endpoint startup");
 assert.deepEqual(protectedLifecycleEvents.slice(0, 3),
   ["start-begins", "start-completes", "monitor-starts"]);
+lifecycleCtx.e2eeChannel = lifecycleChannel;
+await lifecycleCtx.activate();
+assert.equal(protectedLifecycleEvents.filter((event: string) => event === "start-begins").length, 1,
+  "DataChannel reconnection must retain epoch signer");
 lifecycleCtx.close();
 assert.equal(lifecycleCtx.e2eeAdapterReady, false);
 assert.ok(protectedLifecycleEvents.includes("monitor-stops"),
@@ -1204,6 +1228,8 @@ let lastChannel: Record<string, any> | null = null;
 const frameCtx: Record<string, any> = {
   E2EE_CHANNEL_LABEL: "ucr.e2ee.media.v1",
   closeE2eeTransport() {},
+  detachE2eeChannel() {},
+  ucrDiagnosticReason: (message: string) => /replayed/.test(String(message||"")) ? "MEDIA_REPLAY_REJECTED" : "OTHER",
   receiveE2eeChunk: (wire: unknown) => wire,
   packetCount: 0,
   ui: {packets: {textContent: ""}, status: {textContent: ""},
@@ -1236,10 +1262,12 @@ assert.equal(persistedFrameCount, 0,
 // A real browser permission dialog can resolve AFTER Leave/host withdrawal.
 // Execute the actual browser functions rather than asserting only code strings.
 const captureCode = browser.slice(
-  browser.indexOf("function preferredCameraCapture("),
+  browser.indexOf("function ucrSoftNetworkRecoveryEnabled("),
   browser.indexOf("async function replaceLocalTrack("),
 );
-assert.ok(captureCode.startsWith("function preferredCameraCapture("));
+assert.ok(captureCode.startsWith("function ucrSoftNetworkRecoveryEnabled("));
+assert.match(captureCode, /function preferredCameraCapture\(/);
+assert.match(captureCode, /function ucrMobileCaptureHost\(/);
 const capturedResolvers: Array<(stream: any) => void> = [];
 let stoppedCaptureTracks = 0;
 const capturedTrack = () => ({
@@ -1590,7 +1618,7 @@ assert.equal(fencedCtx.startWebRtc.offerId, "C".repeat(43), "refused close prese
 // camera/microphone capture, not only close the encrypted DataChannel.
 const captureStopCode = browser.slice(
   browser.indexOf("function stopLocalCapture(){"),
-  browser.indexOf("function teardownPeer(){"),
+  browser.indexOf("function teardownPeer("),
 );
 const admissionCode = browser.slice(
   browser.indexOf("async function activateAdmittedMedia(){"),
@@ -2338,6 +2366,13 @@ assert.equal(ucrVideoStageTargetFrameRate(0, 0, true), 1,
 assert.equal(ucrVideoStageProfile(2).frameRate, 24);
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0, 0, 0, 1, 0x65, 0x88])), "avc1.42002a");
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0, 0, 1, 0x65, 0x88])), "avc1.42002a");
+assert.equal(
+  ucrRecommendedTurnCascade({turnHost: "turn.example.org", turnsPort: 443}),
+  "turn:turn.example.org:3478?transport=udp,turn:turn.example.org:3478?transport=tcp,turns:turn.example.org:443?transport=tcp",
+);
+assert.equal(ucrOptionalStunUrls({turnHost: "turn.example.org", stunHost: "stun.example.org"}), "stun:stun.example.org:3478");
+assert.throws(() => ucrRecommendedTurnCascade({turnHost: "127.0.0.1"}), /DNS hostname/);
+assert.throws(() => ucrRecommendedTurnCascade({turnHost: "localhost"}), /localhost/);
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0x10, 0x00, 0x00, 0x9d, 0x01])), "vp8");
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
 assert.deepEqual(ucrAdaptiveVideoStep(0, 1_500_000, 0, 0), {stage:1, healthySamples:0});
@@ -2852,11 +2887,15 @@ try {
     [[960, 540], [640, 360]]);
   assert.equal((producerConfigured[0] as {framerate: number}).framerate, 24,
     "software encoder configuration must be capped to 24 fps");
-  assert.equal(outputFrames.filter(f => f.streamId === "camera123").length, 9,
+  const fullLayer = outputFrames.filter(f => /^camera123-m[a-f0-9]{8}$/.test(f.streamId));
+  const lowLayer = outputFrames.filter(f => /^camera123-m[a-f0-9]{8}-low$/.test(f.streamId));
+  assert.equal(fullLayer.length, 9,
     "software producer must actually pace 30 fps capture down to 24 fps");
-  assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length >= 3);
-  assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length <= 6);
-  assert.equal(lowDraws, outputFrames.filter(f => f.streamId === "camera123-low").length);
+  assert.ok(lowLayer.length >= 3);
+  assert.ok(lowLayer.length <= 6);
+  assert.equal(lowDraws, lowLayer.length);
+  assert.equal(new Set(fullLayer.map(f => f.streamId)).size, 1,
+    "one producer start uses one authenticated media-session identity");
 
   // A revoked screen source must never re-attach after an earlier async reader
   // cancellation finishes. This exercises the real producer's updateSources.
@@ -2917,15 +2956,19 @@ try {
     E2EE_MAX_BUFFERED_SEND_BYTES: 2 * 1024 * 1024,
     E2EE_CHUNK_HEADER_BYTES: 24, E2EE_CHUNK_PAYLOAD_BYTES: 16000 - 24,
     E2EE_CHUNK_MAGIC: "UCRCHK01", window: {__ucrAudioCounters: {transportQueued: 0}},
+    packetCount: 0, ui: {packets: {textContent: "0"}},
     BigInt, Uint8Array, TextEncoder, DataView, Math, Error,
   };
   runInNewContext(browser.slice(start,end) +
     "\nthis.publish = sendE2eeEnvelope;",context);
   assert.throws(()=>context.publish(Uint8Array.of(7,8), "video"),/congested/);
   assert.equal(sentChunks.length,0,"congested camera must not starve protected audio");
+  assert.equal(context.packetCount,0,"refused frame must not count as encrypted packet");
   context.publish(Uint8Array.of(1,2), "audio");
   assert.equal(sentChunks.length,1,"encrypted Opus must use reserved channel capacity");
   assert.equal(context.window.__ucrAudioCounters.transportQueued,1);
+  assert.equal(context.packetCount,1,"successful outbound seal must increment encryptedPackets");
+  assert.equal(context.ui.packets.textContent,"1");
   // Bounded latency is more important than accepting ever-growing Opus
   // backlog: above the audio limit even voice frames must be refused.
   context.e2eeChannel.bufferedAmount = 400_000;
@@ -3042,6 +3085,66 @@ for (const [name, publish, seal, transport] of [
   await stageAdapter.stop();
 }
 
+// Outbound DataChannel congestion must be backpressure rather than a failure
+// of cryptographic authority, and never request a bigger video keyframe.
+{
+  const metrics = (globalThis as unknown as {
+    __ucrMediaStageMetrics?: {sendQueueCongested: number; videoKeyframeRequests: number};
+  }).__ucrMediaStageMetrics;
+  const congestedBefore = metrics?.sendQueueCongested ?? 0;
+  const keyframesBefore = metrics?.videoKeyframeRequests ?? 0;
+  const notices: string[] = [];
+  const previousNotice = (globalThis as unknown as {
+    ucrEndpointMediaCongestion?: (kind: string) => void;
+  }).ucrEndpointMediaCongestion;
+  (globalThis as unknown as {ucrEndpointMediaCongestion?: (kind: string) => void})
+    .ucrEndpointMediaCongestion = (kind) => {notices.push(kind);};
+  const errors: string[] = [];
+  const keyframeRequests: string[] = [];
+  const congested = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire() { return Uint8Array.of(3); },
+      open_wire() { return Uint8Array.of(2); },
+      revoke() {},
+    },
+    producer: {
+      async start(_sources, emit) {
+        await emit({mediaKind: "video", videoSourceKind: "camera", streamId: "camera",
+          timestamp: 1n, keyframe: false, bytes: Uint8Array.of(4)});
+      },
+      requestVideoKeyframe(streamId) { keyframeRequests.push(streamId); },
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() { return new Uint8Array(32); }},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => true,
+    authorizePublish: () => true,
+    onError(error) { errors.push((error as Error).message); },
+  });
+  await congested.start({...src, sendEnvelope() {
+    const error = Object.assign(new Error("DataChannel send buffer congested"),
+      {code: "UCR_TRANSPORT_QUEUE_CONGESTED"});
+    throw error;
+  }});
+  assert.deepEqual(errors, [],
+    "outbound congestion must not fail-close the protected media pipeline");
+  assert.deepEqual(keyframeRequests, [],
+    "congested video must not request a larger keyframe");
+  assert.deepEqual(notices, ["video"],
+    "the page may display congestion without ending the call");
+  assert.equal(metrics?.sendQueueCongested, congestedBefore + 1);
+  assert.equal(metrics?.videoKeyframeRequests, keyframesBefore);
+  await congested.stop();
+  const noticeHolder = globalThis as unknown as {
+    ucrEndpointMediaCongestion?: (kind: string) => void;
+  };
+  if (previousNotice) noticeHolder.ucrEndpointMediaCongestion = previousNotice;
+  else Reflect.deleteProperty(globalThis, "ucrEndpointMediaCongestion");
+}
+
 // Different frames on one DataChannel may finish async trust lookups out of
 // order. The E2EE receiver must commit them in arrival order PER source/stream,
 // without stalling another participant and without weakening replay rejection.
@@ -3100,6 +3203,182 @@ assert.deepEqual(receivedSequences, ["bob:1", "alice:1", "alice:2", "alice:1"],
 await assert.rejects(inbound.onEnvelope(inboundWire(1n, "alice", "audio")),
   /replayed endpoint media frame/);
 await inbound.stop();
+
+assert.equal(UCR_MEDIA_REPLAY_WINDOW, 64n);
+assert.equal(ucrHoldPeak(0, 0.5), 0.5);
+assert.ok(ucrHoldPeak(0.5, 0) > 0.4);
+assert.equal(ucrQualifyMediaStreamId("camera123", "abcd1234"), "camera123-mabcd1234");
+assert.throws(() => ucrQualifyMediaStreamId("camera123-mab", "abcd1234"));
+assert.match(ucrNewMediaSessionId(), /^[a-f0-9]{8}$/);
+{
+  const m = (globalThis as unknown as {__ucrMediaStageMetrics: {
+    replayRejected:number;replayDuplicate:number;replayStale:number;lastRxVideo:number;
+  }}).__ucrMediaStageMetrics;
+  const played:bigint[]=[];
+  const adapter = new UcrPortableEndpointMediaAdapter({
+    bridge:{seal_wire(){return Uint8Array.of(1);},open_wire(){return Uint8Array.of(8);},revoke(){}},
+    producer:{start(){},stop(){}},consumer:{play(_frame,header){played.push(header.sequence);},stop(){}},
+    trustedKeys:{resolve(){return new Uint8Array(32).fill(3);}},
+    binding:{tenantId:"tenant",namespaceId:null,callId:"call",groupId:"group",
+      cryptoEpoch:3n,negotiationRef:"current",negotiationGeneration:1n},
+    authorizeFrame:()=>true,authorizePublish:()=>true
+  });
+  await adapter.start({...src,sendEnvelope(){}});
+  await adapter.onEnvelope(inboundWire(100n,"alice"));
+  await adapter.onEnvelope(inboundWire(99n,"alice"));
+  assert.deepEqual(played,[100n,99n],"authenticated reorder within window");
+  await assert.rejects(adapter.onEnvelope(inboundWire(100n,"alice")), /replayed endpoint media frame/);
+  await assert.rejects(adapter.onEnvelope(inboundWire(1n,"alice")), /replayed endpoint media frame/);
+  assert.ok(m.replayRejected>=2 && m.replayDuplicate>=1 && m.replayStale>=1);
+  assert.equal(m.lastRxVideo,100);
+  await adapter.onEnvelope(inboundWire(101n,"alice"));
+  await adapter.stop();
+}
+
+// Closed DataChannel is transient backpressure, not a fatal crypto failure.
+{
+  const errors:string[]=[];
+  const closed = new UcrPortableEndpointMediaAdapter({
+    bridge:{seal_wire(){return Uint8Array.of(3);},open_wire(){return Uint8Array.of(2);},revoke(){}},
+    producer:{
+      async start(_sources,emit){
+        await emit({mediaKind:"audio",streamId:"mic",timestamp:1n,
+          keyframe:false,bytes:Uint8Array.of(4)});
+      },stop(){}
+    },
+    consumer:{play(){},stop(){}},trustedKeys:{resolve(){return new Uint8Array(32);}},
+    binding:{tenantId:"tenant",namespaceId:null,callId:"call",groupId:"group",
+      cryptoEpoch:3n,negotiationRef:"current",negotiationGeneration:1n},
+    authorizeFrame:()=>true,authorizePublish:()=>true,
+    onError(error){errors.push((error as Error).message);}
+  });
+  await closed.start({...src,sendEnvelope(){
+    const error=new Error("Encrypted media channel is not open") as Error & {code?:string};
+    error.code="UCR_TRANSPORT_CHANNEL_CLOSED";
+    throw error;
+  }});
+  assert.deepEqual(errors,[],"closed DC must not revoke the epoch signer");
+  await closed.stop();
+}
+
+// Hidden tabs skip GPU decode, and old delta frames do not replay into visible video.
+{
+  const previousDocument=Object.getOwnPropertyDescriptor(globalThis,"document");
+  const fakeDoc={hidden:true};
+  Object.defineProperty(globalThis,"document",{configurable:true,value:fakeDoc});
+  const counters=(globalThis as unknown as {__ucrVideoCounters:{
+    hiddenRenderSkips:number;droppedStale:number;
+  }}).__ucrVideoCounters;
+  const skips=counters.hiddenRenderSkips;
+  const hiddenConsumer=new UcrBrowserWebCodecsConsumer({
+    videoCanvas:{width:0,height:0,getContext(){return {drawImage(){throw new Error("hidden draw");}};}} as unknown as HTMLCanvasElement
+  });
+  hiddenConsumer.play({mediaKind:"video",videoSourceKind:"camera",
+    streamId:"hidden-skip",timestamp:1n,keyframe:true,bytes:Uint8Array.of(1,2)});
+  assert.equal(counters.hiddenRenderSkips,skips+1,"hidden tab must not decode video");
+  hiddenConsumer.stop();
+  const codecKeys=["MediaStreamTrackProcessor","AudioEncoder","VideoEncoder",
+    "AudioDecoder","VideoDecoder","EncodedAudioChunk","EncodedVideoChunk"] as const;
+  const savedCodecs=codecKeys.map(key=>({key,original:Object.getOwnPropertyDescriptor(globalThis,key)}));
+  for(const key of codecKeys){
+    Object.defineProperty(globalThis,key,{configurable:true,writable:true,value:class{}});
+  }
+  Object.defineProperty(globalThis,"VideoDecoder",{
+    configurable:true,writable:true,
+    value:class {
+      constructor(options:{output:(frame:{displayWidth:number;displayHeight:number;close():void})=>void}){
+        this.output=options.output;
+      }
+      output:(frame:{displayWidth:number;displayHeight:number;close():void})=>void;
+      configure(){}
+      decode(){this.output({displayWidth:320,displayHeight:240,close(){}});}
+      close(){}
+    }
+  });
+  Object.defineProperty(globalThis,"EncodedVideoChunk",{
+    configurable:true,writable:true,value:class{constructor(_input:unknown){}}
+  });
+  fakeDoc.hidden=false;
+  const visibleConsumer=new UcrBrowserWebCodecsConsumer({
+    videoCanvas:{width:0,height:0,getContext(){return {drawImage(){}};}} as unknown as HTMLCanvasElement
+  });
+  const before=counters.droppedStale;
+  visibleConsumer.play({mediaKind:"video",videoSourceKind:"camera",
+    streamId:"stale-drop",timestamp:1_000_000n,keyframe:true,bytes:Uint8Array.of(1,2)});
+  visibleConsumer.play({mediaKind:"video",videoSourceKind:"camera",
+    streamId:"stale-drop",timestamp:100n,keyframe:false,bytes:Uint8Array.of(1,2)});
+  assert.ok(counters.droppedStale>before,"old delta must be dropped");
+  visibleConsumer.stop();
+  for(const {key,original} of savedCodecs){
+    if(original)Object.defineProperty(globalThis,key,original);
+    else delete (globalThis as Record<string,unknown>)[key];
+  }
+  if(previousDocument)Object.defineProperty(globalThis,"document",previousDocument);
+  else delete (globalThis as {document?:unknown}).document;
+}
+
+// 180 s of bidirectional sealed media on the real portable adapter.
+// Uses media-clock frames, not wall-clock and not physical A↔B evidence.
+// The established epoch signer continues sequences; a new authenticated
+// stream ID may start at 1 without colliding with an earlier replay cursor.
+{
+  const alicePlayed: string[] = [], bobPlayed: string[] = [];
+  const binding = {tenantId: "tenant", namespaceId: null, callId: "call",
+    groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+    negotiationGeneration: 1n};
+  const envelope = (sequence: bigint, principalId: string,
+    mediaKind: "audio" | "video", streamId: string) =>
+    encodeSfuForwardEnvelopeWire({frame: {
+      header: {
+        tenantId: "tenant", namespaceId: null, callId: "call", groupId: "group",
+        source: {principalId, kind: "person"}, sourceDeviceId: principalId + "-dev",
+        streamId, negotiationRef: "current", negotiationGeneration: 1n,
+        cryptoEpoch: 3n, cryptoStateRef: "state", cryptoSuite: "ucr.v1",
+        headerVersion: 2, mediaKind, videoSourceKind: mediaKind === "video" ? "camera" : null,
+        sequence, mediaTimestamp: sequence * 20_000n,
+        keyframe: mediaKind === "video" && sequence % 15n === 1n,
+      },
+      nonce: new Uint8Array(24), ciphertext: Uint8Array.of(1),
+      sourceSignature: {keyId: "trusted", algorithmId: "ed25519",
+        algorithmVersion: 1, signature: new Uint8Array(64)},
+    }});
+  const peer = (played: string[]) => new UcrPortableEndpointMediaAdapter({
+    bridge: {seal_wire() {return Uint8Array.of(1);},
+      open_wire() {return Uint8Array.of(8);}, revoke() {}},
+    producer: {start() {}, stop() {}},
+    consumer: {play(_frame, header) {
+      played.push(header.mediaKind + ":" + header.streamId + ":" + header.sequence.toString());
+    }, stop() {}},
+    trustedKeys: {resolve() {return new Uint8Array(32).fill(3);}},
+    binding, authorizeFrame: () => true, authorizePublish: () => true,
+  });
+  const alice = peer(alicePlayed), bob = peer(bobPlayed);
+  await alice.start({...src, sendEnvelope() {}});
+  await bob.start({...src, sendEnvelope() {}});
+  const audioFrames = 180 * 50, videoFrames = 180 * 5;
+  for (let i = 1; i <= audioFrames; i++) {
+    const sequence = BigInt(i);
+    await bob.onEnvelope(envelope(sequence, "alice", "audio", "mic-a"));
+    await alice.onEnvelope(envelope(sequence, "bob", "audio", "mic-b"));
+    if (i % 10 === 0) {
+      const vs = BigInt(i / 10);
+      await bob.onEnvelope(envelope(vs, "alice", "video", "cam-a"));
+      await alice.onEnvelope(envelope(vs, "bob", "video", "cam-b"));
+    }
+    if (i === 90 * 50) {
+      await assert.rejects(bob.onEnvelope(envelope(sequence, "alice", "audio", "mic-a")),
+        /replayed endpoint media frame/, "duplicate after 90 s must reject");
+    }
+  }
+  assert.equal(alicePlayed.filter(row => row.startsWith("audio:")).length, audioFrames);
+  assert.equal(bobPlayed.filter(row => row.startsWith("audio:")).length, audioFrames);
+  assert.equal(alicePlayed.filter(row => row.startsWith("video:")).length, videoFrames);
+  assert.equal(bobPlayed.filter(row => row.startsWith("video:")).length, videoFrames);
+  await bob.onEnvelope(envelope(1n, "alice", "audio", "mic-a-rejoin"));
+  assert.ok(bobPlayed.includes("audio:mic-a-rejoin:1"),
+    "new authenticated stream must have separate replay cursor");
+  await alice.stop();await bob.stop();
+}
 
 // Verify the inbound pipeline identifies authorization, key resolution, authenticated
 // decryption and decoder/playout failures without exposing private exception strings.

@@ -47,7 +47,7 @@ use ucr_model::{
     TenantScope,
 };
 use ucr_realtime::{DEFAULT_JOIN_TTL_SECONDS, JoinTokenIssuer};
-use ucr_storage_sqlite::{EndpointMlsKeyPackageOffer, SqliteLocalStore};
+use ucr_storage_sqlite::{EndpointMlsKeyPackageOffer, NewFirstPartySession, SqliteLocalStore};
 
 use crate::first_party_media;
 
@@ -239,8 +239,10 @@ struct Session {
 
 // Login and Logout share ONE lock: a completed Logout revokes every session
 // for that Device, and a pre-Logout challenge can never issue a later cookie.
-// This is process-local, like the existing session pool; multi-process BFF
-// authentication remains a separate release gate.
+// Sessions are mirrored into canonical SQLite (schema v57) under a SHA-256
+// digest of the cookie token: SQLite is authoritative, so a Logout or Device
+// revoke survives a restart and is seen by every process sharing the file.
+// This in-memory ledger is only a cache plus the login-generation fences.
 #[derive(Debug, Default)]
 struct SessionLedger {
     sessions: Vec<Session>,
@@ -291,11 +293,13 @@ struct State {
     consumed: Mutex<Vec<([u8; 32], Instant)>>,
     untrusted_consumed: Mutex<Vec<([u8; 32], Instant)>>,
     recovery_consumed: Mutex<Vec<([u8; 32], Instant)>>,
-    signup_admissions: Mutex<Vec<Instant>>,
     sessions: Mutex<SessionLedger>,
     // One in-process serialization gate per canonical Device. Weak entries are
     // pruned so anonymous/retired Devices cannot grow this map without bound.
     protected_actions: Mutex<HashMap<Binding, Weak<Mutex<()>>>>,
+    /// `UCR_FIRST_PARTY_CALL_WAIT=1` enables the incoming-call long-poll
+    /// wake-up endpoint. Default off: clients keep periodic polling only.
+    call_wait_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -361,9 +365,9 @@ pub(super) async fn serve(
         consumed: Mutex::new(Vec::new()),
         untrusted_consumed: Mutex::new(Vec::new()),
         recovery_consumed: Mutex::new(Vec::new()),
-        signup_admissions: Mutex::new(Vec::new()),
         sessions: Mutex::new(SessionLedger::default()),
         protected_actions: Mutex::new(HashMap::new()),
+        call_wait_enabled: call_wait_enabled_from_env(),
     });
     println!(
         "UCR_FIRST_PARTY_READY loopback={} https_edge=required",
@@ -768,23 +772,56 @@ fn spend_verified_recovery<T>(
 }
 
 /// Reserve a bounded anonymous signup slot before writing to canonical `SQLite`.
-/// The quota is process-local; multi-instance/global anti-abuse admission is a
-/// separate release gate and must not be represented as already enforced.
+/// The sliding-window quota lives in canonical `SQLite` (schema v57), so a
+/// restart does not reset it and processes sharing the file share one budget.
 fn admit_signup(state: &State) -> Result<(), StatusCode> {
-    admit_signup_at(state, Instant::now())
+    admit_signup_at(state, now_unix_ms()?)
 }
 
-fn admit_signup_at(state: &State, now: Instant) -> Result<(), StatusCode> {
-    let mut admitted = state
-        .signup_admissions
-        .lock()
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    admitted.retain(|at| now.saturating_duration_since(*at) < SIGNUP_WINDOW);
-    if admitted.len() >= MAX_SELF_SERVICE_SIGNUPS {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
+fn admit_signup_at(state: &State, now_unix_ms: i64) -> Result<(), StatusCode> {
+    let window =
+        i64::try_from(SIGNUP_WINDOW.as_millis()).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let max =
+        u32::try_from(MAX_SELF_SERVICE_SIGNUPS).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if state
+        .store
+        .admit_first_party_signup(now_unix_ms, window, max)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    {
+        Ok(())
+    } else {
+        Err(StatusCode::TOO_MANY_REQUESTS)
     }
-    admitted.push(now);
+}
+
+fn session_token_digest(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
+}
+
+fn binding_key(binding: &Binding) -> Result<String, StatusCode> {
+    serde_json::to_string(binding).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Deletes durable sessions FIRST (fail closed), then the cached ones.
+fn revoke_device_sessions(
+    state: &State,
+    ledger: &mut SessionLedger,
+    binding: &Binding,
+) -> Result<(), StatusCode> {
+    state
+        .store
+        .revoke_first_party_sessions(&binding_key(binding)?)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    ledger.revoke_device(binding);
     Ok(())
+}
+
+fn durable_session_live(state: &State, token: &str, binding: &Binding) -> Result<bool, StatusCode> {
+    let record = state
+        .store
+        .first_party_session(&session_token_digest(token), now_unix_ms()?)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(record.is_some_and(|record| record.binding_key == binding_key(binding).unwrap_or_default()))
 }
 
 fn register_self_service_account(
@@ -861,6 +898,33 @@ fn issue_session(
     if sessions.len() >= MAX_SESSIONS {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
+    let issued_unix_ms = now_unix_ms()?;
+    let ttl_ms =
+        i64::try_from(SESSION_TTL.as_millis()).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let owner_key = serde_json::to_string(&(
+        &binding.tenant_id,
+        &binding.namespace_id,
+        &binding.participant_id,
+    ))
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let persisted = state
+        .store
+        .persist_first_party_session(&NewFirstPartySession {
+            token_digest: &session_token_digest(&token),
+            binding_key: &binding_key(&binding)?,
+            owner_key: &owner_key,
+            signer_key_id: &signer_key_id,
+            signer_public_key: &signer_public_key,
+            issued_unix_ms,
+            expires_unix_ms: issued_unix_ms.saturating_add(ttl_ms),
+            max_per_owner: u32::try_from(MAX_SESSIONS_PER_IDENTITY)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+            max_total: u32::try_from(MAX_SESSIONS).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+        })
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if !persisted {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     sessions.push(Session {
         token: token.clone(),
         binding: binding.clone(),
@@ -897,6 +961,19 @@ fn authenticated(state: &State, request: &Request<Incoming>) -> Result<Session, 
     {
         return Err(StatusCode::UNAUTHORIZED);
     }
+    authenticate_token(state, token)
+}
+
+/// Resolves a cookie token. `SQLite` is authoritative: a cached session whose
+/// durable row was revoked (by this or another process) is dropped, and after
+/// a restart a still-valid durable row is rehydrated with LIVE subject and
+/// signer checks, exactly like a cached one.
+fn authenticate_token(state: &State, token: &str) -> Result<Session, StatusCode> {
+    let digest = session_token_digest(token);
+    let durable = state
+        .store
+        .first_party_session(&digest, now_unix_ms()?)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let session = {
         let mut sessions = state
             .sessions
@@ -905,12 +982,30 @@ fn authenticated(state: &State, request: &Request<Incoming>) -> Result<Session, 
         sessions
             .sessions
             .retain(|session| session.until > Instant::now());
-        sessions
-            .sessions
-            .iter()
-            .find(|s| s.token == token)
-            .cloned()
-            .ok_or(StatusCode::UNAUTHORIZED)?
+        let Some(durable) = durable else {
+            sessions.sessions.retain(|session| session.token != token);
+            return Err(StatusCode::UNAUTHORIZED);
+        };
+        if let Some(cached) = sessions.sessions.iter().find(|s| s.token == token) {
+            cached.clone()
+        } else {
+            let binding: Binding =
+                serde_json::from_str(&durable.binding_key).map_err(|_| StatusCode::UNAUTHORIZED)?;
+            let remaining = u64::try_from(durable.expires_unix_ms.saturating_sub(now_unix_ms()?))
+                .map_err(|_| StatusCode::UNAUTHORIZED)?;
+            let rehydrated = Session {
+                token: token.to_owned(),
+                subject: subject_for(state, &binding)?,
+                binding,
+                signer_key_id: durable.signer_key_id,
+                signer_public_key: durable.signer_public_key,
+                until: Instant::now() + Duration::from_millis(remaining).min(SESSION_TTL),
+            };
+            if sessions.sessions.len() < MAX_SESSIONS {
+                sessions.sessions.push(rehydrated.clone());
+            }
+            rehydrated
+        }
     };
     let live_subject = subject_for(state, &session.binding)?;
     if live_subject != session.subject {
@@ -2076,6 +2171,14 @@ async fn dispatch(
                 None,
             ));
         }
+        if let Some(rest) = path.strip_prefix("/v1/first-party/call/wait") {
+            let auth = session.ok_or(StatusCode::UNAUTHORIZED)?;
+            let since = match rest {
+                "" => None,
+                tail => Some(tail.strip_prefix('/').ok_or(StatusCode::NOT_FOUND)?),
+            };
+            return Ok((call_wait(state, &auth, since).await?, None));
+        }
         return Err(StatusCode::NOT_FOUND);
     }
     // Bound the stream before aggregating DATA frames. A Content-Length check
@@ -2111,6 +2214,90 @@ fn require_post_headers(request: &Request<Incoming>, origin: &str) -> Result<(),
     } else {
         Err(StatusCode::FORBIDDEN)
     }
+}
+
+/// Upper bound one wake-up request is held open; the browser re-issues it.
+/// Must stay below the realtime-web edge proxy timeout (`ROOM_PROXY_TIMEOUT`).
+const CALL_WAIT_MAX: Duration = Duration::from_secs(15);
+/// Server-side check period of the single-row revision (in-process read).
+const CALL_WAIT_STEP: Duration = Duration::from_millis(250);
+
+fn call_wait_enabled_from_env() -> bool {
+    std::env::var("UCR_FIRST_PARTY_CALL_WAIT").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on"
+        )
+    })
+}
+
+/// Incoming-call wake-up (item C6). Carries NO Call data: it only reports that
+/// the canonical authorization revision (bumped by every Call/participant
+/// write, schema v58) moved, so the browser should re-run its normal,
+/// fully authorized `call/incoming` read. The session is revalidated on every
+/// step, so Logout/Device revoke ends the wait with 401.
+async fn call_wait(
+    state: &State,
+    auth: &Session,
+    since: Option<&str>,
+) -> Result<Value, StatusCode> {
+    if !state.call_wait_enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let since = since
+        .map(|value| value.parse::<u64>().map_err(|_| StatusCode::BAD_REQUEST))
+        .transpose()?;
+    let current = || {
+        state
+            .store
+            .authorization_revision_value()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+    };
+    revalidate_session(state, auth)?;
+    let Some(since) = since else {
+        return Ok(json!({"revision": current()?.to_string(), "changed": false}));
+    };
+    let deadline = Instant::now() + CALL_WAIT_MAX;
+    loop {
+        revalidate_session(state, auth)?;
+        let revision = current()?;
+        if revision != since {
+            return Ok(json!({"revision": revision.to_string(), "changed": true}));
+        }
+        if Instant::now() >= deadline {
+            return Ok(json!({"revision": revision.to_string(), "changed": false}));
+        }
+        tokio::time::sleep(CALL_WAIT_STEP).await;
+    }
+}
+
+/// Re-checks a cloned session under the per-Device gate: cached AND durable
+/// liveness, live subject, and live trusted signer key.
+fn revalidate_session(state: &State, auth: &Session) -> Result<(), StatusCode> {
+    {
+        let ledger = state
+            .sessions
+            .lock()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        if !ledger.sessions.iter().any(|current| {
+            current.token == auth.token
+                && current.binding == auth.binding
+                && current.until > Instant::now()
+        }) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    if !durable_session_live(state, &auth.token, &auth.binding)? {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if subject_for(state, &auth.binding)? != auth.subject {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let (key_id, public_key) = trusted_key(state, &auth.binding)?;
+    if key_id != auth.signer_key_id || public_key != auth.signer_public_key {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(())
 }
 
 fn dispatch_post(
@@ -2178,26 +2365,7 @@ fn dispatch_post(
     let _second = second_gate
         .map(|gate| gate.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE))
         .transpose()?;
-    {
-        let ledger = state
-            .sessions
-            .lock()
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        if !ledger.sessions.iter().any(|current| {
-            current.token == auth.token
-                && current.binding == auth.binding
-                && current.until > Instant::now()
-        }) {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-    }
-    if subject_for(state, &auth.binding)? != auth.subject {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    let (key_id, public_key) = trusted_key(state, &auth.binding)?;
-    if key_id != auth.signer_key_id || public_key != auth.signer_public_key {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    revalidate_session(state, auth)?;
     if path == "/v1/first-party/logout" {
         let input: BoundRequest = parse(body)?;
         ensure_binding(&input.binding, auth)?;
@@ -2212,7 +2380,7 @@ fn dispatch_post(
         {
             return Err(StatusCode::UNAUTHORIZED);
         }
-        sessions.revoke_device(&auth.binding);
+        revoke_device_sessions(state, &mut sessions, &auth.binding)?;
         let cookie =
             format!("{COOKIE_NAME}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict");
         return Ok((json!({"signedOut": true}), Some(cookie)));
@@ -2496,10 +2664,14 @@ fn device_route(
                 .sessions
                 .lock()
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-            sessions.revoke_device(&Binding {
-                device: input.device_id,
-                ..auth.binding.clone()
-            });
+            revoke_device_sessions(
+                state,
+                &mut sessions,
+                &Binding {
+                    device: input.device_id,
+                    ..auth.binding.clone()
+                },
+            )?;
             json!({"revoked": true})
         }
         "/v1/first-party/device/rotate-recovery" => {

@@ -192,7 +192,16 @@ const ACTIVE_CALL_HINT_KEY = "ucr.first-party.active-call.v1";
 const authDiagnostics=[];
 let plOwnIdentity=null;
 function plSetSignedIn(identity){
-  plOwnIdentity=identity||null;
+  const nextIdentity=identity||null;
+  if(plOwnIdentity!==nextIdentity){
+    // A manual invite is an account-scoped contact locator. Never show the
+    // previous account's link after logout, revocation, or account switching.
+    const manual=document.getElementById("pl-invite-manual");
+    const field=document.getElementById("pl-invite-manual-url");
+    if(manual)manual.hidden=true;
+    if(field)field.value="";
+  }
+  plOwnIdentity=nextIdentity;
   const logged=Boolean(plOwnIdentity);
   el("pl-new-user").hidden=logged;
   el("pl-user-cabinet").hidden=!logged;
@@ -249,16 +258,59 @@ function plInviteUrl(){
   url.searchParams.set("contact",plOwnIdentity);
   return url.href;
 }
-el("pl-copy-invite").addEventListener("click",()=>void run(async()=>{
-  const url=plInviteUrl();if(!url)return;
-  await navigator.clipboard.writeText(url);
-  message("Приглашение скопировано. Попросите знакомого сверить код с вами.");
-}));
-el("pl-share-invite").addEventListener("click",()=>void run(async()=>{
-  const url=plInviteUrl();if(!url)return;
-  if(navigator.share){await navigator.share({title:"PetrelLink — контакт",url});}
-  else{await navigator.clipboard.writeText(url);message("Приглашение скопировано.");}
-}));
+// An invitation is a public contact locator, not a Device credential or Join
+// grant. Keep these user-gesture actions independent of background auth refreshes
+// and the call navigation lock: the generic run() gate silently drops clicks.
+function plShowInviteForManualCopy(url) {
+  let container=el("pl-invite-manual");
+  if(!container){
+    container=document.createElement("div");
+    container.id="pl-invite-manual";
+    container.setAttribute("role","group");
+    container.setAttribute("aria-label","Ссылка для приглашения");
+    const hint=document.createElement("p");
+    hint.textContent="Браузер не разрешил автоматическое копирование. Скопируйте ссылку из поля ниже.";
+    const field=document.createElement("input");
+    field.type="text";field.id="pl-invite-manual-url";field.readOnly=true;
+    field.setAttribute("aria-label","Ссылка приглашения для ручного копирования");
+    field.style.width="100%";
+    container.append(hint,field);
+    el("pl-user-cabinet").append(container);
+  }
+  const field=el("pl-invite-manual-url");
+  field.value=url;
+  container.hidden=false;
+  field.focus();
+  field.select();
+  message("Выделена ссылка приглашения. Нажмите Ctrl+C, чтобы скопировать её.");
+}
+async function plCopyInvite() {
+  const url=plInviteUrl();
+  if(!url){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
+  try{
+    if(!navigator.clipboard?.writeText)throw Error("Clipboard API is unavailable");
+    await navigator.clipboard.writeText(url);
+    message("Приглашение скопировано. Попросите знакомого сверить код с вами.");
+  }catch(_){plShowInviteForManualCopy(url);}
+}
+async function plShareInvite() {
+  const url=plInviteUrl();
+  if(!url){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
+  if(typeof navigator.share==="function"){
+    try{
+      await navigator.share({title:"PetrelLink — контакт",url});
+      return;
+    }catch(error){
+      // A cancelled native share must not leak credentials or trigger a
+      // second prompt. Make the link visibly available for manual sharing.
+      plShowInviteForManualCopy(url);
+      return;
+    }
+  }
+  await plCopyInvite();
+}
+el("pl-copy-invite").addEventListener("click",()=>{void plCopyInvite();});
+el("pl-share-invite").addEventListener("click",()=>{void plShareInvite();});
 function authHttpCode(error){
   const match=String(error instanceof Error?error.message:"").match(/HTTP (401|403|404|409|429|500|502|503)/);
   return match?Number(match[1]):null;
@@ -269,22 +321,92 @@ function authFailureCategory(error){
   if(code===403)return "HTTP_403_ACCESS_DENIED";
   if(code===409)return "HTTP_409_STATE_CONFLICT";
   if(code===503)return "HTTP_503_AUTHORITY_UNAVAILABLE";
+  const raw=String(error instanceof Error?error.message:error||"");
+  if(/wasm|module|import/i.test(raw))return "MEDIA_MODULE_LOAD_FAILURE";
+  if(/lock unavailable/i.test(raw))return "MLS_LOCK_UNAVAILABLE";
+  if(/media fenced|epoch conflicts|Commit not canonically/i.test(raw))return "MLS_EPOCH_CONFLICT";
+  if(/snapshot is missing/i.test(raw))return "MLS_SNAPSHOT_MISSING";
+  if(/canonical Call changed during signed Join/i.test(raw))return "JOIN_REVISION_CHANGED";
+  if(/recipient has not accepted/i.test(raw))return "CALL_NOT_ACCEPTED";
   return code?"HTTP_"+code:"CLIENT_OR_NETWORK_ERROR";
 }
-function authDiagnostic(stage,outcome,error){
-  // Explicit allowlist: do not include arbitrary error messages or IDs.
-  const allowed=new Set(["resume_session","device_reauthentication","device_scope_verification","list_devices","list_contacts","incoming_calls","inspect_call","initialization","periodic_refresh"]);
-  if(!allowed.has(stage))return;
-  authDiagnostics.push({timestamp:new Date().toISOString(),stage,outcome,
-    reason:error?authFailureCategory(error):null,httpStatus:error?authHttpCode(error):null});
+const SESSION_STAGES=new Set([
+  "resume_session","device_reauthentication","device_scope_verification",
+  "list_devices","list_contacts","incoming_calls","inspect_call",
+  "initialization","periodic_refresh","visibility_refresh",
+  "mls_prepare","mls_publish_group","mls_publish_offer","mls_commit",
+  "mls_welcome","join_grant","begin_media"
+]);
+const MLS_PHASES=new Set(["prepare","wait_group","published_group","wait_offer","published_offer",
+  "committed","wait_welcome","ready","cancelled","failed","lock_unavailable"]);
+const CALL_STATES=new Set(["inviting","ringing","active","reconnecting","terminated"]);
+const CALL_ROLES=new Set(["caller","callee"]);
+let sessionCallInfo={callState:null,role:null,mlsPhase:null,grantPresent:false};
+function rememberCallInfo(partial){
+  if(!partial)return;
+  if(partial.callState&&CALL_STATES.has(partial.callState))sessionCallInfo.callState=partial.callState;
+  if(partial.role&&CALL_ROLES.has(partial.role))sessionCallInfo.role=partial.role;
+  if(partial.mlsPhase&&MLS_PHASES.has(partial.mlsPhase))sessionCallInfo.mlsPhase=partial.mlsPhase;
+  if(typeof partial.grantPresent==="boolean")sessionCallInfo.grantPresent=partial.grantPresent;
+}
+function callRoleOf(snapshot){
+  if(!snapshot||!snapshot.call)return null;
+  if(snapshot.identity===snapshot.call.callerIdentityId)return "caller";
+  if(snapshot.identity===snapshot.call.calleeIdentityId)return "callee";
+  return null;
+}
+function authDiagnostic(stage,outcome,error,extra){
+  if(!SESSION_STAGES.has(stage))return;
+  const event={timestamp:new Date().toISOString(),stage,outcome,
+    reason:error?authFailureCategory(error):null,httpStatus:error?authHttpCode(error):null};
+  if(extra){
+    if(extra.callState&&CALL_STATES.has(extra.callState))event.callState=extra.callState;
+    if(extra.role&&CALL_ROLES.has(extra.role))event.role=extra.role;
+    if(extra.mlsPhase&&MLS_PHASES.has(extra.mlsPhase))event.mlsPhase=extra.mlsPhase;
+    if(typeof extra.grantPresent==="boolean")event.grantPresent=extra.grantPresent;
+    rememberCallInfo(extra);
+  }
+  authDiagnostics.push(event);
   if(authDiagnostics.length>60)authDiagnostics.shift();
   authRenderDiagnostics();
+}
+function readPersistedMediaDiagnostics(){
+  try{
+    const raw=JSON.parse(sessionStorage.getItem("ucrSessionMediaDiagnostics")||"null");
+    if(!raw||typeof raw!=="object")return null;
+    const ice=raw.ice&&typeof raw.ice==="object"?{
+      connectionState:typeof raw.ice.connectionState==="string"?raw.ice.connectionState:null,
+      iceConnectionState:typeof raw.ice.iceConnectionState==="string"?raw.ice.iceConnectionState:null,
+      iceGatheringState:typeof raw.ice.iceGatheringState==="string"?raw.ice.iceGatheringState:null,
+      sdpComplete:raw.ice.sdpComplete===true,
+      iceServerKinds:typeof raw.ice.iceServerKinds==="string"?raw.ice.iceServerKinds:null,
+      localCandidateType:typeof raw.ice.localCandidateType==="string"?raw.ice.localCandidateType:null,
+      remoteCandidateType:typeof raw.ice.remoteCandidateType==="string"?raw.ice.remoteCandidateType:null
+    }:null;
+    return {schema:raw.schema==="ucr-local-diagnostics-v1"?"ucr-local-diagnostics-v1":null,
+      grantPresent:raw.grantPresent===true,webrtc:typeof raw.webrtc==="string"?raw.webrtc:null,ice};
+  }catch{return null;}
 }
 function authRenderDiagnostics(){
   const panel=el("auth-diagnostics-report");
   if(!panel)return;
-  panel.textContent=JSON.stringify({schema:"ucr-auth-diagnostics-v1",
-    generatedAt:new Date().toISOString(),events:authDiagnostics},null,2);
+  panel.textContent=JSON.stringify({
+    schema:"ucr-session-diagnostics-v2",authSchema:"ucr-auth-diagnostics-v1",
+    generatedAt:new Date().toISOString(),
+    call:{state:sessionCallInfo.callState,role:sessionCallInfo.role,
+      mlsPhase:sessionCallInfo.mlsPhase,grantPresent:sessionCallInfo.grantPresent===true},
+    media:readPersistedMediaDiagnostics(),events:authDiagnostics
+  },null,2);
+}
+function mlsHint(error){
+  const code=authHttpCode(error),category=authFailureCategory(error);
+  if(code===403)return "Криптографический допуск отклонён (403). Повторяем с актуальной ревизией звонка…";
+  if(category==="MEDIA_MODULE_LOAD_FAILURE")return "Не загрузился модуль защищённой медиа. Повторяем попытку…";
+  if(category==="MLS_LOCK_UNAVAILABLE")return "Недоступна блокировка MLS в этом браузере. Оставьте звонок в одной вкладке.";
+  if(category==="MLS_EPOCH_CONFLICT")return "Конфликт эпохи MLS. Завершите звонок и начните новый, не переиспользуя старую группу.";
+  if(category==="MLS_SNAPSHOT_MISSING")return "Локальный снимок MLS недоступен. Повторяем подготовку…";
+  if(category==="CLIENT_OR_NETWORK_ERROR")return "Сеть или клиент прервали подготовку медиа. Звонок не сброшен, повторяем…";
+  return "Ошибка криптографического допуска. Повторяем без сброса вызова…";
 }
 el("auth-diagnostics-copy").addEventListener("click",async()=>{
   try{await navigator.clipboard.writeText(el("auth-diagnostics-report").textContent);}
@@ -353,6 +475,14 @@ async function restoreSession() {
     // A transient network/5xx failure, rate limit or 403 must not silently
     // issue another session or turn a failed status check into a login attempt.
     if(authHttpCode(error)!==401)throw error;
+    try {
+      const retried=await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());
+      if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+      return retried;
+    } catch(retryError) {
+      if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+      if(authHttpCode(retryError)!==401)throw retryError;
+    }
     const hint=lastBinding();
     if(!hint){
       authDiagnostic("device_reauthentication","unavailable");
@@ -522,7 +652,14 @@ function handleMlsIntegrityError(error) {
   return true;
 }
 async function run(action) {
-  if (busy || navigating) return;
+  if (busy || navigating) {
+    // The lock remains authoritative; never start a duplicate call or login.
+    // But user actions must not vanish without acknowledgement.
+    message(navigating
+      ? "Открывается защищённая конференция. Действие сейчас недоступно."
+      : "Предыдущее действие ещё выполняется. Повторите после его завершения.");
+    return;
+  }
   busy = true;
   try {await action();}
   catch(error) {
@@ -782,16 +919,23 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
       throw Error("MLS preparation cancelled by canonical Call");
     return {user,call};
   };
-  const initial=await check();
-  const user=initial.user,call=initial.call;
-  const request={callId,expectedRevision:call.revision};
-  const descriptor=await host.describeAcceptedCallMls(user,request);
-  await check();
-  if(descriptor.callId!==callId||descriptor.deviceId!==user.deviceId||
-     descriptor.requiresEndpointOwnedCommit!==true)
-    throw Error("Untrusted first-party MLS descriptor");
-  const creator=descriptor.creatorPrincipalId===user.participantId;
-  const key=mlsStateKey(user,descriptor);
+  let live=null;
+  const requestOf=()=>({callId,expectedRevision:live.call.revision});
+  const pullDescriptor=async()=>{
+    live=await check();
+    const next=await host.describeAcceptedCallMls(live.user,requestOf());
+    live=await check();
+    if(next.callId!==callId||next.deviceId!==live.user.deviceId||
+       next.requiresEndpointOwnedCommit!==true)
+      throw Error("Untrusted first-party MLS descriptor");
+    return next;
+  };
+  let descriptor=await pullDescriptor();
+  const creator=descriptor.creatorPrincipalId===live.user.participantId;
+  const key=mlsStateKey(live.user,descriptor);
+  rememberCallInfo({callState:live.call.state,
+    role:callRoleOf({call:live.call,identity:live.user.participantId}),
+    mlsPhase:"prepare",grantPresent:false});
   const operation=async()=>{
     const module=await mlsWasm();
     let state=null;
@@ -799,7 +943,7 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
     let wrapping=null;
     try{
       wrapping=await mlsWrappingKey(key,{requireExisting:sealed!==null});
-      await check();
+      descriptor=await pullDescriptor();
       if(creator){
         // Recover the exact already-staged wire after uncertain server ACK,
         // crash, or failed local promotion. Never stage a second random Commit.
@@ -809,9 +953,9 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
           if(descriptor.cryptoEpoch===0 &&
              descriptor.groupRevision===journal.groupRevision &&
              descriptor.cryptoStateRef===journal.baseRef){
-            await check();
-            await host.addEndpointMlsPeer(user,{
-              ...request,groupRevision:journal.groupRevision,
+            live=await check();
+            await host.addEndpointMlsPeer(live.user,{
+              ...requestOf(),groupRevision:journal.groupRevision,
               eventId:journal.eventId,cryptoEpoch:journal.epoch,
               cryptoStateRef:journal.ref,
               recipientDeviceId:journal.recipientDeviceId,
@@ -820,31 +964,32 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
               recipientSignatureBase64Url:journal.recipientSignatureBase64Url,
               commit:journal.commit,welcome:journal.welcome
             });
-            await check();
+            live=await check();
           }else if(descriptor.cryptoEpoch!==journal.epoch ||
                    descriptor.cryptoStateRef!==journal.ref){
             throw Error("Canonical MLS epoch conflicts with pending Commit; media fenced");
           }
-          const canonical=await host.describeAcceptedCallMls(user,request);
-          await check();
+          const canonical=await host.describeAcceptedCallMls(live.user,requestOf());
+          live=await check();
           if(canonical.cryptoEpoch!==journal.epoch||
              canonical.cryptoStateRef!==journal.ref||
              canonical.expectedPeerDeviceId!==journal.recipientDeviceId)
             throw Error("Pending MLS Commit not canonically confirmed; media fenced");
           // Validate sealed new epoch locally before replacing the old snapshot.
-          state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
-            descriptor.groupId,user.deviceId,wrapping,journal.sealed,
+          state=module.EndpointMlsState.restore(live.user.tenantId,live.user.namespaceId??undefined,
+            descriptor.groupId,live.user.deviceId,wrapping,journal.sealed,
             BigInt(journal.epoch),journal.ref);
           state.authorize_direct_call_roster(journal.recipientDeviceId);
           await mlsSave(key,journal.sealed);
           await mlsTransition(key,null);
           sealed=journal.sealed;
+          authDiagnostic("mls_commit","ok",null,{mlsPhase:"committed"});
           return true;
         }
         if(descriptor.cryptoEpoch===null){
           if(sealed===null){
-            state=new module.EndpointMlsState(user.tenantId,user.namespaceId??undefined,
-              descriptor.groupId,user.deviceId);
+            state=new module.EndpointMlsState(live.user.tenantId,live.user.namespaceId??undefined,
+              descriptor.groupId,live.user.deviceId);
             state.create_endpoint_group();
             // Seal the creator's epoch-zero Group in a distinct AAD domain
             // BEFORE publishing. A lost HTTP acknowledgement must not mint
@@ -852,15 +997,16 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
             await mlsSave(key,state.seal_unpublished_group(wrapping),true);
           }else{
             state=module.EndpointMlsState.restore_unpublished_group(
-              user.tenantId,user.namespaceId??undefined,descriptor.groupId,
-              user.deviceId,wrapping,sealed);
+              live.user.tenantId,live.user.namespaceId??undefined,descriptor.groupId,
+              live.user.deviceId,wrapping,sealed);
           }
-          await check();
-          await host.publishEndpointMlsGroup(user,{
-            ...request,cryptoStateRef:state.crypto_state_ref()
+          live=await check();
+          await host.publishEndpointMlsGroup(live.user,{
+            ...requestOf(),cryptoStateRef:state.crypto_state_ref()
           });
-          await check();
+          live=await check();
           // A recipient's independently signed offer may arrive later.
+          authDiagnostic("mls_publish_group","ok",null,{mlsPhase:"published_group"});
           return false;
         }
         if(sealed===null)throw Error("Initiator's private OpenMLS snapshot is missing");
@@ -870,31 +1016,31 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
           // verify the canonical digest, then atomically promote the snapshot.
           let unpublished=false;
           try{
-            state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
-              descriptor.groupId,user.deviceId,wrapping,sealed,
+            state=module.EndpointMlsState.restore(live.user.tenantId,live.user.namespaceId??undefined,
+              descriptor.groupId,live.user.deviceId,wrapping,sealed,
               0n,descriptor.cryptoStateRef);
           }catch{
             state=module.EndpointMlsState.restore_unpublished_group(
-              user.tenantId,user.namespaceId??undefined,descriptor.groupId,
-              user.deviceId,wrapping,sealed);
+              live.user.tenantId,live.user.namespaceId??undefined,descriptor.groupId,
+              live.user.deviceId,wrapping,sealed);
             unpublished=true;
           }
           if(state.crypto_state_ref()!==descriptor.cryptoStateRef)
             throw Error("Published MLS epoch-zero digest differs from local Group");
           if(unpublished){
             await mlsSave(key,state.seal_snapshot(wrapping));
-            await check();
+            live=await check();
           }
         }else{
-          state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
-            descriptor.groupId,user.deviceId,wrapping,sealed,
+          state=module.EndpointMlsState.restore(live.user.tenantId,live.user.namespaceId??undefined,
+            descriptor.groupId,live.user.deviceId,wrapping,sealed,
             BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef);
         }
         if(descriptor.cryptoEpoch===0){
-          const offers=await host.listEndpointMlsOffers(user,request);
-          await check();
-          if(offers.length===0)return false;
-          if(offers.length!==1||offers[0].recipientDeviceId===user.deviceId)
+          const offers=await host.listEndpointMlsOffers(live.user,requestOf());
+          live=await check();
+          if(offers.length===0){authDiagnostic("mls_prepare","pending",null,{mlsPhase:"wait_offer"});return false;}
+          if(offers.length!==1||offers[0].recipientDeviceId===live.user.deviceId)
             throw Error("Ambiguous authenticated MLS recipient offer");
           const offer=offers[0];
           const packageBytes=Uint8Array.from(atob(
@@ -921,9 +1067,9 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
           await mlsTransition(key,{...journal,
             commit:Array.from(journal.commit),welcome:Array.from(journal.welcome),
             sealed:Array.from(journal.sealed)});
-          await check();
-          await host.addEndpointMlsPeer(user,{
-            ...request,groupRevision:journal.groupRevision,
+          live=await check();
+          await host.addEndpointMlsPeer(live.user,{
+            ...requestOf(),groupRevision:journal.groupRevision,
             eventId:journal.eventId,cryptoEpoch:journal.epoch,cryptoStateRef:journal.ref,
             recipientDeviceId:journal.recipientDeviceId,
             recipientSignerKeyId:journal.recipientSignerKeyId,
@@ -931,50 +1077,52 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
             recipientSignatureBase64Url:journal.recipientSignatureBase64Url,
             commit:journal.commit,welcome:journal.welcome
           });
-          const canonical=await host.describeAcceptedCallMls(user,request);
-          await check();
+          const canonical=await host.describeAcceptedCallMls(live.user,requestOf());
+          live=await check();
           if(canonical.cryptoEpoch!==epoch||canonical.cryptoStateRef!==stateRef||
              canonical.expectedPeerDeviceId!==offer.recipientDeviceId)
             throw Error("Server did not confirm the staged MLS Commit");
           await mlsSave(key,journal.sealed);
           await mlsTransition(key,null);
-          await check();
+          live=await check();
+          authDiagnostic("mls_commit","ok",null,{mlsPhase:"committed"});
         }
       }else{
         // The durable public offer has a foreign key to the canonical Group:
         // never publish before the initiator's signed epoch-zero creation.
-        if(descriptor.cryptoEpoch===null)return false;
+        if(descriptor.cryptoEpoch===null){authDiagnostic("mls_prepare","pending",null,{mlsPhase:"wait_group"});return false;}
         if(sealed===null){
           if(descriptor.cryptoEpoch!==0)
             throw Error("Recipient KeyPackage missing after canonical MLS admission");
-          state=new module.EndpointMlsState(user.tenantId,user.namespaceId??undefined,
-            descriptor.groupId,user.deviceId);
+          state=new module.EndpointMlsState(live.user.tenantId,live.user.namespaceId??undefined,
+            descriptor.groupId,live.user.deviceId);
           await mlsSave(key,state.seal_unjoined_key_package(wrapping),true);
           sealed=await mlsSnapshot(key);
-          await check();
+          live=await check();
         }
         if(descriptor.cryptoEpoch===0){
           if(!state)state=module.EndpointMlsState.restore_unjoined_key_package(
-            user.tenantId,user.namespaceId??undefined,descriptor.groupId,
-            user.deviceId,wrapping,sealed);
+            live.user.tenantId,live.user.namespaceId??undefined,descriptor.groupId,
+            live.user.deviceId,wrapping,sealed);
           // Idempotent retry of the EXACT SAME signed KeyPackage. A failed
           // first HTTP response must not strand a durable pending offer.
-          await host.publishEndpointMlsOffer(user,{
-            ...request,keyPackage:new Uint8Array(state.key_package())
+          await host.publishEndpointMlsOffer(live.user,{
+            ...requestOf(),keyPackage:new Uint8Array(state.key_package())
           });
-          await check();
+          live=await check();
+          authDiagnostic("mls_publish_offer","ok",null,{mlsPhase:"published_offer"});
           return false;
         }
         try{
-          state=module.EndpointMlsState.restore(user.tenantId,user.namespaceId??undefined,
-            descriptor.groupId,user.deviceId,wrapping,sealed,
+          state=module.EndpointMlsState.restore(live.user.tenantId,live.user.namespaceId??undefined,
+            descriptor.groupId,live.user.deviceId,wrapping,sealed,
             BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef);
         }catch{
           state=module.EndpointMlsState.restore_unjoined_key_package(
-            user.tenantId,user.namespaceId??undefined,descriptor.groupId,
-            user.deviceId,wrapping,sealed);
-          const bootstrap=await host.fetchEndpointMlsBootstrap(user,request);
-          await check();
+            live.user.tenantId,live.user.namespaceId??undefined,descriptor.groupId,
+            live.user.deviceId,wrapping,sealed);
+          const bootstrap=await host.fetchEndpointMlsBootstrap(live.user,requestOf());
+          live=await check();
           if(bootstrap.groupId!==descriptor.groupId||
              bootstrap.cryptoEpoch!==descriptor.cryptoEpoch||
              bootstrap.cryptoStateRef!==descriptor.cryptoStateRef)
@@ -987,19 +1135,23 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
              state.crypto_state_ref()!==descriptor.cryptoStateRef)
             throw Error("Recipient OpenMLS epoch differs from canonical admission");
           await mlsSave(key,state.seal_snapshot(wrapping));
-          await check();
+          live=await check();
+          authDiagnostic("mls_welcome","ok",null,{mlsPhase:"committed"});
         }
       }
-      const committed=await host.describeAcceptedCallMls(user,request);
-      await check();
+      const committed=await host.describeAcceptedCallMls(live.user,requestOf());
+      live=await check();
       if(committed.cryptoEpoch===null||committed.cryptoEpoch<1||
          !committed.expectedPeerDeviceId||
-         committed.expectedPeerDeviceId===user.deviceId||
+         committed.expectedPeerDeviceId===live.user.deviceId||
          committed.groupId!==descriptor.groupId||
          committed.cryptoEpoch!==Number(state.crypto_epoch())||
-         committed.cryptoStateRef!==state.crypto_state_ref())
+         committed.cryptoStateRef!==state.crypto_state_ref()){
+        authDiagnostic("mls_prepare","pending",null,{mlsPhase:"wait_welcome"});
         return false;
+      }
       state.authorize_direct_call_roster(committed.expectedPeerDeviceId);
+      authDiagnostic("mls_prepare","ok",null,{mlsPhase:"ready"});
       return true;
     }finally{
       if(wrapping)wrapping.fill(0);
@@ -1008,8 +1160,12 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
   };
   // Serialize competing same-origin tabs. No second Call, Identity or key
   // authority: this lock only fences local encrypted MLS snapshot updates.
-  if(!navigator.locks?.request)
+  if(!navigator.locks?.request){
+    authDiagnostic("mls_prepare","failed",
+      Error("Cross-tab MLS persistence lock unavailable; refusing unsafe Join"),
+      {mlsPhase:"lock_unavailable"});
     throw Error("Cross-tab MLS persistence lock unavailable; refusing unsafe Join");
+  }
   return navigator.locks.request("ucr-first-party-mls:"+key,{mode:"exclusive"},operation);
 }
 
@@ -1028,18 +1184,54 @@ async function beginMedia(callId) {
   // A real endpoint-owned MLS group and the recipient's independently
   // authenticated KeyPackage/Welcome MUST precede any signed Join.
   if(mlsPreparation)return;
+  authDiagnostic("begin_media","started",null,{callState:selected.call.state,
+    role:callRoleOf(selected),mlsPhase:"prepare",grantPresent:false});
   const preparation=prepareFirstPartyEndpointMls(callId,selectedScope,selectedLocator);
   mlsPreparation=preparation;
   let mlsReady;
   try{mlsReady=await preparation;}
+  catch(error){
+    const raw=String(error instanceof Error?error.message:error||"");
+    const cancelled=/cancelled by/i.test(raw);
+    authDiagnostic("mls_prepare",cancelled?"cancelled":"failed",cancelled?null:error,{
+      mlsPhase:cancelled?"cancelled":"failed",callState:selected.call?.state,
+      role:callRoleOf(selected),grantPresent:false
+    });
+    if(cancelled)return;
+    throw error;
+  }
   finally{if(mlsPreparation===preparation)mlsPreparation=null;}
-  if(!mlsReady)return;
+  if(!mlsReady){
+    let conferenceActive=false;
+    try{conferenceActive=sessionStorage.getItem("ucrConferenceMediaActive")==="1";}catch(_){}
+    if(conferenceActive){
+      message("Защищённый звонок уже открыт на экране конференции.");
+      authDiagnostic("begin_media","pending",null,{
+        callState:selected.call.state,role:callRoleOf(selected),
+        mlsPhase:sessionCallInfo.mlsPhase||"ready",grantPresent:true
+      });
+      return;
+    }
+    const phase=sessionCallInfo.mlsPhase;
+    if(phase==="wait_group")message("Звонок принят. Ждём криптогруппу собеседника…");
+    else if(phase==="wait_offer"||phase==="published_group")message("Криптогруппа создана. Ждём ключ собеседника…");
+    else if(phase==="published_offer"||phase==="wait_welcome")message("Ключ отправлен. Ждём подтверждение собеседника…");
+    else message("Проверяем криптографический допуск собеседника…");
+    return;
+  }
   // A slow MLS preflight can outlive Hangup or a Device switch. Revalidate
   // immediately before the irreversible signed Join request.
   if(navigating||accountScope!==selectedScope||!active||
      active.terminating||active.call.callId!==callId||
      active.call.state!=="active"||activeCallLocator()!==selectedLocator)return;
-  const grant = await calls.join(callId);
+  let grant;
+  try{
+    grant = await calls.join(callId);
+    authDiagnostic("join_grant","ok",null,{grantPresent:true,mlsPhase:"ready"});
+  }catch(error){
+    authDiagnostic("join_grant","failed",error,{grantPresent:false});
+    throw error;
+  }
   if (!grant || grant.callId !== callId) throw Error("Call admission mismatch");
   // Periodic inspection may replace the object for the SAME active Call.
   // Fence by canonical Call/Device state, not mutable UI object identity.
@@ -1125,7 +1317,10 @@ function renderIncoming(items) {
         active = {call:result,identity:session.participantId};
         rememberActiveCall(result,session.participantId);
         showActive();
-        if (result.state === "active") await beginMedia(result.callId);
+        if (result.state === "active") {
+          try { await beginMedia(result.callId); }
+          catch (error) { message(mlsHint(error)); }
+        }
       }),
       btn("Отклонить",async () => {
         await calls.signal(call.callId,"reject");
@@ -1190,8 +1385,12 @@ async function refresh() {
           activeCallLocator() !== inspectedLocator || navigating) return;
       if (fresh.callId !== inspectedCall.callId) throw Error("Call inspection mismatch");
       active = {...inspected,call:fresh};
+      rememberCallInfo({callState:fresh.state,role:callRoleOf(active),grantPresent:false});
       showActive();
-      if (fresh.state === "active") await beginMedia(fresh.callId);
+      if (fresh.state === "active") {
+        try { await beginMedia(fresh.callId); }
+        catch (error) { message(mlsHint(error)); }
+      }
       if (fresh.state === "terminated") {
         forgetActiveCall(inspectedLocator);
         if (active.identity === fresh.callerIdentityId) clearRetryKey(fresh);
@@ -1271,6 +1470,46 @@ async function initialize() {
         (err instanceof Error ? err.message : String(err)));
     });
   },2500);
+  startIncomingCallWake();
+}
+// Item C6: optional incoming-call wake-up (server flag
+// UCR_FIRST_PARTY_CALL_WAIT, default off). The long-poll response carries no
+// Call data; it only triggers the same authorized refresh() the periodic
+// poller runs. 404 (flag off) or repeated errors stop it and leave the
+// periodic polling above as the only path. No third-party push service.
+let incomingWakeGeneration = 0;
+function startIncomingCallWake() {
+  const generation = ++incomingWakeGeneration;
+  const authGeneration = uiAuthGeneration;
+  void (async () => {
+    let since = null, failures = 0;
+    while (generation === incomingWakeGeneration && authGeneration === uiAuthGeneration) {
+      let response;
+      try {
+        response = await fetch("/v1/first-party/call/wait" + (since === null ? "" : "/" + since),
+          {method:"GET",credentials:"same-origin",cache:"no-store",redirect:"error"});
+      } catch (error) {
+        response = null;
+      }
+      if (generation !== incomingWakeGeneration || authGeneration !== uiAuthGeneration) return;
+      if (response && response.status === 404) return;
+      if (!response || !response.ok) {
+        failures += 1;
+        if (failures >= 3) return;
+        await new Promise(resolve => setTimeout(resolve, 2500 * failures));
+        continue;
+      }
+      failures = 0;
+      let result;
+      try { result = await response.json(); } catch (error) { return; }
+      if (!result || typeof result.revision !== "string" || !/^[0-9]{1,20}$/.test(result.revision)) return;
+      const changed = since !== null && result.changed === true;
+      since = result.revision;
+      if (changed && !busy && !navigating) {
+        void refresh().catch(err => authDiagnostic("periodic_refresh","failed",err));
+      }
+    }
+  })();
 }
 el("device-login").addEventListener("submit", event => {
   event.preventDefault();
@@ -1405,10 +1644,22 @@ el("recover-form").addEventListener("submit",event=>{
     await initialize();
   });
 });
-el("copy-recovery").addEventListener("click",()=>void run(async()=>{
-  await navigator.clipboard.writeText(el("recovery-code").value);
-  message("Код скопирован. Сохраните его в защищённом месте.");
-}));
+// A recovery code is a secret: show a manual fallback only in its existing
+// secure form field; never put it in a URL, log, diagnostic, or popup.
+el("copy-recovery").addEventListener("click",()=>{
+  void (async()=>{
+    const field=el("recovery-code");
+    if(!field.value){message("Сначала создайте или обновите код восстановления.");return;}
+    try{
+      if(typeof navigator.clipboard?.writeText!=="function")throw Error("clipboard unavailable");
+      await navigator.clipboard.writeText(field.value);
+      message("Код скопирован. Сохраните его в защищённом месте.");
+    }catch(_){
+      field.focus();field.select();
+      message("Буфер обмена заблокирован. Код выделен: нажмите Ctrl+C или используйте «Копировать».");
+    }
+  })();
+});
 el("rotate-recovery").addEventListener("click",()=>void run(async()=>{
   const code=await host.rotateRecoveryCode();
   showRecovery(code);

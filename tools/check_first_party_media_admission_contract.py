@@ -93,9 +93,9 @@ assert 'sendQueueCongested' in pipeline
 assert 'sendInvalidEnvelope' in pipeline
 assert 'sendUnexpectedFailure' in pipeline
 assert 'sendUnavailable' in pipeline
-assert 'code === "UCR_TRANSPORT_CHANNEL_CLOSED"' in pipeline
-assert 'code === "UCR_TRANSPORT_QUEUE_CONGESTED"' in pipeline
-assert 'code === "UCR_TRANSPORT_INVALID_ENVELOPE"' in pipeline
+assert 'transportCode === "UCR_TRANSPORT_CHANNEL_CLOSED"' in pipeline
+assert 'transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED"' in pipeline
+assert 'transportCode === "UCR_TRANSPORT_INVALID_ENVELOPE"' in pipeline
 assert 'ui.webrtcState.textContent=pc.connectionState||"Connecting";' in client
 assert 'UCR_TRANSPORT_CHANNEL_CLOSED' in client
 assert 'UCR_TRANSPORT_QUEUE_CONGESTED' in client
@@ -126,6 +126,8 @@ assert 'const start = pending - now > 0.35 ? now' not in webcodecs
 assert 'export function ucrAdaptiveVideoStep(' in webcodecs
 assert 'ucrVideoAdaptation.stage = next.stage' in webcodecs
 assert 'ucrEncryptedTransportBufferedAmount' in client
+assert 'window.ucrEncryptedTransportPathStats=' in client
+assert 'if(window.ucrLossRttBwe!==true' in client, 'path stats polling must stay opt-in'
 assert 'const ceiling=mediaKind==="video"?256*1024:384*1024;' in client
 assert 'e2eeChannel.bufferedAmount:Number.POSITIVE_INFINITY' in client
 assert 'videoAdaptation:(window.__ucrVideoAdaptation?' in client

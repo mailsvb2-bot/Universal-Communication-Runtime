@@ -483,7 +483,7 @@ Promise.resolve()
             """
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(async () => {
-  const module = await import("./endpoint-media/reference_browser_media_installer.js");
+  const module = await import(new URL("/endpoint-media/reference_browser_media_installer.js", window.location.href).href);
   let denied = "";
   try {
     await module.installUcrReferenceBrowserMedia({
@@ -640,7 +640,7 @@ Promise.resolve()
             """
 const done=arguments[arguments.length-1], deviceId=arguments[0];
 (async()=>{
- const mod=await import("./endpoint-media/reference_browser_media_installer.js");
+ const mod=await import(new URL("/endpoint-media/reference_browser_media_installer.js", window.location.href).href);
  const vault=mod.createUcrBrowserProtectedDeviceVault();
  const scope={tenantId:"browser-probe",namespaceId:null,deviceId};
  const first=await vault.stageNew(scope);
@@ -664,7 +664,7 @@ const done=arguments[arguments.length-1], deviceId=arguments[0];
             """
 const done=arguments[arguments.length-1], deviceId=arguments[0], expected=arguments[1];
 (async()=>{
- const mod=await import("./endpoint-media/reference_browser_media_installer.js");
+ const mod=await import(new URL("/endpoint-media/reference_browser_media_installer.js", window.location.href).href);
  const vault=mod.createUcrBrowserProtectedDeviceVault();
  const scope={tenantId:"browser-probe",namespaceId:null,deviceId};
  const restored=await vault.load(scope);
@@ -1276,6 +1276,12 @@ injected.remove();
     check(closeOffer === "A".repeat(43), "old owned WebRTC offer not closed");
     check(startWebRtc.offerOwner?.token === "fixture-old-grant",
       "old close must retain original grant while HTTP is pending");
+    // Actual Leave must wait for the original offer's server-side close,
+    // while capture and the consumed grant are revoked synchronously.
+    check(oldLeaveSequence === null,
+      "Leave overtook the original WebRTC close");
+    oldClose.resolve({ok:true});
+    for (let i = 0; i < 8; i++) await Promise.resolve();
     check(oldLeaveSequence === 1, "retired Leave missing original server generation");
 
     // Emulate a separate, independently issued signed grant with a new
@@ -1296,7 +1302,6 @@ injected.remove();
     ui.state.textContent = "New joined";
     ui.status.textContent = "New session active";
     ui.join.disabled = true;
-    oldClose.resolve({ok:true});
     oldLeave.resolve({ok:true});
     oldHeartbeat.resolve({json: async () => ({
       admission_state:"admitted",media_policy:null
@@ -1313,6 +1318,8 @@ injected.remove();
 
     // Dispatch the browser's actual offline event, including a busy screen
     // capture. Local tracks and the peer must stop before HTTP completes.
+    // Soft mobile recovery (window.ucrSoftNetworkRecovery) is opt-in and is
+    // covered by architecture string gates; default remains fail-closed Leave.
     api = async (path, payload) => {
       if (path === "/v1/realtime/webrtc/close") {
         closeOffer = payload.offer_id;
@@ -1328,13 +1335,16 @@ injected.remove();
     screenShareBusy = true;
     window.dispatchEvent(new Event("offline"));
     check(!sessionActive && !mediaActive, "offline retained media authorization");
-    check(offlineLeaveSequence === 2, "offline Leave did not use new Join generation");
+    // No HTTP wait is allowed before stopping physical tracks. Since Close
+    // finishes asynchronously, Leave is checked after an event-loop turn.
     for (const name of ["microphone","camera","screen"]) {
       check(events.includes("stop:offline:" + name), "offline kept " + name + " capturing");
     }
     check(events.includes("peer:offline"), "offline left WebRTC peer open");
     check(closeOffer === "B".repeat(43),
       "offline must close the replacement session's own WebRTC offer");
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    check(offlineLeaveSequence === 2, "offline Leave did not use new Join generation");
     window.dispatchEvent(new Event("online"));
     check(!sessionActive, "online silently reauthorized revoked session");
     check(signedGrantRetired && ui.join.disabled,
@@ -1435,7 +1445,7 @@ const done = arguments[arguments.length - 1];
   ]);
   let rejected = false;
   try {
-    const mod = await import("./endpoint-media/reference_browser_media_installer.js");
+    const mod = await import(new URL("/endpoint-media/reference_browser_media_installer.js", window.location.href).href);
     const vault = mod.createUcrBrowserProtectedDeviceVault();
     try {
       await Promise.race([

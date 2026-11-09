@@ -60,6 +60,17 @@ const context={
   restoreSession:async()=>user,message(){},
   refreshing:false,navigating:false,timer:null,knownContacts:[],
   mlsPreparation:null,
+  // This isolated regression executes Call code without the page diagnostics.
+  // Diagnostics are observation-only; they do not own media or grant authority.
+  authDiagnostic(){},
+  rememberCallInfo(){},
+  mlsHint(){return "MLS/Join temporarily unavailable";},
+  sessionCallInfo:{mlsPhase:null},
+  callRoleOf(snapshot){
+    if(snapshot?.identity===snapshot?.call?.callerIdentityId)return "caller";
+    if(snapshot?.identity===snapshot?.call?.calleeIdentityId)return "callee";
+    return null;
+  },
   prepareFirstPartyEndpointMls:async()=>true,
   clearInterval(){},renderContacts(){},renderIncoming(){incomingRendered++;},
   authTrace:async(_stage,operation)=>operation(),clearRetryKey(){},

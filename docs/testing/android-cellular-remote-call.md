@@ -53,3 +53,19 @@ per-session TURN REST credentials; the browser receives only session ICE
 credentials, never the root secret. This does **not** start coturn, provision a
 public DNS hostname, configure the router/firewall or verify an actual relay.
 If TLS or TURN inputs are missing, public mode fails before exposing ingress.
+
+## ICE / TURN cascade for phone↔PC (carrier NAT)
+
+Mobile carriers often use symmetric NAT and block UDP. Configure a comma-separated
+cascade on the Windows public launcher (`-TurnUrls`) / `UCR_WEBRTC_TURN_URLS`:
+
+```text
+turn:turn.example.org:3478?transport=udp,turn:turn.example.org:3478?transport=tcp,turns:turn.example.org:443?transport=tcp
+```
+
+Prefer `turns:` on TCP 443 so cellular firewalls that only allow HTTPS can still
+relay. The launcher still requires at least one `turns:` URL in public mode.
+Optional `-StunUrls` helps secure-mode host/srflx discovery on LAN (AP isolation
+still needs TURN). Soft offline recovery for brief mobile blips is **opt-in**:
+`localStorage.setItem('ucrSoftNetworkRecovery','1')` or `window.ucrSoftNetworkRecovery=true`
+before joining; default remains fail-closed Leave on `navigator` offline.

@@ -7,7 +7,13 @@ param(
     [string]$PublicCertificate = '',
     [string]$PublicPrivateKey = '',
     [string]$PublicEdgeBind = '0.0.0.0:443',
+    # Single TURNS URL (legacy). Prefer -TurnUrls for UDP+TCP+443 cascade.
     [string]$TurnUrl = '',
+    # Comma-separated TURN/TURNS URLs, e.g.
+    # turn:turn.example.org:3478?transport=udp,turn:turn.example.org:3478?transport=tcp,turns:turn.example.org:443?transport=tcp
+    [string]$TurnUrls = '',
+    # Optional STUN CSV for secure-mode host/srflx discovery (local LAN or public).
+    [string]$StunUrls = '',
     [string]$TurnSecretFile = '',
     # OpenSSL development root; override with -OpenSslRoot or UCR_OPENSSL_ROOT.
     [string]$OpenSslRoot = ''
@@ -54,25 +60,53 @@ if ($remote) {
         !(Test-Path -LiteralPath $PublicPrivateKey -PathType Leaf)) {
         throw 'Public TLS certificate and private key must already exist'
     }
-    $turnMatch = [regex]::Match($TurnUrl, '^turns:([a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])(?::([0-9]{1,5}))?(\?transport=tcp)?$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if (!$turnMatch.Success -or !$TurnSecretFile -or
+    if ([string]::IsNullOrWhiteSpace($TurnUrls) -and -not [string]::IsNullOrWhiteSpace($TurnUrl)) {
+        $TurnUrls = $TurnUrl
+    }
+    if ([string]::IsNullOrWhiteSpace($TurnUrls) -or !$TurnSecretFile -or
         !(Test-Path -LiteralPath $TurnSecretFile -PathType Leaf)) {
-        throw 'Public mode requires external TURNS and existing TURN REST secret'
+        throw 'Public mode requires external TURN/TURNS URLs and existing TURN REST secret'
     }
-    $turnHost = $turnMatch.Groups[1].Value
-    if ($turnMatch.Groups[2].Success) {
-        $turnPort = [int]$turnMatch.Groups[2].Value
-        if ($turnPort -lt 1 -or $turnPort -gt 65535) { throw 'Invalid public TURN port' }
+    $turnParts = @($TurnUrls.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($turnParts.Count -lt 1 -or $turnParts.Count -gt 8) {
+        throw 'Public TURN requires 1..8 comma-separated turn:/turns: URLs'
     }
-    $turnIp = $null
-    if ($turnHost -eq 'localhost' -or [Net.IPAddress]::TryParse($turnHost,[ref]$turnIp)) {
-        throw 'Public TURN must use an external DNS hostname'
+    $sawTurns = $false
+    foreach ($part in $turnParts) {
+        $turnMatch = [regex]::Match($part, '^(turns?):([a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9])(?::([0-9]{1,5}))?(?:\?transport=(udp|tcp))?$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if (!$turnMatch.Success) {
+            throw "Invalid TURN URL '$part'; use turn:/turns:host[:port][?transport=udp|tcp]"
+        }
+        if ($turnMatch.Groups[1].Value -ieq 'turns') { $sawTurns = $true }
+        $turnHost = $turnMatch.Groups[2].Value
+        if ($turnMatch.Groups[3].Success) {
+            $turnPort = [int]$turnMatch.Groups[3].Value
+            if ($turnPort -lt 1 -or $turnPort -gt 65535) { throw "Invalid public TURN port in '$part'" }
+        }
+        $turnIp = $null
+        if ($turnHost -eq 'localhost' -or [Net.IPAddress]::TryParse($turnHost,[ref]$turnIp)) {
+            throw "Public TURN host in '$part' must be an external DNS hostname"
+        }
     }
+    if (-not $sawTurns) {
+        throw 'Public mode requires at least one turns: URL (TCP/TLS) for carrier NAT fallback'
+    }
+    $TurnUrl = [string]::Join(',', $turnParts)
     $origin = $parsed.AbsoluteUri.TrimEnd('/')
     $cert = (Resolve-Path -LiteralPath $PublicCertificate).Path
     $privateKey = (Resolve-Path -LiteralPath $PublicPrivateKey).Path
-} elseif ($PublicCertificate -or $PublicPrivateKey -or $TurnUrl -or $TurnSecretFile) {
+} elseif ($PublicCertificate -or $PublicPrivateKey -or $TurnUrl -or $TurnUrls -or $TurnSecretFile) {
     throw 'External TLS/TURN parameters require -PublicOrigin'
+}
+# Optional STUN for local or public secure-mode discovery (never invented).
+if (-not [string]::IsNullOrWhiteSpace($StunUrls)) {
+    $stunParts = @($StunUrls.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    foreach ($part in $stunParts) {
+        if ($part -notmatch '^stuns?:[^\s,]+$') {
+            throw "Invalid STUN URL '$part'; use stun:host:port or stuns:host:port"
+        }
+    }
+    $StunUrls = [string]::Join(',', $stunParts)
 }
 $vc = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
 $opensslRoot = if ($OpenSslRoot) { $OpenSslRoot } elseif ($env:UCR_OPENSSL_ROOT) { $env:UCR_OPENSSL_ROOT } else { 'C:\UCR-OpenSSL' }
@@ -312,6 +346,7 @@ if ($remote) {
         } else {
             throw 'TURN secret must be 32 raw bytes or 64 hexadecimal digits'
         }
+        # CSV cascade: UDP first, then TCP, then TURNS (often 443) for carrier NAT.
         $env:UCR_WEBRTC_TURN_URLS = $TurnUrl
         $env:UCR_WEBRTC_TURN_SECRET_HEX = $turnHex
         $env:UCR_WEBRTC_RELAY_ONLY = 'true'
@@ -320,6 +355,15 @@ if ($remote) {
     }
 } else {
     Remove-Item Env:UCR_WEBRTC_TURN_URLS,Env:UCR_WEBRTC_TURN_SECRET_HEX,Env:UCR_WEBRTC_RELAY_ONLY -ErrorAction SilentlyContinue
+}
+if (-not [string]::IsNullOrWhiteSpace($StunUrls)) {
+    $env:UCR_WEBRTC_STUN_URLS = $StunUrls
+    Write-Host "STUN configured ($(($StunUrls -split ',').Count) URL(s)) for host/srflx ICE discovery."
+} else {
+    Remove-Item Env:UCR_WEBRTC_STUN_URLS -ErrorAction SilentlyContinue
+    if (-not $remote) {
+        Write-Host 'No STUN/TURN configured: cross-network phone↔PC ICE will only use host candidates (same LAN, no AP isolation).'
+    }
 }
 
 $env:UCR_BROWSER_REALTIME_GATEWAY_ENABLED = 'true'
@@ -353,7 +397,11 @@ try {
     if ($OpenSecondPersistentProfile -and !$remote) {
         & (Join-Path $root 'scripts\windows\open-second-persistent-chrome.ps1')
     }
-    if ($remote) { Write-Host 'TURNS relay reachability, coturn REST secret parity and Android admission remain unverified.' }
+    if ($remote) {
+        Write-Host 'TURNS relay reachability, coturn REST secret parity and Android admission remain unverified.'
+        Write-Host 'Recommended TURN cascade: turn:host:3478?transport=udp,turn:host:3478?transport=tcp,turns:host:443?transport=tcp'
+        Write-Host 'Mobile soft offline recovery (opt-in): localStorage.ucrSoftNetworkRecovery=1 or window.ucrSoftNetworkRecovery=true'
+    }
     Write-Host 'Next test: create two independent trusted identities, accept Call, and verify actual E2EE bidirectional A/V.'
 } catch {
     Write-Host "UCR local HTTPS startup failed: $_"

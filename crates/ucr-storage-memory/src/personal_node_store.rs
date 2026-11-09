@@ -21,7 +21,9 @@ impl PersonalNodeStore for MemoryLocalStore {
             return Err(DurableStoreError::InvalidRecord);
         }
         let key = personal_node_profile_key(&canonical.scope, &canonical.endpoint_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.personal_node_profiles.get(&key) {
             return if existing == &canonical {
                 Ok(DurableRecordStatus::Duplicate)
@@ -53,7 +55,9 @@ impl PersonalNodeStore for MemoryLocalStore {
         next_state: PersonalNodeState,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = personal_node_profile_key(scope, endpoint_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .personal_node_profiles
             .get(&key)
@@ -91,7 +95,9 @@ impl PersonalNodeStore for MemoryLocalStore {
             &canonical.endpoint_id,
             &canonical.object_id,
         );
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.personal_node_objects.get(&object_key) {
             return if existing == &canonical {
                 Ok(DurableRecordStatus::Duplicate)
@@ -178,7 +184,9 @@ impl PersonalNodeStore for MemoryLocalStore {
         object_id: &PersonalNodeObjectId,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let key = personal_node_object_key(scope, endpoint_id, object_id);
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         Ok(if state.personal_node_objects.remove(&key).is_some() {
             DurableRecordStatus::Persisted
         } else {

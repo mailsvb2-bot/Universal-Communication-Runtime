@@ -2816,7 +2816,80 @@ fn browser_media_assets_present() -> bool {
         || std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
         std::path::PathBuf::from,
     );
-    browser_media_assets_present_in(&root)
+    if !browser_media_assets_present_in(&root) {
+        return false;
+    }
+    // Release builds can pin the exact browser assets to the declared Git
+    // revision. When either half of the policy is configured, require both.
+    let manifest = std::env::var_os("UCR_REALTIME_WEB_RELEASE_MANIFEST");
+    let source = std::env::var("UCR_REALTIME_WEB_EXPECTED_SOURCE_SHA").ok();
+    match (manifest, source) {
+        (None, None) => true, // local/development gateway retains legacy readiness
+        (Some(manifest), Some(source)) => {
+            browser_media_assets_match_manifest(&root, std::path::Path::new(&manifest), &source)
+        }
+        _ => false,
+    }
+}
+
+fn browser_media_assets_match_manifest(
+    root: &std::path::Path,
+    manifest: &std::path::Path,
+    expected_sha: &str,
+) -> bool {
+    use sha2::{Digest as _, Sha256};
+    if expected_sha.len() != 40 || !expected_sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    if manifest.is_symlink() {
+        return false;
+    }
+    let Ok(raw) = std::fs::read(manifest) else {
+        return false;
+    };
+    if raw.len() > 64 * 1024 {
+        return false;
+    }
+    let Ok(document) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    if document.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+        || document
+            .get("source_sha")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected_sha)
+    {
+        return false;
+    }
+    let Some(files) = document.get("files").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    if files.len() != REFERENCE_MEDIA_ASSETS.len() {
+        return false;
+    }
+    REFERENCE_MEDIA_ASSETS.iter().all(|(_, filename, _)| {
+        let path = root.join(filename);
+        if path.is_symlink() {
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            return false;
+        };
+        if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
+            return false;
+        }
+        let Some(known) = files.get(*filename) else {
+            return false;
+        };
+        let expected_length = known.get("size").and_then(serde_json::Value::as_u64);
+        let expected_hash = known.get("sha256").and_then(serde_json::Value::as_str);
+        let mut actual_hash = String::with_capacity(64);
+        for byte in Sha256::digest(&bytes) {
+            use std::fmt::Write as _;
+            let _ = write!(&mut actual_hash, "{byte:02x}");
+        }
+        expected_length == Some(bytes.len() as u64) && expected_hash == Some(actual_hash.as_str())
+    })
 }
 
 fn browser_media_assets_present_in(root: &std::path::Path) -> bool {
@@ -2838,6 +2911,19 @@ fn serve_reference_media_asset(path: &str) -> HttpResponse {
     let Some((file, mime)) = reference_media_asset(path) else {
         return empty_response(StatusCode::NOT_FOUND);
     };
+    // A configured release manifest must continue to match at the moment of
+    // serving, not only during an earlier readiness probe. Never serve an
+    // unverified E2EE module if a deploy replaces one of its files in-place.
+    if (std::env::var_os("UCR_REALTIME_WEB_RELEASE_MANIFEST").is_some()
+        || std::env::var_os("UCR_REALTIME_WEB_EXPECTED_SOURCE_SHA").is_some())
+        && !browser_media_assets_present()
+    {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "endpoint_media_integrity_mismatch",
+            "Browser E2EE assets do not match the source-bound release manifest",
+        );
+    }
     // A deployment must provide the exact WASM and SDK bundles built for its
     // source revision. Never generate an adapter dynamically or load a remote
     // untrusted CDN script. Missing assets fail closed, not to plaintext media.
@@ -3780,6 +3866,57 @@ mod tests {
     }
 
     #[test]
+    fn browser_media_manifest_rejects_tampering_and_source_mismatch() {
+        use sha2::{Digest as _, Sha256};
+        let root =
+            std::env::temp_dir().join(format!("ucr-browser-manifest-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut assets = serde_json::Map::new();
+        for (_, file, _) in super::REFERENCE_MEDIA_ASSETS {
+            let destination = root.join(file);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            let data = format!("asset-owned:{file}");
+            std::fs::write(destination, data.as_bytes()).unwrap();
+            let mut hash = String::with_capacity(64);
+            for byte in Sha256::digest(data.as_bytes()) {
+                use std::fmt::Write as _;
+                let _ = write!(&mut hash, "{byte:02x}");
+            }
+            assets.insert(
+                file.to_owned(),
+                serde_json::json!({"size": data.len(), "sha256": hash}),
+            );
+        }
+        let sha = "a".repeat(40);
+        let manifest = root.join("release-manifest.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "source_sha": sha, "files": assets
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(super::browser_media_assets_match_manifest(
+            &root, &manifest, &sha
+        ));
+        assert!(!super::browser_media_assets_match_manifest(
+            &root,
+            &manifest,
+            &"b".repeat(40)
+        ));
+        std::fs::write(
+            root.join("endpoint-wasm/ucr_endpoint_wasm_bg.wasm"),
+            b"tampered",
+        )
+        .unwrap();
+        assert!(!super::browser_media_assets_match_manifest(
+            &root, &manifest, &sha
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn first_party_upstream_rejects_public_and_invalid_addresses() {
         assert!(super::parse_first_party_upstream("127.0.0.1:18081").is_ok());
         assert!(super::parse_first_party_upstream("[::1]:18081").is_ok());
@@ -4023,7 +4160,8 @@ mod tests {
         let script = super::FIRST_PARTY_START_JS;
         assert!(page.contains("id=\"auth-diagnostics-report\""));
         assert!(page.contains("id=\"auth-diagnostics-save\""));
-        assert!(script.contains("schema:\"ucr-auth-diagnostics-v1\""));
+        assert!(script.contains("schema:\"ucr-session-diagnostics-v2\""));
+        assert!(script.contains("authSchema:\"ucr-auth-diagnostics-v1\""));
         assert!(script.contains("authDiagnostics.length>60"));
         assert!(script.contains("HTTP_401_AUTHORITY_REJECTED"));
         assert!(script.contains("authTrace(\"resume_session\""));
@@ -4031,6 +4169,12 @@ mod tests {
         assert!(script.contains("authTrace(\"list_contacts\""));
         assert!(script.contains("authTrace(\"list_devices\""));
         assert!(script.contains("authTrace(\"incoming_calls\""));
+        assert!(
+            script.contains("const requestOf=()=>({callId,expectedRevision:live.call.revision})")
+        );
+        assert!(script.contains("\"mls_prepare\""));
+        assert!(script.contains("mlsPhase"));
+        assert!(script.contains("grantPresent"));
         assert!(!script.contains("authDiagnostics.push({error:"));
     }
 
@@ -4042,7 +4186,18 @@ mod tests {
         assert!(client.contains("id=\"ucr-diagnostics-copy\""));
         assert!(client.contains("ucrDiagnosticsEvents.length>80"));
         assert!(client.contains("schema:\"ucr-local-diagnostics-v1\""));
+        assert!(client.contains("ucrSessionMediaDiagnostics"));
+        assert!(client.contains("iceServerKinds"));
+        assert!(client.contains("offeredIceServerKinds"));
+        assert!(client.contains("lastFailure:ucrLastFailure"));
+        assert!(client.contains("ucrOfferedIceKinds||\"pending\""));
+        assert!(client.contains("localCandidateType"));
+        assert!(client.contains("sdpComplete"));
+        assert!(client.contains("grantPresent"));
         assert!(client.contains("hiddenRenderSkips"));
+        assert!(client.contains("droppedStale:window.__ucrVideoCounters.droppedStale"));
+        assert!(client.contains("lastRxAudio:window.__ucrMediaStageMetrics.lastRxAudio"));
+        assert!(client.contains("replayRejected:window.__ucrMediaStageMetrics.replayRejected"));
         assert!(client.contains("videoVisibility:{"));
         assert!(client.contains("renderStallMs:document.hidden?null:"));
         assert!(client.contains("hiddenTotalMs:"));
@@ -4220,7 +4375,7 @@ mod tests {
         // accepted, exact-Call Join. It only enters the URL fragment and
         // cannot leak through a query string or a server request.
         let join = js
-            .find("const grant = await calls.join(callId)")
+            .find("grant = await calls.join(callId)")
             .expect("media entry must be authorized by canonical Call");
         let bound = js
             .find("grant.callId !== callId")
@@ -4232,7 +4387,8 @@ mod tests {
             .find("location.replace(next.href)")
             .expect("navigate only after canonical media authorization");
         assert!(join < bound && bound < fragment && fragment < navigate);
-        assert!(js.contains("if (fresh.state === \"active\") await beginMedia(fresh.callId)"));
+        assert!(js.contains("if (fresh.state === \"active\") {"));
+        assert!(js.contains("await beginMedia(fresh.callId)"));
         // A public Device binding hint is not a login credential. It
         // permits re-authentication only by proving possession of the
         // canonical protected signer against the server after restart.
@@ -4438,7 +4594,10 @@ mod tests {
             "if(e2eeChannel!==channel||terminalHandled)return;",
             "if(sessionActive&&mediaActive){",
             "webrtcNeedsPeerRebuild=true;",
-            "closeE2eeTransport();",
+            "function detachE2eeChannel(){",
+            "detachE2eeChannel();",
+            "teardownPeer({keepAdapter:true})",
+            "e2eeAdapterStarted&&e2eeAdapter()",
             "scheduleWebRtcRetry();",
             "if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}",
             "webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;",

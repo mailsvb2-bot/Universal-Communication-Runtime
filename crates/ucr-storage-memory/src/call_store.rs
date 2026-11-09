@@ -121,8 +121,7 @@ fn create_call_with_parent_guard(
     let key = call_key(&session.scope, &session.call_id);
     let conversation_key = conversation_key(&session.scope, &session.conversation.conversation_id);
     let state = &mut *store
-        .state
-        .lock()
+        .lock_state_mut()
         .map_err(|_| DurableStoreError::Internal)?;
     if let Some(parent) = parent {
         let parent_invalid = parent.scope != session.scope
@@ -323,7 +322,9 @@ impl CallStore for MemoryLocalStore {
         actor: &ScopedPrincipal,
         signal: &CallSignal,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         apply_call_signal_in_state(&mut state, actor, signal)
     }
 
@@ -340,7 +341,9 @@ impl CallStore for MemoryLocalStore {
         {
             return Err(DurableStoreError::PermissionDenied);
         }
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut state = self
+            .lock_state_mut()
+            .map_err(|_| DurableStoreError::Internal)?;
         let direct =
             validated_call_from_state(&state, &direct_signal.scope, &direct_signal.call_id)?
                 .ok_or(DurableStoreError::InvalidRecord)?;
