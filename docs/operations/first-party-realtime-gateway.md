@@ -182,3 +182,15 @@ crypto-custody regression and a real A↔B browser/phone call across NAT/TURN
 with two-way encrypted audio/video are still required before calling this
 server-blind production E2EE. Track #328 and #274; never use the historic
 media-host committer topology as a deployment shortcut.
+
+## Anonymous challenge flood
+
+Sign-up, login, recovery and device-enrollment challenges are stateless
+(MAC-sealed with a per-process key, bound to binding, purpose and key). Issuing
+one allocates no server memory; only verified proofs are remembered until
+expiry to reject replay. A flood of anonymous challenge requests therefore
+cannot lock other users out. Per-client-IP quotas are not implemented: the
+HTTPS edge is a raw TLS passthrough and the BFF only sees a loopback peer. To
+limit account creation per client, terminate TLS at a reverse proxy that
+rate-limits by client address (for example nginx `limit_req`, see
+`rt0-first-party-https-edge.nginx.conf`).
