@@ -87,6 +87,10 @@ overflow-checks = true
 strip = "symbols"
 
 [patch.crates-io]
+# Upstream 0.3.0 pins vulnerable rusqlite 0.37; retain OpenMLS storage code
+# and migrations while using the patched SQLite stack.
+openmls_sqlite_storage = { path = "third_party/openmls-sqlite-storage" }
+refinery-core = { path = "third_party/refinery-core" }
 webrtc-util = { path = "third_party/webrtc-util-v0172" }
 
 # Phase 29: hpke-rs 0.7.0 depends unconditionally on libcrux-sha3 only for
