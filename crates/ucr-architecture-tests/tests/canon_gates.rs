@@ -709,7 +709,7 @@ fn local_storage_keeps_sqlite_out_of_canonical_core() {
             .expect("read sqlite manifest");
     assert!(root.contains("crates/ucr-storage-memory"));
     assert!(root.contains("crates/ucr-storage-sqlite"));
-    assert!(sqlite_manifest.contains("version = \"=0.37.0\""));
+    assert!(sqlite_manifest.contains("version = \"=0.41.1\""));
     assert!(sqlite_manifest.contains("features = [\"bundled\"]"));
 }
 
