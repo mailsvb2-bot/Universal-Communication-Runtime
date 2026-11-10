@@ -3151,6 +3151,39 @@ where
         })
     }
 
+    // The signed endpoint MLS Add ledger records (creator Device, recipient
+    // Device) in that order. Merely accepting either Device for either Call
+    // principal would lose that binding at the realtime MLS authority boundary.
+    // Check the exact two-person roster from the canonical Call snapshot.
+    fn first_party_committed_device_matches_principal(
+        call: &ucr_model::CallSession,
+        principal: &ucr_model::PrincipalRef,
+        device: &DeviceId,
+        committed: &(String, String),
+    ) -> bool {
+        let [a, b] = call.participants.as_slice() else {
+            return false;
+        };
+        if a.principal == b.principal {
+            return false;
+        }
+        let recipient = if a.principal == call.initiated_by {
+            &b.principal
+        } else if b.principal == call.initiated_by {
+            &a.principal
+        } else {
+            return false;
+        };
+        let expected = if principal == &call.initiated_by {
+            &committed.0
+        } else if principal == recipient {
+            &committed.1
+        } else {
+            return false;
+        };
+        device.as_opaque().as_str() == expected
+    }
+
     fn mls_admission_context(
         &self,
         claims: &RealtimeSessionClaims,
@@ -3195,7 +3228,12 @@ where
             if !active_member
                 || snapshot.group_crypto_epoch == 0
                 || !snapshot.group_id.as_opaque().as_str().starts_with("fp-mg-")
-                || (device.as_opaque().as_str() != pair.0 && device.as_opaque().as_str() != pair.1)
+                || !Self::first_party_committed_device_matches_principal(
+                    &snapshot.call,
+                    &claims.participant,
+                    device,
+                    &pair,
+                )
                 || store
                     .server_possesses_mls_group(&claims.scope, &snapshot.group_id)
                     .map_err(|error| map_group_mls_store_error(&error))?
