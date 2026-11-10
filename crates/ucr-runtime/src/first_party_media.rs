@@ -401,7 +401,13 @@ where
     // throughout its lifetime. Reusing a Group with a removed third party
     // (even a non-server Device) would risk disclosure of older media epochs.
     // A storage failure or an overlong roster fails closed; never truncate.
+    let (legacy_host, _) = media_host(&direct.scope)?;
     let members = store.group_memberships(&direct.scope, &ids.group_id, 8)?;
+    // Keep the reserved legacy server principal explicitly excluded, even if
+    // a future roster implementation changes its historical-member policy.
+    if members.iter().any(|member| member.member == legacy_host.principal) {
+        return Err(MediaRuntimeError::Conflict);
+    }
     if !endpoint_only_media_roster(&members, &participants) {
         return Err(MediaRuntimeError::Conflict);
     }
