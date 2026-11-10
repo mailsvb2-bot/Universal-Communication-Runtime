@@ -332,7 +332,7 @@ where
 }
 
 /// A two-party media group must have exactly its two active endpoint members.
-    /// Any third-party or historical membership forces a new Group identity;
+/// Any third-party or historical membership forces a new Group identity;
     /// removing a server-held MLS leaf cannot erase secrets it already held.
 fn endpoint_members_are_exclusive(
     members: &[(PrincipalRef, GroupMemberState)],
@@ -666,7 +666,7 @@ mod tests {
             &[
                 clean[0].clone(),
                 clean[1].clone(),
-                (person(MEDIA_HOST_IDENTITY), GroupMemberState::Left),
+                (person(MEDIA_HOST_IDENTITY), GroupMemberState::Removed),
             ],
             &endpoints
         ));
@@ -674,7 +674,7 @@ mod tests {
             &[
                 clean[0].clone(),
                 clean[1].clone(),
-                (person("mallory"), GroupMemberState::Left),
+                (person("mallory"), GroupMemberState::Removed),
             ],
             &endpoints
         ));
