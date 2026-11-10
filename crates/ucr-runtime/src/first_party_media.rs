@@ -671,14 +671,16 @@ mod tests {
         // that epoch's exporter. Never reuse its Group ID for A↔B media.
         assert!(!endpoint_only_media_roster(
             &[
-                alice.clone(), bob.clone(),
+                alice.clone(),
+                bob.clone(),
                 make("mallory", GroupMemberState::Removed),
             ],
             &endpoints
         ));
         assert!(!endpoint_only_media_roster(
             &[
-                alice.clone(), bob.clone(),
+                alice.clone(),
+                bob.clone(),
                 make(MEDIA_HOST_IDENTITY, GroupMemberState::Removed),
             ],
             &endpoints
@@ -697,17 +699,29 @@ mod tests {
     fn endpoint_media_roster_fails_closed_on_bounded_truncation() {
         use ucr_model::GroupRole;
         let participants = [person("alice"), person("bob")];
-        let all = (0..8).map(|i| GroupMembership {
-            scope: scope("t", None),
-            group_id: GroupId::from_opaque(OpaqueId::new("private-media").unwrap()),
-            member: if i == 0 { person("alice") } else if i == 1 { person("bob") } else { person(&format!("old-{i}")) },
-            role: GroupRole::Member,
-            permissions: vec![],
-            state: if i < 2 { GroupMemberState::Active } else { GroupMemberState::Removed },
-            joined_revision: 0,
-            removed_revision: None,
-            history_floor_logical_order: 0,
-        }).collect::<Vec<_>>();
+        let all = (0..8)
+            .map(|i| GroupMembership {
+                scope: scope("t", None),
+                group_id: GroupId::from_opaque(OpaqueId::new("private-media").unwrap()),
+                member: if i == 0 {
+                    person("alice")
+                } else if i == 1 {
+                    person("bob")
+                } else {
+                    person(&format!("old-{i}"))
+                },
+                role: GroupRole::Member,
+                permissions: vec![],
+                state: if i < 2 {
+                    GroupMemberState::Active
+                } else {
+                    GroupMemberState::Removed
+                },
+                joined_revision: 0,
+                removed_revision: None,
+                history_floor_logical_order: 0,
+            })
+            .collect::<Vec<_>>();
         assert!(!endpoint_only_media_roster(&all, &participants));
     }
 
