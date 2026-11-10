@@ -670,7 +670,10 @@ mod tests {
             &[alice.clone(), bob.clone()],
             &endpoints
         ));
-        assert!(!endpoint_only_media_roster(std::slice::from_ref(&alice), &endpoints));
+        assert!(!endpoint_only_media_roster(
+            std::slice::from_ref(&alice),
+            &endpoints
+        ));
         assert!(!endpoint_only_media_roster(
             &[alice.clone(), make("bob", GroupMemberState::Removed)],
             &endpoints
