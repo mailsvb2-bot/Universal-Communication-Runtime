@@ -33,8 +33,7 @@ use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, ConversationId, ConversationKind, ConversationRef,
     DeviceId, EventId, GroupId, GroupMemberState, GroupMembership, GroupOwnership, IdentityId,
-    OpaqueId,
-    PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
+    OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::GROUP_MLS_CAPABILITY;
 
