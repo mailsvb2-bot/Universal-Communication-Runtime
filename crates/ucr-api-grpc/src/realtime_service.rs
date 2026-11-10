@@ -4782,7 +4782,10 @@ mod first_party_media_binding_tests {
         ));
         let duplicate_device_pair = ("device-a".to_owned(), "device-a".to_owned());
         assert!(!first_party_committed_device_matches_principal(
-            &call, &alice, &device_a, &duplicate_device_pair
+            &call,
+            &alice,
+            &device_a,
+            &duplicate_device_pair
         ));
         let mut malformed = call.clone();
         malformed.participants[1].principal = alice.clone();
