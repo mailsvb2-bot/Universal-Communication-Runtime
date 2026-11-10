@@ -92,7 +92,19 @@ fn direct_media_requires_committed_endpoint_owned_epoch() {
         .expect("media admission boundary");
     assert!(gate.contains("group.crypto_state.epoch == 0"));
     assert!(gate.contains("server_possesses_mls_group("));
-    assert!(gate.contains("GroupMemberState::Active"));
+    // The admission gate delegates exact historical membership validation to
+    // the canonical helper. Check both the call site and its fail-closed rule.
+    assert!(gate.contains("endpoint_only_media_roster(&members, &participants)"));
+    let roster = media
+        .split("fn endpoint_only_media_roster(")
+        .nth(1)
+        .expect("canonical endpoint-only roster helper")
+        .split("pub(crate) fn prepare_direct_call_media<S>(")
+        .next()
+        .expect("roster helper body");
+    assert!(roster.contains("members.len() == participants.len()"));
+    assert!(roster.contains("membership.state == GroupMemberState::Active"));
+    assert!(roster.contains("membership.member == *expected"));
 }
 
 #[test]
