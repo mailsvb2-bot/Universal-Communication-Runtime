@@ -405,7 +405,10 @@ where
     let members = store.group_memberships(&direct.scope, &ids.group_id, 8)?;
     // Keep the reserved legacy server principal explicitly excluded, even if
     // a future roster implementation changes its historical-member policy.
-    if members.iter().any(|member| member.member == legacy_host.principal) {
+    if members
+        .iter()
+        .any(|member| member.member == legacy_host.principal)
+    {
         return Err(MediaRuntimeError::Conflict);
     }
     if !endpoint_only_media_roster(&members, &participants) {
