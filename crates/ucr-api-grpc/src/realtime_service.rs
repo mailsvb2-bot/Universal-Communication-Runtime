@@ -4720,7 +4720,7 @@ mod first_party_media_binding_tests {
     fn first_party_mls_admission_binds_committed_device_to_exact_call_principal() {
         use ucr_model::{
             CallParticipant, CallSession, ConversationId, ConversationKind, ConversationRef,
-            PrincipalRef, TerminationReason,
+            PrincipalRef,
         };
         let principal = |name: &str| PrincipalRef {
             principal_id: PrincipalId::from_opaque(OpaqueId::new(name).unwrap()),
