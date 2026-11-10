@@ -3151,39 +3151,6 @@ where
         })
     }
 
-    // The signed endpoint MLS Add ledger records (creator Device, recipient
-    // Device) in that order. Merely accepting either Device for either Call
-    // principal would lose that binding at the realtime MLS authority boundary.
-    // Check the exact two-person roster from the canonical Call snapshot.
-    fn first_party_committed_device_matches_principal(
-        call: &ucr_model::CallSession,
-        principal: &ucr_model::PrincipalRef,
-        device: &DeviceId,
-        committed: &(String, String),
-    ) -> bool {
-        let [a, b] = call.participants.as_slice() else {
-            return false;
-        };
-        if a.principal == b.principal {
-            return false;
-        }
-        let recipient = if a.principal == call.initiated_by {
-            &b.principal
-        } else if b.principal == call.initiated_by {
-            &a.principal
-        } else {
-            return false;
-        };
-        let expected = if principal == &call.initiated_by {
-            &committed.0
-        } else if principal == recipient {
-            &committed.1
-        } else {
-            return false;
-        };
-        device.as_opaque().as_str() == expected
-    }
-
     fn mls_admission_context(
         &self,
         claims: &RealtimeSessionClaims,
@@ -3228,7 +3195,7 @@ where
             if !active_member
                 || snapshot.group_crypto_epoch == 0
                 || !snapshot.group_id.as_opaque().as_str().starts_with("fp-mg-")
-                || !Self::first_party_committed_device_matches_principal(
+                || !first_party_committed_device_matches_principal(
                     &snapshot.call,
                     &claims.participant,
                     device,
@@ -4631,6 +4598,39 @@ struct LiveMediaBinding {
     trusted_device_keys: Vec<pb::RealtimeEndpointTrustKey>,
 }
 
+// The signed endpoint MLS Add ledger records (creator Device, recipient
+// Device) in that order. Merely accepting either Device for either Call
+// principal would lose that binding at the realtime MLS authority boundary.
+// Check the exact two-person roster from the canonical Call snapshot.
+fn first_party_committed_device_matches_principal(
+    call: &ucr_model::CallSession,
+    principal: &ucr_model::PrincipalRef,
+    device: &DeviceId,
+    committed: &(String, String),
+) -> bool {
+    let [a, b] = call.participants.as_slice() else {
+        return false;
+    };
+    if a.principal == b.principal {
+        return false;
+    }
+    let recipient = if a.principal == call.initiated_by {
+        &b.principal
+    } else if b.principal == call.initiated_by {
+        &a.principal
+    } else {
+        return false;
+    };
+    let expected = if principal == &call.initiated_by {
+        &committed.0
+    } else if principal == recipient {
+        &committed.1
+    } else {
+        return false;
+    };
+    device.as_opaque().as_str() == expected
+}
+
 fn require_complete_first_party_media_binding(
     binding: Option<&LiveMediaBinding>,
     authenticated_device_id: &DeviceId,
@@ -4714,6 +4714,81 @@ mod first_party_media_binding_tests {
         pair: &(String, String),
     ) -> bool {
         require_complete_first_party_media_binding(binding, device, pair).is_ok()
+    }
+
+    #[test]
+    fn first_party_mls_admission_binds_committed_device_to_exact_call_principal() {
+        use ucr_model::{
+            CallParticipant, CallSession, ConversationId, ConversationKind, ConversationRef,
+            PrincipalRef, TerminationReason,
+        };
+        let principal = |name: &str| PrincipalRef {
+            principal_id: PrincipalId::from_opaque(OpaqueId::new(name).unwrap()),
+            kind: PrincipalKind::Person,
+        };
+        let alice = principal("alice");
+        let bob = principal("bob");
+        let mallory = principal("mallory");
+        let call = CallSession {
+            scope: TenantScope {
+                tenant_id: ucr_model::TenantId::from_opaque(OpaqueId::new("tenant").unwrap()),
+                namespace_id: None,
+            },
+            call_id: CallId::from_opaque(OpaqueId::new("call").unwrap()),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(OpaqueId::new("conv").unwrap()),
+                kind: ConversationKind::PrivateGroup,
+            },
+            initiated_by: alice.clone(),
+            participants: vec![
+                CallParticipant {
+                    principal: alice.clone(),
+                    state: CallParticipantState::Accepted,
+                    joined_revision: 0,
+                    left_revision: None,
+                },
+                CallParticipant {
+                    principal: bob.clone(),
+                    state: CallParticipantState::Accepted,
+                    joined_revision: 0,
+                    left_revision: None,
+                },
+            ],
+            signalling_state: CallSignallingState::Active,
+            reconnecting_participant: None,
+            media_negotiation_ref: None,
+            media_negotiation_generation: 0,
+            replication_generation: 0,
+            revision: 2,
+            termination_reason: None,
+        };
+        let device_a = DeviceId::from_opaque(OpaqueId::new("device-a").unwrap());
+        let device_b = DeviceId::from_opaque(OpaqueId::new("device-b").unwrap());
+        let pair = ("device-a".to_owned(), "device-b".to_owned());
+        assert!(first_party_committed_device_matches_principal(
+            &call, &alice, &device_a, &pair
+        ));
+        assert!(first_party_committed_device_matches_principal(
+            &call, &bob, &device_b, &pair
+        ));
+        assert!(!first_party_committed_device_matches_principal(
+            &call, &alice, &device_b, &pair
+        ));
+        assert!(!first_party_committed_device_matches_principal(
+            &call, &bob, &device_a, &pair
+        ));
+        assert!(!first_party_committed_device_matches_principal(
+            &call, &mallory, &device_a, &pair
+        ));
+        let mut malformed = call.clone();
+        malformed.participants[1].principal = alice.clone();
+        assert!(!first_party_committed_device_matches_principal(
+            &malformed, &alice, &device_a, &pair
+        ));
+        malformed.participants.pop();
+        assert!(!first_party_committed_device_matches_principal(
+            &malformed, &alice, &device_a, &pair
+        ));
     }
 
     #[test]
