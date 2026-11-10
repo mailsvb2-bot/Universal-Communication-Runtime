@@ -4611,7 +4611,7 @@ fn first_party_committed_device_matches_principal(
     let [a, b] = call.participants.as_slice() else {
         return false;
     };
-    if a.principal == b.principal {
+    if a.principal == b.principal || committed.0 == committed.1 {
         return false;
     }
     let recipient = if a.principal == call.initiated_by {
@@ -4628,7 +4628,7 @@ fn first_party_committed_device_matches_principal(
     } else {
         return false;
     };
-    device.as_opaque().as_str() == expected
+    device.as_opaque().as_str() == expected.as_str()
 }
 
 fn require_complete_first_party_media_binding(
@@ -4779,6 +4779,10 @@ mod first_party_media_binding_tests {
         ));
         assert!(!first_party_committed_device_matches_principal(
             &call, &mallory, &device_a, &pair
+        ));
+        let duplicate_device_pair = ("device-a".to_owned(), "device-a".to_owned());
+        assert!(!first_party_committed_device_matches_principal(
+            &call, &alice, &device_a, &duplicate_device_pair
         ));
         let mut malformed = call.clone();
         malformed.participants[1].principal = alice.clone();
