@@ -331,6 +331,25 @@ where
         .map_err(MediaRuntimeError::from)
 }
 
+/// A two-party media group must have exactly its two active endpoint members.
+    /// Any third-party or historical membership forces a new Group identity;
+    /// removing a server-held MLS leaf cannot erase secrets it already held.
+fn endpoint_members_are_exclusive(
+    members: &[(PrincipalRef, GroupMemberState)],
+    participants: &[PrincipalRef; 2],
+) -> bool {
+    participants[0] != participants[1]
+        && members.len() == 2
+        && participants.iter().all(|principal| {
+            members
+                .iter()
+                .any(|(member, state)| member == principal && *state == GroupMemberState::Active)
+        })
+        && members.iter().all(|(member, state)| {
+            participants.contains(member) && *state == GroupMemberState::Active
+        })
+}
+
 /// Resolves the endpoint-owned media runtime of one ACTIVE direct Call for the
 /// authenticated `subject` and returns the media Call the Join grant must name.
 ///
@@ -377,22 +396,17 @@ where
     {
         return Err(MediaRuntimeError::Conflict);
     }
-    let (legacy_host, _) = media_host(&direct.scope)?;
     let members = store.group_memberships(&direct.scope, &ids.group_id, 8)?;
-    // A removed legacy server committer may have retained older epoch secrets.
-    // Never reuse its Group ID, even after membership changes.
-    if members.iter().any(|member| {
-        member.member == legacy_host.principal
-            || (member.state == GroupMemberState::Active && !participants.contains(&member.member))
-    }) {
+    // The complete membership history must be exclusive to these two endpoints.
+    // Even a removed third member (including the legacy media host) may retain
+    // earlier epoch secrets. A bounded membership listing cannot prove absence
+    // of such a member if it contains more than the two expected records.
+    let membership_snapshot = members
+        .iter()
+        .map(|member| (member.member.clone(), member.state.clone()))
+        .collect::<Vec<_>>();
+    if !endpoint_members_are_exclusive(&membership_snapshot, &participants) {
         return Err(MediaRuntimeError::Conflict);
-    }
-    if !participants.iter().all(|participant| {
-        members.iter().any(|membership| {
-            membership.state == GroupMemberState::Active && membership.member == *participant
-        })
-    }) {
-        return Err(MediaRuntimeError::Unavailable);
     }
     let media = ensure_media_call(store, direct, &ids, &direct.scope, &participants)?;
     if media.signalling_state == CallSignallingState::Terminated {
@@ -626,6 +640,51 @@ mod tests {
             .participants
             .push(participant("carol", CallParticipantState::Accepted));
         assert!(admissible_participants(&three, &subject("alice")).is_err());
+    }
+
+    #[test]
+    fn endpoint_media_membership_rejects_historical_or_foreign_key_holders() {
+        let endpoints = [person("alice"), person("bob")];
+        let active = GroupMemberState::Active;
+        let clean = vec![
+            (endpoints[0].clone(), active.clone()),
+            (endpoints[1].clone(), active.clone()),
+        ];
+        assert!(endpoint_members_are_exclusive(&clean, &endpoints));
+        assert!(endpoint_members_are_exclusive(
+            &[clean[1].clone(), clean[0].clone()],
+            &endpoints
+        ));
+        assert!(!endpoint_members_are_exclusive(&clean[..1], &endpoints));
+        assert!(!endpoint_members_are_exclusive(
+            &[clean[0].clone(), clean[0].clone()],
+            &endpoints
+        ));
+        // Do not trust a group after a removed server host or a third endpoint
+        // participated in an earlier epoch; their old exporter is not revoked.
+        assert!(!endpoint_members_are_exclusive(
+            &[
+                clean[0].clone(),
+                clean[1].clone(),
+                (person(MEDIA_HOST_IDENTITY), GroupMemberState::Left),
+            ],
+            &endpoints
+        ));
+        assert!(!endpoint_members_are_exclusive(
+            &[
+                clean[0].clone(),
+                clean[1].clone(),
+                (person("mallory"), GroupMemberState::Left),
+            ],
+            &endpoints
+        ));
+        assert!(!endpoint_members_are_exclusive(
+            &[
+                clean[0].clone(),
+                (person("mallory"), active),
+            ],
+            &endpoints
+        ));
     }
 
     #[test]
