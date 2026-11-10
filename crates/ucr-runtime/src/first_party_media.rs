@@ -32,7 +32,8 @@ use ucr_group_mls::GroupMlsServerCustodyProbe;
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, ConversationId, ConversationKind, ConversationRef,
-    DeviceId, EventId, GroupId, GroupMemberState, GroupOwnership, IdentityId, OpaqueId,
+    DeviceId, EventId, GroupId, GroupMemberState, GroupMembership, GroupOwnership, IdentityId,
+    OpaqueId,
     PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::GROUP_MLS_CAPABILITY;
@@ -331,6 +332,25 @@ where
         .map_err(MediaRuntimeError::from)
 }
 
+/// A private first-party media Group is born with the caller and admits only
+/// the one intended peer. A *removed* third member is still disqualifying:
+/// that endpoint may retain keys/ciphertext from its former epoch. Never
+/// accept an apparently clean current roster if historical membership proves
+/// that the Group ID belonged to somebody else (including the legacy host).
+/// Requiring the complete exact two-member roster also prevents a bounded
+/// membership listing from hiding a historical third participant.
+fn endpoint_only_media_roster(
+    members: &[GroupMembership],
+    participants: &[PrincipalRef; 2],
+) -> bool {
+    members.len() == participants.len()
+        && participants.iter().all(|expected| {
+            members.iter().any(|membership| {
+                membership.member == *expected && membership.state == GroupMemberState::Active
+            })
+        })
+}
+
 /// Resolves the endpoint-owned media runtime of one ACTIVE direct Call for the
 /// authenticated `subject` and returns the media Call the Join grant must name.
 ///
@@ -377,22 +397,14 @@ where
     {
         return Err(MediaRuntimeError::Conflict);
     }
-    let (legacy_host, _) = media_host(&direct.scope)?;
+    // `group_memberships` returns all historical rows, not only current
+    // members. The Group ID must have *exactly* the two current endpoints
+    // throughout its lifetime. Reusing a Group with a removed third party
+    // (even a non-server Device) would risk disclosure of older media epochs.
+    // A storage failure or an overlong roster fails closed; never truncate.
     let members = store.group_memberships(&direct.scope, &ids.group_id, 8)?;
-    // A removed legacy server committer may have retained older epoch secrets.
-    // Never reuse its Group ID, even after membership changes.
-    if members.iter().any(|member| {
-        member.member == legacy_host.principal
-            || (member.state == GroupMemberState::Active && !participants.contains(&member.member))
-    }) {
+    if !endpoint_only_media_roster(&members, &participants) {
         return Err(MediaRuntimeError::Conflict);
-    }
-    if !participants.iter().all(|participant| {
-        members.iter().any(|membership| {
-            membership.state == GroupMemberState::Active && membership.member == *participant
-        })
-    }) {
-        return Err(MediaRuntimeError::Unavailable);
     }
     let media = ensure_media_call(store, direct, &ids, &direct.scope, &participants)?;
     if media.signalling_state == CallSignallingState::Terminated {
@@ -626,6 +638,77 @@ mod tests {
             .participants
             .push(participant("carol", CallParticipantState::Accepted));
         assert!(admissible_participants(&three, &subject("alice")).is_err());
+    }
+
+    #[test]
+    fn endpoint_media_roster_rejects_historical_outsiders_and_missing_peer() {
+        use ucr_model::GroupRole;
+
+        let make = |id: &str, state: GroupMemberState| GroupMembership {
+            scope: scope("t", None),
+            group_id: GroupId::from_opaque(OpaqueId::new("private-media").unwrap()),
+            member: person(id),
+            role: GroupRole::Member,
+            permissions: vec![],
+            state,
+            joined_revision: 0,
+            removed_revision: None,
+            history_floor_logical_order: 0,
+        };
+        let endpoints = [person("alice"), person("bob")];
+        let alice = make("alice", GroupMemberState::Active);
+        let bob = make("bob", GroupMemberState::Active);
+        assert!(endpoint_only_media_roster(
+            &[alice.clone(), bob.clone()],
+            &endpoints
+        ));
+        assert!(!endpoint_only_media_roster(&[alice.clone()], &endpoints));
+        assert!(!endpoint_only_media_roster(
+            &[alice.clone(), make("bob", GroupMemberState::Removed)],
+            &endpoints
+        ));
+        // A third member removed after a prior epoch still had access to
+        // that epoch's exporter. Never reuse its Group ID for A↔B media.
+        assert!(!endpoint_only_media_roster(
+            &[
+                alice.clone(), bob.clone(),
+                make("mallory", GroupMemberState::Removed),
+            ],
+            &endpoints
+        ));
+        assert!(!endpoint_only_media_roster(
+            &[
+                alice.clone(), bob.clone(),
+                make(MEDIA_HOST_IDENTITY, GroupMemberState::Removed),
+            ],
+            &endpoints
+        ));
+        assert!(!endpoint_only_media_roster(
+            &[alice.clone(), make("mallory", GroupMemberState::Active)],
+            &endpoints
+        ));
+        assert!(!endpoint_only_media_roster(
+            &[alice.clone(), alice],
+            &endpoints
+        ));
+    }
+
+    #[test]
+    fn endpoint_media_roster_fails_closed_on_bounded_truncation() {
+        use ucr_model::GroupRole;
+        let participants = [person("alice"), person("bob")];
+        let all = (0..8).map(|i| GroupMembership {
+            scope: scope("t", None),
+            group_id: GroupId::from_opaque(OpaqueId::new("private-media").unwrap()),
+            member: if i == 0 { person("alice") } else if i == 1 { person("bob") } else { person(&format!("old-{i}")) },
+            role: GroupRole::Member,
+            permissions: vec![],
+            state: if i < 2 { GroupMemberState::Active } else { GroupMemberState::Removed },
+            joined_revision: 0,
+            removed_revision: None,
+            history_floor_logical_order: 0,
+        }).collect::<Vec<_>>();
+        assert!(!endpoint_only_media_roster(&all, &participants));
     }
 
     #[test]
