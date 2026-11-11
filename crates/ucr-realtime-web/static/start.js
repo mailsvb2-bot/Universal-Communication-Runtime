@@ -737,8 +737,8 @@ function renderContacts(contacts) {
     const actions = document.createElement("div");
     actions.className = "actions";
     actions.append(
-      btn("Аудиозвонок", () => dial(contact,"audio")),
-      btn("Видеозвонок", () => dial(contact,"video")),
+      btn("Аудиозвонок", () => dial(contact,"audio").catch(e => {throw Error(friendlyCallError(e));})),
+      btn("Видеозвонок", () => dial(contact,"video").catch(e => {throw Error(friendlyCallError(e));})),
       btn("Переименовать", async () => {
         const value=window.prompt("Имя контакта",contact.displayName);
         if(value===null)return;
@@ -1334,9 +1334,7 @@ async function dial(contact,media) {
   const session = await restoreSession();
   if(!scope || scope!==accountScope || generation!==uiAuthGeneration ||
      principalScope(session)!==scope)throw Error("Device changed before Call creation");
-  let call;
-  try{call=await calls.start(contact.id,media,requestId);}
-  catch(e){throw Error(friendlyCallError(e));}
+  const call = await calls.start(contact.id,media,requestId);
   // The Call owner may have committed before a concurrent logout/revocation.
   // Never repaint that stale Call under a new or unauthenticated Device.
   if(scope!==accountScope || generation!==uiAuthGeneration)
