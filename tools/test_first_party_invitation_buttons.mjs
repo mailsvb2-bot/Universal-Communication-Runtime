@@ -57,3 +57,5 @@ listeners.get("pl-copy-invite:click")();
 await new Promise(resolve=>setImmediate(resolve));
 assert.ok(messages.at(-1).includes("Сначала подтвердите профиль"));
 console.log("PASS: invite copy/share work under busy lock, denied clipboard/share, missing identity");
+// This existing CI entrypoint also runs the real consumer contact/phonebook contract.
+await import("../tests/consumer_phonebook.test.mjs");
