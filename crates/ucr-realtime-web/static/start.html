@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Cache-Control" content="no-store">
-<title>PetrelLink — Защищённая связь</title>
+<title>PetrelLink — Звонки и контакты</title>
 <style>
 :root{color-scheme:dark;font:16px system-ui,sans-serif;background:#0b1222;color:#edf3ff}
 *{box-sizing:border-box}body{margin:0;padding:24px;min-height:100vh}
@@ -67,6 +67,61 @@ button.secondary{background:#274354}
 #pl-user-cabinet .actions{margin-top:12px}
 #pl-advanced summary{cursor:pointer;padding:12px}
 #pl-advanced section{margin:12px 0}
+
+/* Consumer-first presentation: one clear call path; existing security/Call owners stay unchanged. */
+main{display:flex;flex-direction:column;gap:14px;max-width:880px}
+main>section,main>details{margin:0}
+#pl-header{order:0;margin:0 0 8px;padding:8px 0}
+#pl-onboard{order:1}
+#pl-incoming{order:2;border:2px solid #ffcf79;background:#342a29}
+#pl-current-call{order:3;border-color:#52d6c2;background:#123b43}
+#pl-contacts{order:4}
+.call-stage{order:5}
+#pl-advanced{order:6}
+main>section[role="status"]{order:7}
+body.pl-signed-in #pl-onboard{padding:16px 22px;background:#112b39;box-shadow:none}
+body.pl-signed-in #pl-onboard>h1,body.pl-signed-in #pl-onboard>p{display:none}
+#pl-user-cabinet{gap:4px}
+#pl-user-cabinet h2{margin:0;font-size:1.3rem}
+#pl-user-cabinet p{margin:4px 0}
+#pl-contacts{padding:clamp(16px,3vw,26px)}
+#pl-contacts h2{font-size:1.45rem;letter-spacing:-.02em}
+#pl-phonebook{background:#0d2332;border:1px solid #31536a}
+#pl-phonebook p{margin:0 0 12px}
+#pl-phonebook .actions{margin:0}
+#pl-add-by-invite{border-top:1px solid #264359;margin:12px 0 4px}
+#pl-add-by-invite summary{padding:12px 2px;cursor:pointer;color:#9de8dc}
+#pl-contacts-filter{height:49px}
+#contacts{display:grid;gap:10px;margin-top:16px}
+#contacts li{border:1px solid #31566a;background:#142e40;border-radius:14px;padding:15px}
+.pl-contact-heading{display:flex;gap:12px;align-items:center}
+.pl-contact-heading strong{font-size:1.06rem;overflow-wrap:anywhere}
+.pl-contact-avatar{display:inline-flex;width:43px;height:43px;flex-shrink:0;align-items:center;justify-content:center;border-radius:50%;background:#215268;color:#dffefa;font-weight:750}
+.pl-contact-card .actions{margin-top:12px}
+.pl-contact-card .actions>button{flex:1;min-height:45px}
+.pl-contact-card button:disabled{opacity:.5}
+.pl-contact-tools{margin-top:8px}
+.pl-contact-tools summary{cursor:pointer;color:#bdd6e5;padding:7px 0}
+.pl-contact-tools .actions button{font-size:.88rem}
+#pl-current-call #call-state{font-size:1.12rem;color:#f1feff;margin:6px 0}
+#pl-current-call #cancel{background:#d95562;color:white}
+#pl-incoming li{background:#49332e;border-radius:10px;padding:12px;margin:5px 0}
+#pl-incoming .identity{font-size:.82rem}
+#pl-call-technical{margin-top:12px;font-size:.84rem}
+#pl-call-technical summary{cursor:pointer;color:#b9c9dd}
+.call-stage .call-steps{margin-top:12px}
+main>section[role="status"]{background:#0b1d2a;box-shadow:none}
+main>section[role="status"]>h2{font-size:1rem}
+#status{font-size:.88rem}
+#pl-advanced{padding:0 12px}
+#pl-advanced>summary{font-size:.86rem}
+@media(max-width:620px){
+ body{padding:12px}
+ #pl-header{padding:5px}
+ #pl-phonebook .actions button{width:100%}
+ .pl-contact-card .actions>button{width:auto}
+ #pl-contacts{padding:16px}
+}
 </style>
 
 <script defer src="/readiness.js"></script>
@@ -79,18 +134,20 @@ button.secondary{background:#274354}
   <h1>Общайтесь с близкими</h1>
   <p>Защищённые аудио- и видеозвонки. Создайте профиль, пригласите знакомого и нажмите «Позвонить».</p>
   <div id="pl-new-user"><h2>Начать общение</h2><p>Первое устройство будет зарегистрировано автоматически.</p><div id="pl-signup-slot"></div></div>
-  <div id="pl-user-cabinet" hidden><h2>Ваш профиль готов</h2><p id="pl-friendly-identity">Добавьте контакт для первого звонка.</p><div class="actions"><button id="pl-copy-invite" type="button">Скопировать приглашение</button><button id="pl-share-invite" type="button" class="secondary">Поделиться приглашением</button></div></div>
+  <div id="pl-user-cabinet" hidden><h2>Вы на связи</h2><p id="pl-friendly-identity">Выберите человека ниже или пригласите знакомого.</p><div class="actions"><button id="pl-share-invite" type="button">Пригласить друга</button><button id="pl-copy-invite" type="button" class="secondary">Скопировать ссылку</button></div></div>
 </section>
-<section class="call-stage" aria-label="Видеозвонок">
-  <h2>Экран видеозвонка</h2>
+<section class="call-stage" aria-label="Состояние звонка" hidden>
+  <h2>Соединение</h2>
+  <p id="video-guide" class="media-entry">Ожидаем защищённое соединение.</p>
+  <details id="pl-call-technical"><summary>Подробнее о соединении</summary>
   <div class="call-steps" aria-label="Этапы соединения">
     <span id="stage-device" aria-current="step">1. Моё устройство</span>
     <span id="stage-contact">2. Контакт и вызов</span>
     <span id="stage-accepted">3. Принятие вызова</span>
     <span id="stage-media">4. Камера и видео</span>
   </div>
-  <p id="video-guide" class="media-entry">Сначала зарегистрируйте устройство. Экран с камерой откроется автоматически после принятия вызова собеседником.</p>
-  <small id="video-readiness">Проверка готовности браузерного медиашлюза…</small>
+  <small id="video-readiness">Проверка готовности соединения…</small>
+  </details>
 </section>
 <details id="pl-advanced"><summary>Настройки безопасности и восстановление доступа</summary>
 <section aria-label="Учётная запись">
@@ -134,20 +191,20 @@ button.secondary{background:#274354}
 </section>
 </details>
 <section id="pl-contacts" hidden>
-  <h2>Контакты</h2>
+  <h2>Кому позвонить?</h2>
   <div id="pl-phonebook" role="group" aria-label="Контакты телефона">
-    <p>Выберите человека из телефона. Номер нужен только для приглашения и не подтверждает его личность.</p>
+    <p id="pl-phonebook-help">Добавьте знакомого из контактов устройства или пригласите по ссылке. Номер не используется для подтверждения личности.</p>
     <div class="actions">
-      <button id="pl-pick-phone-contact" type="button">Выбрать из телефона</button>
-      <button id="pl-open-vcard" type="button" class="secondary">Выбрать файл контакта (.vcf)</button>
+      <button id="pl-pick-phone-contact" type="button">Выбрать контакт</button>
+      <button id="pl-open-vcard" type="button" class="secondary">Импорт контакта (.vcf)</button>
     </div>
     <input id="pl-vcard-file" type="file" accept=".vcf,text/vcard" hidden aria-label="Файл одного контакта">
     <p id="pl-phonebook-result" role="status" aria-live="polite" hidden></p>
     <button id="pl-sms-invite" type="button" hidden>Пригласить по SMS</button>
   </div>
-  <label for="pl-contacts-filter">Найти контакт</label>
-  <input id="pl-contacts-filter" type="search" maxlength="128" autocomplete="off" placeholder="Имя знакомого">
-  <details id="pl-add-by-invite"><summary>Добавить по приглашению</summary>
+  <label for="pl-contacts-filter">Поиск по контактам</label>
+  <input id="pl-contacts-filter" type="search" maxlength="128" autocomplete="off" placeholder="Введите имя">
+  <details id="pl-add-by-invite"><summary>Добавить знакомого по приглашению</summary>
   <p id="pl-invite-help" hidden>Приглашение получено. Укажите, как зовут человека, и нажмите «Добавить». Проверьте его личность через доверенный канал.</p>
   <form id="new-contact">
     <input id="contact-name" aria-label="Имя" maxlength="128" placeholder="Имя" required>
@@ -164,14 +221,14 @@ button.secondary{background:#274354}
   <small>В этом браузерном варианте входящие проверяются только при открытом приложении. Фоновые мобильные уведомления ещё требуют отдельного провайдера.</small>
 </section>
 <section id="pl-current-call" hidden>
-  <h2>Текущий вызов</h2>
+  <h2>Звонок</h2>
   <p id="call-state">Нет активного вызова.</p>
   <div class="actions">
-    <button type="button" id="cancel" class="secondary" hidden>Отменить / завершить</button>
+    <button type="button" id="cancel" class="secondary" hidden>Завершить звонок</button>
   </div>
 </section>
 <section role="status" aria-live="polite">
-  <h2>Состояние защиты</h2>
+  <h2>Состояние соединения</h2>
   <p id="status">До подтверждения учётной записи и Device камера и микрофон не включаются.</p>
   <details id="auth-diagnostics"><summary>Диагностика входа, звонка и медиа</summary><p>Показываются этапы входа, подготовки MLS/Join и (если открывался экран звонка) состояние ICE. Ключи, токены, Identity ID, grant и SDP не сохраняются.</p><button id="auth-diagnostics-copy" type="button" class="secondary">Скопировать отчёт</button><button id="auth-diagnostics-save" type="button" class="secondary">Сохранить JSON</button><pre id="auth-diagnostics-report" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto"></pre></details>
 </section>
