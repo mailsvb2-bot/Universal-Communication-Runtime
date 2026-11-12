@@ -725,7 +725,26 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         let joined = self.registry.join(claims.clone(), now_unix_ms);
         cancel_guard.armed = false;
         match joined {
-            Ok(outcome) => Ok(outcome),
+            Ok(outcome) => {
+                // Final admission fence: a different process can revoke the durable
+                // grant after the pre-Join read but before the local registry Join.
+                // Do not expose a successful Join response for that known-stale
+                // generation. This narrows the cross-process race; it is NOT a
+                // substitute for an atomic durable revoke/admission transaction.
+                let final_authority = fresh_now()
+                    .map(|clock| clock.max(now_unix_ms))
+                    .and_then(|clock| self.require_live_canonical_join_grant(&claims, clock));
+                if let Err(error) = final_authority {
+                    self.registry
+                        .leave_if_sequence(&claims, outcome.join_generation, now_unix_ms)
+                        .map_err(map_registry_error)?;
+                    let _ = self
+                        .release_sfu_call_placement_if_inactive(&claims, now_unix_ms)
+                        .await;
+                    return Err(error);
+                }
+                Ok(outcome)
+            }
             Err(error) => {
                 let error = map_registry_error(error);
                 let _ = self
@@ -5421,6 +5440,89 @@ mod sfu_placement_lifecycle_tests {
                 .is_err(),
             "durable revoke must override a still-live issuer-local token"
         );
+    }
+
+    #[tokio::test]
+    async fn post_join_authority_fence_removes_revoked_or_expired_generation() {
+        // The second clock callback runs only after registry.join. A concurrent
+        // canonical revoke (or lease expiry) must not produce an admitted Call.
+        for revoke in [true, false] {
+            let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+            let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
+            let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+            let binding = claims(
+                if revoke {
+                    "post-join-revoked"
+                } else {
+                    "post-join-expired"
+                },
+                "post-join-device",
+            );
+            let grant = service
+                .join_issuer
+                .issue(
+                    binding.scope,
+                    binding.call_id,
+                    binding.participant,
+                    binding.device_id,
+                    300,
+                    1_000,
+                )
+                .expect("issue canonical grant")
+                .claims;
+            service
+                .store
+                .persist_conference_join_grant(&ConferenceJoinGrantRecord {
+                    scope: grant.scope.clone(),
+                    conference_id: GroupId::from_opaque(id("post-join-conference")),
+                    integration_id: ucr_model::IntegrationId::from_opaque(id(
+                        "post-join-integration",
+                    )),
+                    call_id: grant.call_id.clone(),
+                    participant: grant.participant.clone(),
+                    device_id: grant.device_id.clone().expect("Device"),
+                    session_id: grant.session_id.clone(),
+                    issued_at_unix_ms: grant.issued_at_unix_ms,
+                    not_before_unix_ms: grant.not_before_unix_ms,
+                    expires_at_unix_ms: grant.expires_at_unix_ms,
+                    use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+                    revoked: false,
+                    redeemed: false,
+                })
+                .expect("persist canonical grant");
+            let store = Arc::clone(&service.store);
+            let callback_count = AtomicUsize::new(0);
+            let final_expiry = grant.expires_at_unix_ms;
+            let scope = grant.scope.clone();
+            let session_id = grant.session_id.clone();
+            let outcome = service
+                .admit_realtime_session_with_sfu_placement_clocked(grant, 1_001, || {
+                    let invocation = callback_count.fetch_add(1, Ordering::SeqCst);
+                    if invocation == 1 {
+                        if revoke {
+                            store
+                                .revoke_conference_join_grant(&scope, &session_id)
+                                .expect("revoke between registry Join and final fence");
+                        } else {
+                            return Ok(final_expiry);
+                        }
+                    }
+                    Ok(1_001)
+                })
+                .await;
+            assert_eq!(callback_count.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                outcome,
+                Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+                "post-Join revocation or expiry must reject the response"
+            );
+            assert_eq!(registry.active_session_count(), 0);
+            assert_eq!(
+                lifecycle.releases.load(Ordering::Relaxed),
+                1,
+                "rejected generation must release the SFU placement"
+            );
+        }
     }
 
     #[tokio::test]
