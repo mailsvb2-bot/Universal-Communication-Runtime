@@ -1402,7 +1402,7 @@ async function dial(contact,media) {
   // The calling panel sits ABOVE the contact list. Bring the confirmed new
   // Call into view instead of making a working button appear to do nothing.
   if(typeof document!=="undefined")
-    document.querySelector?.(".call-stage")?.scrollIntoView?.({behavior:"smooth",block:"start"});
+    document.querySelector?.("#pl-current-call")?.scrollIntoView?.({behavior:"smooth",block:"start"});
   message("Вызов создан. Ожидается реальное принятие другим участником.");
 }
 // Incoming alerts reflect only the authenticated Call owner's verified list.
@@ -1445,7 +1445,7 @@ function renderIncoming(items) {
         rememberActiveCall(result,session.participantId);
         showActive();
         if(typeof document!=="undefined")
-          document.querySelector?.(".call-stage")?.scrollIntoView?.({behavior:"smooth",block:"start"});
+          document.querySelector?.("#pl-current-call")?.scrollIntoView?.({behavior:"smooth",block:"start"});
         if (result.state === "active") {
           try { await beginMedia(result.callId); }
           catch (error) { message(mlsHint(error)); }
