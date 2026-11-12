@@ -1,3 +1,5 @@
+import {pickSystemContact,readSelectedVcard,smsDraftHref,PhonebookUnavailable} from "/phonebook.js";
+import {friendlyCallError,sharePublicInvite} from "/consumer-actions.js";
 // Report a missing generated browser bundle instead of hanging at login.
 let media;
 try {
@@ -175,6 +177,7 @@ const signup=document.getElementById("signup");
    field.value=code;
    field.setAttribute("data-invited-contact","true");
    document.getElementById("pl-invite-help").hidden=false;
+   document.getElementById("pl-add-by-invite").open=true;
  }
 
 const status = el("status");
@@ -183,6 +186,53 @@ const host = createUcrFirstPartyHttpHost(vault, {origin:location.origin});
 const calls = createUcrContactCallJourney(host,vault);
 let active = null, busy = false, navigating = false, refreshing = false, timer = null;
 let knownContacts = [];
+let selectedPhone = null,selectedPhoneScope=null;
+function resetPhonebook(){
+ selectedPhone=null;selectedPhoneScope=null;
+ el("pl-phonebook-result").hidden=true;el("pl-phonebook-result").textContent="";
+ el("pl-sms-invite").hidden=true;el("pl-vcard-file").value="";
+}
+function acceptPhoneContact(person) {
+ if(!person||!accountScope||!plOwnIdentity)return;
+ selectedPhone=person;selectedPhoneScope=accountScope;
+ el("pl-phonebook-result").textContent="Выбран "+person.displayName+". Для защищённого звонка необходимо обменяться приглашениями.";
+ el("pl-phonebook-result").hidden=false;
+ el("contact-name").value=person.displayName;
+ el("pl-sms-invite").hidden=!person.phone;
+ el("pl-add-by-invite").open=true;
+}
+el("pl-pick-phone-contact").addEventListener("click",async()=>{
+ const scope=accountScope,gen=uiAuthGeneration;
+ if(!scope||!plOwnIdentity){message("Сначала создайте профиль.");return;}
+ try{
+  const person=await pickSystemContact();
+  if(scope===accountScope&&gen===uiAuthGeneration&&person)acceptPhoneContact(person);
+ }catch(e){
+  if(scope!==accountScope||gen!==uiAuthGeneration)return;
+  if(e instanceof PhonebookUnavailable){message("Выбор контакта недоступен. Используйте .vcf.");el("pl-vcard-file").click();}
+  else if(e?.name!=="AbortError")message("Не удалось выбрать контакт.");
+ }
+});
+el("pl-open-vcard").addEventListener("click",()=>{
+ if(!accountScope||!plOwnIdentity){message("Сначала создайте профиль.");return;}
+ el("pl-vcard-file").click();
+});
+el("pl-vcard-file").addEventListener("change",async event=>{
+ const input=event.currentTarget,scope=accountScope,gen=uiAuthGeneration;
+ try{const file=input.files?.[0];if(!file||!scope||!plOwnIdentity)return;
+  const person=await readSelectedVcard(file);
+  if(scope===accountScope&&gen===uiAuthGeneration)acceptPhoneContact(person);
+ }catch(e){if(scope===accountScope&&gen===uiAuthGeneration)message(e?.message||"Ошибка чтения контакта.");}
+ finally{input.value="";}
+});
+el("pl-sms-invite").addEventListener("click",()=>{
+ if(!accountScope||!plOwnIdentity||selectedPhoneScope!==accountScope||!selectedPhone?.phone)return;
+ try{
+  const href=smsDraftHref(selectedPhone.phone,plInviteUrl(),location.origin);
+  const link=document.createElement("a");link.href=href;link.rel="noreferrer";link.click();
+ }catch(e){message(e?.message||"Ошибка приглашения.");}
+});
+el("pl-contacts-filter").addEventListener("input",()=>renderContacts(knownContacts));
 let accountScope = null;
 // Fence delayed authenticated reads across logout, revoke and same-Identity re-login.
 let uiAuthGeneration = 0;
@@ -194,6 +244,7 @@ let plOwnIdentity=null;
 function plSetSignedIn(identity){
   const nextIdentity=identity||null;
   if(plOwnIdentity!==nextIdentity){
+    resetPhonebook();
     // A manual invite is an account-scoped contact locator. Never show the
     // previous account's link after logout, revocation, or account switching.
     const manual=document.getElementById("pl-invite-manual");
@@ -212,6 +263,7 @@ function plSetSignedIn(identity){
     const invited=el("contact-peer").dataset.invitedContact==="true";
     if(invited) {
       el("pl-invite-help").hidden=false;
+      el("pl-add-by-invite").open=true;
       // The invite is only a locator, not authority to authenticate its sender.
       el("pl-contacts").scrollIntoView({behavior:"smooth",block:"start"});
       el("contact-name").focus({preventScroll:true});
@@ -234,6 +286,8 @@ function plClearAuthenticatedView(preserveRecoveryCode=false){
   accountScope=null;
   active=null;
   knownContacts=[];
+  resetPhonebook();
+  el("pl-contacts-filter").value="";
   idempotency.clear();
   renderContacts([]);
   renderIncoming([]);
@@ -296,18 +350,18 @@ async function plCopyInvite() {
 async function plShareInvite() {
   const url=plInviteUrl();
   if(!url){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
-  if(typeof navigator.share==="function"){
-    try{
-      await navigator.share({title:"PetrelLink — контакт",url});
-      return;
-    }catch(error){
-      // A cancelled native share must not leak credentials or trigger a
-      // second prompt. Make the link visibly available for manual sharing.
-      plShowInviteForManualCopy(url);
-      return;
-    }
-  }
-  await plCopyInvite();
+  try {
+    const result=await sharePublicInvite({
+      url,origin:location.origin,navigatorLike:navigator,
+      copyFallback:async safe=>{
+        if(!navigator.clipboard?.writeText)throw Error("clipboard unavailable");
+        await navigator.clipboard.writeText(safe);
+      },
+    });
+    if(result==="shared"||result==="cancelled")return;
+    if(result==="copied"){message("Приглашение скопировано.");return;}
+  }catch(_){}
+  plShowInviteForManualCopy(url);
 }
 el("pl-copy-invite").addEventListener("click",()=>{void plCopyInvite();});
 el("pl-share-invite").addEventListener("click",()=>{void plShareInvite();});
@@ -669,9 +723,11 @@ async function run(action) {
 }
 function renderContacts(contacts) {
   knownContacts = contacts.slice();
+  const filter=el("pl-contacts-filter").value.trim().toLocaleLowerCase();
   const list = el("contacts");
   list.replaceChildren();
   for (const contact of contacts) {
+    if(filter&&!contact.displayName.toLocaleLowerCase().includes(filter))continue;
     const li = document.createElement("li");
     const title = document.createElement("strong");
     title.append(textNode(contact.displayName));
@@ -681,9 +737,18 @@ function renderContacts(contacts) {
     const actions = document.createElement("div");
     actions.className = "actions";
     actions.append(
-      btn("Аудиозвонок", () => dial(contact,"audio")),
-      btn("Видеозвонок", () => dial(contact,"video")),
+      btn("Аудиозвонок", () => dial(contact,"audio").catch(e => {throw Error(friendlyCallError(e));})),
+      btn("Видеозвонок", () => dial(contact,"video").catch(e => {throw Error(friendlyCallError(e));})),
+      btn("Переименовать", async () => {
+        const value=window.prompt("Имя контакта",contact.displayName);
+        if(value===null)return;
+        const name=value.trim();
+        if(!name||name.length>128)throw Error("Введите имя до 128 символов.");
+        await calls.renameContact(contact.id,name);
+        await updateContacts();
+      },"secondary"),
       btn("Удалить", async () => {
+        if(!window.confirm("Удалить контакт «"+contact.displayName+"»?"))return;
         await calls.removeContact(contact.id);
         await updateContacts();
       },"secondary"),
@@ -1559,6 +1624,8 @@ el("new-contact").addEventListener("submit", event => {
       throw Error("Этот человек уже добавлен в контакты.");
     }
     await calls.addContact(name,peer);
+    resetPhonebook();
+    el("pl-add-by-invite").open=false;
     el("new-contact").reset();
     delete el("contact-peer").dataset.invitedContact;
     el("pl-invite-help").hidden=true;

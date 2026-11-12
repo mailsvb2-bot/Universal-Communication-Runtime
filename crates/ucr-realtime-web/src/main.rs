@@ -47,6 +47,8 @@ const MAX_SIGNALING_ICE_MID_BYTES: usize = 256;
 const CLIENT_HTML: &str = include_str!("../static/client.html");
 const FIRST_PARTY_START_HTML: &str = include_str!("../static/start.html");
 const FIRST_PARTY_START_JS: &str = include_str!("../static/start.js");
+const FIRST_PARTY_PHONEBOOK_JS: &str = include_str!("../static/phonebook.js");
+const FIRST_PARTY_CONSUMER_ACTIONS_JS: &str = include_str!("../static/consumer-actions.js");
 const FIRST_PARTY_READINESS_JS: &str = include_str!("../static/readiness.js");
 const MOBILE_BROWSER_PROBE_JS: &str = include_str!("../static/mobile-browser-probe.js");
 
@@ -742,6 +744,8 @@ fn first_party_static_response(path: &str) -> Option<HttpResponse> {
     Some(match path {
         "/start" | "/start.html" => first_party_start_response(),
         "/start.js" => first_party_start_js_response(),
+        "/phonebook.js" => static_script_response(FIRST_PARTY_PHONEBOOK_JS),
+        "/consumer-actions.js" => static_script_response(FIRST_PARTY_CONSUMER_ACTIONS_JS),
         "/readiness.js" => first_party_readiness_js_response(),
         "/mobile-browser-probe.js" => mobile_browser_probe_js_response(),
         "/favicon.ico" => favicon_response(),

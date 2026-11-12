@@ -190,6 +190,11 @@ export function createUcrContactCallJourney(
       await stillSame(auth);
       return entry;
     },
+    async renameContact(contactId:string,name:string):Promise<void> {
+      const auth=await session();
+      await book(auth).rename(contactId,name);
+      await stillSame(auth);
+    },
     async removeContact(contactId:string):Promise<void> {
       const auth=await session();
       await book(auth).remove(contactId);

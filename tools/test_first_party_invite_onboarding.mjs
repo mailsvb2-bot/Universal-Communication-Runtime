@@ -17,6 +17,7 @@ function makeView({code="alice.device-1",invited=true,scope=null,identity=null}=
   const recoveryCode={value:"one-time-recovery"};
   const nodes={
     "contact-peer":peer,
+    "pl-contacts-filter":{value:"previous-user-search"},
     "new-contact":{reset(){peer.value="";}},
     "devices":{replaceChildren(){}},
     "who":{textContent:""},
@@ -28,6 +29,7 @@ function makeView({code="alice.device-1",invited=true,scope=null,identity=null}=
     accountScope:scope,plOwnIdentity:identity,uiAuthGeneration:0,
     active:{},knownContacts:[{id:"old"}],timer:null,idempotency:new Map([["old",true]]),
     clearInterval(){},renderContacts(){},renderIncoming(){},showActive(){},
+    resetPhonebook(){state.phonebookResets=(state.phonebookResets??0)+1;},
     plSetSignedIn(){state.plOwnIdentity=null;},
     el(id){assert.ok(nodes[id],"unexpected UI node "+id);return nodes[id];},
   };
@@ -44,6 +46,7 @@ assert.equal(anonymous.state.accountScope,null);
 assert.equal(anonymous.state.active,null);
 assert.equal(anonymous.state.knownContacts.length,0);
 assert.equal(anonymous.state.uiAuthGeneration,1);
+assert.equal(anonymous.state.phonebookResets,1,"phonebook selection cleared on auth reset");
 assert.equal(anonymous.recoveryCode.value,"",
   "ordinary anonymous cleanup must not retain old recovery credentials");
 

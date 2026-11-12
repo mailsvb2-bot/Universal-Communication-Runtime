@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import vm from "node:vm";
+import {sharePublicInvite} from "../crates/ucr-realtime-web/static/consumer-actions.js";
 const js=readFileSync("crates/ucr-realtime-web/static/start.js","utf8");
 const start=js.indexOf("function plInviteUrl(){");
 const end=js.indexOf("function authHttpCode(error){",start);
@@ -21,7 +22,8 @@ function el(id){
 const clipboard=[];
 const ctx={plOwnIdentity:"known-peer",location:{origin:"https://example.test"},navigator:{clipboard:{writeText:async url=>{clipboard.push(url);}}},
 document:{createElement:tag=>({tag,children:[],style:{},append(...v){this.children.push(...v);for(const x of v)if(x.id)elements.set(x.id,x)},setAttribute(){},focus(){this.focused=true},select(){this.selected=true}})},
-el,message:v=>messages.push(v),busy:true,navigating:true,run:()=>{throw Error("invitation must not be gated on run()")},URL};
+el,message:v=>messages.push(v),busy:true,navigating:true,
+sharePublicInvite,resetPhonebook(){},run:()=>{throw Error("invitation must not be gated on run()")},URL};
 vm.runInNewContext(js.slice(start,end),ctx);
 listeners.get("pl-copy-invite:click")();
 await new Promise(resolve=>setImmediate(resolve));
@@ -55,3 +57,5 @@ listeners.get("pl-copy-invite:click")();
 await new Promise(resolve=>setImmediate(resolve));
 assert.ok(messages.at(-1).includes("Сначала подтвердите профиль"));
 console.log("PASS: invite copy/share work under busy lock, denied clipboard/share, missing identity");
+// This existing CI entrypoint also runs the real consumer contact/phonebook contract.
+await import("../tests/consumer_phonebook.test.mjs");
