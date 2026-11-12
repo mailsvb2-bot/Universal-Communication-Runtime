@@ -694,7 +694,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     where
         S: ConferenceJoinGrantStore,
     {
-        let _guard = self
+        let placement_guard = self
             .sfu_placement_transition_guard(&claims.scope, &claims.call_id)
             .await;
         // Redemption can precede this mutex. Recheck the SAME canonical
@@ -723,14 +723,51 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             return Err(error);
         }
         let joined = self.registry.join(claims.clone(), now_unix_ms);
-        cancel_guard.armed = false;
         match joined {
-            Ok(outcome) => Ok(outcome),
+            Ok(outcome) => {
+                // A concurrent process may revoke the grant after the
+                // pre-Join read. This additional fence narrows that interval;
+                // it does not claim atomic cross-process admission/revoke.
+                let final_authority = fresh_now()
+                    .map(|clock| clock.max(now_unix_ms))
+                    .and_then(|clock| self.require_live_canonical_join_grant(&claims, clock));
+                if let Err(error) = final_authority {
+                    // A reconnect may have replaced an existing registry
+                    // generation while its WebRTC provider is still alive.
+                    // Queue shutdown BEFORE retiring that exact generation.
+                    // The existing pending-close queue survives provider errors.
+                    self.registry
+                        .queue_webrtc_close(&claims)
+                        .map_err(map_registry_error)?;
+                    self.registry
+                        .leave_if_sequence(&claims, outcome.join_generation, now_unix_ms)
+                        .map_err(map_registry_error)?;
+                    // Never await provider shutdown while holding the per-Call
+                    // placement gate, and never release placement before peer
+                    // closure is confirmed. If close or release fails (or the
+                    // task is cancelled), PlacementCancelGuard queues a retry.
+                    drop(placement_guard);
+                    self.confirm_pending_webrtc_close(
+                        &claims.scope,
+                        &claims.call_id,
+                        &claims.session_id,
+                    )
+                    .await?;
+                    self.release_sfu_call_placement_if_inactive(&claims, now_unix_ms)
+                        .await?;
+                    cancel_guard.armed = false;
+                    return Err(error);
+                }
+                cancel_guard.armed = false;
+                Ok(outcome)
+            }
             Err(error) => {
                 let error = map_registry_error(error);
-                let _ = self
-                    .release_sfu_call_placement_if_inactive(&claims, now_unix_ms)
-                    .await;
+                // A placement acquired before registry Join must remain queued
+                // for retry if release fails or is cancelled.
+                self.release_sfu_call_placement_if_inactive(&claims, now_unix_ms)
+                    .await?;
+                cancel_guard.armed = false;
                 Err(error)
             }
         }
@@ -5420,6 +5457,177 @@ mod sfu_placement_lifecycle_tests {
                 .require_live_canonical_join_grant(claims, 1_001)
                 .is_err(),
             "durable revoke must override a still-live issuer-local token"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_join_authority_fence_removes_revoked_or_expired_generation() {
+        // The second clock callback runs only after registry.join. A concurrent
+        // canonical revoke (or lease expiry) must not produce an admitted Call.
+        for revoke in [true, false] {
+            let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+            let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
+            let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+            let binding = claims(
+                if revoke {
+                    "post-join-revoked"
+                } else {
+                    "post-join-expired"
+                },
+                "post-join-device",
+            );
+            let grant = service
+                .join_issuer
+                .issue(
+                    binding.scope,
+                    binding.call_id,
+                    binding.participant,
+                    binding.device_id,
+                    300,
+                    1_000,
+                )
+                .expect("issue canonical grant")
+                .claims;
+            service
+                .store
+                .persist_conference_join_grant(&ConferenceJoinGrantRecord {
+                    scope: grant.scope.clone(),
+                    conference_id: GroupId::from_opaque(id("post-join-conference")),
+                    integration_id: ucr_model::IntegrationId::from_opaque(id(
+                        "post-join-integration",
+                    )),
+                    call_id: grant.call_id.clone(),
+                    participant: grant.participant.clone(),
+                    device_id: grant.device_id.clone().expect("Device"),
+                    session_id: grant.session_id.clone(),
+                    issued_at_unix_ms: grant.issued_at_unix_ms,
+                    not_before_unix_ms: grant.not_before_unix_ms,
+                    expires_at_unix_ms: grant.expires_at_unix_ms,
+                    use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+                    revoked: false,
+                    redeemed: false,
+                })
+                .expect("persist canonical grant");
+            let store = Arc::clone(&service.store);
+            let callback_count = AtomicUsize::new(0);
+            let final_expiry = grant.expires_at_unix_ms;
+            let scope = grant.scope.clone();
+            let session_id = grant.session_id.clone();
+            let outcome = service
+                .admit_realtime_session_with_sfu_placement_clocked(grant, 1_001, || {
+                    let invocation = callback_count.fetch_add(1, Ordering::SeqCst);
+                    if invocation == 1 {
+                        if revoke {
+                            store
+                                .revoke_conference_join_grant(&scope, &session_id)
+                                .expect("revoke between registry Join and final fence");
+                        } else {
+                            return Ok(final_expiry);
+                        }
+                    }
+                    Ok(1_001)
+                })
+                .await;
+            assert_eq!(callback_count.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                outcome,
+                Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated)),
+                "post-Join revocation or expiry must reject the response"
+            );
+            assert_eq!(registry.active_session_count(), 0);
+            assert_eq!(
+                lifecycle.releases.load(Ordering::Relaxed),
+                1,
+                "rejected generation must release the SFU placement"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn post_join_revoke_retains_failed_sfu_placement_release_for_retry() {
+        let registry = Arc::new(RealtimeSessionRegistry::with_expired_call_cleanup(8, 2));
+        let lifecycle = Arc::new(FailFirstReleasePlacementLifecycle::default());
+        let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+        let binding = claims("post-join-retry-session", "post-join-retry-device");
+        let grant = service
+            .join_issuer
+            .issue(
+                binding.scope,
+                binding.call_id,
+                binding.participant,
+                binding.device_id,
+                300,
+                1_000,
+            )
+            .expect("issue canonical grant")
+            .claims;
+        service
+            .store
+            .persist_conference_join_grant(&ConferenceJoinGrantRecord {
+                scope: grant.scope.clone(),
+                conference_id: GroupId::from_opaque(id("post-join-retry-conference")),
+                integration_id: ucr_model::IntegrationId::from_opaque(id(
+                    "post-join-retry-integration",
+                )),
+                call_id: grant.call_id.clone(),
+                participant: grant.participant.clone(),
+                device_id: grant.device_id.clone().expect("Device"),
+                session_id: grant.session_id.clone(),
+                issued_at_unix_ms: grant.issued_at_unix_ms,
+                not_before_unix_ms: grant.not_before_unix_ms,
+                expires_at_unix_ms: grant.expires_at_unix_ms,
+                use_policy: ConferenceJoinGrantUsePolicy::Reusable,
+                revoked: false,
+                redeemed: false,
+            })
+            .expect("persist canonical grant");
+        let store = Arc::clone(&service.store);
+        let scope = grant.scope.clone();
+        let call_id = grant.call_id.clone();
+        let session_id = grant.session_id.clone();
+        let callbacks = AtomicUsize::new(0);
+        let result = service
+            .admit_realtime_session_with_sfu_placement_clocked(grant, 1_001, || {
+                if callbacks.fetch_add(1, Ordering::SeqCst) == 1 {
+                    store
+                        .revoke_conference_join_grant(&scope, &session_id)
+                        .expect("revoke after registry admission");
+                }
+                Ok(1_001)
+            })
+            .await;
+        assert_eq!(
+            result,
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            ))
+        );
+        assert_eq!(registry.active_session_count(), 0);
+        assert!(
+            registry
+                .pending_webrtc_closes()
+                .expect("provider closes")
+                .is_empty(),
+            "confirmed provider close must precede placement release"
+        );
+        assert_eq!(lifecycle.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            registry
+                .expired_call_cleanup_candidates_at(1_002)
+                .expect("pending placement release"),
+            vec![(scope.clone(), call_id.clone())],
+            "release failure must remain retryable even with no active session"
+        );
+        service
+            .sweep_expired_sfu_placements_at(1_002)
+            .await
+            .expect("retry placement release");
+        assert_eq!(lifecycle.attempts.load(Ordering::SeqCst), 2);
+        assert!(
+            registry
+                .expired_call_cleanup_candidates_at(1_003)
+                .expect("acknowledged release")
+                .is_empty()
         );
     }
 
