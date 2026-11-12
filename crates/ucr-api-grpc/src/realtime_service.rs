@@ -694,7 +694,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     where
         S: ConferenceJoinGrantStore,
     {
-        let _guard = self
+        let placement_guard = self
             .sfu_placement_transition_guard(&claims.scope, &claims.call_id)
             .await;
         // Redemption can precede this mutex. Recheck the SAME canonical
@@ -723,33 +723,51 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             return Err(error);
         }
         let joined = self.registry.join(claims.clone(), now_unix_ms);
-        cancel_guard.armed = false;
         match joined {
             Ok(outcome) => {
-                // Final admission fence: a different process can revoke the durable
-                // grant after the pre-Join read but before the local registry Join.
-                // Do not expose a successful Join response for that known-stale
-                // generation. This narrows the cross-process race; it is NOT a
-                // substitute for an atomic durable revoke/admission transaction.
+                // A concurrent process may revoke the grant after the
+                // pre-Join read. This additional fence narrows that interval;
+                // it does not claim atomic cross-process admission/revoke.
                 let final_authority = fresh_now()
                     .map(|clock| clock.max(now_unix_ms))
                     .and_then(|clock| self.require_live_canonical_join_grant(&claims, clock));
                 if let Err(error) = final_authority {
+                    // A reconnect may have replaced an existing registry
+                    // generation while its WebRTC provider is still alive.
+                    // Queue shutdown BEFORE retiring that exact generation.
+                    // The existing pending-close queue survives provider errors.
+                    self.registry
+                        .queue_webrtc_close(&claims)
+                        .map_err(map_registry_error)?;
                     self.registry
                         .leave_if_sequence(&claims, outcome.join_generation, now_unix_ms)
                         .map_err(map_registry_error)?;
-                    let _ = self
-                        .release_sfu_call_placement_if_inactive(&claims, now_unix_ms)
-                        .await;
+                    // Never await provider shutdown while holding the per-Call
+                    // placement gate, and never release placement before peer
+                    // closure is confirmed. If close or release fails (or the
+                    // task is cancelled), PlacementCancelGuard queues a retry.
+                    drop(placement_guard);
+                    self.confirm_pending_webrtc_close(
+                        &claims.scope,
+                        &claims.call_id,
+                        &claims.session_id,
+                    )
+                    .await?;
+                    self.release_sfu_call_placement_if_inactive(&claims, now_unix_ms)
+                        .await?;
+                    cancel_guard.armed = false;
                     return Err(error);
                 }
+                cancel_guard.armed = false;
                 Ok(outcome)
             }
             Err(error) => {
                 let error = map_registry_error(error);
-                let _ = self
-                    .release_sfu_call_placement_if_inactive(&claims, now_unix_ms)
-                    .await;
+                // A placement acquired before registry Join must remain queued
+                // for retry if release fails or is cancelled.
+                self.release_sfu_call_placement_if_inactive(&claims, now_unix_ms)
+                    .await?;
+                cancel_guard.armed = false;
                 Err(error)
             }
         }
