@@ -55,6 +55,21 @@ const KEY="petrellink.language.v1";
     "Ваш профиль готов":"Your profile is ready",
     "Добавьте контакт для первого звонка.":"Add a contact to make your first call.",
     "Создать профиль":"Create profile",
+    "Вы на связи":"You're connected",
+    "Кому позвонить?":"Who would you like to call?",
+    "Позвонить":"Audio call",
+    "Пригласить друга":"Invite someone",
+    "Скопировать ссылку":"Copy invitation link",
+    "Настройки контакта":"Contact options",
+    "По вашему запросу контакты не найдены.":"No matching contacts.",
+    "Контактов пока нет. Пригласите друга с помощью кнопки выше.":"No contacts yet. Invite someone using the button above.",
+    "Звонок":"Call",
+    "Соединение":"Connecting",
+    "Подробнее о соединении":"Connection details",
+    "Состояние соединения":"Connection status",
+    "Выбрать контакт":"Choose contact",
+    "Импорт контакта (.vcf)":"Import contact (.vcf)",
+    "Добавить знакомого по приглашению":"Add someone using an invitation",
     "Скопировать приглашение":"Copy invitation",
     "Поделиться приглашением":"Share invitation",
     "Контакты":"Contacts",
@@ -186,6 +201,12 @@ const host = createUcrFirstPartyHttpHost(vault, {origin:location.origin});
 const calls = createUcrContactCallJourney(host,vault);
 let active = null, busy = false, navigating = false, refreshing = false, timer = null;
 let knownContacts = [];
+// Native Contact Picker is not available on most desktop browsers.
+const phonePickerSupported=typeof navigator.contacts?.select==="function";
+if(!phonePickerSupported){
+ el("pl-pick-phone-contact").hidden=true;
+ el("pl-phonebook-help").textContent="На этом устройстве можно пригласить друга ссылкой или выбрать файл одного контакта (.vcf).";
+}
 let selectedPhone = null,selectedPhoneScope=null;
 function resetPhonebook(){
  selectedPhone=null;selectedPhoneScope=null;
@@ -254,9 +275,11 @@ function plSetSignedIn(identity){
   }
   plOwnIdentity=nextIdentity;
   const logged=Boolean(plOwnIdentity);
+  document.body?.classList?.toggle("pl-signed-in",logged);
   el("pl-new-user").hidden=logged;
   el("pl-user-cabinet").hidden=!logged;
-  for(const id of ["pl-contacts","pl-incoming","pl-current-call"])el(id).hidden=!logged;
+  el("pl-contacts").hidden=!logged;
+  if(!logged){el("pl-incoming").hidden=true;el("pl-current-call").hidden=true;}
   if(logged){
     el("pl-friendly-identity").dataset.plOriginalText="Профиль активен. Пригласите знакомого или выберите контакт для звонка.";
     el("pl-friendly-identity").textContent=localize("Профиль активен. Пригласите знакомого или выберите контакт для звонка.");
@@ -726,19 +749,34 @@ function renderContacts(contacts) {
   const filter=el("pl-contacts-filter").value.trim().toLocaleLowerCase();
   const list = el("contacts");
   list.replaceChildren();
-  for (const contact of contacts) {
-    if(filter&&!contact.displayName.toLocaleLowerCase().includes(filter))continue;
+  const shown=contacts.filter(c=>!filter||c.displayName.toLocaleLowerCase().includes(filter))
+    .sort((a,b)=>a.displayName.localeCompare(b.displayName,lang));
+  for (const contact of shown) {
     const li = document.createElement("li");
+    li.className="pl-contact-card";
+    const heading=document.createElement("div");
+    heading.className="pl-contact-heading";
+    const avatar=document.createElement("span");
+    avatar.className="pl-contact-avatar";
+    avatar.setAttribute("aria-hidden","true");
+    avatar.textContent=contact.displayName.trim().slice(0,1).toLocaleUpperCase();
     const title = document.createElement("strong");
     title.append(textNode(contact.displayName));
-    const identity = document.createElement("div");
-    identity.className = "identity";
-    identity.textContent = contact.peerIdentityId;
+    heading.append(avatar,title);
     const actions = document.createElement("div");
     actions.className = "actions";
-    actions.append(
-      btn("Аудиозвонок", () => dial(contact,"audio").catch(e => {throw Error(friendlyCallError(e));})),
-      btn("Видеозвонок", () => dial(contact,"video").catch(e => {throw Error(friendlyCallError(e));})),
+    const audio=btn("Позвонить", () => dial(contact,"audio").catch(e=>{throw Error(friendlyCallError(e));}));
+    const video=btn("Видеозвонок", () => dial(contact,"video").catch(e=>{throw Error(friendlyCallError(e));}));
+    audio.setAttribute("aria-label","Аудиозвонок: "+contact.displayName);
+    video.setAttribute("aria-label","Видеозвонок: "+contact.displayName);
+    actions.append(audio,video);
+    const tools=document.createElement("details");
+    tools.className="pl-contact-tools";
+    const summary=document.createElement("summary");
+    summary.textContent="Настройки контакта";
+    const more=document.createElement("div");
+    more.className="actions";
+    more.append(
       btn("Переименовать", async () => {
         const value=window.prompt("Имя контакта",contact.displayName);
         if(value===null)return;
@@ -753,13 +791,19 @@ function renderContacts(contacts) {
         await updateContacts();
       },"secondary"),
     );
-    li.append(title,identity,actions);
+    tools.append(summary,more);
+    li.append(heading,actions,tools);
     list.append(li);
   }
   if (!contacts.length) {
     const li = document.createElement("li");
-    li.dataset.plOriginalText = "Контактов пока нет. Пригласите знакомого по ссылке или добавьте его код.";
+    li.dataset.plOriginalText = "Контактов пока нет. Пригласите друга с помощью кнопки выше.";
     li.textContent = localize(li.dataset.plOriginalText);
+    list.append(li);
+  } else if (!shown.length) {
+    const li=document.createElement("li");
+    li.dataset.plOriginalText="По вашему запросу контакты не найдены.";
+    li.textContent=localize(li.dataset.plOriginalText);
     list.append(li);
   }
 }
@@ -772,8 +816,27 @@ async function updateContacts() {
 function nameFor(identity) {
   return knownContacts.find(c => c.peerIdentityId === identity)?.displayName ?? identity;
 }
+function friendlyCallState(value){
+  return ({
+    inviting:"Вызываем собеседника…",
+    ringing:"Идёт вызов…",
+    active:"Звонок принят",
+    reconnecting:"Восстанавливаем соединение…",
+    terminated:"Звонок завершён",
+  })[value]||"Проверяем звонок…";
+}
 function showActive() {
   const state = el("call-state");
+  const hasCall=Boolean(active&&active.call.state!=="terminated");
+  // A terminated, compromised MLS Call has a user-triggered recovery action.
+  // Keep its panel available without treating the terminated Call as active.
+  const canRecover=Boolean(active &&
+    active.call.state==="terminated" &&
+    active.identity===active.call.callerIdentityId &&
+    compromisedCalls().has(active.call.callId));
+  el("pl-current-call").hidden=!(hasCall||canRecover);
+  const callPanel=document.querySelector?.(".call-stage");
+  if(callPanel)callPanel.hidden=!hasCall;
   if (!active) {
     state.textContent = localize("Нет активного вызова.");
     el("cancel").hidden = true;
@@ -782,12 +845,10 @@ function showActive() {
   }
   const remote = active.call.callerIdentityId === active.identity
     ? active.call.calleeIdentityId : active.call.callerIdentityId;
-  state.textContent = nameFor(remote) + " — " + active.call.state
+  state.textContent = nameFor(remote) + " — " + friendlyCallState(active.call.state)
     + " (" + (active.call.media === "video" ? "видео" : "аудио") + ")";
   el("cancel").hidden = active.call.state === "terminated";
-  if (active.call.state === "terminated" &&
-      active.identity === active.call.callerIdentityId &&
-      compromisedCalls().has(active.call.callId)) {
+  if (canRecover) {
     // A compromised MLS Group is never reused. Re-entry creates an entirely
     // new canonical Call (hence a different derived endpoint-owned Group).
     // The ordinary accepted-Call path below then performs Device-owned
@@ -1342,12 +1403,18 @@ async function dial(contact,media) {
   active = {call,identity:session.participantId};
   rememberActiveCall(call,session.participantId);
   showActive();
+  // The calling panel sits ABOVE the contact list. Bring the confirmed new
+  // Call into view instead of making a working button appear to do nothing.
+  if(typeof document!=="undefined")
+    document.querySelector?.("#pl-current-call")?.scrollIntoView?.({behavior:"smooth",block:"start"});
   message("Вызов создан. Ожидается реальное принятие другим участником.");
 }
 // Incoming alerts reflect only the authenticated Call owner's verified list.
 // A tab title remains visible without prompting for browser notification grants.
 const ordinaryPageTitle = typeof document === "undefined" ? "PetrelLink" : document.title;
 function renderIncoming(items) {
+  const incomingPanel=document.querySelector?.("#pl-incoming");
+  if(incomingPanel)incomingPanel.hidden=!accountScope||items.length===0;
   if (typeof document !== "undefined") document.title = items.length > 0 && accountScope
     ? "Входящий вызов · PetrelLink" : ordinaryPageTitle;
   const list = el("incoming");
@@ -1358,8 +1425,7 @@ function renderIncoming(items) {
     heading.textContent = nameFor(call.callerIdentityId);
     const description = document.createElement("div");
     description.className = "identity";
-    description.textContent = "Входящий " + (call.media==="video" ? "видеовызов" : "аудиовызов")
-      + " — " + call.callId;
+    description.textContent = "Входящий " + (call.media==="video" ? "видеозвонок" : "звонок");
     const actions = document.createElement("div");
     actions.className = "actions";
     actions.append(
@@ -1382,6 +1448,8 @@ function renderIncoming(items) {
         active = {call:result,identity:session.participantId};
         rememberActiveCall(result,session.participantId);
         showActive();
+        if(typeof document!=="undefined")
+          document.querySelector?.("#pl-current-call")?.scrollIntoView?.({behavior:"smooth",block:"start"});
         if (result.state === "active") {
           try { await beginMedia(result.callId); }
           catch (error) { message(mlsHint(error)); }

@@ -143,8 +143,15 @@ assert 'accountScope=null;\n  active=null;\n  knownContacts=[];' in JS, (
     "failed authentication must clear prior principal's UI data"
 )
 # Dynamic controls must be created with the common click-binding helper.
-for label in ("Аудиозвонок", "Видеозвонок", "Удалить", "Отозвать устройство", "Принять", "Отклонить"):
+# The consumer audio CTA says "Позвонить", while its accessible name still
+# specifies "Аудиозвонок" and it must invoke the canonical dial("audio").
+for label in ("Видеозвонок", "Удалить", "Отозвать устройство", "Принять", "Отклонить"):
     assert 'btn("' + label + '"' in JS, "missing dynamic control: " + label
+assert 'btn("Аудиозвонок"' in JS or (
+    'btn("Позвонить"' in JS and
+    'audio.setAttribute("aria-label","Аудиозвонок: "+contact.displayName)' in JS and
+    'dial(contact,"audio")' in JS
+), "consumer audio Call must remain accessible and canonical"
 assert 'button.addEventListener("click", () => void run(callback))' in JS
 assert "const session = await restoreSession();" in JS
 assert "const call = await calls.start(contact.id,media,requestId);" in JS
