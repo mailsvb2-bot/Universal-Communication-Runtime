@@ -81,4 +81,36 @@ vm.runInNewContext(js.slice(begin,finish),{
  el:id=>id==="pl-pick-phone-contact"?supportedPicker:element()
 });
 assert.equal(supportedPicker.hidden,false);
+// Compromised, terminated caller Calls must keep their recovery action visible.
+const showBegin=js.indexOf("function showActive() {");
+const showEnd=js.indexOf("// The first-party /start page",showBegin);
+assert.ok(showBegin>=0&&showEnd>showBegin);
+function renderCallPanel({state,compromised,owner=true}){
+  const panel=element("section"),stage=element("section"),status=element("p"),cancel=element("button");
+  const recovered=[];
+  const call={state,callId:"call-1",callerIdentityId:"alice",calleeIdentityId:"bob",media:"video"};
+  const scope={active:{call,identity:owner?"alice":"bob"},accountScope:"scope",
+    document:{querySelector:()=>stage},el:id=>({"pl-current-call":panel,"call-state":status,cancel}[id]),
+    compromisedCalls:()=>new Set(compromised?["call-1"]:[]),
+    nameFor:()=> "Друг",friendlyCallState:value=>value,
+    setCallStage:()=>{},btn:(label)=>{recovered.push(label);return element("button");}};
+  vm.runInNewContext(js.slice(showBegin,showEnd)+"\nthis.showActive=showActive;",scope);
+  scope.showActive();
+  return {panel,stage,recovered,cancel};
+}
+const recoverable=renderCallPanel({state:"terminated",compromised:true});
+assert.equal(recoverable.panel.hidden,false,"compromised caller recovery must remain visible");
+assert.equal(recoverable.stage.hidden,true,"terminated Call must not reopen live call stage");
+assert.deepEqual(recoverable.recovered,["Новый защищённый звонок"]);
+assert.equal(recoverable.cancel.hidden,true);
+for (const options of [
+  {state:"terminated",compromised:false},
+  {state:"terminated",compromised:true,owner:false},
+]) {
+  const result=renderCallPanel(options);
+  assert.equal(result.panel.hidden,true,"normal terminated calls should close");
+  assert.equal(result.recovered.length,0);
+}
+assert.equal(renderCallPanel({state:"ringing",compromised:false}).panel.hidden,false);
+
 console.log("PASS: consumer UI renders searchable cards, real audio/video actions, correct empty states and honest picker fallback");

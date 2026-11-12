@@ -828,7 +828,13 @@ function friendlyCallState(value){
 function showActive() {
   const state = el("call-state");
   const hasCall=Boolean(active&&active.call.state!=="terminated");
-  el("pl-current-call").hidden=!hasCall;
+  // A terminated, compromised MLS Call has a user-triggered recovery action.
+  // Keep its panel available without treating the terminated Call as active.
+  const canRecover=Boolean(active &&
+    active.call.state==="terminated" &&
+    active.identity===active.call.callerIdentityId &&
+    compromisedCalls().has(active.call.callId));
+  el("pl-current-call").hidden=!(hasCall||canRecover);
   const callPanel=document.querySelector?.(".call-stage");
   if(callPanel)callPanel.hidden=!hasCall;
   if (!active) {
@@ -842,9 +848,7 @@ function showActive() {
   state.textContent = nameFor(remote) + " — " + friendlyCallState(active.call.state)
     + " (" + (active.call.media === "video" ? "видео" : "аудио") + ")";
   el("cancel").hidden = active.call.state === "terminated";
-  if (active.call.state === "terminated" &&
-      active.identity === active.call.callerIdentityId &&
-      compromisedCalls().has(active.call.callId)) {
+  if (canRecover) {
     // A compromised MLS Group is never reused. Re-entry creates an entirely
     // new canonical Call (hence a different derived endpoint-owned Group).
     // The ordinary accepted-Call path below then performs Device-owned
