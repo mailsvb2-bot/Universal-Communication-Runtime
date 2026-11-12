@@ -7,6 +7,7 @@ No new call authority, shadow contact directory, account identifier, phone looku
 - Contacts become the first useful signed-in screen, ahead of technical call internals.
 - Each private contact displays one primary audio action and one video action, both wired to `dial(contact,media)` -> `calls.start()` through the current Device-bound BFF.
 - Search handles empty matches and contacts are sorted; rename/delete remain available in per-contact options.
+- When a user starts or accepts a Call, the active panel is scrolled into view so the button visibly responds.
 - During a call, the actual Call state is shown in ordinary language. Incoming calls are emphasized only when present.
 - Detailed stages and diagnostics remain accessible but do not dominate the screen.
 - Unsupported Contacts Picker browsers (notably desktop Chrome) do not display a nonworking native picker. User can still import one .vcf or send an invite.
