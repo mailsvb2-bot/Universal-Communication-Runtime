@@ -1912,7 +1912,7 @@ plUI('contacts').addEventListener('click',event=>{
  if(n!==0&&n!==1)return;
  plQuickVideo.checked=n===1;plUiSave();
 },true);
-plQuickAction.addEventListener('click',()=>{
+el("pl-quick-action").addEventListener("click",()=>{
  plUiSave();
  if(!document.body.classList.contains('pl-signed-in')){
   const signup=plUI('signup');
