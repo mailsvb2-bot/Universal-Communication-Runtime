@@ -1855,3 +1855,87 @@ void (async () => {
   }
   finally { busy = false; }
 })();
+
+/* BEGIN PETRELLINK-CONSUMER-20261113-V3 - presentation only, canonical auth/calls remain in start.js */
+const PL_UI_KEY='petrellink.ui.preferences.v1';
+const plUI=id=>document.getElementById(id);
+const plQuickPanel=plUI('pl-quick-panel'),plQuickName=plUI('pl-quick-name');
+const plQuickVideo=plUI('pl-quick-video'),plQuickMic=plUI('pl-quick-mic');
+const plQuickAction=plUI('pl-quick-action'),plQuickHint=plUI('pl-quick-hint');
+function plUiRead(){
+  try{const x=JSON.parse(localStorage.getItem(PL_UI_KEY)||'{}');
+    if(!x||typeof x!=='object'||Array.isArray(x))return {};
+    return {name:typeof x.name==='string'?x.name.slice(0,40):'',video:x.video!==false,mic:x.mic!==false};
+  }catch(_){return {};}
+}
+function plUiSave(){
+  try{localStorage.setItem(PL_UI_KEY,JSON.stringify({name:plQuickName.value.trim().slice(0,40),video:plQuickVideo.checked,mic:plQuickMic.checked}));}catch(_){}
+}
+function plUiPreferredButtons(){
+  const video=plQuickVideo.checked;
+  document.querySelectorAll('#contacts .pl-contact-card').forEach(li=>{
+    const buttons=li.querySelectorAll('.actions>button');
+    if(buttons.length<2)return;
+    buttons[0].classList.toggle('pl-preferred-action',!video);
+    buttons[1].classList.toggle('pl-preferred-action',video);
+  });
+}
+const plUiText={
+ ru:{title:'Всё готово для общения',subtitle:'Вам понадобится только знакомый человек.',name:'Как подписать этот браузер? (видно только вам)',video:'Видеозвонок',mic:'Микрофон',secure:'🔒 Защищённое соединение · Без установки приложения',join:'Выбрать, кому позвонить',signup:'Создать защищённый профиль',hintIn:'Выберите контакт ниже. Камера и микрофон потребуют вашего разрешения.',hintOut:'Первое устройство регистрируется защищённым способом. Имя остаётся только в этом браузере.'},
+ en:{title:'Ready to connect',subtitle:'All you need is someone you know.',name:'Name for this browser (visible only to you)',video:'Video call',mic:'Microphone',secure:'🔒 Secure connection · No app required',join:'Choose someone to call',signup:'Create a secure profile',hintIn:'Choose a contact below. Camera and microphone require your permission.',hintOut:'Your first device will be enrolled securely. This name stays in this browser.'}
+};
+function plUiSync(){
+ const signed=document.body.classList.contains('pl-signed-in');
+ const english=document.documentElement.lang==='en';
+ const words=plUiText[english?'en':'ru'];
+ document.querySelectorAll('[data-pl-ui]').forEach(node=>{const key=node.getAttribute('data-pl-ui');if(Object.hasOwn(words,key))node.textContent=words[key];});
+ plQuickName.placeholder=english?'Your name':'Ваше имя';
+ plQuickAction.textContent=signed?words.join:words.signup;
+ plQuickHint.textContent=signed?words.hintIn:words.hintOut;
+ plQuickPanel.classList.toggle('pl-quick-signed-in',signed);
+ plUiPreferredButtons();
+}
+const plSavedUi=plUiRead();
+plQuickName.value=plSavedUi.name||'';
+plQuickVideo.checked=plSavedUi.video!==false;
+plQuickMic.checked=plSavedUi.mic!==false;
+for(const input of [plQuickName,plQuickVideo,plQuickMic]){
+ input.addEventListener('input',()=>{plUiSave();plUiPreferredButtons();});
+ input.addEventListener('change',()=>{plUiSave();plUiPreferredButtons();});
+}
+plUI('contacts').addEventListener('click',event=>{
+ const target=event.target instanceof Element?event.target.closest('button'):null;
+ const actions=target?.parentElement;
+ if(!actions?.classList.contains('actions')||!actions.parentElement?.classList.contains('pl-contact-card'))return;
+ const buttons=[...actions.querySelectorAll(':scope > button')];
+ const n=buttons.indexOf(target);
+ if(n!==0&&n!==1)return;
+ plQuickVideo.checked=n===1;plUiSave();
+},true);
+el("pl-quick-action").addEventListener("click",()=>{
+ plUiSave();
+ if(!document.body.classList.contains('pl-signed-in')){
+  const signup=plUI('signup');
+  if(signup&&!signup.disabled&&!signup.hidden){signup.click();return;}
+  plUI('pl-advanced')?.setAttribute('open','');
+  plUI('pl-onboard')?.scrollIntoView({block:'start',behavior:'smooth'});return;
+ }
+ const contacts=plUI('pl-contacts');if(!contacts||contacts.hidden)return;
+ contacts.scrollIntoView({block:'start',behavior:'smooth'});
+ if(!contacts.querySelector('.pl-contact-card')){
+  const invite=plUI('pl-copy-invite');
+  if(invite&&!invite.disabled)invite.focus({preventScroll:true});
+  else plUI('pl-add-by-invite')?.setAttribute('open','');
+ }else plUI('pl-contacts-filter')?.focus({preventScroll:true});
+});
+const plUiObserver=new MutationObserver(records=>{
+ if(records.some(r=>r.attributeName==='hidden'||r.attributeName==='class'||r.type==='childList'))queueMicrotask(plUiSync);
+});
+for(const id of ['pl-new-user','pl-user-cabinet','pl-contacts','contacts','pl-incoming']){
+ const node=plUI(id);
+ if(node)plUiObserver.observe(node,{attributes:true,attributeFilter:['hidden'],childList:id==='contacts'});
+}
+plUiObserver.observe(document.body,{attributes:true,attributeFilter:['class']});
+plUI('pl-language')?.addEventListener('change',()=>queueMicrotask(plUiSync));
+plUiSync();
+/* END PETRELLINK-CONSUMER-20261113-V3 */

@@ -122,6 +122,32 @@ main>section[role="status"]>h2{font-size:1rem}
  .pl-contact-card .actions>button{width:auto}
  #pl-contacts{padding:16px}
 }
+
+
+/* BEGIN PETRELLINK-CONSUMER-20261113-V3: consumer-first responsive presentation */
+#pl-quick-panel{display:grid;gap:15px;padding:20px 0}
+#pl-quick-panel[hidden]{display:none}
+#pl-quick-panel h2{font-size:1.25rem;margin:0}
+#pl-quick-panel p{margin:0;color:#bad2dd}
+#pl-quick-name{width:100%;min-height:48px}
+.pl-quick-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.pl-quick-item{display:flex;align-items:center;gap:10px;padding:13px;border:1px solid #497182;border-radius:14px;background:#102f3c}
+.pl-quick-item input{width:22px;height:22px}
+#pl-quick-action{min-height:56px;background:#65e2cf;color:#092d30;font-weight:750;font-size:1.05rem}
+.pl-quick-info{font-size:.87rem;line-height:1.5}
+.pl-quick-tip{font-size:.85rem;color:#acf0e0}
+.pl-quick-pill{font-size:.73rem;font-weight:800;letter-spacing:.04em;color:#78e8d5}
+#pl-onboard{background:linear-gradient(125deg,#123848,#101e30);border-radius:22px}
+#pl-contacts .pl-contact-card{border-radius:16px;padding:17px;background:#102c3b}
+#pl-contacts .actions>button{min-height:47px}
+#pl-contacts .actions>button.pl-preferred-action{background:#65e2cf;color:#092d30}
+#pl-incoming{border-color:#e7bf70!important}
+#incoming .actions>button{min-height:49px}
+#pl-current-call #cancel{background:#dc5c66;color:#fff}
+#pl-quick-action:focus-visible,#pl-quick-name:focus-visible,.pl-quick-item:focus-within{outline:3px solid #79e9d9;outline-offset:3px}
+@media(max-width:640px){#pl-quick-panel{gap:12px}.pl-quick-item{padding:9px;min-height:56px;font-size:.9rem}#pl-quick-action{width:100%}}
+/* END PETRELLINK-CONSUMER-20261113-V3 */
+
 </style>
 
 <script defer src="/readiness.js"></script>
@@ -135,6 +161,19 @@ main>section[role="status"]>h2{font-size:1rem}
   <p>Защищённые аудио- и видеозвонки. Создайте профиль, пригласите знакомого и нажмите «Позвонить».</p>
   <div id="pl-new-user"><h2>Начать общение</h2><p>Первое устройство будет зарегистрировано автоматически.</p><div id="pl-signup-slot"></div></div>
   <div id="pl-user-cabinet" hidden><h2>Вы на связи</h2><p id="pl-friendly-identity">Выберите человека ниже или пригласите знакомого.</p><div class="actions"><button id="pl-share-invite" type="button">Пригласить друга</button><button id="pl-copy-invite" type="button" class="secondary">Скопировать ссылку</button></div></div>
+  <!-- BEGIN PETRELLINK-CONSUMER-20261113-V3 -->
+  <div id="pl-quick-panel" aria-label="Быстрый старт">
+    <div><span class="pl-quick-pill">PETRELLINK</span><h2 data-pl-ui="title">Всё готово для общения</h2><p data-pl-ui="subtitle">Вам понадобится только знакомый человек.</p></div>
+    <div><label for="pl-quick-name" data-pl-ui="name">Как подписать этот браузер? (видно только вам)</label><input type="text" id="pl-quick-name" maxlength="40" autocomplete="nickname" placeholder="Ваше имя"></div>
+    <div class="pl-quick-grid" role="group" aria-label="Предпочтения звонка">
+      <label class="pl-quick-item" for="pl-quick-video"><input type="checkbox" id="pl-quick-video" checked><span data-pl-ui="video">Видеозвонок</span></label>
+      <label class="pl-quick-item" for="pl-quick-mic"><input type="checkbox" id="pl-quick-mic" checked><span data-pl-ui="mic">Микрофон</span></label>
+    </div>
+    <button type="button" id="pl-quick-action">Продолжить</button>
+    <p class="pl-quick-info" id="pl-quick-hint" aria-live="polite">Устройство и доступ проверяются перед звонком.</p>
+    <div class="pl-quick-tip" data-pl-ui="secure">🔒 Защищённое соединение · Без установки приложения</div>
+  </div>
+  <!-- END PETRELLINK-CONSUMER-20261113-V3 -->
 </section>
 <section class="call-stage" aria-label="Состояние звонка" hidden>
   <h2>Соединение</h2>
@@ -227,7 +266,7 @@ main>section[role="status"]>h2{font-size:1rem}
     <button type="button" id="cancel" class="secondary" hidden>Завершить звонок</button>
   </div>
 </section>
-<section role="status" aria-live="polite">
+<section role="status" aria-live="polite" class="pl-compact-status">
   <h2>Состояние соединения</h2>
   <p id="status">До подтверждения учётной записи и Device камера и микрофон не включаются.</p>
   <details id="auth-diagnostics"><summary>Диагностика входа, звонка и медиа</summary><p>Показываются этапы входа, подготовки MLS/Join и (если открывался экран звонка) состояние ICE. Ключи, токены, Identity ID, grant и SDP не сохраняются.</p><button id="auth-diagnostics-copy" type="button" class="secondary">Скопировать отчёт</button><button id="auth-diagnostics-save" type="button" class="secondary">Сохранить JSON</button><pre id="auth-diagnostics-report" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto"></pre></details>

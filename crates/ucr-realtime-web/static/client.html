@@ -45,6 +45,33 @@ button:disabled,select:disabled,input:disabled{opacity:.45;cursor:not-allowed}
 .small{font-size:.85rem;color:#94a3b8}
 .hidden{display:none}
 canvas.remote-media.hidden{display:none}
+
+
+/* BEGIN PETRELLINK-CONSUMER-20261113-V3: one-screen call controls, original event handlers retained */
+body{min-height:100dvh;background:radial-gradient(circle at 70% -15%,#163d50,#07111e 70%)}
+main{width:min(100%,1100px);padding:clamp(12px,3vw,34px);margin:auto}
+.card{padding:clamp(16px,3vw,28px);border-radius:22px}
+#brand-name{font-size:clamp(1.45rem,4vw,2rem)}
+#intro{font-size:.94rem;margin:4px 0 15px}
+#status{font-size:.92rem;min-height:0;padding:11px 14px;margin:12px 0}
+.media{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;margin:18px 0}
+.video-card{position:relative;border:1px solid #3b596c;border-radius:18px;overflow:hidden;background:#041018}
+.video-card video,.video-card canvas{aspect-ratio:16/9;min-height:210px;background:#01070d}
+#pl-call-primary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:16px 0}
+#pl-call-primary button{min-height:56px;padding:10px 6px;border-radius:13px;font-size:.92rem}
+#pl-call-primary #leave{background:#e55f69;color:white}
+#pl-call-more,#pl-room-details,#pl-connection-details,#pl-chat-details{background:#0b2231;border:1px solid #315568;border-radius:15px;padding:10px 14px;margin:12px 0}
+#pl-call-more>summary,#pl-room-details>summary,#pl-connection-details>summary,#pl-chat-details>summary{padding:7px 4px;cursor:pointer;color:#c7e0ec;font-weight:700}
+#pl-call-more>.controls{margin:10px 0}
+#pl-call-actions{grid-template-columns:1fr;max-width:440px;margin:16px auto}
+#pl-call-actions #join{min-height:58px;background:#65dfcf;color:#072832;font-size:1.04rem}
+#ucr-diagnostics:not([open]){padding:9px 13px}
+button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #69e5d2;outline-offset:3px}
+@media(min-width:780px){.media{grid-template-columns:minmax(0,1fr) 240px;align-items:start}.media>.video-card:first-child{grid-column:2;grid-row:1}.media>.video-card:last-child{grid-column:1;grid-row:1}.media>.video-card:not(:first-child):not(:last-child){grid-column:1 / -1}}
+@media(max-width:620px){main{padding:10px}.card{padding:14px}.video-card video,.video-card canvas{min-height:170px}#pl-call-primary{gap:6px}#pl-call-primary button{font-size:.76rem;min-height:55px}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+/* END PETRELLINK-CONSUMER-20261113-V3 */
+
 </style>
 </head>
 <body>
@@ -64,6 +91,7 @@ canvas.remote-media.hidden{display:none}
   </select>
   <button id="room-submit" class="primary" type="submit">Подключиться</button>
 </form>
+<details id="pl-room-details"><summary>Участники и записи</summary>
 <section id="room-people" class="hidden" aria-label="Участники">
   <h2>Участники</h2>
   <div id="room-people-list" class="small">Список появится после входа.</div>
@@ -73,25 +101,32 @@ canvas.remote-media.hidden{display:none}
   <p class="small">Это просмотр уже расшифрованной картинки в браузере. Канонический архив комнаты остаётся зашифрованным.</p>
   <div id="room-viewings-list" class="small">Пока нет записи просмотра.</div>
 </section>
+</details>
+<details id="pl-connection-details"><summary>Состояние соединения</summary>
 <div class="grid">
 <div class="metric"><span id="state-label">State</span><b id="state">Ready</b></div>
 <div class="metric"><span id="webrtc-label">WebRTC</span><b id="webrtc-state">Idle</b></div>
 <div class="metric"><span id="packets-label">Encrypted packets</span><b id="packets">0</b></div>
 <div class="metric"><span id="expires-label">Expires</span><b id="expires">—</b></div>
 </div>
+</details>
 <div id="status" role="status" aria-live="polite">Reading signed join grant…</div>
 <div class="media">
 <div class="video-card"><header id="local-label">You</header><video id="local-video" autoplay muted playsinline></video></div>
 <div id="screen-card" class="video-card hidden"><header id="screen-label">Your screen</header><video id="screen-video" autoplay muted playsinline></video></div>
 <div class="video-card"><header id="remote-label">Remote</header><video id="remote-video" autoplay muted playsinline webkit-playsinline></video><canvas id="remote-e2ee-canvas" class="remote-media hidden" width="640" height="360" aria-label="Decrypted endpoint-only video"></canvas></div>
 </div>
+<div id="pl-call-primary" role="toolbar" aria-label="Управление звонком">
+<button id="mic-toggle" class="secondary" disabled>Mute microphone</button>
+<button id="camera-toggle" class="secondary" disabled>Turn camera off</button>
+<button id="sound-unlock" class="secondary" disabled>Enable sound</button>
+<button id="leave" class="secondary" disabled>Завершить</button>
+</div>
+<details id="pl-call-more"><summary>Дополнительно: устройства, экран, реакции и приватность</summary>
 <div class="controls">
 <select id="privacy-mode" aria-label="Network privacy mode"><option value="secure">Protected call (normal network)</option><option value="private">Higher privacy (TURN relay only)</option><option value="maximum" disabled>Maximum privacy (independent relay not configured)</option></select>
 <select id="microphone" aria-label="Microphone"><option value="">Default microphone</option></select>
 <select id="camera" aria-label="Camera"><option value="">Default camera</option></select>
-<button id="mic-toggle" class="secondary" disabled>Mute microphone</button>
-<button id="sound-unlock" class="secondary" disabled>Enable sound</button>
-<button id="camera-toggle" class="secondary" disabled>Turn camera off</button>
 <button id="screen-toggle" class="secondary" disabled>Share screen</button>
 <button id="hand-toggle" class="secondary" disabled>Raise hand</button>
 <select id="reaction" aria-label="Reaction">
@@ -102,9 +137,10 @@ canvas.remote-media.hidden{display:none}
   <option value="🎉">🎉</option>
 </select>
 <button id="reaction-send" class="secondary" disabled>React</button>
-</div>
+</div></details>
 <div id="reactions" class="small" aria-live="polite"></div>
 <div id="active-speaker" class="small" aria-live="polite">Active speaker: none</div>
+<details id="pl-chat-details"><summary>Чат</summary>
 <div id="chat-card" class="card" aria-label="Conference chat">
   <div id="chat-messages" class="small" aria-live="polite"></div>
   <div class="controls">
@@ -112,12 +148,12 @@ canvas.remote-media.hidden{display:none}
     <button id="chat-send" class="secondary" disabled>Send</button>
   </div>
 </div>
-<div class="grid">
-<button id="join" class="primary">Join conference</button>
-<button id="leave" class="secondary" disabled>Leave</button>
+</details>
+<div class="grid" id="pl-call-actions">
+<button id="join" class="primary">Подключиться</button>
 </div>
 
-<details id="ucr-diagnostics" open>
+<details id="ucr-diagnostics">
   <summary>Диагностика звонка — состояние и ошибки</summary>
   <p class="small">Без паролей, токенов, ключей, содержимого сообщений и идентификаторов участников. Работает без F12.</p>
   <button id="ucr-diagnostics-copy" class="secondary" type="button">Скопировать отчёт</button>
@@ -2025,6 +2061,11 @@ function preferredMicCapture(){
 // One click should establish an audio conversation even when a user's camera
 // is absent, disconnected, or held by another application. Never reinterpret
 // a permission denial as a recoverable hardware failure.
+function plConsumerPrefs(){
+ try{const x=JSON.parse(localStorage.getItem("petrellink.ui.preferences.v1")||"{}");
+  return {mic:x?.mic!==false,video:x?.video!==false};
+ }catch(_){return {mic:true,video:true};}
+}
 async function capturePermittedMedia(audio,video,isCurrent){
   try{
     return {stream:await navigator.mediaDevices.getUserMedia({audio,video}),audioOnlyFallback:false};
@@ -2064,11 +2105,13 @@ async function ensureLocalMedia(force=false){
 async function captureLocalMedia(force){
   if(force&&localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;}
   const audioAllowed=policyAllows("audio"),cameraAllowed=policyAllows("camera");
-  if(!audioAllowed&&!cameraAllowed){
+  const preferred=plConsumerPrefs();
+  const requestAudio=audioAllowed&&preferred.mic,requestCamera=cameraAllowed&&preferred.video;
+  if(!requestAudio&&!requestCamera){
     localStream=new MediaStream();ui.localVideo.srcObject=localStream;refreshLocalMediaControls();return localStream;
   }
-  const audio=audioAllowed?(ui.mic.value?{...preferredMicCapture(),deviceId:{exact:ui.mic.value}}:preferredMicCapture()):false;
-  const video=cameraAllowed?preferredCameraCapture(ui.camera.value):false;
+  const audio=requestAudio?(ui.mic.value?{...preferredMicCapture(),deviceId:{exact:ui.mic.value}}:preferredMicCapture()):false;
+  const video=requestCamera?preferredCameraCapture(ui.camera.value):false;
   const generation=mediaCaptureGeneration;
   const captureCurrent=()=>generation===mediaCaptureGeneration&&sessionActive&&
     (mediaActive||(typeof earlyLocalCapture!=="undefined"&&earlyLocalCapture))&&
@@ -3839,10 +3882,13 @@ function startRoomGestureCapture(){
   if(localStream||localMediaPromise)return;
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)return;
   const epoch=roomGestureEpoch;
-  const preferred=preferredCameraCapture("");
+  const preference=plConsumerPrefs();
+  const preferred=preference.video?preferredCameraCapture(""):false;
+  const microphone=preference.mic?preferredMicCapture():false;
+  if(!preferred&&!microphone)return;
   const capture=(async()=>{
     try{
-      const stream=await navigator.mediaDevices.getUserMedia({audio:preferredMicCapture(),video:preferred});
+      const stream=await navigator.mediaDevices.getUserMedia({audio:microphone,video:preferred});
       if(epoch!==roomGestureEpoch){
         stream.getTracks().forEach(track=>track.stop());
         return null;
@@ -4361,6 +4407,43 @@ window.addEventListener("pageshow",()=>{
   if(sessionActive&&mediaActive)resumeRoomAudio(window.ucrLocalRoomAudioContext);
 });
 window.addEventListener("pagehide",()=>{cancelSoftNetworkGrace();releaseRoomPresence();if(typeof stopRoomViewingCopy==="function")stopRoomViewingCopy();const leavingSequence=activeSessionSequence;activeSessionSequence=0;if(sessionActive)signedGrantRetired=true;++sessionLifecycleGeneration;++mediaCaptureGeneration;++heartbeatRequestGeneration;++roomGestureEpoch;clearTimeout(heartbeatWatchdog);heartbeatWatchdog=null;heartbeatInFlight=false;retireEndpointMlsState();if(sessionActive){ucrFreezePreLeaveSnapshot();closeServerPeer(true);if(leavingSequence>0)api("/v1/realtime/leave",{...body(),expected_session_sequence:leavingSequence},undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);reactionTimer=null;if(chatTimer)clearInterval(chatTimer);chatTimer=null;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;stopLocalCapture();});
+
+
+/* BEGIN PETRELLINK-CONSUMER-20261113-V3 - presentation, no independent Call/Join executor */
+(function plCallConsumerView(){
+ 'use strict';
+ const safe=id=>document.getElementById(id),status=safe('status');
+ const labels=[['join','Подключиться'],['leave','Завершить'],['mic-toggle','Микрофон'],['camera-toggle','Камера'],['sound-unlock','Включить звук'],['screen-toggle','Показать экран'],['hand-toggle','Поднять руку']];
+ function sync(){
+  const join=safe('join'),leave=safe('leave');
+  if(join)join.setAttribute('aria-label',join.disabled?'Подключение недоступно':'Подключиться к защищённому звонку');
+  if(leave)leave.setAttribute('aria-label',leave.disabled?'Завершение недоступно':'Завершить звонок');
+  for(const [id,name] of labels){const b=safe(id);if(b&&!b.title)b.title=name;}
+  document.body.classList.toggle('pl-call-live',Boolean(leave&&!leave.disabled));
+  if(status)status.setAttribute('aria-live','polite');
+ }
+ for(const b of document.querySelectorAll('#pl-call-primary button,#pl-call-actions button')){
+  new MutationObserver(sync).observe(b,{attributes:true,attributeFilter:['disabled','hidden']});
+ }
+ // Explicitly enabling a missing local track takes precedence over a saved capture opt-out.
+ for(const [id,kind] of [['mic-toggle','mic'],['camera-toggle','video']]){
+  const button=safe(id);if(!button)continue;
+  button.addEventListener('click',()=>{
+   const stream=safe('local-video')?.srcObject;
+   const track=kind==='mic'?stream?.getAudioTracks?.()[0]:stream?.getVideoTracks?.()[0];
+   if(track)return;
+   try{
+    const key='petrellink.ui.preferences.v1';
+    const stored=JSON.parse(localStorage.getItem(key)||'{}');
+    const next=stored&&typeof stored==='object'&&!Array.isArray(stored)?stored:{};
+    next[kind]=true;localStorage.setItem(key,JSON.stringify(next));
+   }catch(_){}
+  },{capture:true});
+ }
+ sync();
+})();
+/* END PETRELLINK-CONSUMER-20261113-V3 */
+
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>
