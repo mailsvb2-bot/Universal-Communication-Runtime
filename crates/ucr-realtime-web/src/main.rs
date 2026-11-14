@@ -780,25 +780,7 @@ async fn handle_request(
         return Ok(response);
     }
     if method == Method::GET && path == "/v1/room/status" {
-        // A listening port is insufficient: ucr-dev --room owns an unrelated
-        // SQLite store and grants, and must never be accepted as production.
-        // Only a same-loopback adapter backed by the canonical runtime may
-        // acknowledge this dedicated production contract. Do not infer E2EE
-        // or signed-grant admission from generic /readyz.
-        let canonical = matches!(
-            tokio::time::timeout(
-                Duration::from_millis(900),
-                read_room_proxy(state.room_api, "/v1/room/capabilities", b"{}", None)
-            ).await,
-            Ok(Ok((status, payload))) if status == StatusCode::OK
-                && serde_json::from_slice::<serde_json::Value>(&payload).ok().is_some_and(|value| {
-                    value.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
-                        && value.get("owner").and_then(serde_json::Value::as_str)
-                            == Some("canonical-ucr-runtime")
-                        && value.get("capability").and_then(serde_json::Value::as_str)
-                            == Some("production-room-enrollment-v1")
-                })
-        );
+        let canonical = canonical_room_ready(state.room_api).await;
         return Ok(if canonical {
             json_bytes_response(
                 StatusCode::OK,
@@ -873,6 +855,16 @@ async fn handle_request(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "body_too_large",
                 "room request is too large",
+            ));
+        }
+        if !canonical_room_ready(state.room_api).await {
+            return Ok(with_cors(
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "room_backend_unavailable",
+                    "Эфир временно недоступен: production-сервис комнаты не готов",
+                ),
+                origin.as_deref(),
             ));
         }
         let response =
@@ -3405,6 +3397,28 @@ fn parse_room_api_socket(base: &str) -> Result<SocketAddr, String> {
         .parse()
         .map_err(|_| "room API port is invalid".to_owned())?;
     Ok(SocketAddr::new(ip, port_number))
+}
+
+async fn canonical_room_ready(addr: SocketAddr) -> bool {
+    // A listening port is insufficient: ucr-dev --room owns an unrelated
+    // SQLite store and grants, and must never be accepted as production.
+    // Only a same-loopback adapter backed by the canonical runtime may
+    // acknowledge this dedicated production contract. Do not infer E2EE
+    // or signed-grant admission from generic /readyz.
+    matches!(
+        tokio::time::timeout(
+            Duration::from_millis(900),
+            read_room_proxy(addr, "/v1/room/capabilities", b"{}", None)
+        ).await,
+        Ok(Ok((status, payload))) if status == StatusCode::OK
+            && serde_json::from_slice::<serde_json::Value>(&payload).ok().is_some_and(|value| {
+                value.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
+                    && value.get("owner").and_then(serde_json::Value::as_str)
+                        == Some("canonical-ucr-runtime")
+                    && value.get("capability").and_then(serde_json::Value::as_str)
+                        == Some("production-room-enrollment-v1")
+            })
+    )
 }
 
 async fn proxy_room_post(
