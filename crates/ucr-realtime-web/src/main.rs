@@ -808,7 +808,7 @@ async fn handle_request(
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "room_backend_unavailable",
-                "Эфир временно недоступен: сервер комнаты не запущен",
+                "Эфир временно недоступен: production-сервис комнаты не готов",
             )
         });
     }
