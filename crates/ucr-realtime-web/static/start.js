@@ -1904,7 +1904,7 @@ function plUiSync(){
  const words=plUiText[english?'en':'ru'];
  document.querySelectorAll('[data-pl-ui]').forEach(node=>{const key=node.getAttribute('data-pl-ui');if(Object.hasOwn(words,key))node.textContent=words[key];});
  plQuickName.placeholder=english?'Your name':'Ваше имя';
- const hasContacts=Boolean(document.querySelector('#contacts .pl-contact-card'));
+ const hasContacts=knownContacts.length>0;
  plQuickAction.textContent=signed?(hasContacts?words.join:(english?'Invite someone':'Пригласить друга')):words.signup;
  plQuickHint.textContent=signed?words.hintIn:words.hintOut;
  plQuickPanel.classList.toggle('pl-quick-signed-in',signed);
@@ -1937,11 +1937,15 @@ el("pl-quick-action").addEventListener("click",()=>{
  }
  const contacts=plUI('pl-contacts');if(!contacts||contacts.hidden)return;
  contacts.scrollIntoView({block:'start',behavior:'smooth'});
- if(!contacts.querySelector('.pl-contact-card')){
-  // Keep Web Share API inside the original user gesture; merely focusing
-  // another invite button leaves first-time users stuck with no action.
+ if(!knownContacts.length){
+  // Keep Web Share API inside the original user gesture for a truly empty book.
   void plShareInvite();
- }else plUI('pl-contacts-filter')?.focus({preventScroll:true});
+ }else{
+  // An empty filtered list is not an empty address book: clear the filter
+  // rather than sending an unrelated invitation.
+  const search=plUI('pl-contacts-filter');
+  if(search){search.value='';renderContacts(knownContacts);search.focus({preventScroll:true});}
+ }
 });
 const plUiObserver=new MutationObserver(records=>{
  if(records.some(r=>r.attributeName==='hidden'||r.attributeName==='class'||r.type==='childList'))queueMicrotask(plUiSync);
