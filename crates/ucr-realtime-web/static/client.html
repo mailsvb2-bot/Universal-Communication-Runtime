@@ -4161,7 +4161,7 @@ function beginLocalRoomLobby(){
     ui.status.textContent="Эфир доступен. Укажите имя и нажмите «Подключиться».";
   }).catch(()=>{
     if(roomSubmit)roomSubmit.disabled=true;
-    ui.status.textContent="Эфир временно недоступен: сервер комнаты не запущен. Звонки продолжают работать.";
+    ui.status.textContent="Эфир временно недоступен: production-сервис комнаты не готов. Звонки продолжают работать.";
   });
   ui.footerNote.textContent="Камера и микрофон спикера открываются этим нажатием и остаются на этой странице. Экран спикер показывает кнопкой «Показать экран».";
   // Availability status is owned by the /v1/room/status preflight above.
