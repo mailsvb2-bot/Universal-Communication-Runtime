@@ -780,19 +780,7 @@ async fn handle_request(
         return Ok(response);
     }
     if method == Method::GET && path == "/v1/room/status" {
-        let canonical = canonical_room_ready(state.room_api).await;
-        return Ok(if canonical {
-            json_bytes_response(
-                StatusCode::OK,
-                br#"{"ok":true,"transport":"canonical-room-ready"}"#.to_vec(),
-            )
-        } else {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "room_backend_unavailable",
-                "Эфир временно недоступен: production-сервис комнаты не готов",
-            )
-        });
+        return Ok(room_status_response(state.room_api).await);
     }
     if method == Method::GET && path == "/room" {
         return Ok(html_body_response(StatusCode::OK, room_page()));
@@ -3397,6 +3385,21 @@ fn parse_room_api_socket(base: &str) -> Result<SocketAddr, String> {
         .parse()
         .map_err(|_| "room API port is invalid".to_owned())?;
     Ok(SocketAddr::new(ip, port_number))
+}
+
+async fn room_status_response(addr: SocketAddr) -> HttpResponse {
+    if canonical_room_ready(addr).await {
+        json_bytes_response(
+            StatusCode::OK,
+            br#"{"ok":true,"transport":"canonical-room-ready"}"#.to_vec(),
+        )
+    } else {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "room_backend_unavailable",
+            "Эфир временно недоступен: production-сервис комнаты не готов",
+        )
+    }
 }
 
 async fn canonical_room_ready(addr: SocketAddr) -> bool {
