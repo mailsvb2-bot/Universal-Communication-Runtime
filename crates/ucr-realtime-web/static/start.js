@@ -361,30 +361,39 @@ function plShowInviteForManualCopy(url) {
   field.select();
   message("Выделена ссылка приглашения. Нажмите Ctrl+C, чтобы скопировать её.");
 }
+// Invitation locators are account-scoped even across OS share-sheet and
+// clipboard promises. A logout/account switch must not resurrect a prior link.
+function plInviteStillCurrent(url,owner,scope){
+  return Boolean(scope&&accountScope===scope&&plOwnIdentity===owner&&plInviteUrl()===url);
+}
 async function plCopyInvite() {
-  const url=plInviteUrl();
-  if(!url){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
+  const url=plInviteUrl(),owner=plOwnIdentity,scope=accountScope;
+  if(!url||!scope){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
   try{
+    if(!plInviteStillCurrent(url,owner,scope))return;
     if(!navigator.clipboard?.writeText)throw Error("Clipboard API is unavailable");
     await navigator.clipboard.writeText(url);
-    message("Приглашение скопировано. Попросите знакомого сверить код с вами.");
-  }catch(_){plShowInviteForManualCopy(url);}
+    if(plInviteStillCurrent(url,owner,scope))
+      message("Приглашение скопировано. Попросите знакомого сверить код с вами.");
+  }catch(_){if(plInviteStillCurrent(url,owner,scope))plShowInviteForManualCopy(url);}
 }
 async function plShareInvite() {
-  const url=plInviteUrl();
-  if(!url){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
+  const url=plInviteUrl(),owner=plOwnIdentity,scope=accountScope;
+  if(!url||!scope){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
   try {
     const result=await sharePublicInvite({
       url,origin:location.origin,navigatorLike:navigator,
       copyFallback:async safe=>{
+        if(!plInviteStillCurrent(url,owner,scope))return;
         if(!navigator.clipboard?.writeText)throw Error("clipboard unavailable");
         await navigator.clipboard.writeText(safe);
       },
     });
+    if(!plInviteStillCurrent(url,owner,scope))return;
     if(result==="shared"||result==="cancelled")return;
     if(result==="copied"){message("Приглашение скопировано.");return;}
   }catch(_){}
-  plShowInviteForManualCopy(url);
+  if(plInviteStillCurrent(url,owner,scope))plShowInviteForManualCopy(url);
 }
 el("pl-copy-invite").addEventListener("click",()=>{void plCopyInvite();});
 el("pl-share-invite").addEventListener("click",()=>{void plShareInvite();});
@@ -674,6 +683,11 @@ function showRecovery(code) {
   const element = el("recovery-output");
   element.hidden = false;
   el("recovery-code").value = code;
+  // A one-time recovery code must be visible immediately, even when signup
+  // was initiated from the consumer CTA outside the collapsed advanced panel.
+  const recoveryPanel=el("pl-advanced");
+  recoveryPanel.open=true;
+  element.scrollIntoView?.({block:"nearest",behavior:"auto"});
   message("Новый одноразовый код создан. Сохраните его отдельно: повторно он не показывается.");
 }
 async function updateDevices() {
@@ -1890,7 +1904,8 @@ function plUiSync(){
  const words=plUiText[english?'en':'ru'];
  document.querySelectorAll('[data-pl-ui]').forEach(node=>{const key=node.getAttribute('data-pl-ui');if(Object.hasOwn(words,key))node.textContent=words[key];});
  plQuickName.placeholder=english?'Your name':'Ваше имя';
- plQuickAction.textContent=signed?words.join:words.signup;
+ const hasContacts=knownContacts.length>0;
+ plQuickAction.textContent=signed?(hasContacts?words.join:(english?'Invite someone':'Пригласить друга')):words.signup;
  plQuickHint.textContent=signed?words.hintIn:words.hintOut;
  plQuickPanel.classList.toggle('pl-quick-signed-in',signed);
  plUiPreferredButtons();
@@ -1922,11 +1937,15 @@ el("pl-quick-action").addEventListener("click",()=>{
  }
  const contacts=plUI('pl-contacts');if(!contacts||contacts.hidden)return;
  contacts.scrollIntoView({block:'start',behavior:'smooth'});
- if(!contacts.querySelector('.pl-contact-card')){
-  const invite=plUI('pl-copy-invite');
-  if(invite&&!invite.disabled)invite.focus({preventScroll:true});
-  else plUI('pl-add-by-invite')?.setAttribute('open','');
- }else plUI('pl-contacts-filter')?.focus({preventScroll:true});
+ if(!knownContacts.length){
+  // Keep Web Share API inside the original user gesture for a truly empty book.
+  void plShareInvite();
+ }else{
+  // An empty filtered list is not an empty address book: clear the filter
+  // rather than sending an unrelated invitation.
+  const search=plUI('pl-contacts-filter');
+  if(search){search.value='';renderContacts(knownContacts);search.focus({preventScroll:true});}
+ }
 });
 const plUiObserver=new MutationObserver(records=>{
  if(records.some(r=>r.attributeName==='hidden'||r.attributeName==='class'||r.type==='childList'))queueMicrotask(plUiSync);
