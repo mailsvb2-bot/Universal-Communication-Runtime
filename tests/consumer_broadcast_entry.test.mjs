@@ -14,11 +14,11 @@ test("first-party /start has a visible, keyboard-usable Live link",()=>{
  assert.match(html,/<nav id="pl-entry-nav" aria-label="Разделы PetrelLink">/);
  assert.doesNotMatch(anchor[0],/hidden|disabled|target="_blank"/);
  const href=anchor[0].match(/href="([^"]+)"/)?.[1];
- assert.equal(href,"/conference");
+ assert.equal(href,"/room");
  assert.equal(new URL(href,origin).origin,origin,"route remains same-origin");
 });
 
-test("broadcast link reaches the original conference handler, not another authority",()=>{
+test("broadcast link reaches the existing room enrollment handler, not grant-only conference",()=>{
  assert.match(server,/"\/"\s*\|\s*"\/join"\s*\|\s*"\/conference"\s*\|\s*"\/client.html"/);
  assert.match(server,/return Ok\(html_response\(StatusCode::OK, CLIENT_HTML\)\);/);
  assert.match(html,/<a href="\/start" aria-current="page" data-pl-ui="calls">Звонки<\/a>/);
