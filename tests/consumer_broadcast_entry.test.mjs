@@ -19,8 +19,10 @@ test("first-party /start has a visible, keyboard-usable Live link",()=>{
 });
 
 test("broadcast link reaches the existing room enrollment handler, not grant-only conference",()=>{
- assert.match(server,/"\/"\s*\|\s*"\/join"\s*\|\s*"\/conference"\s*\|\s*"\/client.html"/);
- assert.match(server,/return Ok\(html_response\(StatusCode::OK, CLIENT_HTML\)\);/);
+ assert.match(server,/path == "\/room"/);
+ assert.match(server,/return Ok\(html_body_response\(StatusCode::OK, room_page\(\)\)\);/);
+ assert.match(server,/fn room_page\(\) -> String/);
+ assert.match(server,/CLIENT_HTML\.replace/);
  assert.match(html,/<a href="\/start" aria-current="page" data-pl-ui="calls">Звонки<\/a>/);
  assert.match(script,/ru:\{calls:'Звонки',broadcast:'Эфир'/);
  assert.match(script,/en:\{calls:'Calls',broadcast:'Live'/);
