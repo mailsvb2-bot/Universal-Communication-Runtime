@@ -4147,8 +4147,24 @@ function beginLocalRoomLobby(){
   ui.brandName.textContent="Комната UCR";
   lobby.classList.remove("hidden");
   ui.join.classList.add("hidden");
+  // Do not offer a Join button when the room backend is missing. /readyz
+  // checks the gateway, not the separate Room API. This probe is only
+  // network readiness; admission, MLS and media still require full verification.
+  const roomSubmit=document.getElementById("room-submit");
+  if(roomSubmit)roomSubmit.disabled=true;
+  ui.status.textContent="Проверяем доступность эфира…";
+  fetch("/v1/room/status",{cache:"no-store"}).then(async response=>{
+    if(!response.ok)throw new Error("room_unavailable");
+    const result=await response.json();
+    if(result.ok!==true||result.transport!=="room-api-reachable")throw new Error("room_unavailable");
+    if(roomSubmit)roomSubmit.disabled=false;
+    ui.status.textContent="Эфир доступен. Укажите имя и нажмите «Подключиться».";
+  }).catch(()=>{
+    if(roomSubmit)roomSubmit.disabled=true;
+    ui.status.textContent="Эфир временно недоступен: сервер комнаты не запущен. Звонки продолжают работать.";
+  });
   ui.footerNote.textContent="Камера и микрофон спикера открываются этим нажатием и остаются на этой странице. Экран спикер показывает кнопкой «Показать экран».";
-  ui.status.textContent="Откройте эту страницу во втором окне, чтобы второй человек вошёл в ту же комнату.";
+  // Availability status is owned by the /v1/room/status preflight above.
   // Compile the endpoint runtime while the name is typed, beside the click,
   // not after a second document has thrown the first camera away.
   loadEndpointWasmModule().catch(()=>{});
