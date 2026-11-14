@@ -800,7 +800,10 @@ async fn handle_request(
                 })
         );
         return Ok(if canonical {
-            json_bytes_response(StatusCode::OK, br#"{"ok":true,"transport":"canonical-room-ready"}"#.to_vec())
+            json_bytes_response(
+                StatusCode::OK,
+                br#"{"ok":true,"transport":"canonical-room-ready"}"#.to_vec(),
+            )
         } else {
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
