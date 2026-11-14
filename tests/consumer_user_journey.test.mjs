@@ -31,6 +31,7 @@ test("the signed-in CTA gives an actionable invite when contacts are empty",()=>
  const contacts={hidden:false,scrollIntoView(){},querySelector(){return null}};
  let invoked=0,registered;
  const scope={
+  knownContacts:[],
   el:(id)=>{assert.equal(id,"pl-quick-action");return {addEventListener:(event,cb)=>{assert.equal(event,"click");registered=cb}}},
   plUiSave:()=>{},
   document:{body:{classList:{contains:()=>true}}},
@@ -48,6 +49,7 @@ test("CTA selects contact rather than inviting when the phonebook has entries",(
  let invited=0,focused=0,registered;
  const contacts={hidden:false,scrollIntoView(){},querySelector:()=>({})};
  const scope={
+  knownContacts:[{id:'one'}],
   el:()=>({addEventListener:(_event,cb)=>{registered=cb}}),
   plUiSave:()=>{},
   document:{body:{classList:{contains:()=>true}}},
@@ -68,6 +70,7 @@ test("consumer CTA label distinguishes no contacts from populated contact list",
  const classes={toggle(){},contains:x=>x==="pl-signed-in"};
  const quickName={placeholder:""},quickAction={textContent:""},quickHint={textContent:""};
  const scope={
+  knownContacts:[],
   document:{body:{classList:classes},documentElement:{lang:"ru"},querySelectorAll:()=>[],querySelector:()=>populated?{}:null},
   plQuickName:quickName,plQuickAction:quickAction,plQuickHint:quickHint,
   plQuickPanel:{classList:{toggle(){}}},plUiPreferredButtons:()=>{},
@@ -76,7 +79,7 @@ test("consumer CTA label distinguishes no contacts from populated contact list",
  vm.runInNewContext(catalog+source+"\nthis.sync=plUiSync;",scope);
  scope.sync();
  assert.equal(quickAction.textContent,"Пригласить друга");
- populated=true;scope.sync();
+ populated=true;scope.knownContacts=[{id:'one'}];scope.sync();
  assert.equal(quickAction.textContent,"Выбрать, кому позвонить");
 });
 
@@ -115,4 +118,25 @@ test("a failed pending clipboard operation cannot restore a previous account inv
  rejectCopy(new Error("clipboard denied"));
  await attempt;
  assert.equal(shown,0);
+});
+
+test("filtered-to-zero search still navigates to real contacts, not invite",()=>{
+ const source=section('el("pl-quick-action").addEventListener("click",()=>{','const plUiObserver=');
+ let callback,invited=0,rendered=0,focused=0;
+ const search={value:"missing friend",focus(){focused++;}};
+ const scope={
+  knownContacts:[{id:"existing"}],
+  el:()=>({addEventListener:(_event,cb)=>{callback=cb}}),
+  plUiSave:()=>{},
+  document:{body:{classList:{contains:()=>true}}},
+  plUI:id=>id==="pl-contacts"?{hidden:false,scrollIntoView(){}}:id==="pl-contacts-filter"?search:null,
+  plShareInvite:()=>{invited++;return Promise.resolve()},
+  renderContacts:items=>{assert.equal(items.length,1);rendered++;}
+ };
+ vm.runInNewContext(source,scope);
+ callback();
+ assert.equal(invited,0);
+ assert.equal(rendered,1);
+ assert.equal(search.value,"");
+ assert.equal(focused,1);
 });
