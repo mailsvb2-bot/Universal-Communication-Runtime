@@ -678,7 +678,7 @@ function showRecovery(code) {
   // was initiated from the consumer CTA outside the collapsed advanced panel.
   const recoveryPanel=el("pl-advanced");
   recoveryPanel.open=true;
-  element.scrollIntoView?.({block:"nearest",behavior:"instant"});
+  element.scrollIntoView?.({block:"nearest",behavior:"auto"});
   message("Новый одноразовый код создан. Сохраните его отдельно: повторно он не показывается.");
 }
 async function updateDevices() {
