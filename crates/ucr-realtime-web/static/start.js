@@ -361,30 +361,39 @@ function plShowInviteForManualCopy(url) {
   field.select();
   message("Выделена ссылка приглашения. Нажмите Ctrl+C, чтобы скопировать её.");
 }
+// Invitation locators are account-scoped even across OS share-sheet and
+// clipboard promises. A logout/account switch must not resurrect a prior link.
+function plInviteStillCurrent(url,owner,scope){
+  return Boolean(scope&&accountScope===scope&&plOwnIdentity===owner&&plInviteUrl()===url);
+}
 async function plCopyInvite() {
-  const url=plInviteUrl();
-  if(!url){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
+  const url=plInviteUrl(),owner=plOwnIdentity,scope=accountScope;
+  if(!url||!scope){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
   try{
+    if(!plInviteStillCurrent(url,owner,scope))return;
     if(!navigator.clipboard?.writeText)throw Error("Clipboard API is unavailable");
     await navigator.clipboard.writeText(url);
-    message("Приглашение скопировано. Попросите знакомого сверить код с вами.");
-  }catch(_){plShowInviteForManualCopy(url);}
+    if(plInviteStillCurrent(url,owner,scope))
+      message("Приглашение скопировано. Попросите знакомого сверить код с вами.");
+  }catch(_){if(plInviteStillCurrent(url,owner,scope))plShowInviteForManualCopy(url);}
 }
 async function plShareInvite() {
-  const url=plInviteUrl();
-  if(!url){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
+  const url=plInviteUrl(),owner=plOwnIdentity,scope=accountScope;
+  if(!url||!scope){message("Сначала подтвердите профиль, чтобы пригласить контакт.");return;}
   try {
     const result=await sharePublicInvite({
       url,origin:location.origin,navigatorLike:navigator,
       copyFallback:async safe=>{
+        if(!plInviteStillCurrent(url,owner,scope))return;
         if(!navigator.clipboard?.writeText)throw Error("clipboard unavailable");
         await navigator.clipboard.writeText(safe);
       },
     });
+    if(!plInviteStillCurrent(url,owner,scope))return;
     if(result==="shared"||result==="cancelled")return;
     if(result==="copied"){message("Приглашение скопировано.");return;}
   }catch(_){}
-  plShowInviteForManualCopy(url);
+  if(plInviteStillCurrent(url,owner,scope))plShowInviteForManualCopy(url);
 }
 el("pl-copy-invite").addEventListener("click",()=>{void plCopyInvite();});
 el("pl-share-invite").addEventListener("click",()=>{void plShareInvite();});
