@@ -20,7 +20,7 @@ function el(id){
   return elements.get(id);
 }
 const clipboard=[];
-const ctx={plOwnIdentity:"known-peer",location:{origin:"https://example.test"},navigator:{clipboard:{writeText:async url=>{clipboard.push(url);}}},
+const ctx={plOwnIdentity:"known-peer",accountScope:"known-peer-session",location:{origin:"https://example.test"},navigator:{clipboard:{writeText:async url=>{clipboard.push(url);}}},
 document:{createElement:tag=>({tag,children:[],style:{},append(...v){this.children.push(...v);for(const x of v)if(x.id)elements.set(x.id,x)},setAttribute(){},focus(){this.focused=true},select(){this.selected=true}})},
 el,message:v=>messages.push(v),busy:true,navigating:true,
 sharePublicInvite,resetPhonebook(){},run:()=>{throw Error("invitation must not be gated on run()")},URL};
