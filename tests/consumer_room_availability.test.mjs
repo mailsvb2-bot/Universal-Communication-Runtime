@@ -13,7 +13,9 @@ const room=client.slice(begin,end);
 
 test("room availability is separate from the general gateway readyz",()=>{
  assert.match(root,/path == "\/v1\/room\/status"/);
- assert.match(root,/read_room_proxy\(state\.room_api, "\/v1\/room\/capabilities"/);\n assert.match(root,/canonical-ucr-runtime/);\n assert.match(root,/production-room-enrollment-v1/);
+ assert.match(root,/read_room_proxy\(state\.room_api, "\/v1\/room\/capabilities"/);
+ assert.match(root,/canonical-ucr-runtime/);
+ assert.match(root,/production-room-enrollment-v1/);
  assert.match(root,/StatusCode::SERVICE_UNAVAILABLE/);
  assert.match(root,/room_backend_unavailable/);
  assert.match(root,/transport":"canonical-room-ready/);
