@@ -4156,7 +4156,7 @@ function beginLocalRoomLobby(){
   fetch("/v1/room/status",{cache:"no-store"}).then(async response=>{
     if(!response.ok)throw new Error("room_unavailable");
     const result=await response.json();
-    if(result.ok!==true||result.transport!=="room-api-reachable")throw new Error("room_unavailable");
+    if(result.ok!==true||result.transport!=="canonical-room-ready")throw new Error("room_unavailable");
     if(roomSubmit)roomSubmit.disabled=false;
     ui.status.textContent="Эфир доступен. Укажите имя и нажмите «Подключиться».";
   }).catch(()=>{
