@@ -674,6 +674,11 @@ function showRecovery(code) {
   const element = el("recovery-output");
   element.hidden = false;
   el("recovery-code").value = code;
+  // A one-time recovery code must be visible immediately, even when signup
+  // was initiated from the consumer CTA outside the collapsed advanced panel.
+  const recoveryPanel=el("pl-advanced");
+  recoveryPanel.open=true;
+  element.scrollIntoView?.({block:"nearest",behavior:"instant"});
   message("Новый одноразовый код создан. Сохраните его отдельно: повторно он не показывается.");
 }
 async function updateDevices() {
@@ -1890,7 +1895,8 @@ function plUiSync(){
  const words=plUiText[english?'en':'ru'];
  document.querySelectorAll('[data-pl-ui]').forEach(node=>{const key=node.getAttribute('data-pl-ui');if(Object.hasOwn(words,key))node.textContent=words[key];});
  plQuickName.placeholder=english?'Your name':'Ваше имя';
- plQuickAction.textContent=signed?words.join:words.signup;
+ const hasContacts=Boolean(document.querySelector('#contacts .pl-contact-card'));
+ plQuickAction.textContent=signed?(hasContacts?words.join:(english?'Invite someone':'Пригласить друга')):words.signup;
  plQuickHint.textContent=signed?words.hintIn:words.hintOut;
  plQuickPanel.classList.toggle('pl-quick-signed-in',signed);
  plUiPreferredButtons();
@@ -1923,9 +1929,9 @@ el("pl-quick-action").addEventListener("click",()=>{
  const contacts=plUI('pl-contacts');if(!contacts||contacts.hidden)return;
  contacts.scrollIntoView({block:'start',behavior:'smooth'});
  if(!contacts.querySelector('.pl-contact-card')){
-  const invite=plUI('pl-copy-invite');
-  if(invite&&!invite.disabled)invite.focus({preventScroll:true});
-  else plUI('pl-add-by-invite')?.setAttribute('open','');
+  // Keep Web Share API inside the original user gesture; merely focusing
+  // another invite button leaves first-time users stuck with no action.
+  void plShareInvite();
  }else plUI('pl-contacts-filter')?.focus({preventScroll:true});
 });
 const plUiObserver=new MutationObserver(records=>{
