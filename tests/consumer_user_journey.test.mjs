@@ -54,7 +54,8 @@ test("CTA selects contact rather than inviting when the phonebook has entries",(
   plUiSave:()=>{},
   document:{body:{classList:{contains:()=>true}}},
   plUI:(id)=>id==="pl-contacts"?contacts:id==="pl-contacts-filter"?{focus(){focused++}}:null,
-  plShareInvite:()=>{invited++;return Promise.resolve()}
+  plShareInvite:()=>{invited++;return Promise.resolve()},
+  renderContacts:()=>{}
  };
  vm.runInNewContext(source,scope);
  registered();
