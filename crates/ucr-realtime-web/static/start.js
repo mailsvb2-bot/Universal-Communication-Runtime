@@ -1895,8 +1895,8 @@ function plUiPreferredButtons(){
   });
 }
 const plUiText={
- ru:{title:'Всё готово для общения',subtitle:'Вам понадобится только знакомый человек.',name:'Как подписать этот браузер? (видно только вам)',video:'Видеозвонок',mic:'Микрофон',secure:'🔒 Защищённое соединение · Без установки приложения',join:'Выбрать, кому позвонить',signup:'Создать защищённый профиль',hintIn:'Выберите контакт ниже. Камера и микрофон потребуют вашего разрешения.',hintOut:'Первое устройство регистрируется защищённым способом. Имя остаётся только в этом браузере.'},
- en:{title:'Ready to connect',subtitle:'All you need is someone you know.',name:'Name for this browser (visible only to you)',video:'Video call',mic:'Microphone',secure:'🔒 Secure connection · No app required',join:'Choose someone to call',signup:'Create a secure profile',hintIn:'Choose a contact below. Camera and microphone require your permission.',hintOut:'Your first device will be enrolled securely. This name stays in this browser.'}
+ ru:{calls:'Звонки',broadcast:'Эфир',title:'Всё готово для общения',subtitle:'Вам понадобится только знакомый человек.',name:'Как подписать этот браузер? (видно только вам)',video:'Видеозвонок',mic:'Микрофон',secure:'🔒 Защищённое соединение · Без установки приложения',join:'Выбрать, кому позвонить',signup:'Создать защищённый профиль',hintIn:'Выберите контакт ниже. Камера и микрофон потребуют вашего разрешения.',hintOut:'Первое устройство регистрируется защищённым способом. Имя остаётся только в этом браузере.'},
+ en:{calls:'Calls',broadcast:'Live',title:'Ready to connect',subtitle:'All you need is someone you know.',name:'Name for this browser (visible only to you)',video:'Video call',mic:'Microphone',secure:'🔒 Secure connection · No app required',join:'Choose someone to call',signup:'Create a secure profile',hintIn:'Choose a contact below. Camera and microphone require your permission.',hintOut:'Your first device will be enrolled securely. This name stays in this browser.'}
 };
 function plUiSync(){
  const signed=document.body.classList.contains('pl-signed-in');
