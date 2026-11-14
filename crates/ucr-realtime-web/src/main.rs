@@ -779,6 +779,24 @@ async fn handle_request(
     {
         return Ok(response);
     }
+    if method == Method::GET && path == "/v1/room/status" {
+        // The HTML /room route is not proof that its separate Room API exists.
+        // Fail closed before media capture if the pinned loopback endpoint is absent.
+        // This is a connectivity preflight, NOT an admission or E2EE readiness claim.
+        let connected = matches!(
+            tokio::time::timeout(Duration::from_millis(750), TcpStream::connect(state.room_api)).await,
+            Ok(Ok(_))
+        );
+        return Ok(if connected {
+            json_bytes_response(StatusCode::OK, br#"{"ok":true,"transport":"room-api-reachable"}"#.to_vec())
+        } else {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "room_backend_unavailable",
+                "Эфир временно недоступен: сервер комнаты не запущен",
+            )
+        });
+    }
     if method == Method::GET && path == "/room" {
         return Ok(html_body_response(StatusCode::OK, room_page()));
     }
