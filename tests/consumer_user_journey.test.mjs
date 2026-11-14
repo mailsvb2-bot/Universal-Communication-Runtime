@@ -79,3 +79,40 @@ test("consumer CTA label distinguishes no contacts from populated contact list",
  populated=true;scope.sync();
  assert.equal(quickAction.textContent,"Выбрать, кому позвонить");
 });
+
+test("pending share result cannot reveal the previous account invitation after logout",async()=>{
+ const code=section("function plInviteStillCurrent(","el(\"pl-copy-invite\").addEventListener");
+ let resolveShare;const pending=new Promise(resolve=>{resolveShare=resolve;});
+ let shown=0,copied=0;
+ const scope={
+  plOwnIdentity:"identity-one",accountScope:"scope-one",
+  plInviteUrl:()=>scope.plOwnIdentity?"https://example.invalid/start?contact="+scope.plOwnIdentity:null,
+  location:{origin:"https://example.invalid"},navigator:{clipboard:{writeText:async()=>{copied++;}}},
+  sharePublicInvite:async()=>pending,
+  plShowInviteForManualCopy:()=>{shown++;},message:()=>{}
+ };
+ vm.runInNewContext(code+"\\nthis.share=plShareInvite;",scope);
+ const attempt=scope.share();
+ scope.plOwnIdentity=null;scope.accountScope=null;
+ resolveShare("manual");
+ await attempt;
+ assert.equal(shown,0,"stale invite fallback must not be visible after logout");
+ assert.equal(copied,0);
+});
+
+test("a failed pending clipboard operation cannot restore a previous account invite",async()=>{
+ const code=section("function plInviteStillCurrent(","el(\"pl-copy-invite\").addEventListener");
+ let rejectCopy;const pending=new Promise((_,reject)=>{rejectCopy=reject;});
+ let shown=0;
+ const scope={
+  plOwnIdentity:"identity-one",accountScope:"scope-one",
+  plInviteUrl:()=>scope.plOwnIdentity?"https://example.invalid/start?contact="+scope.plOwnIdentity:null,
+  navigator:{clipboard:{writeText:()=>pending}},plShowInviteForManualCopy:()=>{shown++;},message:()=>{}
+ };
+ vm.runInNewContext(code+"\\nthis.copy=plCopyInvite;",scope);
+ const attempt=scope.copy();
+ scope.plOwnIdentity="identity-two";scope.accountScope="scope-two";
+ rejectCopy(new Error("clipboard denied"));
+ await attempt;
+ assert.equal(shown,0);
+});
