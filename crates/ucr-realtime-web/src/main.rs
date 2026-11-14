@@ -780,15 +780,27 @@ async fn handle_request(
         return Ok(response);
     }
     if method == Method::GET && path == "/v1/room/status" {
-        // The HTML /room route is not proof that its separate Room API exists.
-        // Fail closed before media capture if the pinned loopback endpoint is absent.
-        // This is a connectivity preflight, NOT an admission or E2EE readiness claim.
-        let connected = matches!(
-            tokio::time::timeout(Duration::from_millis(750), TcpStream::connect(state.room_api)).await,
-            Ok(Ok(_))
+        // A listening port is insufficient: ucr-dev --room owns an unrelated
+        // SQLite store and grants, and must never be accepted as production.
+        // Only a same-loopback adapter backed by the canonical runtime may
+        // acknowledge this dedicated production contract. Do not infer E2EE
+        // or signed-grant admission from generic /readyz.
+        let canonical = matches!(
+            tokio::time::timeout(
+                Duration::from_millis(900),
+                read_room_proxy(state.room_api, "/v1/room/capabilities", b"{}", None)
+            ).await,
+            Ok(Ok((status, payload))) if status == StatusCode::OK
+                && serde_json::from_slice::<serde_json::Value>(&payload).ok().is_some_and(|value| {
+                    value.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
+                        && value.get("owner").and_then(serde_json::Value::as_str)
+                            == Some("canonical-ucr-runtime")
+                        && value.get("capability").and_then(serde_json::Value::as_str)
+                            == Some("production-room-enrollment-v1")
+                })
         );
-        return Ok(if connected {
-            json_bytes_response(StatusCode::OK, br#"{"ok":true,"transport":"room-api-reachable"}"#.to_vec())
+        return Ok(if canonical {
+            json_bytes_response(StatusCode::OK, br#"{"ok":true,"transport":"canonical-room-ready"}"#.to_vec())
         } else {
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
