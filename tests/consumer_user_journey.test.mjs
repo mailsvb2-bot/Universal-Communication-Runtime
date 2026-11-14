@@ -91,7 +91,7 @@ test("pending share result cannot reveal the previous account invitation after l
   sharePublicInvite:async()=>pending,
   plShowInviteForManualCopy:()=>{shown++;},message:()=>{}
  };
- vm.runInNewContext(code+"\\nthis.share=plShareInvite;",scope);
+ vm.runInNewContext(code+"\nthis.share=plShareInvite;",scope);
  const attempt=scope.share();
  scope.plOwnIdentity=null;scope.accountScope=null;
  resolveShare("manual");
@@ -109,7 +109,7 @@ test("a failed pending clipboard operation cannot restore a previous account inv
   plInviteUrl:()=>scope.plOwnIdentity?"https://example.invalid/start?contact="+scope.plOwnIdentity:null,
   navigator:{clipboard:{writeText:()=>pending}},plShowInviteForManualCopy:()=>{shown++;},message:()=>{}
  };
- vm.runInNewContext(code+"\\nthis.copy=plCopyInvite;",scope);
+ vm.runInNewContext(code+"\nthis.copy=plCopyInvite;",scope);
  const attempt=scope.copy();
  scope.plOwnIdentity="identity-two";scope.accountScope="scope-two";
  rejectCopy(new Error("clipboard denied"));
