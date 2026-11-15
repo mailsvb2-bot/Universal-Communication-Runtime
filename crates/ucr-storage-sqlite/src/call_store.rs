@@ -1437,7 +1437,10 @@ fn map_call_error(error: ucr_protocol::CallSignallingError) -> DurableStoreError
 mod tests {
     use super::*;
     use crate::{SQLITE_SCHEMA_VERSION, message_store::tests::TestDb};
-    use ucr_core::{CallStore, ConversationStore, EventJournalStore, GroupStore, StorageProvider, UniversalConferenceStore};
+    use ucr_core::{
+        CallStore, ConversationStore, EventJournalStore, GroupStore, StorageProvider,
+        UniversalConferenceStore,
+    };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CallParticipant, CorrelationContext, DeviceId, DeviceRef,
         EventEnvelope, EventId, IdentityId, ProtocolVersion,
@@ -2007,10 +2010,12 @@ mod tests {
             Err(DurableStoreError::PermissionDenied)
         );
     }
+
     #[test]
     fn room_end_and_group_call_creation_share_one_sqlite_lifecycle_fence() {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(db.path()).expect("open");
+        let joining = SqliteLocalStore::open(db.path()).expect("independent Call connection");
         let (mut active_call, alice, _bob) = session();
         let room_id = GroupId::from_opaque(oid("room-call-group"));
         let room_conversation = ucr_model::ConversationRecord {
@@ -2090,7 +2095,7 @@ mod tests {
             .expect("canonical active group Call");
         let fingerprint = call_creation_fingerprint(&active_call).expect("Call fingerprint");
         {
-            let mut connection = store.lock_connection().expect("connection");
+            let mut connection = joining.lock_connection().expect("connection");
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .expect("transaction");
@@ -2111,7 +2116,7 @@ mod tests {
         );
 
         {
-            let mut connection = store.lock_connection().expect("connection");
+            let mut connection = joining.lock_connection().expect("connection");
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .expect("transaction");
@@ -2147,7 +2152,7 @@ mod tests {
         let mut late_call = active_call;
         late_call.call_id = CallId::from_opaque(oid("room-late-call"));
         assert_eq!(
-            store.create_call(&alice, &late_call),
+            joining.create_call(&alice, &late_call),
             Err(DurableStoreError::PermissionDenied),
             "Call creation must observe Ended under its own canonical write transaction"
         );
