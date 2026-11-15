@@ -96,6 +96,7 @@ mod universal_conference_service;
 pub use universal_conference_service::{
     GrpcUniversalConferenceService, UniversalConferenceRuntimeCapabilities,
     canonical_universal_conference_lifecycle_event, issue_authenticated_first_party_room_join,
+    FirstPartyRoomJoinAttempt,
     prepare_authenticated_first_party_room_call, reconcile_canonical_conference_permissions,
     universal_conference_service_server,
 };
