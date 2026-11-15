@@ -445,6 +445,7 @@ fn transition_universal_conference_with_event_in_transaction(
     lifecycle: UniversalConferenceLifecycle,
     entry_open: bool,
     event: Option<&EventEnvelope>,
+    allow_live_end_without_calls: bool,
 ) -> Result<UniversalConferenceProfile, DurableStoreError> {
     let current =
         load_profile(transaction, scope, conference_id)?.ok_or(DurableStoreError::Conflict)?;
@@ -460,9 +461,11 @@ fn transition_universal_conference_with_event_in_transaction(
         return Ok(current);
     }
 
-    if current.revision != expected_revision
-        || !valid_lifecycle_transition(current.lifecycle, lifecycle)
-    {
+    let lifecycle_change_allowed = valid_lifecycle_transition(current.lifecycle, lifecycle)
+        || (allow_live_end_without_calls
+            && current.lifecycle == UniversalConferenceLifecycle::Live
+            && lifecycle == UniversalConferenceLifecycle::Ended);
+    if current.revision != expected_revision || !lifecycle_change_allowed {
         return Err(DurableStoreError::Conflict);
     }
     if !conference_consumes_resource_quota(current.lifecycle)
@@ -818,6 +821,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
             lifecycle,
             entry_open,
             event,
+            false,
         )?;
         transaction
             .commit()
@@ -845,6 +849,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
             UniversalConferenceLifecycle::Ended,
             false,
             event,
+            true,
         )?;
         transaction
             .commit()
