@@ -2104,12 +2104,17 @@ mod tests {
             transaction.commit().expect("commit active Call");
         }
 
+        let mut end_event = event("room-call-end-event");
+        end_event.event_type = "ucr.conference.ended".to_owned();
+        end_event.logical_order = live.revision + 1;
+        end_event.actor.on_behalf_of = Some(PrincipalId::from_opaque(oid("room-call-integration")));
+
         assert_eq!(
             store.end_universal_conference_if_no_active_group_calls(
                 &scope(),
                 &room_id,
                 live.revision,
-                None,
+                Some(&end_event),
             ),
             Err(DurableStoreError::Conflict),
             "an active canonical Group Call must prevent Ended"
@@ -2141,7 +2146,7 @@ mod tests {
                 &scope(),
                 &room_id,
                 live.revision,
-                None,
+                Some(&end_event),
             )
             .expect("room can end after all Calls are terminal");
         assert_eq!(
