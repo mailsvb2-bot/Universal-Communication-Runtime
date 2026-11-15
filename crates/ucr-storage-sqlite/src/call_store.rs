@@ -2046,7 +2046,7 @@ mod tests {
         let room = ucr_model::UniversalConferenceProfile {
             scope: scope(),
             conference_id: room_id.clone(),
-            integration_id: IntegrationId::from_opaque(oid("room-call-integration")),
+            integration_id: ucr_model::IntegrationId::from_opaque(oid("room-call-integration")),
             external_conference_id: b"room-call-external".to_vec(),
             create_idempotency_key: "room-call-create".to_owned(),
             mode: ucr_model::UniversalConferenceMode::Webinar,
