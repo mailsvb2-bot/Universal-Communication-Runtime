@@ -399,6 +399,70 @@ struct StoredParticipant {
 }
 
 impl UniversalConferenceStore for SqliteLocalStore {
+    fn persist_first_party_room_with_owner(
+        &self,
+        room: &UniversalConferenceProfile,
+        owner: &UniversalConferenceParticipantProfile,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_profile(room)?;
+        validate_participant(owner)?;
+        // The owner and the conference must be a single source of truth, never
+        // two independent writes separated by a process crash or concurrent join.
+        if room.scope != owner.scope
+            || room.conference_id != owner.conference_id
+            || room.integration_id != owner.integration_id
+            || room.mode != UniversalConferenceMode::Webinar
+            || room.lifecycle != UniversalConferenceLifecycle::Scheduled
+            || room.entry_open
+            || room.revision != 1
+            || owner.participant.kind != PrincipalKind::Person
+            || owner.role != ConferenceParticipantRole::Owner
+            || !owner.active
+            || owner.revision != 1
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+
+        // Both canonical identities must match an exact idempotent retry.
+        // Never treat an orphaned room (or an unexpected new owner) as success.
+        if let Some(existing) = load_profile_for_external(
+            &tx,
+            &room.scope,
+            &room.integration_id,
+            &room.external_conference_id,
+        )? {
+            let existing_owner =
+                load_participant(&tx, &room.scope, &room.conference_id, &owner.participant)?;
+            return if existing == *room && existing_owner.as_ref() == Some(owner) {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if load_profile(&tx, &room.scope, &room.conference_id)?.is_some() {
+            return Err(DurableStoreError::Conflict);
+        }
+        ensure_integration_conference_quota(&tx, &room.scope, &room.integration_id)?;
+        ensure_integration_participant_quota(&tx, &room.scope, &room.integration_id)?;
+        insert_profile(&tx, room)?;
+        ensure_participant_capacity(&tx, &room.scope, &room.conference_id)?;
+        ensure_unique_active_owner(
+            &tx,
+            &room.scope,
+            &room.conference_id,
+            &owner.participant,
+            owner.role,
+            owner.active,
+        )?;
+        insert_participant(&tx, owner)?;
+        tx.commit().map_err(|error| map_sqlite_error(&error))?;
+        Ok(DurableRecordStatus::Persisted)
+    }
+
     fn persist_universal_conference_profile(
         &self,
         profile: &UniversalConferenceProfile,
