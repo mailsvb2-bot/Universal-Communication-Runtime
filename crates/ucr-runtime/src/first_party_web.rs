@@ -1192,7 +1192,7 @@ fn start_call(state: &State, session: &Session, intent: &StartIntent) -> Result<
     to_call(state, &current)
 }
 
-fn has_derived_direct_media(kind: &ucr_model::ConversationKind) -> Result<bool, StatusCode> {
+fn has_derived_direct_media(kind: ucr_model::ConversationKind) -> Result<bool, StatusCode> {
     match kind {
         ucr_model::ConversationKind::Direct => Ok(true),
         // A webinar Room's Group Call IS its media Call. It has no derived
@@ -1228,7 +1228,7 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
         kind: action,
     };
     let runtime = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref());
-    let has_derived_media = has_derived_direct_media(&before.conversation.kind)?;
+    let has_derived_media = has_derived_direct_media(before.conversation.kind)?;
     if ends_media && has_derived_media {
         // The existing canonical CallStore owns BOTH transitions. An immediate
         // SQLite transaction (or the Memory owner mutex) fences concurrent
@@ -3088,11 +3088,11 @@ mod tests {
     #[test]
     fn group_room_calls_never_create_or_terminate_a_derived_direct_media_child() {
         assert_eq!(
-            has_derived_direct_media(&ucr_model::ConversationKind::Direct),
+            has_derived_direct_media(ucr_model::ConversationKind::Direct),
             Ok(true)
         );
         assert_eq!(
-            has_derived_direct_media(&ucr_model::ConversationKind::PrivateGroup),
+            has_derived_direct_media(ucr_model::ConversationKind::PrivateGroup),
             Ok(false)
         );
     }
