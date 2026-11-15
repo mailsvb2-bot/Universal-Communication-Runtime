@@ -771,6 +771,92 @@ impl UniversalConferenceStore for SqliteLocalStore {
         Ok(updated)
     }
 
+    fn persist_first_party_room_attendee(
+        &self,
+        attendee: &UniversalConferenceParticipantProfile,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_participant(attendee)?;
+        if attendee.participant.kind != PrincipalKind::Person
+            || attendee.role != ConferenceParticipantRole::Attendee
+            || !attendee.active
+            || attendee.revision != 1
+            || !attendee.audio_muted
+            || attendee.camera_allowed
+            || attendee.publish_audio_allowed
+            || attendee.publish_video_allowed
+            || attendee.screen_share_allowed
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let profile = load_profile(&tx, &attendee.scope, &attendee.conference_id)?
+            .ok_or(DurableStoreError::Conflict)?;
+        if profile.integration_id != attendee.integration_id
+            || profile.mode != UniversalConferenceMode::Webinar
+            || !profile.entry_open
+            || !matches!(
+                profile.lifecycle,
+                UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+            )
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        let namespace = namespace_storage_key(&attendee.scope);
+        let active_owner_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM universal_conference_participants
+                 WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+                   AND conference_id = ?4 AND role = 'owner' AND active = 1
+                   AND principal_kind = 'person'",
+                params![
+                    attendee.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    attendee.conference_id.as_opaque().as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if active_owner_count != 1 {
+            return Err(DurableStoreError::Conflict);
+        }
+        if let Some(current) = load_participant(
+            &tx,
+            &attendee.scope,
+            &attendee.conference_id,
+            &attendee.participant,
+        )? {
+            return if current == *attendee {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if load_participant_for_external(
+            &tx,
+            &attendee.scope,
+            &attendee.conference_id,
+            &attendee.integration_id,
+            &attendee.external_user_id,
+        )?
+        .is_some()
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        ensure_participant_capacity(&tx, &attendee.scope, &attendee.conference_id)?;
+        ensure_integration_participant_quota(
+            &tx,
+            &attendee.scope,
+            &attendee.integration_id,
+        )?;
+        insert_participant(&tx, attendee)?;
+        tx.commit().map_err(|error| map_sqlite_error(&error))?;
+        Ok(DurableRecordStatus::Persisted)
+    }
+
     fn persist_universal_conference_participant(
         &self,
         participant: &UniversalConferenceParticipantProfile,
