@@ -3215,7 +3215,7 @@ where
 }
 
 /// Issues an authenticated first-party room Join through the SAME durable
-/// universal-conference issuer, CommandAcceptanceStore, Device projection
+/// universal-conference issuer, `CommandAcceptanceStore`, Device projection
 /// and active Group Call lookup used by machine-authenticated conference joins.
 /// This is never a substitute for endpoint MLS or SFU readiness.
 ///
@@ -3225,6 +3225,13 @@ where
 /// # Errors
 /// Rejects foreign principal/Device, closed room, missing active Group Call,
 /// expired schedule, idempotency conflicts and unavailable canonical storage.
+/// The request-specific replay key and clock, kept together for the canonical
+/// durable Join issuance boundary.
+pub struct FirstPartyRoomJoinAttempt<'a> {
+    pub idempotency_key: &'a str,
+    pub now_unix_ms: i64,
+}
+
 pub fn issue_authenticated_first_party_room_join<S>(
     store: &S,
     issuer: &JoinTokenIssuer,
@@ -3232,8 +3239,7 @@ pub fn issue_authenticated_first_party_room_join<S>(
     room_id: &GroupId,
     participant: &PrincipalRef,
     device_id: &DeviceId,
-    idempotency_key: &str,
-    now_unix_ms: i64,
+    attempt: FirstPartyRoomJoinAttempt<'_>,
 ) -> Result<pb::ConferenceJoinGrant, CanonicalError>
 where
     S: UniversalConferenceStore
@@ -3245,7 +3251,7 @@ where
         + GroupStore
         + GroupMlsServerCustodyProbe,
 {
-    validate_mutation_idempotency_key(idempotency_key)?;
+    validate_mutation_attempt.idempotency_key(attempt.idempotency_key)?;
     if participant.kind != PrincipalKind::Person {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
@@ -3305,7 +3311,7 @@ where
         use_policy: pb::JoinGrantUsePolicy::Reusable as i32,
         not_before_unix_ms: None,
         not_after_unix_ms: None,
-        idempotency_key: idempotency_key.to_owned(),
+        attempt.idempotency_key: attempt.idempotency_key.to_owned(),
     };
     let payload = request.encode_to_vec();
     let grant = issue_join_grant(
@@ -3320,10 +3326,10 @@ where
             use_policy: RealtimeJoinGrantUsePolicy::Reusable,
             not_before_unix_ms: None,
             not_after_unix_ms: None,
-            idempotency_key: idempotency_key.to_owned(),
+            attempt.idempotency_key: attempt.idempotency_key.to_owned(),
         },
         payload,
-        now_unix_ms,
+        attempt.now_unix_ms,
     )?;
     // The owner may have closed the Room while grant signing persisted its
     // durable row. Do not return a stale bearer; revoke both the canonical
