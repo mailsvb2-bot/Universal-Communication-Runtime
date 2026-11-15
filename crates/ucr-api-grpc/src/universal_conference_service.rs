@@ -18,7 +18,8 @@ use sha2::{Digest as _, Sha256};
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
-    AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
+    AuthorizationEvaluator, CallPermissionGrantStore, CallStore, CommandAcceptanceStore,
+    ConferenceJoinGrantStore,
     DeviceLifecycleStore, DurableStoreError, EventJournalStore, ExternalIdentityBindingStore,
     GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
@@ -2319,22 +2320,6 @@ const MANAGED_PARTICIPANT_PERMISSIONS: [&str; 7] = [
     SCREEN_SHARE_SEND_PERMISSION,
 ];
 
-/// Reconciles the same role/media `PermissionGrants` as machine-authenticated
-/// universal conference enrollment, after a proven first-party Person Device
-/// has been atomically registered in the canonical Conference roster.
-/// This function grants no identity, Device trust or signed Join token.
-///
-/// # Errors
-/// Returns a canonical error when permission storage is unavailable or rejects
-/// a grant/revocation; callers must fail closed and retry reconciliation.
-pub fn reconcile_canonical_conference_permissions<S: PermissionGrantStore>(
-    store: &S,
-    profile: &UniversalConferenceParticipantProfile,
-    mode: UniversalConferenceMode,
-) -> Result<(), CanonicalError> {
-    sync_participant_permissions(store, profile, mode)
-}
-
 fn sync_participant_permissions<S: PermissionGrantStore>(
     store: &S,
     profile: &UniversalConferenceParticipantProfile,
@@ -2699,6 +2684,7 @@ where
         + GroupStore
         + GroupMlsServerCustodyProbe
         + CallStore
+        + CallPermissionGrantStore
         + GroupCallLookupStore
         + PrincipalIdentityBindingStore
         + IdentityDeviceLookupStore,
@@ -2770,7 +2756,67 @@ where
         scope: scope.clone(),
         principal: owner.clone(),
     };
-    reconcile_runtime_call(store, &input, &command_id, &actor, &ready)
+    let prepared = reconcile_runtime_call(store, &input, &command_id, &actor, &ready)?;
+    if prepared {
+        reconcile_first_party_room_call_permissions(store, scope, room_id, &ready)?;
+    }
+    Ok(prepared)
+}
+
+fn first_party_room_call_permissions(
+    publish_audio_allowed: bool,
+    publish_video_allowed: bool,
+    screen_share_allowed: bool,
+) -> Vec<&'static str> {
+    let mut permissions = vec![
+        CALL_OBSERVE_PERMISSION,
+        CONFERENCE_SUBSCRIBE_PERMISSION,
+        AUDIO_RECEIVE_PERMISSION,
+        VIDEO_RECEIVE_PERMISSION,
+    ];
+    if publish_audio_allowed {
+        permissions.push(AUDIO_SEND_PERMISSION);
+    }
+    if publish_video_allowed {
+        permissions.push(VIDEO_SEND_PERMISSION);
+    }
+    if screen_share_allowed {
+        permissions.push(SCREEN_SHARE_SEND_PERMISSION);
+    }
+    permissions
+}
+
+fn reconcile_first_party_room_call_permissions<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participants: &[RuntimeReadyParticipant],
+) -> Result<(), CanonicalError>
+where
+    S: CallPermissionGrantStore + GroupCallLookupStore,
+{
+    let calls = store
+        .active_calls_for_group(scope, room_id, 2)
+        .map_err(map_store_error)?;
+    let [call] = calls.as_slice() else {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    };
+    for participant in participants {
+        let permissions = first_party_room_call_permissions(
+            participant.profile.publish_audio_allowed,
+            participant.profile.publish_video_allowed,
+            participant.profile.screen_share_allowed,
+        );
+        store
+            .grant_call_permissions(
+                scope,
+                &call.call_id,
+                std::slice::from_ref(&participant.profile.participant),
+                &permissions,
+            )
+            .map_err(map_store_error)?;
+    }
+    Ok(())
 }
 
 fn prepare_conference_runtime<S>(
@@ -6188,5 +6234,40 @@ mod universal_runtime_tests {
             &removed_history,
             &participants
         ));
+    }
+}
+
+#[cfg(test)]
+mod first_party_room_permission_tests {
+    use super::first_party_room_call_permissions;
+    use ucr_protocol::{
+        AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CALL_OBSERVE_PERMISSION,
+        CONFERENCE_SUBSCRIBE_PERMISSION, SCREEN_SHARE_SEND_PERMISSION, VIDEO_RECEIVE_PERMISSION,
+        VIDEO_SEND_PERMISSION,
+    };
+
+    #[test]
+    fn room_speaker_and_attendee_permissions_are_minimal_and_role_bound() {
+        assert_eq!(
+            first_party_room_call_permissions(true, true, true),
+            vec![
+                CALL_OBSERVE_PERMISSION,
+                CONFERENCE_SUBSCRIBE_PERMISSION,
+                AUDIO_RECEIVE_PERMISSION,
+                VIDEO_RECEIVE_PERMISSION,
+                AUDIO_SEND_PERMISSION,
+                VIDEO_SEND_PERMISSION,
+                SCREEN_SHARE_SEND_PERMISSION,
+            ]
+        );
+        assert_eq!(
+            first_party_room_call_permissions(false, false, false),
+            vec![
+                CALL_OBSERVE_PERMISSION,
+                CONFERENCE_SUBSCRIBE_PERMISSION,
+                AUDIO_RECEIVE_PERMISSION,
+                VIDEO_RECEIVE_PERMISSION,
+            ]
+        );
     }
 }
