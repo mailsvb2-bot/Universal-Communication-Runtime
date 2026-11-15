@@ -456,7 +456,7 @@ enum ConferenceLifecycleTransition<'a> {
 
 fn transition_universal_conference_with_event_in_transaction(
     transaction: &Transaction<'_>,
-    transition: ConferenceLifecycleTransition<'_>,
+    transition: &ConferenceLifecycleTransition<'_>,
 ) -> Result<UniversalConferenceProfile, DurableStoreError> {
     let (
         scope,
@@ -475,12 +475,12 @@ fn transition_universal_conference_with_event_in_transaction(
             entry_open,
             event,
         } => (
-            scope,
-            conference_id,
-            expected_revision,
-            lifecycle,
-            entry_open,
-            event,
+            *scope,
+            *conference_id,
+            *expected_revision,
+            lifecycle.clone(),
+            *entry_open,
+            *event,
             false,
         ),
         ConferenceLifecycleTransition::EndAfterCallsClosed {
@@ -491,12 +491,12 @@ fn transition_universal_conference_with_event_in_transaction(
         } => {
             ensure_no_active_group_calls(transaction, scope, conference_id)?;
             (
-                scope,
-                conference_id,
-                expected_revision,
+                *scope,
+                *conference_id,
+                *expected_revision,
                 UniversalConferenceLifecycle::Ended,
                 false,
-                event,
+                *event,
                 true,
             )
         }
@@ -528,6 +528,26 @@ fn transition_universal_conference_with_event_in_transaction(
         ensure_integration_conference_quota(transaction, scope, &current.integration_id)?;
     }
 
+    persist_conference_lifecycle_change(
+        transaction,
+        scope,
+        conference_id,
+        expected_revision,
+        lifecycle,
+        entry_open,
+        event,
+    )
+}
+
+fn persist_conference_lifecycle_change(
+    transaction: &Transaction<'_>,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    expected_revision: u64,
+    lifecycle: UniversalConferenceLifecycle,
+    entry_open: bool,
+    event: Option<&EventEnvelope>,
+) -> Result<UniversalConferenceProfile, DurableStoreError> {
     let next_revision = expected_revision
         .checked_add(1)
         .ok_or(DurableStoreError::InvalidRecord)?;
@@ -540,9 +560,9 @@ fn transition_universal_conference_with_event_in_transaction(
     let namespace = namespace_storage_key(scope);
     let changed = transaction
         .execute(
-            "UPDATE universal_conferences \
-             SET lifecycle = ?1, entry_open = ?2, revision = ?3 \
-             WHERE tenant_id = ?4 AND namespace_present = ?5 AND namespace_id = ?6 \
+            "UPDATE universal_conferences \\
+             SET lifecycle = ?1, entry_open = ?2, revision = ?3 \\
+             WHERE tenant_id = ?4 AND namespace_present = ?5 AND namespace_id = ?6 \\
                AND conference_id = ?7 AND revision = ?8",
             params![
                 lifecycle_text(lifecycle),
@@ -869,7 +889,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         let updated = transition_universal_conference_with_event_in_transaction(
             &transaction,
-            ConferenceLifecycleTransition::Standard {
+            &ConferenceLifecycleTransition::Standard {
                 scope,
                 conference_id,
                 expected_revision,
@@ -897,7 +917,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         let ended = transition_universal_conference_with_event_in_transaction(
             &transaction,
-            ConferenceLifecycleTransition::EndAfterCallsClosed {
+            &ConferenceLifecycleTransition::EndAfterCallsClosed {
                 scope,
                 conference_id,
                 expected_revision,
