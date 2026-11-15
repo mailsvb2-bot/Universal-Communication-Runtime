@@ -184,7 +184,9 @@ async fn wait_for_matching_close(
             Ok((closed_session, closed_offer))
                 if closed_session.is_empty()
                     || (closed_session == session_key
-                        && closed_offer.as_deref().is_none_or(|expected| expected == offer_id)) =>
+                        && closed_offer
+                            .as_deref()
+                            .is_none_or(|expected| expected == offer_id)) =>
             {
                 return;
             }
@@ -790,7 +792,9 @@ mod tests {
         close_tx
             .send(("session-a".to_owned(), Some("offer-stale".to_owned())))
             .expect("in-flight sender subscribed before command enqueue");
-        accept_tx.send(()).expect("stale close must not cancel current send");
+        accept_tx
+            .send(())
+            .expect("stale close must not cancel current send");
 
         assert_eq!(task.await.expect("send task"), Ok(()));
     }
