@@ -1218,7 +1218,14 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
         kind: action,
     };
     let runtime = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref());
-    if ends_media {
+    let has_derived_media = match before.conversation.kind {
+        ConversationKind::Direct => true,
+        // A webinar Room's Group Call IS its media Call. It has no derived
+        // direct-media child and must use the canonical Call lifecycle itself.
+        ConversationKind::PrivateGroup => false,
+        _ => return Err(StatusCode::CONFLICT),
+    };
+    if ends_media && has_derived_media {
         // The existing canonical CallStore owns BOTH transitions. An immediate
         // SQLite transaction (or the Memory owner mutex) fences concurrent
         // Join and guarantees that neither Call can be left half-terminated.
@@ -1243,7 +1250,10 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
             .map_err(|_| StatusCode::CONFLICT)?;
     }
     let current = get_call(state, session, &req.call_id)?;
-    if !ends_media && current.signalling_state == CallSignallingState::Terminated {
+    if has_derived_media
+        && !ends_media
+        && current.signalling_state == CallSignallingState::Terminated
+    {
         first_party_media::end_direct_call_media(state.store.as_ref(), &current)
             .map_err(|_| StatusCode::CONFLICT)?;
     }
