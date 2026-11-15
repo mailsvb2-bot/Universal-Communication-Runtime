@@ -3465,17 +3465,15 @@ where
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
     validate_first_party_room_group_owner(store, scope, room_id, &current_owner, &current_group)?;
     validate_first_party_room_group_member(store, scope, room_id, current_enrolled)?;
-    Ok(
-        current_room.as_ref() == Some(&snapshot.room)
-            && current_owner == snapshot.owner
-            && current_enrolled == &snapshot.enrolled
-            && current_device == *device_id
-            && current_key.key_id.as_opaque().as_str() == attempt.signer_key_id
-            && current_call == snapshot.call_id
-            && current_group.revision == snapshot.group.revision
-            && current_group.crypto_state == snapshot.group.crypto_state
-            && current_group.ownership == snapshot.group.ownership,
-    )
+    Ok(current_room.as_ref() == Some(&snapshot.room)
+        && current_owner == snapshot.owner
+        && current_enrolled == &snapshot.enrolled
+        && current_device == *device_id
+        && current_key.key_id.as_opaque().as_str() == attempt.signer_key_id
+        && current_call == snapshot.call_id
+        && current_group.revision == snapshot.group.revision
+        && current_group.crypto_state == snapshot.group.crypto_state
+        && current_group.ownership == snapshot.group.ownership)
 }
 
 /// Issues an authenticated first-party room Join through the canonical durable
