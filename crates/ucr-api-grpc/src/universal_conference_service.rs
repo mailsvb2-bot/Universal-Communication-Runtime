@@ -3096,6 +3096,102 @@ where
     }
 }
 
+/// Issues an authenticated first-party room Join through the SAME durable
+/// universal-conference issuer, CommandAcceptanceStore, Device projection
+/// and active Group Call lookup used by machine-authenticated conference joins.
+/// This is never a substitute for endpoint MLS or SFU readiness.
+///
+/// The HTTP first-party host must independently verify the cookie, Device
+/// signer, exact binding, and per-Device revocation fences before calling.
+///
+/// # Errors
+/// Rejects foreign principal/Device, closed room, missing active Group Call,
+/// expired schedule, idempotency conflicts and unavailable canonical storage.
+pub fn issue_authenticated_first_party_room_join<S>(
+    store: &S,
+    issuer: &JoinTokenIssuer,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participant: &PrincipalRef,
+    device_id: &DeviceId,
+    idempotency_key: &str,
+    now_unix_ms: i64,
+) -> Result<pb::ConferenceJoinGrant, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + ConferenceJoinGrantStore
+        + CommandAcceptanceStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + GroupCallLookupStore,
+{
+    validate_mutation_idempotency_key(idempotency_key)?;
+    if participant.kind != PrincipalKind::Person {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    let integration_id = IntegrationId::from_opaque(
+        OpaqueId::new("ucr-first-party-room")
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
+    let room = store
+        .universal_conference_profile(scope, room_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    if room.integration_id != integration_id
+        || room.mode != UniversalConferenceMode::Webinar
+        || !room.entry_open
+        || !matches!(
+            room.lifecycle,
+            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+        )
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    let enrolled = store
+        .universal_conference_participant(scope, room_id, participant)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    if enrolled.integration_id != integration_id || !enrolled.active {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    // JoinTokenIssuer must bind to this *exact* authenticated Device. The
+    // generic integration API resolves one active Device; compare before
+    // handing off so a different logged-in Device cannot receive that grant.
+    let current_device = resolve_join_device(store, scope, participant)?;
+    if &current_device != device_id {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    let request = pb::UniversalIssueJoinGrantRequest {
+        scope: Some(pb_scope(scope)),
+        conference_id: Some(pb_opaque(room_id.as_opaque())),
+        integration_id: Some(pb_opaque(integration_id.as_opaque())),
+        external_user_id: enrolled.external_user_id.clone(),
+        ttl_seconds: 900,
+        use_policy: pb::JoinGrantUsePolicy::Reusable as i32,
+        not_before_unix_ms: None,
+        not_after_unix_ms: None,
+        idempotency_key: idempotency_key.to_owned(),
+    };
+    let payload = request.encode_to_vec();
+    issue_join_grant(
+        store,
+        issuer,
+        IssueJoinGrantInput {
+            scope: scope.clone(),
+            conference_id: room_id.clone(),
+            integration_id,
+            external_user_id: enrolled.external_user_id,
+            ttl_seconds: 900,
+            use_policy: RealtimeJoinGrantUsePolicy::Reusable,
+            not_before_unix_ms: None,
+            not_after_unix_ms: None,
+            idempotency_key: idempotency_key.to_owned(),
+        },
+        payload,
+        now_unix_ms,
+    )
+}
+
 fn issue_join_grant<S>(
     store: &S,
     issuer: &JoinTokenIssuer,
