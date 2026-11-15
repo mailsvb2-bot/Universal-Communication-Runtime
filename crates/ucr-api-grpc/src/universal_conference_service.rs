@@ -2569,7 +2569,14 @@ struct RuntimeReadyParticipant {
 /// MLS Groups, missing enrolled Devices, changed conference state or Call CAS.
 fn first_party_room_owner(
     participants: &[UniversalConferenceParticipantProfile],
+    integration_id: &IntegrationId,
 ) -> Result<PrincipalRef, CanonicalError> {
+    if participants
+        .iter()
+        .any(|participant| &participant.integration_id != integration_id)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
+    }
     let owners = participants
         .iter()
         .filter(|participant| participant.role == ConferenceParticipantRole::Owner)
@@ -2669,7 +2676,7 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
     let enrolled = active_conference_participants(store, scope, room_id)?;
-    if first_party_room_owner(&enrolled)? != *owner {
+    if first_party_room_owner(&enrolled, &integration_id)? != *owner {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
     let group = store
@@ -3266,14 +3273,20 @@ pub struct FirstPartyRoomJoinAttempt<'a> {
 
 fn validate_first_party_room_call_member(
     call: &CallSession,
+    owner: &PrincipalRef,
     participant: &PrincipalRef,
 ) -> Result<(), CanonicalError> {
-    if call.signalling_state != CallSignallingState::Active
-        || !call.participants.iter().any(|member| {
-            member.principal == *participant
+    let accepted = |principal: &PrincipalRef| {
+        call.participants.iter().any(|member| {
+            &member.principal == principal
                 && member.state == CallParticipantState::Accepted
                 && member.left_revision.is_none()
         })
+    };
+    if call.signalling_state != CallSignallingState::Active
+        || &call.initiated_by != owner
+        || !accepted(owner)
+        || !accepted(participant)
     {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
@@ -3284,6 +3297,7 @@ fn resolve_first_party_room_call<S>(
     store: &S,
     scope: &TenantScope,
     room_id: &GroupId,
+    owner: &PrincipalRef,
     participant: &PrincipalRef,
 ) -> Result<CallId, CanonicalError>
 where
@@ -3298,7 +3312,7 @@ where
         (None, _) => return Err(CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)),
         (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
     };
-    validate_first_party_room_call_member(&call, participant)?;
+    validate_first_party_room_call_member(&call, owner, participant)?;
     Ok(call.call_id)
 }
 
@@ -3366,7 +3380,7 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
     let participants = active_conference_participants(store, scope, room_id)?;
-    let owner = first_party_room_owner(&participants)?;
+    let owner = first_party_room_owner(&participants, &integration_id)?;
     let enrolled = participants
         .iter()
         .find(|candidate| &candidate.participant == participant)
@@ -3395,7 +3409,7 @@ where
     if active_key.key_id.as_opaque().as_str() != attempt.signer_key_id {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
-    let call_id = resolve_first_party_room_call(store, scope, room_id, participant)?;
+    let call_id = resolve_first_party_room_call(store, scope, room_id, &owner, participant)?;
     // Unlike generic integrations, PetrelLink's first-party Room may NOT
     // join a server-custodied MLS group. The same canonical validator is used
     // by Room preparation and Join issuance; realtime rechecks at admission.
@@ -3449,7 +3463,7 @@ where
             .active_trusted_signing_key(scope, device_id)
             .map_err(map_store_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
-        let current_call = resolve_first_party_room_call(store, scope, room_id, participant)?;
+        let current_call = resolve_first_party_room_call(store, scope, room_id, &owner, participant)?;
         let current_group = store
             .group(scope, room_id)
             .map_err(map_store_error)?
@@ -5618,21 +5632,21 @@ mod universal_runtime_tests {
             &attendee,
         );
 
-        assert!(super::validate_first_party_room_call_member(&call, &attendee).is_err());
+        assert!(super::validate_first_party_room_call_member(&call, &owner, &attendee).is_err());
         call.signalling_state = CallSignallingState::Active;
         assert!(
-            super::validate_first_party_room_call_member(&call, &attendee).is_err(),
+            super::validate_first_party_room_call_member(&call, &owner, &attendee).is_err(),
             "an active Call does not admit an unaccepted attendee"
         );
         call.participants[1].state = CallParticipantState::Accepted;
-        assert!(super::validate_first_party_room_call_member(&call, &attendee).is_ok());
+        assert!(super::validate_first_party_room_call_member(&call, &owner, &attendee).is_ok());
         call.participants[1].left_revision = Some(2);
         assert!(
-            super::validate_first_party_room_call_member(&call, &attendee).is_err(),
+            super::validate_first_party_room_call_member(&call, &owner, &attendee).is_err(),
             "a departed attendee cannot renew a signed Join"
         );
         assert!(
-            super::validate_first_party_room_call_member(&call, &principal("room-outsider"))
+            super::validate_first_party_room_call_member(&call, &owner, &principal("room-outsider"))
                 .is_err(),
             "an unrelated Person cannot receive the Room Join"
         );
