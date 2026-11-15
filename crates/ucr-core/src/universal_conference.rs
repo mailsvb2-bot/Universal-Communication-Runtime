@@ -88,6 +88,10 @@ pub trait UniversalConferenceStore: StorageProvider {
     /// Person owner; never invent a second Device, signer, or storage authority.
     /// Equal authenticated retries are duplicates, conflicting owners fail closed.
     ///
+    /// # Errors
+    /// Returns an explicit durable-store error on invalid ownership, quota
+    /// exhaustion, idempotency conflicts or unavailable canonical storage.
+    ///
     /// The operation records scheduled control-plane intent only. Runtime Group,
     /// endpoint MLS, Call and signed media Join are still separate canonical
     /// authorities and must not be claimed ready by this method.
