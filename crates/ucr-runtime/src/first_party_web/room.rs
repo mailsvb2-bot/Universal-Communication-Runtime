@@ -430,11 +430,7 @@ fn end_unstarted_room(
 // Call creation is owned by the same UniversalConferenceService CallStore
 // reconciler, after each Person endpoint has already contributed a signed
 // MLS Add. It cannot create any MLS key or Group membership itself.
-fn prepare_room_call(
-    state: &State,
-    auth: &Session,
-    input: &RoomJoin,
-) -> Result<Value, StatusCode> {
+fn prepare_room_call(state: &State, auth: &Session, input: &RoomJoin) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
     let (room, _) = owned_room(state, auth, &room_id)?;
@@ -559,11 +555,7 @@ fn publish_room_mls_offer(
         .ok_or(StatusCode::NOT_FOUND)?;
     let enrolled = state
         .store
-        .universal_conference_participant(
-            &auth.subject.scope,
-            &room_id,
-            &auth.subject.principal,
-        )
+        .universal_conference_participant(&auth.subject.scope, &room_id, &auth.subject.principal)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::FORBIDDEN)?;
     if room.integration_id != integration()?
@@ -682,7 +674,10 @@ fn load_room_mls_offers(
         if offer.signer_key_id != key.key_id.as_opaque().as_str() {
             continue;
         }
-        let verified: [u8; 32] = key.public_key.try_into().map_err(|_| StatusCode::CONFLICT)?;
+        let verified: [u8; 32] = key
+            .public_key
+            .try_into()
+            .map_err(|_| StatusCode::CONFLICT)?;
         let proof = encoded_proof(
             "ucr-first-party-room-endpoint-mls-key-package.v1",
             &json!([
@@ -795,8 +790,8 @@ fn commit_room_endpoint_member(
         .public_key
         .try_into()
         .map_err(|_| StatusCode::FORBIDDEN)?;
-    let recipient_identity = String::from_utf8(recipient.external_user_id.clone())
-        .map_err(|_| StatusCode::CONFLICT)?;
+    let recipient_identity =
+        String::from_utf8(recipient.external_user_id.clone()).map_err(|_| StatusCode::CONFLICT)?;
     let offer_proof = encoded_proof(
         "ucr-first-party-room-endpoint-mls-key-package.v1",
         &json!([
@@ -912,16 +907,15 @@ fn room_endpoint_bootstrap(
         .ok_or(StatusCode::NOT_FOUND)?;
     let participant = state
         .store
-        .universal_conference_participant(
-            &auth.subject.scope,
-            &room_id,
-            &auth.subject.principal,
-        )
+        .universal_conference_participant(&auth.subject.scope, &room_id, &auth.subject.principal)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::FORBIDDEN)?;
     if room.integration_id != integration()?
         || !room.entry_open
-        || !matches!(room.lifecycle, UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live)
+        || !matches!(
+            room.lifecycle,
+            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+        )
         || !participant.active
         || participant.role != ConferenceParticipantRole::Attendee
     {
@@ -938,11 +932,7 @@ fn room_endpoint_bootstrap(
     }
     let bootstrap = state
         .store
-        .mls_bootstrap_for_device(
-            &auth.subject.scope,
-            &room_id,
-            &device(&auth.binding)?,
-        )
+        .mls_bootstrap_for_device(&auth.subject.scope, &room_id, &device(&auth.binding)?)
         .map_err(|_| StatusCode::CONFLICT)?
         .ok_or(StatusCode::NOT_FOUND)?;
     Ok(json!({
