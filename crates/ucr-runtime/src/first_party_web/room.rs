@@ -6,6 +6,7 @@
 //! endpoint MLS and the universal conference runtime still own media admission.
 
 use super::*;
+use ucr_api_grpc::canonical_universal_conference_lifecycle_event;
 use ucr_core::{DurableRecordStatus, DurableStoreError, UniversalConferenceStore};
 use ucr_model::{
     ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, UniversalConferenceLifecycle,
@@ -286,6 +287,59 @@ fn change_room_entry(
     Ok(describe_room(&next, false))
 }
 
+// Cancel pre-live rooms using the SAME Conference event constructor and
+// atomic lifecycle/Event transition as universal conference integrations.
+// Live rooms must use their own media teardown first; they cannot be silently
+// marked Ended while SFU or MLS sessions are still present.
+fn end_unstarted_room(
+    state: &State,
+    auth: &Session,
+    input: &RoomEntryChange,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let (profile, _) = owned_room(state, auth, &room_id)?;
+    if profile.lifecycle == UniversalConferenceLifecycle::Ended {
+        return Ok(describe_room(&profile, false));
+    }
+    if profile.revision != input.expected_revision
+        || !matches!(
+            profile.lifecycle,
+            UniversalConferenceLifecycle::Scheduled | UniversalConferenceLifecycle::Waiting
+        )
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let command_id = ucr_model::CommandId::from_opaque(
+        generate_opaque_id().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+    );
+    let idempotency_key = format!("fp-room-end-{}-{}", input.room_id, input.expected_revision);
+    let event = canonical_universal_conference_lifecycle_event(
+        &profile,
+        UniversalConferenceLifecycle::Ended,
+        &command_id,
+        &idempotency_key,
+        now_unix_ms()?,
+    )
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let ended = state
+        .store
+        .transition_universal_conference_with_event(
+            &auth.subject.scope,
+            &room_id,
+            profile.revision,
+            UniversalConferenceLifecycle::Ended,
+            false,
+            Some(&event),
+        )
+        .map_err(|error| match error {
+            DurableStoreError::Conflict | DurableStoreError::InvalidRecord => StatusCode::CONFLICT,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        })?;
+    Ok(describe_room(&ended, false))
+}
+
 fn describe_room(profile: &UniversalConferenceProfile, media_ready: bool) -> Value {
     let lifecycle = match profile.lifecycle {
         UniversalConferenceLifecycle::Scheduled => "scheduled",
@@ -321,6 +375,10 @@ pub(super) fn dispatch(
         "/v1/first-party/room/close" => {
             let request: RoomEntryChange = parse(body)?;
             change_room_entry(state, auth, &request, false)
+        }
+        "/v1/first-party/room/end" => {
+            let request: RoomEntryChange = parse(body)?;
+            end_unstarted_room(state, auth, &request)
         }
         "/v1/first-party/room/attend" => {
             let request: RoomRef = parse(body)?;
