@@ -1791,10 +1791,12 @@ const fn valid_lifecycle_transition(
         (current, next),
         (
             UniversalConferenceLifecycle::Scheduled,
-            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+            UniversalConferenceLifecycle::Waiting
+                | UniversalConferenceLifecycle::Live
+                | UniversalConferenceLifecycle::Ended
         ) | (
             UniversalConferenceLifecycle::Waiting,
-            UniversalConferenceLifecycle::Live
+            UniversalConferenceLifecycle::Live | UniversalConferenceLifecycle::Ended
         ) | (
             UniversalConferenceLifecycle::Live,
             UniversalConferenceLifecycle::Ending
