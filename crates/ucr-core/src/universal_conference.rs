@@ -197,6 +197,21 @@ pub trait UniversalConferenceStore: StorageProvider {
         Err(DurableStoreError::Unavailable)
     }
 
+    /// Atomically admits an independently authenticated first-party viewer,
+    /// requiring an open, non-ended webinar and its one active Person owner
+    /// in the same durable transaction as the roster mutation.
+    ///
+    /// # Errors
+    /// Rejects closed rooms, missing owners, changed roles, capacity exhaustion,
+    /// conflicting identities and unavailable canonical storage.
+    fn persist_first_party_room_attendee(
+        &self,
+        attendee: &UniversalConferenceParticipantProfile,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let _ = attendee;
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Creates or deduplicates one integration-facing participant projection.
     ///
     /// At most one active participant with role `Owner` may exist for a conference. Implementations
