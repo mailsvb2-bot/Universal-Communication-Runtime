@@ -1208,10 +1208,10 @@ fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Va
         &room_id,
         &auth.subject.principal,
         &device(&auth.binding)?,
-        &auth.signer_key_id,
         FirstPartyRoomJoinAttempt {
             idempotency_key: &input.idempotency_key,
             now_unix_ms: now_unix_ms()?,
+            signer_key_id: &auth.signer_key_id,
         },
     )
     .map_err(|_| StatusCode::CONFLICT)?;
