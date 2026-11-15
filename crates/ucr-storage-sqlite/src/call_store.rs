@@ -1437,7 +1437,7 @@ fn map_call_error(error: ucr_protocol::CallSignallingError) -> DurableStoreError
 mod tests {
     use super::*;
     use crate::{SQLITE_SCHEMA_VERSION, message_store::tests::TestDb};
-    use ucr_core::{CallStore, ConversationStore, EventJournalStore, StorageProvider};
+    use ucr_core::{CallStore, ConversationStore, EventJournalStore, GroupStore, StorageProvider, UniversalConferenceStore};
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CallParticipant, CorrelationContext, DeviceId, DeviceRef,
         EventEnvelope, EventId, IdentityId, ProtocolVersion,
@@ -2007,4 +2007,150 @@ mod tests {
             Err(DurableStoreError::PermissionDenied)
         );
     }
+    #[test]
+    fn room_end_and_group_call_creation_share_one_sqlite_lifecycle_fence() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let (mut active_call, alice, _bob) = session();
+        let room_id = GroupId::from_opaque(oid("room-call-group"));
+        let room_conversation = ucr_model::ConversationRecord {
+            scope: scope(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(oid("room-call-conversation")),
+                kind: ConversationKind::PrivateGroup,
+            },
+            parent_conversation_id: None,
+        };
+        let group = ucr_model::GroupRecord {
+            scope: scope(),
+            group_id: room_id.clone(),
+            conversation: room_conversation.conversation.clone(),
+            ownership: ucr_model::GroupOwnership::PersonOwned(alice.principal.clone()),
+            history_policy: ucr_model::GroupHistoryPolicy::NoHistory,
+            delivery_policy: ucr_model::DeliveryPolicy::NoExternalBridge,
+            crypto_state: ucr_model::GroupCryptoState {
+                capability_id: Some(ucr_protocol::GROUP_MLS_CAPABILITY.to_owned()),
+                epoch: 0,
+                state_ref: Some(oid("room-call-state")),
+            },
+            public_policy: None,
+            media_state: ucr_model::GroupMediaState::Idle,
+            bridge_mappings: Vec::new(),
+            replication_generation: 0,
+            revision: 0,
+        };
+        store
+            .create_group(&room_conversation, &group, &alice)
+            .expect("canonical room Group");
+
+        let room = ucr_model::UniversalConferenceProfile {
+            scope: scope(),
+            conference_id: room_id.clone(),
+            integration_id: IntegrationId::from_opaque(oid("room-call-integration")),
+            external_conference_id: b"room-call-external".to_vec(),
+            create_idempotency_key: "room-call-create".to_owned(),
+            mode: ucr_model::UniversalConferenceMode::Webinar,
+            lifecycle: ucr_model::UniversalConferenceLifecycle::Scheduled,
+            schedule: ucr_model::ConferenceScheduleMetadata {
+                starts_at_unix_ms: 1_000,
+                planned_end_unix_ms: None,
+                join_before_seconds: 0,
+                join_after_seconds: 0,
+                timezone: None,
+            },
+            metadata: Vec::new(),
+            entry_open: true,
+            revision: 1,
+        };
+        store
+            .persist_universal_conference_profile(&room)
+            .expect("canonical room profile");
+        let waiting = store
+            .transition_universal_conference(
+                &scope(),
+                &room_id,
+                1,
+                ucr_model::UniversalConferenceLifecycle::Waiting,
+                true,
+            )
+            .expect("room waiting");
+        let live = store
+            .transition_universal_conference(
+                &scope(),
+                &room_id,
+                waiting.revision,
+                ucr_model::UniversalConferenceLifecycle::Live,
+                true,
+            )
+            .expect("room live");
+
+        active_call.conversation = room_conversation.conversation.clone();
+        active_call.call_id = CallId::from_opaque(oid("room-active-call"));
+        let active_call = canonical_call_creation(&active_call, &alice.scope, &alice.principal)
+            .expect("canonical active group Call");
+        let fingerprint = call_creation_fingerprint(&active_call).expect("Call fingerprint");
+        {
+            let mut connection = store.lock_connection().expect("connection");
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("transaction");
+            insert_call(&transaction, &active_call, &fingerprint).expect("insert active Call");
+            replace_participants(&transaction, &active_call).expect("insert Call participants");
+            transaction.commit().expect("commit active Call");
+        }
+
+        assert_eq!(
+            store.end_universal_conference_if_no_active_group_calls(
+                &scope(),
+                &room_id,
+                live.revision,
+                None,
+            ),
+            Err(DurableStoreError::Conflict),
+            "an active canonical Group Call must prevent Ended"
+        );
+
+        {
+            let mut connection = store.lock_connection().expect("connection");
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("transaction");
+            transaction
+                .execute(
+                    "UPDATE calls SET signalling_state = 'terminated'
+                     WHERE tenant_id = ?1 AND namespace_present = ?2
+                       AND namespace_id = ?3 AND call_id = ?4",
+                    params![
+                        scope().tenant_id.as_opaque().as_str(),
+                        namespace_storage_key(&scope()).present,
+                        namespace_storage_key(&scope()).value,
+                        active_call.call_id.as_opaque().as_str(),
+                    ],
+                )
+                .expect("terminate canonical Call");
+            transaction.commit().expect("commit termination");
+        }
+
+        let ended = store
+            .end_universal_conference_if_no_active_group_calls(
+                &scope(),
+                &room_id,
+                live.revision,
+                None,
+            )
+            .expect("room can end after all Calls are terminal");
+        assert_eq!(
+            ended.lifecycle,
+            ucr_model::UniversalConferenceLifecycle::Ended
+        );
+
+        let mut late_call = active_call;
+        late_call.call_id = CallId::from_opaque(oid("room-late-call"));
+        assert_eq!(
+            store.create_call(&alice, &late_call),
+            Err(DurableStoreError::PermissionDenied),
+            "Call creation must observe Ended under its own canonical write transaction"
+        );
+    }
+
 }
