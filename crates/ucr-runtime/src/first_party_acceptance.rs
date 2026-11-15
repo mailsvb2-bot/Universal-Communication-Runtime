@@ -1184,8 +1184,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     // A same-ID group created with the reserved relay Device is unrelated and
     // cannot process the endpoint-only Add or derive the recipient's exporter.
     let server_provider = browser_memory_provider();
-    let server_device =
-        ucr_model::DeviceId::from_opaque(opaque("fp-media-host-device").unwrap());
+    let server_device = ucr_model::DeviceId::from_opaque(opaque("fp-media-host-device").unwrap());
     let server_key_package =
         create_device_key_package(&server_provider, &scope, &server_device).unwrap();
     assert!(
