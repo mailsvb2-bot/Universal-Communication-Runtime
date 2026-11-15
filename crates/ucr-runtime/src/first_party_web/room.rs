@@ -895,6 +895,76 @@ fn commit_room_endpoint_member(
     }))
 }
 
+// Return an encrypted endpoint-owned Welcome only to its original, currently
+// trusted receiving Device. A copied room invite or Join URL never authorizes
+// recovery of someone else's MLS Group state.
+fn room_endpoint_bootstrap(
+    state: &State,
+    auth: &Session,
+    input: &RoomRef,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let room = state
+        .store
+        .universal_conference_profile(&auth.subject.scope, &room_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let participant = state
+        .store
+        .universal_conference_participant(
+            &auth.subject.scope,
+            &room_id,
+            &auth.subject.principal,
+        )
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if room.integration_id != integration()?
+        || !room.entry_open
+        || !matches!(room.lifecycle, UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live)
+        || !participant.active
+        || participant.role != ConferenceParticipantRole::Attendee
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if ucr_group_mls::GroupMlsServerCustodyProbe::server_possesses_mls_group(
+        state.store.as_ref(),
+        &auth.subject.scope,
+        &room_id,
+    )
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let bootstrap = state
+        .store
+        .mls_bootstrap_for_device(
+            &auth.subject.scope,
+            &room_id,
+            &device(&auth.binding)?,
+        )
+        .map_err(|_| StatusCode::CONFLICT)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(json!({
+        "roomId": input.room_id,
+        "deviceId": auth.binding.device,
+        "admissionEventId": bootstrap.admission_event_id.as_opaque().as_str(),
+        "welcomeBase64Url": URL_SAFE_NO_PAD.encode(bootstrap.welcome),
+        "welcomeEpoch": bootstrap.welcome_crypto_state.epoch,
+        "welcomeStateRef": bootstrap.welcome_crypto_state.state_ref.as_ref()
+            .ok_or(StatusCode::CONFLICT)?.as_str(),
+        "commits": bootstrap.subsequent_commits.iter().map(|item| json!({
+            "commitBase64Url":URL_SAFE_NO_PAD.encode(&item.commit),
+            "cryptoEpoch":item.next_crypto_state.epoch,
+            "cryptoStateRef":item.next_crypto_state.state_ref.as_ref().map(OpaqueId::as_str),
+        })).collect::<Vec<_>>(),
+        "cryptoEpoch":bootstrap.current_crypto_state.epoch,
+        "cryptoStateRef":bootstrap.current_crypto_state.state_ref.as_ref()
+            .ok_or(StatusCode::CONFLICT)?.as_str(),
+        "mediaReady": false
+    }))
+}
+
 fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
@@ -979,6 +1049,10 @@ pub(super) fn dispatch(
         "/v1/first-party/room/mls-add-member" => {
             let request: RoomMlsAddMember = parse(body)?;
             commit_room_endpoint_member(state, auth, &request)
+        }
+        "/v1/first-party/room/mls-bootstrap" => {
+            let request: RoomRef = parse(body)?;
+            room_endpoint_bootstrap(state, auth, &request)
         }
         "/v1/first-party/room/prepare" => {
             let request: RoomJoin = parse(body)?;
