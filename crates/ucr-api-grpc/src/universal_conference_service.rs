@@ -2556,6 +2556,124 @@ struct RuntimeReadyParticipant {
     device_id: DeviceId,
 }
 
+/// Reuses the canonical Universal Conference Call reconciler, but ONLY
+/// after the Owner's browser endpoints have cryptographically committed every
+/// participant to a server-blind MLS Group. This deliberately avoids the
+/// legacy machine integration path that creates a server-custodied Group.
+///
+/// The caller must be an independently authenticated first-party owner. This
+/// method neither trusts a browser roster nor generates MLS private keys.
+///
+/// # Errors
+/// Refuses absent/foreign owners, server-custodied, incomplete or uncommitted
+/// MLS Groups, missing enrolled Devices, changed conference state or Call CAS.
+pub fn prepare_authenticated_first_party_room_call<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    owner: &PrincipalRef,
+    idempotency_key: &str,
+) -> Result<bool, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + CommandAcceptanceStore
+        + GroupStore
+        + GroupMlsServerCustodyProbe
+        + CallStore
+        + GroupCallLookupStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore,
+{
+    validate_mutation_idempotency_key(idempotency_key)?;
+    let integration_id = IntegrationId::from_opaque(
+        OpaqueId::new("ucr-first-party-room")
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
+    let input = PrepareConferenceRuntimeInput {
+        scope: scope.clone(),
+        conference_id: room_id.clone(),
+        integration_id,
+        idempotency_key: idempotency_key.to_owned(),
+    };
+    let room = conference_for_integration(store, scope, room_id, &input.integration_id)?;
+    if room.mode != UniversalConferenceMode::Webinar
+        || !room.entry_open
+        || !matches!(
+            room.lifecycle,
+            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+        )
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    let enrolled = active_conference_participants(store, scope, room_id)?;
+    let owners = enrolled
+        .iter()
+        .filter(|person| person.role == ConferenceParticipantRole::Owner)
+        .collect::<Vec<_>>();
+    if owners.len() != 1
+        || &owners[0].participant != owner
+        || owner.kind != PrincipalKind::Person
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    let group = store
+        .group(scope, room_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+    if group.ownership != GroupOwnership::PersonOwned(owner.clone())
+        || group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
+        || group.crypto_state.epoch == 0
+        || group.crypto_state.state_ref.is_none()
+        || store
+            .server_possesses_mls_group(scope, room_id)
+            .map_err(|error| map_group_mls_error(&error))?
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
+    }
+    // Do not generate a Group change on the server. Every committed Device
+    // must already be in the endpoint-controlled group transition ledger.
+    let mut ready = Vec::new();
+    for person in enrolled {
+        let device_id = optional_single_active_device(store, scope, &person.participant)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+        let member = store
+            .group_membership(scope, room_id, &person.participant)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+        if member.state != ucr_model::GroupMemberState::Active
+            || member.role != runtime_group_role(person.role)
+        {
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
+        ready.push(RuntimeReadyParticipant { profile: person, device_id });
+    }
+    if ready.len() < 2 {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    // As in the universal runtime: one accepted Command ID owns the stable
+    // media Call identity. Duplicate attempts reconcile rather than fork Calls.
+    let payload = pb::UniversalPrepareConferenceRuntimeRequest {
+        scope: Some(pb_scope(scope)),
+        conference_id: Some(pb_opaque(room_id.as_opaque())),
+        integration_id: Some(pb_opaque(input.integration_id.as_opaque())),
+        idempotency_key: idempotency_key.to_owned(),
+    }
+    .encode_to_vec();
+    let command_id = accept_integration_mutation_id(
+        store,
+        scope,
+        &input.integration_id,
+        "ucr.conference.runtime.prepare.v1",
+        idempotency_key,
+        payload,
+    )?;
+    let actor = ScopedPrincipal {
+        scope: scope.clone(),
+        principal: owner.clone(),
+    };
+    reconcile_runtime_call(store, &input, &command_id, &actor, &ready)
+}
+
 fn prepare_conference_runtime<S>(
     store: &S,
     input: &PrepareConferenceRuntimeInput,
