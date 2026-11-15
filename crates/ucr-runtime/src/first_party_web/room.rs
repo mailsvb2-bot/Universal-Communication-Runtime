@@ -28,6 +28,14 @@ struct RoomRef {
     room_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomEntryChange {
+    binding: Binding,
+    room_id: String,
+    expected_revision: u64,
+}
+
 fn integration() -> Result<IntegrationId, StatusCode> {
     Ok(IntegrationId::from_opaque(opaque(INTEGRATION)?))
 }
@@ -205,17 +213,6 @@ fn enroll_attendee(state: &State, auth: &Session, input: &RoomRef) -> Result<Val
     {
         return Err(StatusCode::CONFLICT);
     }
-    let participants = state
-        .store
-        .active_universal_conference_participants(&auth.subject.scope, &room_id, 1025)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let owners = participants
-        .iter()
-        .filter(|participant| participant.role == ConferenceParticipantRole::Owner)
-        .collect::<Vec<_>>();
-    if owners.len() != 1 || owners[0].participant == auth.subject.principal {
-        return Err(StatusCode::FORBIDDEN);
-    }
     let attendee = UniversalConferenceParticipantProfile {
         scope: auth.subject.scope.clone(),
         conference_id: room_id.clone(),
@@ -233,7 +230,7 @@ fn enroll_attendee(state: &State, auth: &Session, input: &RoomRef) -> Result<Val
     };
     match state
         .store
-        .persist_universal_conference_participant(&attendee)
+        .persist_first_party_room_attendee(&attendee)
     {
         Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => Ok(json!({
             "roomId": input.room_id,
@@ -247,6 +244,49 @@ fn enroll_attendee(state: &State, auth: &Session, input: &RoomRef) -> Result<Val
         Err(DurableStoreError::Full) => Err(StatusCode::TOO_MANY_REQUESTS),
         Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
+}
+
+// This is only the canonical scheduling/entry gate. It does not activate
+// Group MLS, publish a media-ready claim or mint an unsigned Join.
+fn change_room_entry(
+    state: &State,
+    auth: &Session,
+    input: &RoomEntryChange,
+    open: bool,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let (profile, _) = owned_room(state, auth, &room_id)?;
+    if profile.revision != input.expected_revision {
+        return Err(StatusCode::CONFLICT);
+    }
+    if !matches!(
+        profile.lifecycle,
+        UniversalConferenceLifecycle::Scheduled | UniversalConferenceLifecycle::Waiting
+    ) {
+        return Err(StatusCode::CONFLICT);
+    }
+    if profile.lifecycle == UniversalConferenceLifecycle::Waiting && profile.entry_open == open {
+        return Ok(describe_room(&profile, false));
+    }
+    if profile.lifecycle == UniversalConferenceLifecycle::Scheduled && !open {
+        return Err(StatusCode::CONFLICT);
+    }
+    let next = state
+        .store
+        .transition_universal_conference(
+            &auth.subject.scope,
+            &room_id,
+            profile.revision,
+            UniversalConferenceLifecycle::Waiting,
+            open,
+        )
+        .map_err(|error| match error {
+            DurableStoreError::Conflict | DurableStoreError::InvalidRecord => StatusCode::CONFLICT,
+            DurableStoreError::Full => StatusCode::TOO_MANY_REQUESTS,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        })?;
+    Ok(describe_room(&next, false))
 }
 
 fn describe_room(profile: &UniversalConferenceProfile, media_ready: bool) -> Value {
@@ -276,6 +316,14 @@ pub(super) fn dispatch(
         "/v1/first-party/room/create" => {
             let request: CreateRoom = parse(body)?;
             create_room(state, auth, &request)
+        }
+        "/v1/first-party/room/open" => {
+            let request: RoomEntryChange = parse(body)?;
+            change_room_entry(state, auth, &request, true)
+        }
+        "/v1/first-party/room/close" => {
+            let request: RoomEntryChange = parse(body)?;
+            change_room_entry(state, auth, &request, false)
         }
         "/v1/first-party/room/attend" => {
             let request: RoomRef = parse(body)?;
