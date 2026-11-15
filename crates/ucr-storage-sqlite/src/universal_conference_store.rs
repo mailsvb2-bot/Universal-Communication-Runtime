@@ -478,7 +478,7 @@ fn transition_universal_conference_with_event_in_transaction(
             *scope,
             *conference_id,
             *expected_revision,
-            lifecycle.clone(),
+            *lifecycle,
             *entry_open,
             *event,
             false,
