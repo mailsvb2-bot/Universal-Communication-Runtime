@@ -437,16 +437,63 @@ fn ensure_no_active_group_calls(
     }
 }
 
+enum ConferenceLifecycleTransition<'a> {
+    Standard {
+        scope: &'a TenantScope,
+        conference_id: &'a GroupId,
+        expected_revision: u64,
+        lifecycle: UniversalConferenceLifecycle,
+        entry_open: bool,
+        event: Option<&'a EventEnvelope>,
+    },
+    EndAfterCallsClosed {
+        scope: &'a TenantScope,
+        conference_id: &'a GroupId,
+        expected_revision: u64,
+        event: Option<&'a EventEnvelope>,
+    },
+}
+
 fn transition_universal_conference_with_event_in_transaction(
     transaction: &Transaction<'_>,
-    scope: &TenantScope,
-    conference_id: &GroupId,
-    expected_revision: u64,
-    lifecycle: UniversalConferenceLifecycle,
-    entry_open: bool,
-    event: Option<&EventEnvelope>,
-    allow_live_end_without_calls: bool,
+    transition: ConferenceLifecycleTransition<'_>,
 ) -> Result<UniversalConferenceProfile, DurableStoreError> {
+    let (scope, conference_id, expected_revision, lifecycle, entry_open, event, allow_live_end_without_calls) =
+        match transition {
+            ConferenceLifecycleTransition::Standard {
+                scope,
+                conference_id,
+                expected_revision,
+                lifecycle,
+                entry_open,
+                event,
+            } => (
+                scope,
+                conference_id,
+                expected_revision,
+                lifecycle,
+                entry_open,
+                event,
+                false,
+            ),
+            ConferenceLifecycleTransition::EndAfterCallsClosed {
+                scope,
+                conference_id,
+                expected_revision,
+                event,
+            } => {
+                ensure_no_active_group_calls(transaction, scope, conference_id)?;
+                (
+                    scope,
+                    conference_id,
+                    expected_revision,
+                    UniversalConferenceLifecycle::Ended,
+                    false,
+                    event,
+                    true,
+                )
+            }
+        };
     let current =
         load_profile(transaction, scope, conference_id)?.ok_or(DurableStoreError::Conflict)?;
     validate_conference_lifecycle_event(&current, expected_revision, lifecycle, event)?;
@@ -815,13 +862,14 @@ impl UniversalConferenceStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         let updated = transition_universal_conference_with_event_in_transaction(
             &transaction,
-            scope,
-            conference_id,
-            expected_revision,
-            lifecycle,
-            entry_open,
-            event,
-            false,
+            ConferenceLifecycleTransition::Standard {
+                scope,
+                conference_id,
+                expected_revision,
+                lifecycle,
+                entry_open,
+                event,
+            },
         )?;
         transaction
             .commit()
@@ -840,16 +888,14 @@ impl UniversalConferenceStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        ensure_no_active_group_calls(&transaction, scope, conference_id)?;
         let ended = transition_universal_conference_with_event_in_transaction(
             &transaction,
-            scope,
-            conference_id,
-            expected_revision,
-            UniversalConferenceLifecycle::Ended,
-            false,
-            event,
-            true,
+            ConferenceLifecycleTransition::EndAfterCallsClosed {
+                scope,
+                conference_id,
+                expected_revision,
+                event,
+            },
         )?;
         transaction
             .commit()
