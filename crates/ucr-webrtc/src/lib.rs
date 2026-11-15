@@ -501,8 +501,7 @@ impl LiveWebRtcProvider {
         let (command_tx, command_rx) =
             tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
         let (media_tx, media_rx) = tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
-        let (close_tx, _) =
-            tokio::sync::broadcast::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
+        let (close_tx, _) = tokio::sync::broadcast::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
