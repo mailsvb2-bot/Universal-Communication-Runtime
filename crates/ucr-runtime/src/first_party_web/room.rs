@@ -1198,38 +1198,9 @@ fn accept_room_call(
     }))
 }
 
-fn require_active_room_call_member(
-    call: &CallSession,
-    participant: &PrincipalRef,
-) -> Result<(), StatusCode> {
-    if call.signalling_state != CallSignallingState::Active
-        || !call.participants.iter().any(|member| {
-            member.principal == *participant
-                && member.state == CallParticipantState::Accepted
-                && member.left_revision.is_none()
-        })
-    {
-        return Err(StatusCode::CONFLICT);
-    }
-    Ok(())
-}
-
 fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
-    let room = state
-        .store
-        .universal_conference_profile(&auth.subject.scope, &room_id)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    if room.integration_id != integration()?
-        || !room.entry_open
-        || room.lifecycle != UniversalConferenceLifecycle::Live
-    {
-        return Err(StatusCode::CONFLICT);
-    }
-    let call = room_call(state, auth, &room_id)?.ok_or(StatusCode::CONFLICT)?;
-    require_active_room_call_member(&call, &auth.subject.principal)?;
     let grant = issue_authenticated_first_party_room_join(
         state.store.as_ref(),
         state.issuer.as_ref(),
@@ -1237,6 +1208,7 @@ fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Va
         &room_id,
         &auth.subject.principal,
         &device(&auth.binding)?,
+        &auth.signer_key_id,
         FirstPartyRoomJoinAttempt {
             idempotency_key: &input.idempotency_key,
             now_unix_ms: now_unix_ms()?,
@@ -1453,76 +1425,6 @@ mod tests {
             sidecar.push(suffix);
             let _ = std::fs::remove_file(std::path::PathBuf::from(sidecar));
         }
-    }
-
-    #[test]
-    fn room_join_requires_live_call_and_an_accepted_non_departed_participant() {
-        let scope = TenantScope {
-            tenant_id: TenantId::from_opaque(opaque("room-join-tenant").unwrap()),
-            namespace_id: None,
-        };
-        let owner = ucr_model::PrincipalRef {
-            principal_id: ucr_model::PrincipalId::from_opaque(opaque("room-join-owner").unwrap()),
-            kind: PrincipalKind::Person,
-        };
-        let attendee = ucr_model::PrincipalRef {
-            principal_id: ucr_model::PrincipalId::from_opaque(
-                opaque("room-join-attendee").unwrap(),
-            ),
-            kind: PrincipalKind::Person,
-        };
-        let mut call = CallSession {
-            scope,
-            call_id: ucr_model::CallId::from_opaque(opaque("room-join-call").unwrap()),
-            conversation: ConversationRef {
-                conversation_id: ucr_model::ConversationId::from_opaque(
-                    opaque("room-join-conversation").unwrap(),
-                ),
-                kind: ucr_model::ConversationKind::PrivateGroup,
-            },
-            initiated_by: owner.clone(),
-            participants: vec![
-                ucr_model::CallParticipant {
-                    principal: owner,
-                    state: CallParticipantState::Accepted,
-                    joined_revision: 1,
-                    left_revision: None,
-                },
-                ucr_model::CallParticipant {
-                    principal: attendee.clone(),
-                    state: CallParticipantState::Invited,
-                    joined_revision: 0,
-                    left_revision: None,
-                },
-            ],
-            signalling_state: CallSignallingState::Ringing,
-            reconnecting_participant: None,
-            media_negotiation_ref: None,
-            media_negotiation_generation: 0,
-            replication_generation: 0,
-            revision: 1,
-            termination_reason: None,
-        };
-
-        assert_eq!(
-            require_active_room_call_member(&call, &attendee),
-            Err(StatusCode::CONFLICT),
-            "an invited recipient must not receive a signed media Join"
-        );
-        call.signalling_state = CallSignallingState::Active;
-        assert_eq!(
-            require_active_room_call_member(&call, &attendee),
-            Err(StatusCode::CONFLICT),
-            "active Call state alone does not accept an invited participant"
-        );
-        call.participants[1].state = CallParticipantState::Accepted;
-        assert_eq!(require_active_room_call_member(&call, &attendee), Ok(()));
-        call.participants[1].left_revision = Some(2);
-        assert_eq!(
-            require_active_room_call_member(&call, &attendee),
-            Err(StatusCode::CONFLICT),
-            "a departed participant cannot renew a signed Join"
-        );
     }
 
     #[test]
