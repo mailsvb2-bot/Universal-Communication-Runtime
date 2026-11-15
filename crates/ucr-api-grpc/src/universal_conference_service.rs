@@ -3463,7 +3463,8 @@ where
             .active_trusted_signing_key(scope, device_id)
             .map_err(map_store_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
-        let current_call = resolve_first_party_room_call(store, scope, room_id, &current_owner, participant)?;
+        let current_call =
+            resolve_first_party_room_call(store, scope, room_id, &current_owner, participant)?;
         let current_group = store
             .group(scope, room_id)
             .map_err(map_store_error)?
@@ -5646,8 +5647,12 @@ mod universal_runtime_tests {
             "a departed attendee cannot renew a signed Join"
         );
         assert!(
-            super::validate_first_party_room_call_member(&call, &owner, &principal("room-outsider"))
-                .is_err(),
+            super::validate_first_party_room_call_member(
+                &call,
+                &owner,
+                &principal("room-outsider")
+            )
+            .is_err(),
             "an unrelated Person cannot receive the Room Join"
         );
     }
