@@ -2604,6 +2604,10 @@ where
         || group.group_id != *room_id
         || group.ownership != GroupOwnership::PersonOwned(owner.clone())
         || group.conversation.kind != ConversationKind::PrivateGroup
+        || group.history_policy != GroupHistoryPolicy::NoHistory
+        || group.delivery_policy != DeliveryPolicy::NoExternalBridge
+        || group.public_policy.is_some()
+        || !group.bridge_mappings.is_empty()
         || group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
         || group.crypto_state.epoch == 0
         || group.crypto_state.state_ref.is_none()
@@ -5952,4 +5956,84 @@ mod universal_runtime_tests {
         .expect("person principal retry");
         assert_eq!(repeated, resolved);
     }
+
+    #[test]
+    fn first_party_room_join_rejects_public_history_and_external_bridge_groups() {
+        use ucr_model::{
+            ConversationId, ConversationKind, ConversationRef, DeliveryPolicy, GroupBridgeMapping,
+            GroupCryptoState, GroupHistoryPolicy, GroupMediaState, GroupOwnership, GroupRecord,
+            PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
+        };
+
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("canonical SQLite store");
+        let scope = scope();
+        let room_id = ucr_model::GroupId::from_opaque(oid("fp-room-policy-fence"));
+        let owner = PrincipalRef {
+            principal_id: PrincipalId::from_opaque(oid("fp-room-policy-owner")),
+            kind: PrincipalKind::Person,
+        };
+        let group = GroupRecord {
+            scope: scope.clone(),
+            group_id: room_id.clone(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(oid("fp-room-policy-conversation")),
+                kind: ConversationKind::PrivateGroup,
+            },
+            ownership: GroupOwnership::PersonOwned(owner.clone()),
+            history_policy: GroupHistoryPolicy::NoHistory,
+            delivery_policy: DeliveryPolicy::NoExternalBridge,
+            crypto_state: GroupCryptoState {
+                capability_id: Some(GROUP_MLS_CAPABILITY.to_owned()),
+                epoch: 1,
+                state_ref: Some(oid("fp-room-policy-state")),
+            },
+            public_policy: None,
+            media_state: GroupMediaState::Idle,
+            bridge_mappings: Vec::new(),
+            replication_generation: 0,
+            revision: 1,
+        };
+
+        assert!(super::validate_first_party_room_group_owner(
+            &store, &scope, &room_id, &owner, &group
+        )
+        .is_ok());
+
+        let mut public = group.clone();
+        public.public_policy = Some(PublicGroupPolicy {
+            join_policy: PublicGroupJoinPolicy::InviteOnly,
+            discovery: PublicGroupDiscovery::Unlisted,
+            indexed: false,
+        });
+        assert!(super::validate_first_party_room_group_owner(
+            &store, &scope, &room_id, &owner, &public
+        )
+        .is_err());
+
+        let mut historical = group.clone();
+        historical.history_policy = GroupHistoryPolicy::FullHistory;
+        assert!(super::validate_first_party_room_group_owner(
+            &store, &scope, &room_id, &owner, &historical
+        )
+        .is_err());
+
+        let mut bridged = group.clone();
+        bridged.bridge_mappings.push(GroupBridgeMapping {
+            integration_id: IntegrationId::from_opaque(oid("fp-room-external-bridge")),
+            external_group_id: b"external-room".to_vec(),
+        });
+        assert!(super::validate_first_party_room_group_owner(
+            &store, &scope, &room_id, &owner, &bridged
+        )
+        .is_err());
+
+        let mut externally_delivered = group;
+        externally_delivered.delivery_policy = DeliveryPolicy::BestEffort;
+        assert!(super::validate_first_party_room_group_owner(
+            &store, &scope, &room_id, &owner, &externally_delivered
+        )
+        .is_err());
+    }
+
 }
