@@ -759,7 +759,11 @@ fn first_party_viewer_admission_is_atomically_fenced_by_entry_lifecycle() {
         "closed room must never admit a later viewer"
     );
     assert_eq!(
-        store.universal_conference_participant(&room.scope, &room.conference_id, &later.participant),
+        store.universal_conference_participant(
+            &room.scope,
+            &room.conference_id,
+            &later.participant
+        ),
         Ok(None),
         "rejected viewer must not have any durable roster row"
     );
