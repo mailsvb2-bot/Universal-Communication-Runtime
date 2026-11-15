@@ -9,7 +9,6 @@ use super::*;
 use ucr_api_grpc::{
     FirstPartyRoomJoinAttempt, canonical_universal_conference_lifecycle_event,
     issue_authenticated_first_party_room_join, prepare_authenticated_first_party_room_call,
-    reconcile_canonical_conference_permissions,
 };
 use ucr_core::{
     DurableRecordStatus, DurableStoreError, GroupCallLookupStore, UniversalConferenceStore,
@@ -170,20 +169,6 @@ fn owned_room(
     Ok((profile, owner))
 }
 
-// Reuse the exact PermissionGrantStore reconciler from UniversalConferenceService,
-// never invent Room-scoped role grants or silently claim successful media Join.
-fn reconcile_room_permissions(
-    state: &State,
-    participant: &UniversalConferenceParticipantProfile,
-) -> Result<(), StatusCode> {
-    reconcile_canonical_conference_permissions(
-        state.store.as_ref(),
-        participant,
-        UniversalConferenceMode::Webinar,
-    )
-    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
-}
-
 fn owner_profile(
     auth: &Session,
     room_id: &GroupId,
@@ -223,7 +208,6 @@ fn create_room(state: &State, auth: &Session, input: &CreateRoom) -> Result<Valu
         if existing.create_idempotency_key != input.idempotency_key || recorded_owner != owner {
             return Err(StatusCode::CONFLICT);
         }
-        reconcile_room_permissions(state, &recorded_owner)?;
         return Ok(describe_room(&existing, false));
     }
     let profile = UniversalConferenceProfile {
@@ -250,7 +234,6 @@ fn create_room(state: &State, auth: &Session, input: &CreateRoom) -> Result<Valu
         .persist_first_party_room_with_owner(&profile, &owner);
     match inserted {
         Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => {
-            reconcile_room_permissions(state, &owner)?;
             Ok(describe_room(&profile, false))
         }
         Err(DurableStoreError::Conflict) => {
@@ -260,7 +243,6 @@ fn create_room(state: &State, auth: &Session, input: &CreateRoom) -> Result<Valu
             if found.create_idempotency_key != input.idempotency_key || saved_owner != owner {
                 return Err(StatusCode::CONFLICT);
             }
-            reconcile_room_permissions(state, &saved_owner)?;
             Ok(describe_room(&found, false))
         }
         Err(DurableStoreError::Full) => Err(StatusCode::TOO_MANY_REQUESTS),
@@ -309,7 +291,6 @@ fn enroll_attendee(state: &State, auth: &Session, input: &RoomRef) -> Result<Val
     };
     match state.store.persist_first_party_room_attendee(&attendee) {
         Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => {
-            reconcile_room_permissions(state, &attendee)?;
             Ok(json!({
                 "roomId": input.room_id,
                 "enrolled": true,
