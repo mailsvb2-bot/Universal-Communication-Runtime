@@ -54,6 +54,22 @@ use crate::first_party_media;
 mod room;
 
 const MAX_BODY: usize = 16 * 1024;
+// A signed endpoint MLS Add carries three independently bounded public wire
+// values (KeyPackage, Commit and Welcome). Keep ordinary first-party requests
+// small, but let the canonical MLS transition fit its own strict 10 KB/field
+// decoder limits without being truncated by the generic 16 KB envelope.
+const MAX_MLS_TRANSITION_BODY_BYTES: usize = 40 * 1024;
+
+fn first_party_body_limit(path: &str) -> usize {
+    if matches!(
+        path,
+        "/v1/first-party/call/mls-add-peer" | "/v1/first-party/room/mls-add-member"
+    ) {
+        MAX_MLS_TRANSITION_BODY_BYTES
+    } else {
+        MAX_BODY
+    }
+}
 /// Successfully proven challenges remembered (only until expiry) to reject replay.
 /// Unproven challenges consume NO server memory, so anonymous challenge
 /// requests can never exhaust a shared pool and lock other users out.
@@ -2185,12 +2201,13 @@ async fn dispatch(
     }
     // Bound the stream before aggregating DATA frames. A Content-Length check
     // or collect().await would permit unbounded memory growth from chunked POST.
+    let body_limit = first_party_body_limit(path);
     let mut incoming = request.into_body();
     let mut body = Vec::with_capacity(1024);
     while let Some(frame) = incoming.frame().await {
         let frame = frame.map_err(|_| StatusCode::BAD_REQUEST)?;
         if let Some(data) = frame.data_ref() {
-            if data.len() > MAX_BODY.saturating_sub(body.len()) {
+            if data.len() > body_limit.saturating_sub(body.len()) {
                 return Err(StatusCode::PAYLOAD_TOO_LARGE);
             }
             body.extend_from_slice(data);
@@ -3027,6 +3044,30 @@ mod tests {
             )
             .is_err(),
             "Device-only Join cannot be smuggled through accepted-Call admission"
+        );
+    }
+
+    #[test]
+    fn only_endpoint_mls_add_routes_receive_the_expanded_bounded_body_budget() {
+        assert_eq!(
+            first_party_body_limit("/v1/first-party/call/mls-add-peer"),
+            MAX_MLS_TRANSITION_BODY_BYTES
+        );
+        assert_eq!(
+            first_party_body_limit("/v1/first-party/room/mls-add-member"),
+            MAX_MLS_TRANSITION_BODY_BYTES
+        );
+        assert_eq!(
+            first_party_body_limit("/v1/first-party/room/mls-offer"),
+            MAX_BODY
+        );
+        assert_eq!(
+            first_party_body_limit("/v1/first-party/signup/finish"),
+            MAX_BODY
+        );
+        assert!(
+            MAX_MLS_TRANSITION_BODY_BYTES > 3 * 10_000 + 2 * 1024,
+            "the aggregate limit must fit three individually bounded base64 MLS artifacts and JSON metadata"
         );
     }
 
