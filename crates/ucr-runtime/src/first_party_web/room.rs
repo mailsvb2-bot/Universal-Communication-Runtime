@@ -669,11 +669,8 @@ fn load_room_mls_offers(
             &json!([
                 auth.binding.tenant_id,
                 auth.binding.namespace_id,
-                person.external_user_id
-                    .as_slice()
-                    .iter()
-                    .copied()
-                    .collect::<Vec<_>>(),
+                String::from_utf8(person.external_user_id.clone())
+                    .map_err(|_| StatusCode::CONFLICT)?,
                 candidate,
                 offer.signer_key_id,
                 input.room_id,
