@@ -692,6 +692,14 @@ mod tests {
             &[
                 alice.clone(),
                 bob.clone(),
+                make(MEDIA_HOST_IDENTITY, GroupMemberState::Active),
+            ],
+            &endpoints
+        ));
+        assert!(!endpoint_only_media_roster(
+            &[
+                alice.clone(),
+                bob.clone(),
                 make(MEDIA_HOST_IDENTITY, GroupMemberState::Removed),
             ],
             &endpoints
