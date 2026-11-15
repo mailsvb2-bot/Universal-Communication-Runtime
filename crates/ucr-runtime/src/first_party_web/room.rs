@@ -10,9 +10,7 @@ use ucr_api_grpc::{
     FirstPartyRoomJoinAttempt, canonical_universal_conference_lifecycle_event,
     issue_authenticated_first_party_room_join, prepare_authenticated_first_party_room_call,
 };
-use ucr_core::{
-    DurableRecordStatus, DurableStoreError, UniversalConferenceStore,
-};
+use ucr_core::{DurableRecordStatus, DurableStoreError, UniversalConferenceStore};
 use ucr_model::{
     ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, UniversalConferenceLifecycle,
     UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
