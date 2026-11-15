@@ -966,7 +966,7 @@ async fn run_live_webrtc_worker(
                 handle_live_send_e2ee(
                     &mut sessions,
                     session_id,
-                    offer_id,
+                    &offer_id,
                     *envelope,
                     &mut close_rx,
                     deadline,
@@ -1216,7 +1216,7 @@ async fn handle_live_remote_candidate(
 async fn handle_live_send_e2ee(
     sessions: &mut HashMap<String, LiveWebRtcSession>,
     session_id: SessionId,
-    offer_id: String,
+    offer_id: &str,
     envelope: SfuForwardEnvelope,
     close_rx: &mut tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>,
     deadline: Instant,
