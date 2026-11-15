@@ -228,10 +228,7 @@ fn enroll_attendee(state: &State, auth: &Session, input: &RoomRef) -> Result<Val
         active: true,
         revision: 1,
     };
-    match state
-        .store
-        .persist_first_party_room_attendee(&attendee)
-    {
+    match state.store.persist_first_party_room_attendee(&attendee) {
         Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => Ok(json!({
             "roomId": input.room_id,
             "enrolled": true,
