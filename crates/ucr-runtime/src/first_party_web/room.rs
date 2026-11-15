@@ -11,7 +11,7 @@ use ucr_api_grpc::{
     issue_authenticated_first_party_room_join, prepare_authenticated_first_party_room_call,
 };
 use ucr_core::{
-    DurableRecordStatus, DurableStoreError, GroupCallLookupStore, UniversalConferenceStore,
+    DurableRecordStatus, DurableStoreError, UniversalConferenceStore,
 };
 use ucr_model::{
     ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, UniversalConferenceLifecycle,
@@ -427,21 +427,6 @@ fn go_live_room(
     Ok(describe_room(&current, false))
 }
 
-// End a Room only after its canonical Group Call set is empty. The
-// endpoint-owned MLS Group may remain as durable history; Ended closes the
-// realtime admission gate, and Call termination has already revoked the exact
-// Call-scoped media permissions. In-flight provider close remains a separate
-// realtime lifecycle proof (#336), never inferred from this control-plane event.
-fn room_end_allowed(lifecycle: UniversalConferenceLifecycle, active_call_count: usize) -> bool {
-    active_call_count == 0
-        && matches!(
-            lifecycle,
-            UniversalConferenceLifecycle::Scheduled
-                | UniversalConferenceLifecycle::Waiting
-                | UniversalConferenceLifecycle::Live
-        )
-}
-
 fn end_room(state: &State, auth: &Session, input: &RoomEntryChange) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
@@ -459,13 +444,6 @@ fn end_room(state: &State, auth: &Session, input: &RoomEntryChange) -> Result<Va
     {
         return Err(StatusCode::CONFLICT);
     }
-    let active_calls = state
-        .store
-        .active_calls_for_group(&auth.subject.scope, &room_id, 2)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    if !room_end_allowed(profile.lifecycle, active_calls.len()) {
-        return Err(StatusCode::CONFLICT);
-    }
     let command_id = ucr_model::CommandId::from_opaque(
         generate_opaque_id().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
     );
@@ -481,12 +459,10 @@ fn end_room(state: &State, auth: &Session, input: &RoomEntryChange) -> Result<Va
     .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let ended = state
         .store
-        .transition_universal_conference_with_event(
+        .end_universal_conference_if_no_active_group_calls(
             &auth.subject.scope,
             &room_id,
             profile.revision,
-            UniversalConferenceLifecycle::Ended,
-            false,
             Some(&event),
         )
         .map_err(|error| match error {
@@ -1414,17 +1390,6 @@ mod tests {
             sidecar.push(suffix);
             let _ = std::fs::remove_file(std::path::PathBuf::from(sidecar));
         }
-    }
-
-    #[test]
-    fn room_end_requires_no_active_call_but_allows_ended_media_history() {
-        assert!(room_end_allowed(UniversalConferenceLifecycle::Scheduled, 0));
-        assert!(room_end_allowed(UniversalConferenceLifecycle::Waiting, 0));
-        assert!(room_end_allowed(UniversalConferenceLifecycle::Live, 0));
-        assert!(!room_end_allowed(UniversalConferenceLifecycle::Live, 1));
-        assert!(!room_end_allowed(UniversalConferenceLifecycle::Live, 2));
-        assert!(!room_end_allowed(UniversalConferenceLifecycle::Ended, 0));
-        assert!(!room_end_allowed(UniversalConferenceLifecycle::Ending, 0));
     }
 
     #[test]
