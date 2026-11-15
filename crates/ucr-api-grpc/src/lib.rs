@@ -95,7 +95,7 @@ pub use recording_service::{
 mod universal_conference_service;
 pub use universal_conference_service::{
     GrpcUniversalConferenceService, UniversalConferenceRuntimeCapabilities,
-    universal_conference_service_server,
+    canonical_universal_conference_lifecycle_event, universal_conference_service_server,
 };
 
 mod operator_runtime_service;
