@@ -374,11 +374,7 @@ fn end_unstarted_room(
 // Exact canonical Person/Device session is checked by the enclosing first-
 // party BFF. This route uses only the already-mounted production issuer/store;
 // it creates no synthetic attendee, MLS leaf or second grant signer.
-fn issue_room_join(
-    state: &State,
-    auth: &Session,
-    input: &RoomJoin,
-) -> Result<Value, StatusCode> {
+fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
     let grant = issue_authenticated_first_party_room_join(
