@@ -6072,13 +6072,7 @@ mod universal_runtime_tests {
             external_group_id: b"external-room".to_vec(),
         });
         assert!(
-            super::validate_first_party_room_group_owner(
-                &store,
-                &scope,
-                &room_id,
-                &owner,
-                &bridged
-            )
+            super::validate_first_party_room_group_owner(&store, &scope, &room_id, &owner, &bridged)
             .is_err()
         );
 
@@ -6103,8 +6097,13 @@ mod universal_runtime_tests {
         let room = conference();
         let participant = |id: &str, role| {
             let principal = principal(id);
-            let (audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed, screen_share_allowed) =
-                super::participant_defaults(UniversalConferenceMode::Webinar, role);
+            let (
+                audio_muted,
+                camera_allowed,
+                publish_audio_allowed,
+                publish_video_allowed,
+                screen_share_allowed,
+            ) = super::participant_defaults(UniversalConferenceMode::Webinar, role);
             UniversalConferenceParticipantProfile {
                 scope: scope(),
                 conference_id: room.conference_id.clone(),
@@ -6137,25 +6136,55 @@ mod universal_runtime_tests {
             participant("room-roster-attendee", ConferenceParticipantRole::Attendee),
         ];
         let exact = vec![
-            membership("room-roster-owner", GroupRole::Owner, GroupMemberState::Active),
-            membership("room-roster-attendee", GroupRole::Member, GroupMemberState::Active),
+            membership(
+                "room-roster-owner",
+                GroupRole::Owner,
+                GroupMemberState::Active,
+            ),
+            membership(
+                "room-roster-attendee",
+                GroupRole::Member,
+                GroupMemberState::Active,
+            ),
         ];
-        assert!(super::first_party_room_group_roster_matches(&exact, &participants));
+        assert!(super::first_party_room_group_roster_matches(
+            &exact,
+            &participants
+        ));
 
         let mut outsider = exact.clone();
-        outsider.push(membership("room-roster-outsider", GroupRole::Member, GroupMemberState::Active));
-        assert!(!super::first_party_room_group_roster_matches(&outsider, &participants));
+        outsider.push(membership(
+            "room-roster-outsider",
+            GroupRole::Member,
+            GroupMemberState::Active,
+        ));
+        assert!(!super::first_party_room_group_roster_matches(
+            &outsider,
+            &participants
+        ));
 
         let missing = vec![exact[0].clone()];
-        assert!(!super::first_party_room_group_roster_matches(&missing, &participants));
+        assert!(!super::first_party_room_group_roster_matches(
+            &missing,
+            &participants
+        ));
 
         let mut wrong_role = exact.clone();
         wrong_role[1].role = GroupRole::Admin;
-        assert!(!super::first_party_room_group_roster_matches(&wrong_role, &participants));
+        assert!(!super::first_party_room_group_roster_matches(
+            &wrong_role,
+            &participants
+        ));
 
         let mut removed_history = exact;
-        removed_history.push(membership("room-roster-former", GroupRole::Member, GroupMemberState::Removed));
-        assert!(super::first_party_room_group_roster_matches(&removed_history, &participants));
+        removed_history.push(membership(
+            "room-roster-former",
+            GroupRole::Member,
+            GroupMemberState::Removed,
+        ));
+        assert!(super::first_party_room_group_roster_matches(
+            &removed_history,
+            &participants
+        ));
     }
-
 }
