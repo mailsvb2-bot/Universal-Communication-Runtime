@@ -18,7 +18,8 @@ test("room availability is separate from the general gateway readyz",()=>{
  assert.match(root,/production-room-enrollment-v1/);
  assert.match(root,/StatusCode::SERVICE_UNAVAILABLE/);
  assert.match(root,/room_backend_unavailable/);
- assert.match(root,/if !canonical_room_ready\(state\.room_api\)\.await/);
+ assert.match(root,/if !canonical_room_ready\(room_api\)\.await/);
+ assert.match(root,/handle_room_proxy\(request, state\.room_api, &path, origin\.as_deref\(\)\)/);
  assert.match(root,/transport":"canonical-room-ready/);
 });
 test("room lobby does not offer capture or enrollment before room preflight",()=>{
