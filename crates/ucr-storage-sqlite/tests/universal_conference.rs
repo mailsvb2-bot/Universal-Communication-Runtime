@@ -687,3 +687,81 @@ fn first_party_room_quota_is_checked_under_same_sqlite_transaction() {
     }
     cleanup(&path);
 }
+
+#[test]
+fn first_party_viewer_admission_is_atomically_fenced_by_entry_lifecycle() {
+    let path = db_path("first-party-viewer-lifecycle");
+    let store = SqliteLocalStore::open(&path).expect("room store");
+    let mut room = conference();
+    room.conference_id = GroupId::from_opaque(oid("fp-room-viewer-test"));
+    room.external_conference_id = b"fp-room-viewer-test".to_vec();
+    room.create_idempotency_key = "fp-room-viewer-create".to_owned();
+    let mut owner = participant();
+    owner.role = ConferenceParticipantRole::Owner;
+    owner.conference_id = room.conference_id.clone();
+    let mut attendee = participant();
+    attendee.participant.principal_id = PrincipalId::from_opaque(oid("viewer-person"));
+    attendee.external_user_id = b"viewer-person".to_vec();
+    attendee.conference_id = room.conference_id.clone();
+    attendee.role = ConferenceParticipantRole::Attendee;
+    attendee.audio_muted = true;
+    attendee.camera_allowed = false;
+    attendee.publish_audio_allowed = false;
+    attendee.publish_video_allowed = false;
+    attendee.screen_share_allowed = false;
+    store
+        .persist_first_party_room_with_owner(&room, &owner)
+        .expect("create room with owner");
+    assert_eq!(
+        store.persist_first_party_room_attendee(&attendee),
+        Err(DurableStoreError::Conflict),
+        "a scheduled room is not an open room"
+    );
+    let open = store
+        .transition_universal_conference(
+            &room.scope,
+            &room.conference_id,
+            1,
+            UniversalConferenceLifecycle::Waiting,
+            true,
+        )
+        .expect("open waiting room");
+    assert_eq!(
+        store.persist_first_party_room_attendee(&attendee),
+        Ok(DurableRecordStatus::Persisted)
+    );
+    assert_eq!(
+        store.persist_first_party_room_attendee(&attendee),
+        Ok(DurableRecordStatus::Duplicate)
+    );
+    let mut forged = attendee.clone();
+    forged.role = ConferenceParticipantRole::Speaker;
+    assert_eq!(
+        store.persist_first_party_room_attendee(&forged),
+        Err(DurableStoreError::InvalidRecord),
+        "viewer must not be able to self-elevate"
+    );
+    store
+        .transition_universal_conference(
+            &room.scope,
+            &room.conference_id,
+            open.revision,
+            UniversalConferenceLifecycle::Waiting,
+            false,
+        )
+        .expect("close room");
+    let mut later = attendee.clone();
+    later.participant.principal_id = PrincipalId::from_opaque(oid("second-viewer-person"));
+    later.external_user_id = b"second-viewer-person".to_vec();
+    assert_eq!(
+        store.persist_first_party_room_attendee(&later),
+        Err(DurableStoreError::Conflict),
+        "closed room must never admit a later viewer"
+    );
+    assert_eq!(
+        store.universal_conference_participant(&room.scope, &room.conference_id, &later.participant),
+        Ok(None),
+        "rejected viewer must not have any durable roster row"
+    );
+    cleanup(&path);
+}
