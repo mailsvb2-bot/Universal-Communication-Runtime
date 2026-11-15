@@ -450,8 +450,9 @@ impl UniversalConferenceStore for SqliteLocalStore {
         // webinars. This is checked under the same IMMEDIATE transaction as
         // creation, not in an advisory preflight vulnerable to concurrent tabs.
         let namespace = namespace_storage_key(&room.scope);
-        let open_for_owner: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM universal_conference_participants AS participant
+        let open_for_owner: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM universal_conference_participants AS participant
              JOIN universal_conferences AS conference
                ON participant.tenant_id = conference.tenant_id
               AND participant.namespace_present = conference.namespace_present
@@ -466,15 +467,16 @@ impl UniversalConferenceStore for SqliteLocalStore {
                AND participant.active = 1
                AND conference.integration_id = ?5
                AND conference.lifecycle != 'ended'",
-            params![
-                room.scope.tenant_id.as_opaque().as_str(),
-                namespace.present,
-                namespace.value,
-                owner.participant.principal_id.as_opaque().as_str(),
-                room.integration_id.as_opaque().as_str(),
-            ],
-            |row| row.get(0),
-        ).map_err(|error| map_sqlite_error(&error))?;
+                params![
+                    room.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    owner.participant.principal_id.as_opaque().as_str(),
+                    room.integration_id.as_opaque().as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
         if open_for_owner >= 8 {
             return Err(DurableStoreError::Full);
         }
