@@ -753,6 +753,38 @@ fn first_party_static_response(path: &str) -> Option<HttpResponse> {
     })
 }
 
+async fn handle_room_proxy(
+    request: Request<Incoming>,
+    room_api: SocketAddr,
+    path: &str,
+    origin: Option<&str>,
+) -> HttpResponse {
+    let authorization = optional_authorization(request.headers());
+    let body = match bounded_body(request.into_body()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    if body.len() > MAX_ROOM_PROXY_BODY_BYTES {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "body_too_large",
+            "room request is too large",
+        );
+    }
+    if !canonical_room_ready(room_api).await {
+        return with_cors(
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "room_backend_unavailable",
+                "Эфир временно недоступен: production-сервис комнаты не готов",
+            ),
+            origin,
+        );
+    }
+    let response = proxy_room_post(room_api, path, &body, authorization.as_deref()).await;
+    with_cors(response, origin)
+}
+
 async fn handle_request(
     request: Request<Incoming>,
     state: AppState,
@@ -833,31 +865,7 @@ async fn handle_request(
     // A bearer is optional. When the browser sends one, it is forwarded so
     // the room can tell a speaker from an attendee. It is not logged.
     if room_proxy_path(&path) {
-        let authorization = optional_authorization(request.headers());
-        let body = match bounded_body(request.into_body()).await {
-            Ok(body) => body,
-            Err(error) => return Ok(error.into_response()),
-        };
-        if body.len() > MAX_ROOM_PROXY_BODY_BYTES {
-            return Ok(api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "body_too_large",
-                "room request is too large",
-            ));
-        }
-        if !canonical_room_ready(state.room_api).await {
-            return Ok(with_cors(
-                api_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "room_backend_unavailable",
-                    "Эфир временно недоступен: production-сервис комнаты не готов",
-                ),
-                origin.as_deref(),
-            ));
-        }
-        let response =
-            proxy_room_post(state.room_api, &path, &body, authorization.as_deref()).await;
-        return Ok(with_cors(response, origin.as_deref()));
+        return Ok(handle_room_proxy(request, state.room_api, &path, origin.as_deref()).await);
     }
 
     let token = match bearer_from_headers(request.headers()) {
