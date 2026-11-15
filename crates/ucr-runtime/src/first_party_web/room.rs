@@ -298,7 +298,11 @@ fn change_room_entry(
     if profile.lifecycle == UniversalConferenceLifecycle::Waiting && profile.entry_open == open {
         return Ok(describe_room(&profile, false));
     }
-    if profile.lifecycle == UniversalConferenceLifecycle::Scheduled && !open {
+    // Never reopen a previously closed waiting room: earlier signed Join
+    // leases could otherwise regain authority on the same Conference.
+    if (open && profile.lifecycle != UniversalConferenceLifecycle::Scheduled)
+        || (!open && profile.lifecycle != UniversalConferenceLifecycle::Waiting)
+    {
         return Err(StatusCode::CONFLICT);
     }
     let next = state
@@ -338,6 +342,16 @@ fn end_unstarted_room(
             profile.lifecycle,
             UniversalConferenceLifecycle::Scheduled | UniversalConferenceLifecycle::Waiting
         )
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    // A Room with a prepared Group may already have SFU/MLS sessions. Its
+    // end must go through media termination, not a control-plane-only update.
+    if state
+        .store
+        .group(&auth.subject.scope, &room_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .is_some()
     {
         return Err(StatusCode::CONFLICT);
     }
