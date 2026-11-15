@@ -369,6 +369,48 @@ impl GroupCallLookupStore for SqliteLocalStore {
 
 /// One canonical creation path: optional parent Call CAS is checked under the
 /// same `SQLite` write transaction as the derived Call's durable insert.
+fn ensure_conference_accepts_group_calls(
+    transaction: &Transaction<'_>,
+    session: &CallSession,
+) -> Result<(), DurableStoreError> {
+    if !is_group_kind(session.conversation.kind) {
+        return Ok(());
+    }
+    let namespace = namespace_storage_key(&session.scope);
+    let lifecycle: Option<String> = transaction
+        .query_row(
+            "SELECT uc.lifecycle
+             FROM groups AS g
+             JOIN universal_conferences AS uc
+               ON uc.tenant_id = g.tenant_id
+              AND uc.namespace_present = g.namespace_present
+              AND uc.namespace_id = g.namespace_id
+              AND uc.conference_id = g.group_id
+             WHERE g.tenant_id = ?1
+               AND g.namespace_present = ?2
+               AND g.namespace_id = ?3
+               AND g.conversation_id = ?4
+               AND g.conversation_kind = ?5",
+            params![
+                session.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                session.conversation.conversation_id.as_opaque().as_str(),
+                call_conversation_kind_name(session.conversation.kind),
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))?;
+    if lifecycle
+        .as_deref()
+        .is_some_and(|value| value == "ending" || value == "ended")
+    {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    Ok(())
+}
+
 fn create_call_with_parent_guard(
     store: &SqliteLocalStore,
     creator: &ScopedPrincipal,
@@ -430,6 +472,7 @@ fn create_call_with_parent_guard(
             Err(DurableStoreError::Conflict)
         };
     }
+    ensure_conference_accepts_group_calls(&transaction, &session)?;
     require_group_participants_if_needed(&transaction, &session)?;
     insert_call(&transaction, &session, &creation_fingerprint)?;
     replace_participants(&transaction, &session)?;
