@@ -2641,6 +2641,45 @@ where
     Ok(())
 }
 
+fn first_party_room_group_roster_matches(
+    memberships: &[ucr_model::GroupMembership],
+    participants: &[UniversalConferenceParticipantProfile],
+) -> bool {
+    let active = memberships
+        .iter()
+        .filter(|membership| membership.state == ucr_model::GroupMemberState::Active)
+        .collect::<Vec<_>>();
+    active.len() == participants.len()
+        && participants.iter().all(|participant| {
+            active.iter().any(|membership| {
+                membership.member == participant.participant
+                    && membership.role == runtime_group_role(participant.role)
+            })
+        })
+}
+
+fn validate_first_party_room_group_roster<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participants: &[UniversalConferenceParticipantProfile],
+) -> Result<(), CanonicalError>
+where
+    S: GroupStore,
+{
+    let memberships = store
+        .group_memberships(scope, room_id, MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS)
+        .map_err(map_store_error)?;
+    // A result at the scan ceiling may be truncated. Never authorize a partial
+    // MLS roster: every active leaf must map to one current canonical attendee.
+    if memberships.len() >= MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS
+        || !first_party_room_group_roster_matches(&memberships, participants)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    Ok(())
+}
+
 /// Prepares the canonical media Call only after the Room roster and endpoint-owned
 /// MLS Group have been independently validated.
 ///
@@ -2694,6 +2733,7 @@ where
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
     validate_first_party_room_group_owner(store, scope, room_id, owner, &group)?;
+    validate_first_party_room_group_roster(store, scope, room_id, &enrolled)?;
     // Do not generate a Group change on the server. Every committed Device
     // must already be in the endpoint-controlled group transition ledger.
     let mut ready = Vec::new();
@@ -3403,6 +3443,7 @@ where
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
     validate_first_party_room_group_owner(store, scope, room_id, &owner, &group)?;
+    validate_first_party_room_group_roster(store, scope, room_id, &participants)?;
     validate_first_party_room_group_member(store, scope, room_id, &enrolled)?;
     let current_device = resolve_join_device(store, scope, participant)?;
     if &current_device != device_id {
@@ -3468,6 +3509,7 @@ where
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
     validate_first_party_room_group_owner(store, scope, room_id, &current_owner, &current_group)?;
+    validate_first_party_room_group_roster(store, scope, room_id, &current_participants)?;
     validate_first_party_room_group_member(store, scope, room_id, current_enrolled)?;
     Ok(current_room.as_ref() == Some(&snapshot.room)
         && current_owner == snapshot.owner
@@ -6053,4 +6095,67 @@ mod universal_runtime_tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn first_party_room_group_roster_rejects_unenrolled_active_leaves() {
+        use ucr_model::{GroupMemberState, GroupMembership, GroupPermission, GroupRole};
+
+        let room = conference();
+        let participant = |id: &str, role| {
+            let principal = principal(id);
+            let (audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed, screen_share_allowed) =
+                super::participant_defaults(UniversalConferenceMode::Webinar, role);
+            UniversalConferenceParticipantProfile {
+                scope: scope(),
+                conference_id: room.conference_id.clone(),
+                integration_id: room.integration_id.clone(),
+                external_user_id: id.as_bytes().to_vec(),
+                participant: principal,
+                role,
+                audio_muted,
+                camera_allowed,
+                publish_audio_allowed,
+                publish_video_allowed,
+                screen_share_allowed,
+                active: true,
+                revision: 1,
+            }
+        };
+        let membership = |id: &str, role: GroupRole, state: GroupMemberState| GroupMembership {
+            scope: scope(),
+            group_id: room.conference_id.clone(),
+            member: principal(id),
+            role,
+            permissions: Vec::<GroupPermission>::new(),
+            state,
+            joined_revision: 1,
+            removed_revision: (state == GroupMemberState::Removed).then_some(2),
+            history_floor_logical_order: 0,
+        };
+        let participants = vec![
+            participant("room-roster-owner", ConferenceParticipantRole::Owner),
+            participant("room-roster-attendee", ConferenceParticipantRole::Attendee),
+        ];
+        let exact = vec![
+            membership("room-roster-owner", GroupRole::Owner, GroupMemberState::Active),
+            membership("room-roster-attendee", GroupRole::Member, GroupMemberState::Active),
+        ];
+        assert!(super::first_party_room_group_roster_matches(&exact, &participants));
+
+        let mut outsider = exact.clone();
+        outsider.push(membership("room-roster-outsider", GroupRole::Member, GroupMemberState::Active));
+        assert!(!super::first_party_room_group_roster_matches(&outsider, &participants));
+
+        let missing = vec![exact[0].clone()];
+        assert!(!super::first_party_room_group_roster_matches(&missing, &participants));
+
+        let mut wrong_role = exact.clone();
+        wrong_role[1].role = GroupRole::Admin;
+        assert!(!super::first_party_room_group_roster_matches(&wrong_role, &participants));
+
+        let mut removed_history = exact;
+        removed_history.push(membership("room-roster-former", GroupRole::Member, GroupMemberState::Removed));
+        assert!(super::first_party_room_group_roster_matches(&removed_history, &participants));
+    }
+
 }
