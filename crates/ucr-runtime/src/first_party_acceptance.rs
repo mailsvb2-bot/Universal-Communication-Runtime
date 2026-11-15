@@ -1769,6 +1769,13 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     // Hang-up ends the media Call too; no new Join grant and no re-admission.
     let hung = signal(&server, &bob, &call_id, revision, "hangup").expect("hangup");
     assert_eq!(hung["state"], "terminated");
+    assert!(
+        !server
+            .store
+            .server_possesses_mls_group(&scope, &group_id)
+            .unwrap(),
+        "Hangup/revoke must not leave target Group private state in the server OpenMLS provider"
+    );
     let media = server
         .store
         .call(&claims[0].scope, &claims[0].call_id)
