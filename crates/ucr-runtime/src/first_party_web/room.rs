@@ -34,9 +34,9 @@ fn integration() -> Result<IntegrationId, StatusCode> {
 
 fn scoped_room_id(auth: &Session, key: &str) -> Result<GroupId, StatusCode> {
     if !(16..=90).contains(&key.len())
-        || !key.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
-        })
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -44,7 +44,11 @@ fn scoped_room_id(auth: &Session, key: &str) -> Result<GroupId, StatusCode> {
     digest.update(b"ucr-first-party-webinar-id.v1\0");
     for field in [
         auth.subject.scope.tenant_id.as_opaque().as_wire_bytes(),
-        auth.subject.principal.principal_id.as_opaque().as_wire_bytes(),
+        auth.subject
+            .principal
+            .principal_id
+            .as_opaque()
+            .as_wire_bytes(),
         key.as_bytes(),
     ] {
         digest.update((field.len() as u64).to_be_bytes());
@@ -60,8 +64,7 @@ fn scoped_room_id(auth: &Session, key: &str) -> Result<GroupId, StatusCode> {
     let mut identifier = String::from("fp-room-");
     for byte in digest.finalize() {
         use std::fmt::Write as _;
-        write!(&mut identifier, "{byte:02x}")
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        write!(&mut identifier, "{byte:02x}").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
     Ok(GroupId::from_opaque(opaque(&identifier)?))
 }
@@ -88,11 +91,7 @@ fn owned_room(
     }
     let owner = state
         .store
-        .universal_conference_participant(
-            &auth.subject.scope,
-            room_id,
-            &auth.subject.principal,
-        )
+        .universal_conference_participant(&auth.subject.scope, room_id, &auth.subject.principal)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::FORBIDDEN)?;
     if owner.role != ConferenceParticipantRole::Owner || !owner.active {
@@ -194,8 +193,7 @@ fn enroll_attendee(state: &State, auth: &Session, input: &RoomRef) -> Result<Val
         .universal_conference_profile(&auth.subject.scope, &room_id)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    if profile.mode != UniversalConferenceMode::Webinar
-        || profile.integration_id != integration()?
+    if profile.mode != UniversalConferenceMode::Webinar || profile.integration_id != integration()?
     {
         return Err(StatusCode::NOT_FOUND);
     }
