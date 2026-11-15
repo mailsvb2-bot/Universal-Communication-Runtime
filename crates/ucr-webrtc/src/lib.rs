@@ -1232,7 +1232,7 @@ async fn handle_live_send_e2ee(
             match session.e2ee_channel.as_mut() {
                 Some(channel) => {
                     channel
-                        .send(&envelope, deadline, close_rx, &key, &offer_id)
+                        .send(&envelope, deadline, close_rx, &key, offer_id)
                         .await
                 }
                 None => Err(WebRtcProviderError::SessionUnavailable),
