@@ -20,7 +20,7 @@ assert.match(engine,/session\.shutdown_pending = true;[\s\S]*?bounded_peer_close
 assert.match(engine,/close_rx: tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>/);
 assert.match(engine,/fn request_close\([\s\S]*?try_send\(LiveWebRtcCommand::Close[\s\S]*?close_tx\.send/);
 assert.match(e2ee,/async fn wait_for_matching_close\(/);
-assert.match(e2ee,/async fn cancellable_transport_operation\(/);
+assert.match(e2ee,/async fn cancellable_transport_operation</);
 assert.match(e2ee,/cancellable_transport_operation\([\s\S]*?channel\.send\(/);
 assert.match(e2ee,/cancellable_transport_operation\([\s\S]*?channel\.buffered_amount\(\)/);
 assert.match(e2ee,/matching_close_cancels_an_inflight_datachannel_acceptance/);
