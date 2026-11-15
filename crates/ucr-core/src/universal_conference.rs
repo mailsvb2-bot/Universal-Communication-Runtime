@@ -83,6 +83,23 @@ fn valid_metadata_key(key: &str) -> bool {
 /// This store owns only integration-facing schedule/mode/lifecycle and role/media-policy projection.
 /// Canonical Group membership and `CallSession` signalling stay owned by their existing stores.
 pub trait UniversalConferenceStore: StorageProvider {
+    /// Atomically creates the first-party Room coordinator AND its authenticated
+    /// owner in the same canonical transaction. No room may exist without its
+    /// Person owner; never invent a second Device, signer, or storage authority.
+    /// Equal authenticated retries are duplicates, conflicting owners fail closed.
+    ///
+    /// The operation records scheduled control-plane intent only. Runtime Group,
+    /// endpoint MLS, Call and signed media Join are still separate canonical
+    /// authorities and must not be claimed ready by this method.
+    fn persist_first_party_room_with_owner(
+        &self,
+        room: &UniversalConferenceProfile,
+        owner: &UniversalConferenceParticipantProfile,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let _ = (room, owner);
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Creates or deduplicates one conference profile.
     ///
     /// The exact external key (scope, `integration_id`, `external_conference_id`) is immutable.
