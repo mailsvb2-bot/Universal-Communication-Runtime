@@ -295,7 +295,7 @@ fn enroll_attendee(state: &State, auth: &Session, input: &RoomRef) -> Result<Val
             "enrolled": true,
             "role": "attendee",
             "mediaReady": false,
-        }))
+        })),
         Err(DurableStoreError::Conflict | DurableStoreError::InvalidRecord) => {
             Err(StatusCode::CONFLICT)
         }
