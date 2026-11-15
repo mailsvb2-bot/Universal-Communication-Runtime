@@ -483,9 +483,9 @@ fn transition_universal_conference_with_event_in_transaction(
     let namespace = namespace_storage_key(scope);
     let changed = transaction
         .execute(
-            "UPDATE universal_conferences \\
-             SET lifecycle = ?1, entry_open = ?2, revision = ?3 \\
-             WHERE tenant_id = ?4 AND namespace_present = ?5 AND namespace_id = ?6 \\
+            "UPDATE universal_conferences \
+             SET lifecycle = ?1, entry_open = ?2, revision = ?3 \
+             WHERE tenant_id = ?4 AND namespace_present = ?5 AND namespace_id = ?6 \
                AND conference_id = ?7 AND revision = ?8",
             params![
                 lifecycle_text(lifecycle),
