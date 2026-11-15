@@ -3219,6 +3219,7 @@ where
 pub struct FirstPartyRoomJoinAttempt<'a> {
     pub idempotency_key: &'a str,
     pub now_unix_ms: i64,
+    pub signer_key_id: &'a str,
 }
 
 fn validate_first_party_room_call_member(
@@ -3290,7 +3291,6 @@ pub fn issue_authenticated_first_party_room_join<S>(
     room_id: &GroupId,
     participant: &PrincipalRef,
     device_id: &DeviceId,
-    signer_key_id: &str,
     attempt: FirstPartyRoomJoinAttempt<'_>,
 ) -> Result<pb::ConferenceJoinGrant, CanonicalError>
 where
@@ -3415,7 +3415,7 @@ where
         Ok::<bool, CanonicalError>(
             current_room.as_ref() == Some(&room)
                 && current_device == *device_id
-                && current_key.key_id.as_opaque().as_str() == signer_key_id
+                && current_key.key_id.as_opaque().as_str() == attempt.signer_key_id
                 && current_call == call_id
                 && current_group.revision == group_revision
                 && current_group.crypto_state == group_crypto_state
@@ -5548,6 +5548,41 @@ mod universal_runtime_tests {
             resolve_join_call(&store, &scope(), &conference().conference_id, &attendee,)
                 .expect("join resolves current call"),
             active_call_id
+        );
+    }
+
+    #[test]
+    fn first_party_room_join_requires_active_call_and_accepted_non_departed_member() {
+        let owner = principal("room-join-owner");
+        let attendee = principal("room-join-attendee");
+        let conversation = ucr_model::ConversationRef {
+            conversation_id: ucr_model::ConversationId::from_opaque(oid("room-join-conversation")),
+            kind: ucr_model::ConversationKind::PrivateGroup,
+        };
+        let mut call = history_call(
+            conversation,
+            CallId::from_opaque(oid("room-join-call")),
+            &owner,
+            &attendee,
+        );
+
+        assert!(super::validate_first_party_room_call_member(&call, &attendee).is_err());
+        call.signalling_state = CallSignallingState::Active;
+        assert!(
+            super::validate_first_party_room_call_member(&call, &attendee).is_err(),
+            "an active Call does not admit an unaccepted attendee"
+        );
+        call.participants[1].state = CallParticipantState::Accepted;
+        assert!(super::validate_first_party_room_call_member(&call, &attendee).is_ok());
+        call.participants[1].left_revision = Some(2);
+        assert!(
+            super::validate_first_party_room_call_member(&call, &attendee).is_err(),
+            "a departed attendee cannot renew a signed Join"
+        );
+        assert!(
+            super::validate_first_party_room_call_member(&call, &principal("room-outsider"))
+                .is_err(),
+            "an unrelated Person cannot receive the Room Join"
         );
     }
 
