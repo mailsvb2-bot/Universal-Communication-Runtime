@@ -458,8 +458,15 @@ fn transition_universal_conference_with_event_in_transaction(
     transaction: &Transaction<'_>,
     transition: ConferenceLifecycleTransition<'_>,
 ) -> Result<UniversalConferenceProfile, DurableStoreError> {
-    let (scope, conference_id, expected_revision, lifecycle, entry_open, event, allow_live_end_without_calls) =
-        match transition {
+    let (
+        scope,
+        conference_id,
+        expected_revision,
+        lifecycle,
+        entry_open,
+        event,
+        allow_live_end_without_calls,
+    ) = match transition {
             ConferenceLifecycleTransition::Standard {
                 scope,
                 conference_id,
