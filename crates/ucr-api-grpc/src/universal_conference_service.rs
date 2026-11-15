@@ -2319,7 +2319,7 @@ const MANAGED_PARTICIPANT_PERMISSIONS: [&str; 7] = [
     SCREEN_SHARE_SEND_PERMISSION,
 ];
 
-/// Reconciles the same role/media PermissionGrants as machine-authenticated
+/// Reconciles the same role/media `PermissionGrants` as machine-authenticated
 /// universal conference enrollment, after a proven first-party Person Device
 /// has been atomically registered in the canonical Conference roster.
 /// This function grants no identity, Device trust or signed Join token.
