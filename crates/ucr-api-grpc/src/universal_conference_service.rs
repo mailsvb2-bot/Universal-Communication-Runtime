@@ -3453,7 +3453,7 @@ where
             .universal_conference_profile(scope, room_id)
             .map_err(map_store_error)?;
         let current_participants = active_conference_participants(store, scope, room_id)?;
-        let current_owner = first_party_room_owner(&current_participants)?;
+        let current_owner = first_party_room_owner(&current_participants, &integration_id)?;
         let current_enrolled = current_participants
             .iter()
             .find(|candidate| &candidate.participant == participant)
@@ -3463,7 +3463,7 @@ where
             .active_trusted_signing_key(scope, device_id)
             .map_err(map_store_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
-        let current_call = resolve_first_party_room_call(store, scope, room_id, &owner, participant)?;
+        let current_call = resolve_first_party_room_call(store, scope, room_id, &current_owner, participant)?;
         let current_group = store
             .group(scope, room_id)
             .map_err(map_store_error)?
