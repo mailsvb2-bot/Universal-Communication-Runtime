@@ -8,7 +8,7 @@
 use super::*;
 use ucr_api_grpc::{
     canonical_universal_conference_lifecycle_event, issue_authenticated_first_party_room_join,
-    reconcile_canonical_conference_permissions,
+    prepare_authenticated_first_party_room_call, reconcile_canonical_conference_permissions,
 };
 use ucr_core::{DurableRecordStatus, DurableStoreError, UniversalConferenceStore};
 use ucr_model::{
@@ -388,6 +388,33 @@ fn end_unstarted_room(
 // Exact canonical Person/Device session is checked by the enclosing first-
 // party BFF. This route uses only the already-mounted production issuer/store;
 // it creates no synthetic attendee, MLS leaf or second grant signer.
+// Call creation is owned by the same UniversalConferenceService CallStore
+// reconciler, after each Person endpoint has already contributed a signed
+// MLS Add. It cannot create any MLS key or Group membership itself.
+fn prepare_room_call(
+    state: &State,
+    auth: &Session,
+    input: &RoomJoin,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let (room, _) = owned_room(state, auth, &room_id)?;
+    let call_prepared = prepare_authenticated_first_party_room_call(
+        state.store.as_ref(),
+        &auth.subject.scope,
+        &room_id,
+        &auth.subject.principal,
+        &input.idempotency_key,
+    )
+    .map_err(|_| StatusCode::CONFLICT)?;
+    Ok(json!({
+        "roomId": input.room_id,
+        "revision": room.revision,
+        "callPrepared": call_prepared,
+        "mediaReady": false
+    }))
+}
+
 fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
@@ -456,6 +483,10 @@ pub(super) fn dispatch(
         "/v1/first-party/room/end" => {
             let request: RoomEntryChange = parse(body)?;
             end_unstarted_room(state, auth, &request)
+        }
+        "/v1/first-party/room/prepare" => {
+            let request: RoomJoin = parse(body)?;
+            prepare_room_call(state, auth, &request)
         }
         "/v1/first-party/room/join" => {
             let request: RoomJoin = parse(body)?;
