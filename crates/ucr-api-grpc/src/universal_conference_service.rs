@@ -3888,6 +3888,30 @@ const fn lifecycle_event_type(lifecycle: UniversalConferenceLifecycle) -> Option
     }
 }
 
+/// Builds the exact canonical Conference lifecycle Event used by the
+/// universal conference service. A first-party verified Person may use the
+/// SAME event schema when cancelling a scheduled/waiting room. Callers must
+/// authorize the owner and persist this event atomically with the lifecycle
+/// CAS; creating an Event alone conveys no mutation authority.
+///
+/// # Errors
+/// Returns a canonical error on invalid clock, command identity or encoding.
+pub fn canonical_universal_conference_lifecycle_event(
+    current: &UniversalConferenceProfile,
+    target: UniversalConferenceLifecycle,
+    command_id: &CommandId,
+    idempotency_key: &str,
+    occurred_at_unix_ms: i64,
+) -> Result<Option<EventEnvelope>, CanonicalError> {
+    lifecycle_event(
+        current,
+        target,
+        command_id,
+        idempotency_key,
+        Some(occurred_at_unix_ms),
+    )
+}
+
 fn lifecycle_event(
     current: &UniversalConferenceProfile,
     target: UniversalConferenceLifecycle,
