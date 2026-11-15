@@ -467,40 +467,40 @@ fn transition_universal_conference_with_event_in_transaction(
         event,
         allow_live_end_without_calls,
     ) = match transition {
-            ConferenceLifecycleTransition::Standard {
+        ConferenceLifecycleTransition::Standard {
+            scope,
+            conference_id,
+            expected_revision,
+            lifecycle,
+            entry_open,
+            event,
+        } => (
+            scope,
+            conference_id,
+            expected_revision,
+            lifecycle,
+            entry_open,
+            event,
+            false,
+        ),
+        ConferenceLifecycleTransition::EndAfterCallsClosed {
+            scope,
+            conference_id,
+            expected_revision,
+            event,
+        } => {
+            ensure_no_active_group_calls(transaction, scope, conference_id)?;
+            (
                 scope,
                 conference_id,
                 expected_revision,
-                lifecycle,
-                entry_open,
-                event,
-            } => (
-                scope,
-                conference_id,
-                expected_revision,
-                lifecycle,
-                entry_open,
-                event,
+                UniversalConferenceLifecycle::Ended,
                 false,
-            ),
-            ConferenceLifecycleTransition::EndAfterCallsClosed {
-                scope,
-                conference_id,
-                expected_revision,
                 event,
-            } => {
-                ensure_no_active_group_calls(transaction, scope, conference_id)?;
-                (
-                    scope,
-                    conference_id,
-                    expected_revision,
-                    UniversalConferenceLifecycle::Ended,
-                    false,
-                    event,
-                    true,
-                )
-            }
-        };
+                true,
+            )
+        }
+    };
     let current =
         load_profile(transaction, scope, conference_id)?.ok_or(DurableStoreError::Conflict)?;
     validate_conference_lifecycle_event(&current, expected_revision, lifecycle, event)?;
