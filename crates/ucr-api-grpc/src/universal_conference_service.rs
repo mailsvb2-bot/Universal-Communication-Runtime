@@ -2567,6 +2567,69 @@ struct RuntimeReadyParticipant {
 /// # Errors
 /// Refuses absent/foreign owners, server-custodied, incomplete or uncommitted
 /// MLS Groups, missing enrolled Devices, changed conference state or Call CAS.
+fn first_party_room_owner(
+    participants: &[UniversalConferenceParticipantProfile],
+) -> Result<PrincipalRef, CanonicalError> {
+    let owners = participants
+        .iter()
+        .filter(|participant| participant.role == ConferenceParticipantRole::Owner)
+        .collect::<Vec<_>>();
+    let [owner] = owners.as_slice() else {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    };
+    if owner.participant.kind != PrincipalKind::Person {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    Ok(owner.participant.clone())
+}
+
+fn validate_first_party_room_group_owner<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    owner: &PrincipalRef,
+    group: &GroupRecord,
+) -> Result<(), CanonicalError>
+where
+    S: GroupMlsServerCustodyProbe,
+{
+    if group.scope != *scope
+        || group.group_id != *room_id
+        || group.ownership != GroupOwnership::PersonOwned(owner.clone())
+        || group.conversation.kind != ConversationKind::PrivateGroup
+        || group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
+        || group.crypto_state.epoch == 0
+        || group.crypto_state.state_ref.is_none()
+        || store
+            .server_possesses_mls_group(scope, room_id)
+            .map_err(|error| map_group_mls_error(&error))?
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
+    }
+    Ok(())
+}
+
+fn validate_first_party_room_group_member<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participant: &UniversalConferenceParticipantProfile,
+) -> Result<(), CanonicalError>
+where
+    S: GroupStore,
+{
+    let membership = store
+        .group_membership(scope, room_id, &participant.participant)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+    if membership.state != ucr_model::GroupMemberState::Active
+        || membership.role != runtime_group_role(participant.role)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    Ok(())
+}
+
 pub fn prepare_authenticated_first_party_room_call<S>(
     store: &S,
     scope: &TenantScope,
@@ -2606,42 +2669,21 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
     let enrolled = active_conference_participants(store, scope, room_id)?;
-    let owners = enrolled
-        .iter()
-        .filter(|person| person.role == ConferenceParticipantRole::Owner)
-        .collect::<Vec<_>>();
-    if owners.len() != 1 || &owners[0].participant != owner || owner.kind != PrincipalKind::Person {
+    if first_party_room_owner(&enrolled)? != *owner {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
     let group = store
         .group(scope, room_id)
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
-    if group.ownership != GroupOwnership::PersonOwned(owner.clone())
-        || group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
-        || group.crypto_state.epoch == 0
-        || group.crypto_state.state_ref.is_none()
-        || store
-            .server_possesses_mls_group(scope, room_id)
-            .map_err(|error| map_group_mls_error(&error))?
-    {
-        return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
-    }
+    validate_first_party_room_group_owner(store, scope, room_id, owner, &group)?;
     // Do not generate a Group change on the server. Every committed Device
     // must already be in the endpoint-controlled group transition ledger.
     let mut ready = Vec::new();
     for person in enrolled {
         let device_id = optional_single_active_device(store, scope, &person.participant)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
-        let member = store
-            .group_membership(scope, room_id, &person.participant)
-            .map_err(map_store_error)?
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
-        if member.state != ucr_model::GroupMemberState::Active
-            || member.role != runtime_group_role(person.role)
-        {
-            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
-        }
+        validate_first_party_room_group_member(store, scope, room_id, &person)?;
         ready.push(RuntimeReadyParticipant {
             profile: person,
             device_id,
@@ -3323,13 +3365,22 @@ where
     {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
-    let enrolled = store
-        .universal_conference_participant(scope, room_id, participant)
-        .map_err(map_store_error)?
+    let participants = active_conference_participants(store, scope, room_id)?;
+    let owner = first_party_room_owner(&participants)?;
+    let enrolled = participants
+        .iter()
+        .find(|candidate| &candidate.participant == participant)
+        .cloned()
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
-    if enrolled.integration_id != integration_id || !enrolled.active {
+    if enrolled.integration_id != integration_id {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
+    let group = store
+        .group(scope, room_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+    validate_first_party_room_group_owner(store, scope, room_id, &owner, &group)?;
+    validate_first_party_room_group_member(store, scope, room_id, &enrolled)?;
     // JoinTokenIssuer must bind to this *exact* authenticated Device. The
     // generic integration API resolves one active Device; compare before
     // handing off so a different logged-in Device cannot receive that grant.
@@ -3346,20 +3397,8 @@ where
     }
     let call_id = resolve_first_party_room_call(store, scope, room_id, participant)?;
     // Unlike generic integrations, PetrelLink's first-party Room may NOT
-    // join a server-custodied MLS group. The realtime authority independently
-    // rechecks this at MLS admission; guard signed credentials here as well.
-    let group = store
-        .group(scope, room_id)
-        .map_err(map_store_error)?
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
-    if group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
-        || group.crypto_state.epoch == 0
-        || store
-            .server_possesses_mls_group(scope, room_id)
-            .map_err(|error| map_group_mls_error(&error))?
-    {
-        return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
-    }
+    // join a server-custodied MLS group. The same canonical validator is used
+    // by Room preparation and Join issuance; realtime rechecks at admission.
     let group_revision = group.revision;
     let group_crypto_state = group.crypto_state.clone();
     let request = pb::UniversalIssueJoinGrantRequest {
@@ -3399,6 +3438,12 @@ where
         let current_room = store
             .universal_conference_profile(scope, room_id)
             .map_err(map_store_error)?;
+        let current_participants = active_conference_participants(store, scope, room_id)?;
+        let current_owner = first_party_room_owner(&current_participants)?;
+        let current_enrolled = current_participants
+            .iter()
+            .find(|candidate| &candidate.participant == participant)
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
         let current_device = resolve_join_device(store, scope, participant)?;
         let current_key = store
             .active_trusted_signing_key(scope, device_id)
@@ -3409,17 +3454,24 @@ where
             .group(scope, room_id)
             .map_err(map_store_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
-        let server_has_group = store
-            .server_possesses_mls_group(scope, room_id)
-            .map_err(|error| map_group_mls_error(&error))?;
+        validate_first_party_room_group_owner(
+            store,
+            scope,
+            room_id,
+            &current_owner,
+            &current_group,
+        )?;
+        validate_first_party_room_group_member(store, scope, room_id, current_enrolled)?;
         Ok::<bool, CanonicalError>(
             current_room.as_ref() == Some(&room)
+                && current_owner == owner
+                && current_enrolled == &enrolled
                 && current_device == *device_id
                 && current_key.key_id.as_opaque().as_str() == attempt.signer_key_id
                 && current_call == call_id
                 && current_group.revision == group_revision
                 && current_group.crypto_state == group_crypto_state
-                && !server_has_group,
+                && current_group.ownership == group.ownership,
         )
     })();
     match fence {
