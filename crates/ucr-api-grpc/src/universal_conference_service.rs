@@ -3174,7 +3174,7 @@ where
         || group.crypto_state.epoch == 0
         || store
             .server_possesses_mls_group(scope, room_id)
-            .map_err(map_group_mls_error)?
+            .map_err(|error| map_group_mls_error(&error))?
     {
         return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
     }
