@@ -3215,6 +3215,7 @@ where
 }
 
 /// Replay key and clock for one canonical first-party Room Join attempt.
+#[derive(Debug, Clone, Copy)]
 pub struct FirstPartyRoomJoinAttempt<'a> {
     pub idempotency_key: &'a str,
     pub now_unix_ms: i64,
