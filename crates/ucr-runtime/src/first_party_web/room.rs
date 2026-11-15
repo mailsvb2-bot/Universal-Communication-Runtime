@@ -183,6 +183,74 @@ fn create_room(state: &State, auth: &Session, input: &CreateRoom) -> Result<Valu
     }
 }
 
+// A viewer must be a previously proven canonical Person Device, not an
+// anonymous name or a fabricated external-user reference. This persists
+// membership only; runtime MLS and signed media Join are separate authorities.
+fn enroll_attendee(state: &State, auth: &Session, input: &RoomRef) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let profile = state
+        .store
+        .universal_conference_profile(&auth.subject.scope, &room_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if profile.mode != UniversalConferenceMode::Webinar
+        || profile.integration_id != integration()?
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if !profile.entry_open
+        || !matches!(
+            profile.lifecycle,
+            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+        )
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let participants = state
+        .store
+        .active_universal_conference_participants(&auth.subject.scope, &room_id, 1025)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let owners = participants
+        .iter()
+        .filter(|participant| participant.role == ConferenceParticipantRole::Owner)
+        .collect::<Vec<_>>();
+    if owners.len() != 1 || owners[0].participant == auth.subject.principal {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let attendee = UniversalConferenceParticipantProfile {
+        scope: auth.subject.scope.clone(),
+        conference_id: room_id.clone(),
+        integration_id: profile.integration_id,
+        external_user_id: auth.binding.participant_id.as_bytes().to_vec(),
+        participant: auth.subject.principal.clone(),
+        role: ConferenceParticipantRole::Attendee,
+        audio_muted: true,
+        camera_allowed: false,
+        publish_audio_allowed: false,
+        publish_video_allowed: false,
+        screen_share_allowed: false,
+        active: true,
+        revision: 1,
+    };
+    match state
+        .store
+        .persist_universal_conference_participant(&attendee)
+    {
+        Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => Ok(json!({
+            "roomId": input.room_id,
+            "enrolled": true,
+            "role": "attendee",
+            "mediaReady": false,
+        })),
+        Err(DurableStoreError::Conflict | DurableStoreError::InvalidRecord) => {
+            Err(StatusCode::CONFLICT)
+        }
+        Err(DurableStoreError::Full) => Err(StatusCode::TOO_MANY_REQUESTS),
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
 fn describe_room(profile: &UniversalConferenceProfile, media_ready: bool) -> Value {
     let lifecycle = match profile.lifecycle {
         UniversalConferenceLifecycle::Scheduled => "scheduled",
@@ -210,6 +278,10 @@ pub(super) fn dispatch(
         "/v1/first-party/room/create" => {
             let request: CreateRoom = parse(body)?;
             create_room(state, auth, &request)
+        }
+        "/v1/first-party/room/attend" => {
+            let request: RoomRef = parse(body)?;
+            enroll_attendee(state, auth, &request)
         }
         "/v1/first-party/room/get" => {
             let request: RoomRef = parse(body)?;
