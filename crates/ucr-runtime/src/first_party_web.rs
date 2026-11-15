@@ -51,6 +51,8 @@ use ucr_storage_sqlite::{EndpointMlsKeyPackageOffer, NewFirstPartySession, Sqlit
 
 use crate::first_party_media;
 
+mod room;
+
 const MAX_BODY: usize = 16 * 1024;
 /// Successfully proven challenges remembered (only until expiry) to reject replay.
 /// Unproven challenges consume NO server memory, so anonymous challenge
@@ -2389,6 +2391,8 @@ fn dispatch_post(
         device_route(state, auth, path, body)?
     } else if path.starts_with("/v1/first-party/call/") {
         call_route(state, auth, path, body)?
+    } else if path.starts_with("/v1/first-party/room/") {
+        room::dispatch(state, auth, path, body)?
     } else {
         return Err(StatusCode::NOT_FOUND);
     };
