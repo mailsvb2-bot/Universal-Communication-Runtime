@@ -2122,7 +2122,7 @@ mod tests {
         }
     }
 
-    fn room_call_end_event(live_revision: u64) -> Event {
+    fn room_call_end_event(live_revision: u64) -> ucr_model::EventEnvelope {
         let mut end_event = event("room-call-end-event");
         end_event.event_type = "ucr.conference.ended".to_owned();
         end_event.logical_order = live_revision + 1;
