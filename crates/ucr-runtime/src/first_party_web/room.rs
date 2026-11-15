@@ -290,14 +290,12 @@ fn enroll_attendee(state: &State, auth: &Session, input: &RoomRef) -> Result<Val
         revision: 1,
     };
     match state.store.persist_first_party_room_attendee(&attendee) {
-        Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => {
-            Ok(json!({
-                "roomId": input.room_id,
-                "enrolled": true,
-                "role": "attendee",
-                "mediaReady": false,
-            }))
-        }
+        Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => Ok(json!({
+            "roomId": input.room_id,
+            "enrolled": true,
+            "role": "attendee",
+            "mediaReady": false,
+        }))
         Err(DurableStoreError::Conflict | DurableStoreError::InvalidRecord) => {
             Err(StatusCode::CONFLICT)
         }
