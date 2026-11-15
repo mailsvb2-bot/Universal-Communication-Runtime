@@ -3457,7 +3457,8 @@ where
         .active_trusted_signing_key(scope, device_id)
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
-    let current_call = resolve_first_party_room_call(store, scope, room_id, &current_owner, participant)?;
+    let current_call =
+        resolve_first_party_room_call(store, scope, room_id, &current_owner, participant)?;
     let current_group = store
         .group(scope, room_id)
         .map_err(map_store_error)?
