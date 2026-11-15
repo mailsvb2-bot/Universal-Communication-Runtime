@@ -48,6 +48,16 @@ struct RoomJoin {
     idempotency_key: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomMlsCreate {
+    binding: Binding,
+    room_id: String,
+    expected_revision: u64,
+    crypto_state_ref: String,
+    signature_base64_url: String,
+}
+
 fn integration() -> Result<IntegrationId, StatusCode> {
     Ok(IntegrationId::from_opaque(opaque(INTEGRATION)?))
 }
@@ -415,6 +425,91 @@ fn prepare_room_call(
     }))
 }
 
+// The authenticated Owner's browser publishes an endpoint-created epoch-0
+// MLS Group. Neither the UCR server nor the operator holds the Group secret.
+fn publish_room_endpoint_group(
+    state: &State,
+    auth: &Session,
+    input: &RoomMlsCreate,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let (room, _) = owned_room(state, auth, &room_id)?;
+    if room.revision != input.expected_revision
+        || room.lifecycle != UniversalConferenceLifecycle::Waiting
+        || !room.entry_open
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let state_ref = opaque(&input.crypto_state_ref)?;
+    let proof = encoded_proof(
+        "ucr-first-party-room-endpoint-mls-create.v1",
+        &json!([
+            auth.binding.tenant_id,
+            auth.binding.namespace_id,
+            auth.binding.participant_id,
+            auth.binding.device,
+            auth.signer_key_id,
+            input.room_id,
+            input.expected_revision,
+            0,
+            input.crypto_state_ref
+        ]),
+    )?;
+    verify_ed25519(auth.signer_public_key, &proof, &input.signature_base64_url)?;
+    if ucr_group_mls::GroupMlsServerCustodyProbe::server_possesses_mls_group(
+        state.store.as_ref(),
+        &auth.subject.scope,
+        &room_id,
+    )
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let conversation = ConversationRecord {
+        scope: auth.subject.scope.clone(),
+        conversation: ConversationRef {
+            conversation_id: ConversationId::from_opaque(opaque(&format!(
+                "fp-room-conv-{}",
+                input.room_id
+            ))?),
+            kind: ConversationKind::PrivateGroup,
+        },
+        parent_conversation_id: None,
+    };
+    let group = GroupRecord {
+        scope: auth.subject.scope.clone(),
+        group_id: room_id,
+        conversation: conversation.conversation.clone(),
+        ownership: GroupOwnership::PersonOwned(auth.subject.principal.clone()),
+        history_policy: GroupHistoryPolicy::NoHistory,
+        delivery_policy: DeliveryPolicy::NoExternalBridge,
+        crypto_state: GroupCryptoState {
+            capability_id: Some(ucr_protocol::GROUP_MLS_CAPABILITY.to_owned()),
+            epoch: 0,
+            state_ref: Some(state_ref),
+        },
+        public_policy: None,
+        media_state: GroupMediaState::Idle,
+        bridge_mappings: Vec::new(),
+        replication_generation: 0,
+        revision: 0,
+    };
+    state
+        .store
+        .create_group(&conversation, &group, &auth.subject)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    confirm_endpoint_mls_group_publication(state, &group)?;
+    Ok(json!({
+        "roomId": input.room_id,
+        "groupId": input.room_id,
+        "cryptoEpoch": 0,
+        "cryptoStateRef": input.crypto_state_ref,
+        "requiresEndpointOwnedCommit": true,
+        "mediaReady": false
+    }))
+}
+
 fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
@@ -483,6 +578,10 @@ pub(super) fn dispatch(
         "/v1/first-party/room/end" => {
             let request: RoomEntryChange = parse(body)?;
             end_unstarted_room(state, auth, &request)
+        }
+        "/v1/first-party/room/mls-create" => {
+            let request: RoomMlsCreate = parse(body)?;
+            publish_room_endpoint_group(state, auth, &request)
         }
         "/v1/first-party/room/prepare" => {
             let request: RoomJoin = parse(body)?;
