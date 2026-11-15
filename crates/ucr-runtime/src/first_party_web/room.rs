@@ -857,8 +857,8 @@ fn resolve_room_mls_recipient(
         .public_key
         .try_into()
         .map_err(|_| StatusCode::FORBIDDEN)?;
-    let recipient_identity = String::from_utf8(recipient.external_user_id.clone())
-        .map_err(|_| StatusCode::CONFLICT)?;
+    let recipient_identity =
+        String::from_utf8(recipient.external_user_id.clone()).map_err(|_| StatusCode::CONFLICT)?;
     verify_room_recipient_offer(auth, input, &recipient_identity, signer_key, &package)?;
     Ok((recipient_device, recipient.participant, package))
 }
@@ -954,8 +954,7 @@ fn commit_room_endpoint_member(
     }
     let (recipient_device, recipient_principal, package) =
         resolve_room_mls_recipient(state, auth, input, &room_id)?;
-    let (commit, welcome, fingerprint) =
-        verify_room_owner_mls_commit(auth, input, &package)?;
+    let (commit, welcome, fingerprint) = verify_room_owner_mls_commit(auth, input, &package)?;
     let change = GroupChange {
         event_id: EventId::from_opaque(opaque(&input.event_id)?),
         scope: auth.subject.scope.clone(),
