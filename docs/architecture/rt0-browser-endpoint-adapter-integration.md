@@ -542,16 +542,44 @@ trusted peer signing descriptor. It never selects the peer from a Welcome,
 SFU frame or join fragment. The Rust/WASM exact two-leaf roster check is a
 separate, mandatory cryptographic enforcement layer.
 
-**Remaining release blockers:** This device-pair fence does **not** orchestrate
-the initial endpoint-owned group creation, recipient KeyPackage publication,
-Commit/Welcome delivery and sealed cross-page state handoff from
-`start.js`. The reference `client.html` still uses the legacy realtime
-bootstrap flow for that stage. No two physical Devices, NAT/TURN, real A/V
-media, revocation measurement or production-readiness evidence is established
-by this change. Both PR #329 (host-decrypt reproducer) and PR #330 remain
-draft; the endpoint-only path must be integrated end-to-end before merge.
+**Current first-party direct-call browser integration (verified in repository code on
+2026-11-15):** the endpoint-owned OpenMLS preflight is now implemented in
+`start.js` and runs before the signed media Join:
 
-## Draft #335: canonical direct-Call / derived-media Hangup transaction
+- `prepareFirstPartyEndpointMls` rechecks the selected Call, authenticated
+  Device, canonical Call state and UI generation after every asynchronous
+  boundary. A stale Call, logout, Device switch or Hangup cancels preparation.
+- The creator creates and seals its epoch-zero Group locally before publishing
+  only the public crypto-state reference through the first-party BFF.
+- The recipient creates and seals its own KeyPackage before publishing its
+  signed offer. The creator accepts exactly one recipient offer, stages the
+  MLS Add/Commit/Welcome, writes a sealed transition journal before the BFF
+  commit, and rereads the canonical descriptor before promoting local state.
+- The recipient obtains only its Device-bound Welcome and subsequent Commit
+  chain, joins locally, and verifies the same canonical Group, epoch and state
+  reference. Both endpoints enforce the exact two-Device direct-call roster.
+- `beginMedia` requests the signed Join only after endpoint MLS is ready.
+  `client.html` then reauthenticates the same Device, verifies the accepted
+  Call/Group/epoch and restores the sealed local MLS snapshot. First-party
+  `fp-m-*` Calls fail closed if the legacy server-owned MLS mode is returned.
+
+Private MLS state remains in the existing Device-local protected IndexedDB
+stores. The BFF stores signed public Commit/Welcome material and canonical
+metadata, not an endpoint private seed or exporter. The browser uses the
+first-party session; no ServicePrincipal secret is placed in browser code.
+
+This is repository-level integration, **not proof of a real call**. Two
+physical Devices, public NAT/TURN traversal, permission prompts, remote audio
+and video playback, and measured revoke/stop are still unverified. The
+webinar/Room UI is a separate path: `client.html` still uses the legacy
+`/v1/room/enter` flow there; issue #358 tracks wiring that UI to the new
+canonical first-party Room API. Do not conflate Room readiness with the
+direct-contact E2EE path.
+
+PR #330 merged on 2026-10-30; PR #335 merged on 2026-11-03. PR #329 is
+closed without merge and is not an active implementation branch.
+
+## Merged #335: canonical direct-Call / derived-media Hangup transaction
 
 The first-party `hangup` route now delegates to the **existing** authorized
 Call runtime and one `CallStore::terminate_direct_call_with_derived` operation.
@@ -570,9 +598,12 @@ a new media Call *after* committed Hangup. Tests cover a conflicting derived
 binding (neither termination may commit), an absent child and stale Join
 creation from another SQLite connection.
 
-**Verification pending on the exact draft HEAD:** these repository-local
-regressions do not prove that a remote WebRTC provider has physically stopped
-transmitting, nor that in-flight encrypted packets are cancelled. They do not
-remove the current explicit administrative media-grant requirement. Real
-two-device NAT/TURN E2EE A/V and measured revoke/stop remain release blockers.
-No remote UCR host is authorized by this document.
+**Verification boundary:** the merged transaction and exact Call-scoped
+media grants do not prove that a remote WebRTC provider has physically stopped
+transmitting, nor that an in-flight encrypted packet is cancelled at the
+transport boundary. First-party self-service does not mint tenant-wide media
+grants; the existing grant owner scopes media admission to the accepted direct
+Call. Cross-process in-flight cancellation, confirmed provider close, two
+physical Devices, public NAT/TURN traversal, remote A/V playback and measured
+revoke/stop remain release blockers. No remote UCR host is authorized by this
+document.
