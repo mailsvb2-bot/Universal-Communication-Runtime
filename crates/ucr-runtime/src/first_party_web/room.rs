@@ -10,7 +10,7 @@ use ucr_api_grpc::{
     canonical_universal_conference_lifecycle_event, issue_authenticated_first_party_room_join,
     prepare_authenticated_first_party_room_call, reconcile_canonical_conference_permissions,
 };
-use ucr_core::{DurableRecordStatus, DurableStoreError, UniversalConferenceStore};
+use ucr_core::{DurableRecordStatus, DurableStoreError, GroupCallLookupStore, UniversalConferenceStore};
 use ucr_model::{
     ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, UniversalConferenceLifecycle,
     UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
@@ -46,6 +46,14 @@ struct RoomJoin {
     binding: Binding,
     room_id: String,
     idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomCallAccept {
+    binding: Binding,
+    room_id: String,
+    expected_call_revision: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -955,6 +963,120 @@ fn room_endpoint_bootstrap(
     }))
 }
 
+// A Room's Call is the canonical Group Call, never a second room-specific
+// call table. Every participant must be an active, authenticated Person already
+// enrolled in the same tenant/namespace and conference.
+fn room_call(
+    state: &State,
+    auth: &Session,
+    room_id: &GroupId,
+) -> Result<Option<CallSession>, StatusCode> {
+    let room = state
+        .store
+        .universal_conference_profile(&auth.subject.scope, room_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let attendee = state
+        .store
+        .universal_conference_participant(
+            &auth.subject.scope,
+            room_id,
+            &auth.subject.principal,
+        )
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if room.integration_id != integration()? || !attendee.active {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut calls = state
+        .store
+        .active_calls_for_group(&auth.subject.scope, room_id, 2)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if calls.len() > 1 {
+        return Err(StatusCode::CONFLICT);
+    }
+    let call = calls.pop();
+    if let Some(current) = &call {
+        if !current.participants.iter().any(|p| {
+            p.principal == auth.subject.principal && p.left_revision.is_none()
+        }) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    Ok(call)
+}
+
+fn call_status(state: &State, auth: &Session, input: &RoomRef) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let call = room_call(state, auth, &room_id)?;
+    Ok(if let Some(call) = call {
+        json!({
+            "roomId": input.room_id,
+            "callId": call.call_id.as_opaque().as_str(),
+            "callRevision": call.revision,
+            "callState": format!("{:?}", call.signalling_state),
+            "participants": call.participants.iter().map(|p| json!({
+                "participantId": p.principal.principal_id.as_opaque().as_str(),
+                "state": format!("{:?}", p.state),
+            })).collect::<Vec<_>>(),
+            "mediaReady": false,
+        })
+    } else {
+        json!({"roomId":input.room_id,"callPrepared":false,"mediaReady":false})
+    })
+}
+
+// Attendee consent is an ordinary CallSignal::Accept on the ONE Group Call.
+// It cannot be performed by the owner on behalf of somebody else.
+fn accept_room_call(
+    state: &State,
+    auth: &Session,
+    input: &RoomCallAccept,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let call = room_call(state, auth, &room_id)?
+        .ok_or(StatusCode::CONFLICT)?;
+    if call.revision != input.expected_call_revision
+        || !call.participants.iter().any(|p| {
+            p.principal == auth.subject.principal
+                && matches!(
+                    p.state,
+                    CallParticipantState::Invited | CallParticipantState::Ringing
+                )
+                && p.left_revision.is_none()
+        })
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let signal = CallSignal {
+        event_id: EventId::from_opaque(
+            generate_opaque_id().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+        ),
+        scope: auth.subject.scope.clone(),
+        call_id: call.call_id.clone(),
+        expected_revision: input.expected_call_revision,
+        kind: CallSignalKind::Accept,
+    };
+    state
+        .store
+        .apply_call_signal(&auth.subject, &signal)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let current = state
+        .store
+        .call(&auth.subject.scope, &call.call_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::CONFLICT)?;
+    Ok(json!({
+        "roomId":input.room_id,
+        "callId":current.call_id.as_opaque().as_str(),
+        "callRevision":current.revision,
+        "callState":format!("{:?}",current.signalling_state),
+        "mediaReady":false
+    }))
+}
+
 fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
@@ -1047,6 +1169,14 @@ pub(super) fn dispatch(
         "/v1/first-party/room/prepare" => {
             let request: RoomJoin = parse(body)?;
             prepare_room_call(state, auth, &request)
+        }
+        "/v1/first-party/room/call-status" => {
+            let request: RoomRef = parse(body)?;
+            call_status(state, auth, &request)
+        }
+        "/v1/first-party/room/call-accept" => {
+            let request: RoomCallAccept = parse(body)?;
+            accept_room_call(state, auth, &request)
         }
         "/v1/first-party/room/join" => {
             let request: RoomJoin = parse(body)?;
