@@ -446,6 +446,38 @@ impl UniversalConferenceStore for SqliteLocalStore {
         if load_profile(&tx, &room.scope, &room.conference_id)?.is_some() {
             return Err(DurableStoreError::Conflict);
         }
+        // One authenticated Person may have only a bounded set of unfinished
+        // webinars. This is checked under the same IMMEDIATE transaction as
+        // creation, not in an advisory preflight vulnerable to concurrent tabs.
+        let namespace = namespace_storage_key(&room.scope);
+        let open_for_owner: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM universal_conference_participants AS participant
+             JOIN universal_conferences AS conference
+               ON participant.tenant_id = conference.tenant_id
+              AND participant.namespace_present = conference.namespace_present
+              AND participant.namespace_id = conference.namespace_id
+              AND participant.conference_id = conference.conference_id
+             WHERE participant.tenant_id = ?1
+               AND participant.namespace_present = ?2
+               AND participant.namespace_id = ?3
+               AND participant.principal_kind = 'person'
+               AND participant.principal_id = ?4
+               AND participant.role = 'owner'
+               AND participant.active = 1
+               AND conference.integration_id = ?5
+               AND conference.lifecycle != 'ended'",
+            params![
+                room.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                owner.participant.principal_id.as_opaque().as_str(),
+                room.integration_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        ).map_err(|error| map_sqlite_error(&error))?;
+        if open_for_owner >= 8 {
+            return Err(DurableStoreError::Full);
+        }
         ensure_integration_conference_quota(&tx, &room.scope, &room.integration_id)?;
         ensure_integration_participant_quota(&tx, &room.scope, &room.integration_id)?;
         insert_profile(&tx, room)?;
