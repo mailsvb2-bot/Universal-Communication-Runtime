@@ -9,6 +9,8 @@ on:
       - 'tools/test_first_party_invite_onboarding.mjs'
       - 'tools/test_first_party_mls_coordinator.mjs'
       - 'tools/test_webrtc_late_start_cleanup.mjs'
+      - 'crates/ucr-webrtc/src/lib.rs'
+      - 'crates/ucr-webrtc/src/e2ee_bridge.rs'
       - 'tools/test_encrypted_media_survival.mjs'
       - 'tools/check_first_party_call_revision_contract.py'
       - 'tools/check_first_party_media_admission_contract.py'
