@@ -58,6 +58,16 @@ struct RoomMlsCreate {
     signature_base64_url: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomMlsOffer {
+    binding: Binding,
+    room_id: String,
+    signer_key_id: String,
+    key_package_base64_url: String,
+    signature_base64_url: String,
+}
+
 fn integration() -> Result<IntegrationId, StatusCode> {
     Ok(IntegrationId::from_opaque(opaque(INTEGRATION)?))
 }
@@ -510,6 +520,180 @@ fn publish_room_endpoint_group(
     }))
 }
 
+// An already-proven Person Device deposits only a public MLS KeyPackage,
+// authenticated with its current Device signer. Private MLS keys stay on the
+// browser. The Room Owner can read it only after canonical enrollment.
+fn publish_room_mls_offer(
+    state: &State,
+    auth: &Session,
+    input: &RoomMlsOffer,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    if input.signer_key_id != auth.signer_key_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let room = state
+        .store
+        .universal_conference_profile(&auth.subject.scope, &room_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let enrolled = state
+        .store
+        .universal_conference_participant(
+            &auth.subject.scope,
+            &room_id,
+            &auth.subject.principal,
+        )
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if room.integration_id != integration()?
+        || !room.entry_open
+        || room.lifecycle != UniversalConferenceLifecycle::Waiting
+        || enrolled.role != ConferenceParticipantRole::Attendee
+        || !enrolled.active
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let bytes = decode_mls_public_wire(&input.key_package_base64_url)?;
+    let proof = encoded_proof(
+        "ucr-first-party-room-endpoint-mls-key-package.v1",
+        &json!([
+            auth.binding.tenant_id,
+            auth.binding.namespace_id,
+            auth.binding.participant_id,
+            auth.binding.device,
+            auth.signer_key_id,
+            input.room_id,
+            sha256_b64(&bytes),
+        ]),
+    )?;
+    verify_ed25519(auth.signer_public_key, &proof, &input.signature_base64_url)?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(&input.signature_base64_url)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    state
+        .store
+        .put_endpoint_mls_offer(
+            &auth.subject.scope,
+            &room_id,
+            &device(&auth.binding)?,
+            &EndpointMlsKeyPackageOffer {
+                signer_key_id: input.signer_key_id.clone(),
+                package: bytes,
+                signature,
+            },
+        )
+        .map_err(|_| StatusCode::CONFLICT)?;
+    Ok(json!({
+        "roomId": input.room_id,
+        "deviceId": auth.binding.device,
+        "offerStored": true,
+        "mediaReady": false
+    }))
+}
+
+// The Owner receives only offers from currently enrolled, trusted People.
+// Never return another Device's offer merely because its ID is in the
+// SQLite public-package table.
+fn load_room_mls_offers(
+    state: &State,
+    auth: &Session,
+    input: &RoomRef,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let (room, _) = owned_room(state, auth, &room_id)?;
+    if !room.entry_open || room.lifecycle != UniversalConferenceLifecycle::Waiting {
+        return Err(StatusCode::CONFLICT);
+    }
+    let candidates = state
+        .store
+        .endpoint_mls_offer_device_ids(&auth.subject.scope, &room_id, 16)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let participants = state
+        .store
+        .active_universal_conference_participants(&auth.subject.scope, &room_id, 1025)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut offers = Vec::new();
+    for candidate in candidates {
+        let device_id = DeviceId::from_opaque(opaque(&candidate)?);
+        let Some(descriptor) = state
+            .store
+            .device(&auth.subject.scope, &device_id)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        else {
+            continue;
+        };
+        if !ucr_protocol::device_allows_protected_access(&descriptor) {
+            continue;
+        }
+        let mut selected = None;
+        for person in &participants {
+            if person.role == ConferenceParticipantRole::Owner {
+                continue;
+            }
+            let Some(binding) = state
+                .store
+                .principal_identity_binding(&auth.subject.scope, &person.participant)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            else {
+                continue;
+            };
+            if binding.identity_id == descriptor.identity_id {
+                selected = Some(person);
+                break;
+            }
+        }
+        let Some(person) = selected else { continue };
+        let Some(key) = state
+            .store
+            .active_trusted_signing_key(&auth.subject.scope, &device_id)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        else {
+            continue;
+        };
+        let Some(offer) = state
+            .store
+            .endpoint_mls_offer(&auth.subject.scope, &room_id, &device_id)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        else {
+            continue;
+        };
+        if offer.signer_key_id != key.key_id.as_opaque().as_str() {
+            continue;
+        }
+        let verified: [u8; 32] = key.public_key.try_into().map_err(|_| StatusCode::CONFLICT)?;
+        let proof = encoded_proof(
+            "ucr-first-party-room-endpoint-mls-key-package.v1",
+            &json!([
+                auth.binding.tenant_id,
+                auth.binding.namespace_id,
+                person.external_user_id
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                candidate,
+                offer.signer_key_id,
+                input.room_id,
+                sha256_b64(&offer.package),
+            ]),
+        )?;
+        // Recipient originally signed their external participant ID. The
+        // server binds that ID to canonical attendee identity above; never
+        // authorize based on this array or the public KeyPackage alone.
+        verify_ed25519(verified, &proof, &URL_SAFE_NO_PAD.encode(&offer.signature))?;
+        offers.push(json!({
+            "recipientDeviceId": candidate,
+            "recipientSignerKeyId": offer.signer_key_id,
+            "recipientKeyPackageBase64Url": URL_SAFE_NO_PAD.encode(&offer.package),
+            "recipientSignatureBase64Url": URL_SAFE_NO_PAD.encode(&offer.signature)
+        }));
+    }
+    Ok(json!({"roomId":input.room_id,"offers":offers}))
+}
+
 fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
@@ -582,6 +766,14 @@ pub(super) fn dispatch(
         "/v1/first-party/room/mls-create" => {
             let request: RoomMlsCreate = parse(body)?;
             publish_room_endpoint_group(state, auth, &request)
+        }
+        "/v1/first-party/room/mls-offer" => {
+            let request: RoomMlsOffer = parse(body)?;
+            publish_room_mls_offer(state, auth, &request)
+        }
+        "/v1/first-party/room/mls-offers" => {
+            let request: RoomRef = parse(body)?;
+            load_room_mls_offers(state, auth, &request)
         }
         "/v1/first-party/room/prepare" => {
             let request: RoomJoin = parse(body)?;
