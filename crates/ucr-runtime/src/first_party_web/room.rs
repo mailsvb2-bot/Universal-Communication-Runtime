@@ -400,6 +400,103 @@ pub(super) fn dispatch(
 mod tests {
     use super::*;
     #[test]
+    fn cancellation_persists_canonical_ended_event_and_frees_room_quota() {
+        let temp = std::env::temp_dir().join(format!(
+            "ucr-canonical-room-cancel-{}.sqlite",
+            generate_opaque_id().expect("unique test identifier").as_str()
+        ));
+        let store = SqliteLocalStore::open(&temp).expect("test storage");
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(opaque("room-test-tenant").unwrap()),
+            namespace_id: None,
+        };
+        let integration_id = IntegrationId::from_opaque(opaque(INTEGRATION).unwrap());
+        let room_id = GroupId::from_opaque(opaque("room-test-owner-cancel").unwrap());
+        let person = ucr_model::PrincipalRef {
+            principal_id: ucr_model::PrincipalId::from_opaque(
+                opaque("room-test-owner-person").unwrap(),
+            ),
+            kind: PrincipalKind::Person,
+        };
+        let profile = UniversalConferenceProfile {
+            scope: scope.clone(),
+            conference_id: room_id.clone(),
+            integration_id: integration_id.clone(),
+            external_conference_id: b"room-test-owner-cancel".to_vec(),
+            create_idempotency_key: "room-test-create-owner-cancel".to_owned(),
+            mode: UniversalConferenceMode::Webinar,
+            lifecycle: UniversalConferenceLifecycle::Scheduled,
+            schedule: ConferenceScheduleMetadata {
+                starts_at_unix_ms: 1000,
+                planned_end_unix_ms: None,
+                join_before_seconds: 900,
+                join_after_seconds: 0,
+                timezone: Some("UTC".to_owned()),
+            },
+            metadata: Vec::new(),
+            entry_open: false,
+            revision: 1,
+        };
+        let owner = UniversalConferenceParticipantProfile {
+            scope: scope.clone(),
+            conference_id: room_id.clone(),
+            integration_id,
+            external_user_id: b"room-test-owner-person".to_vec(),
+            participant: person,
+            role: ConferenceParticipantRole::Owner,
+            audio_muted: false,
+            camera_allowed: true,
+            publish_audio_allowed: true,
+            publish_video_allowed: true,
+            screen_share_allowed: true,
+            active: true,
+            revision: 1,
+        };
+        assert_eq!(
+            store.persist_first_party_room_with_owner(&profile, &owner),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let command_id = ucr_model::CommandId::from_opaque(
+            opaque("room-test-end-command").unwrap(),
+        );
+        let event = canonical_universal_conference_lifecycle_event(
+            &profile,
+            UniversalConferenceLifecycle::Ended,
+            &command_id,
+            "room-test-end-once",
+            2000,
+        )
+        .expect("canonical event")
+        .expect("ended event");
+        assert_eq!(event.event_type, "ucr.conference.ended");
+        assert_eq!(event.logical_order, 2);
+        let ended = store
+            .transition_universal_conference_with_event(
+                &scope,
+                &room_id,
+                profile.revision,
+                UniversalConferenceLifecycle::Ended,
+                false,
+                Some(&event),
+            )
+            .expect("atomic cancellation and event");
+        assert_eq!(ended.lifecycle, UniversalConferenceLifecycle::Ended);
+        assert_eq!(ended.revision, 2);
+        assert!(!ended.entry_open);
+        assert_eq!(
+            store.universal_conference_profile(&scope, &room_id),
+            Ok(Some(ended))
+        );
+        drop(store);
+        let _ = std::fs::remove_file(&temp);
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = temp.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(sidecar));
+        }
+    }
+
+    #[test]
     fn owner_role_cannot_be_downgraded_by_room_policy() {
         assert_eq!(INTEGRATION, "ucr-first-party-room");
         assert_ne!(
