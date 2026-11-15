@@ -881,7 +881,7 @@ fn verify_room_recipient_offer(
             input.recipient_device_id,
             input.recipient_signer_key_id,
             input.room_id,
-            sha256_b64(&package),
+            sha256_b64(package),
         ]),
     )?;
     verify_ed25519(
@@ -893,11 +893,17 @@ fn verify_room_recipient_offer(
 }
 
 // The owner signs the immutable MLS transition and both ciphertext artifacts.
+struct VerifiedRoomOwnerMlsCommit {
+    commit: Vec<u8>,
+    welcome: Vec<u8>,
+    fingerprint: [u8; 32],
+}
+
 fn verify_room_owner_mls_commit(
     auth: &Session,
     input: &RoomMlsAddMember,
     package: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>, [u8; 32]), StatusCode> {
+) -> Result<VerifiedRoomOwnerMlsCommit, StatusCode> {
     let commit = decode_mls_public_wire(&input.commit_base64_url)?;
     let welcome = decode_mls_public_wire(&input.welcome_base64_url)?;
     let owner_proof = encoded_proof(
@@ -916,7 +922,7 @@ fn verify_room_owner_mls_commit(
             input.crypto_state_ref,
             input.recipient_device_id,
             input.recipient_signer_key_id,
-            sha256_b64(&package),
+            sha256_b64(package),
             sha256_b64(&commit),
             sha256_b64(&welcome),
         ]),
@@ -927,7 +933,11 @@ fn verify_room_owner_mls_commit(
         &input.signature_base64_url,
     )?;
     let fingerprint: [u8; 32] = Sha256::digest(owner_proof.as_bytes()).into();
-    Ok((commit, welcome, fingerprint))
+    Ok(VerifiedRoomOwnerMlsCommit {
+        commit,
+        welcome,
+        fingerprint,
+    })
 }
 
 fn commit_room_endpoint_member(
@@ -954,7 +964,11 @@ fn commit_room_endpoint_member(
     }
     let (recipient_device, recipient_principal, package) =
         resolve_room_mls_recipient(state, auth, input, &room_id)?;
-    let (commit, welcome, fingerprint) = verify_room_owner_mls_commit(auth, input, &package)?;
+    let VerifiedRoomOwnerMlsCommit {
+        commit,
+        welcome,
+        fingerprint,
+    } = verify_room_owner_mls_commit(auth, input, &package)?;
     let change = GroupChange {
         event_id: EventId::from_opaque(opaque(&input.event_id)?),
         scope: auth.subject.scope.clone(),
