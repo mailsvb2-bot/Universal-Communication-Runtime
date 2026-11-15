@@ -197,6 +197,26 @@ pub trait UniversalConferenceStore: StorageProvider {
         Err(DurableStoreError::Unavailable)
     }
 
+    /// Atomically ends one Conference only when its canonical Group has no active Calls.
+    ///
+    /// The active-Call predicate, Conference revision transition and optional canonical Event
+    /// append must share one durable transaction with Call creation. This prevents a concurrent
+    /// Group Call from appearing after the Conference has committed Ended.
+    ///
+    /// # Errors
+    /// Returns Conflict while any Group Call is active, rejects stale revisions or malformed
+    /// Events, and fails closed when the provider cannot guarantee the atomic boundary.
+    fn end_universal_conference_if_no_active_group_calls(
+        &self,
+        scope: &TenantScope,
+        conference_id: &GroupId,
+        expected_revision: u64,
+        event: Option<&EventEnvelope>,
+    ) -> Result<UniversalConferenceProfile, DurableStoreError> {
+        let _ = (scope, conference_id, expected_revision, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Atomically admits an independently authenticated first-party viewer,
     /// requiring an open, non-ended webinar and its one active Person owner
     /// in the same durable transaction as the roster mutation.
