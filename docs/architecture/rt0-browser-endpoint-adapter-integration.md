@@ -112,12 +112,22 @@ awaited before media capture, and a stale join lifecycle is rejected after its
 completion. The hook is **not** yet a first-party registration implementation;
 the host must supply its authenticated backend and device-key vault.
 
-**This still requires an independently authenticated first-party host.**
-The UCR reference web gateway still has no standalone enrollment credential,
-trusted first-party route to enroll a device, provision/recover a local
-signing key, and publish its trusted descriptor. Such a
-route must be implemented against the existing canonical Device/Identity/Trust
-owners before an unembedded user can complete a real two-device media call.
+**Current first-party host status (2026-11-15).**
+The reference UCR gateway now exposes the same-origin authenticated BFF routes
+for signup, login, recovery, Device inspection/revocation and canonical direct
+Calls. The `start.js` page composes the existing protected browser Device vault,
+`createUcrFirstPartyHttpHost` and `createUcrContactCallJourney` against the
+existing canonical Identity/Device/TrustedSigningKey, Call and SQLite owners.
+This is one first-party authority, not a second identity or crypto store.
+Self-service signup records `IdentityEvidence::SelfAsserted`; it proves
+possession of the enrolled signing key, not externally verified real-world
+identity.
+
+This direct-contact path is separate from the webinar `/room` path. PR #359 adds
+canonical authenticated Room routes, but its public `/room` browser lobby is
+still on the legacy `/v1/room/enter` protocol and is not yet wired to those
+routes. Keep #358 open until that UI uses the first-party BFF and canonical
+Room/MLS/Call/Join flow.
 
 ## Required canonical host integration — cannot be replaced with synthetic trust
 
@@ -155,17 +165,20 @@ canonical negotiated binding, and wraps per-frame authorization in the same
 live admission guard. Revocation before `start()` also permanently revokes the
 bridge.
 
-**Important:** the repository currently does NOT yet provide a first-party
-authenticated browser route that provisions/recovers the device signing seed,
-publishes the device's trusted key, or supplies the complete live negotiation
-binding and source trust map. The already-implemented server MLS bootstrap
-alone does not supply those identity and authorization values. Do not
-`crypto.getRandomValues()` a new signing key on each join and pretend it is
-registered/trusted by the server; do not accept in-band source keys.
+**Current integration boundary (2026-11-15).**
+The first-party direct-contact browser path now installs the canonical
+Device/Trust authority from the authenticated BFF and composes the existing
+endpoint admission resolver for the accepted direct Call. It still fails closed
+if the protected Device signer, active TrustedSigningKey, current MLS roster,
+or live Call/negotiation binding cannot be independently verified.
 
-Until a host supplies this canonical authority, the bundled installer emits
-`Canonical device media signing/trust authority is not wired` and the DataChannel
-is closed. That is deliberate and secure, **not a passing two-device test**.
+The separate `/room` lobby is not yet wired to this host; it still uses the
+legacy local-room enrollment protocol and must not be treated as a production
+first-party path. Do not call `crypto.getRandomValues()` to create a new signing
+key on each join and pretend it is registered/trusted by the server; do not
+accept in-band source keys. A passing browser self-probe or repository
+acceptance test is not a physical two-device A/V call, TURN/NAT traversal,
+measured revoke/stop, or production-readiness evidence.
 
 ### First-party pre-Join OpenMLS orchestration (draft PR #330)
 
