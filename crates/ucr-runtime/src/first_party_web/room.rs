@@ -10,7 +10,9 @@ use ucr_api_grpc::{
     canonical_universal_conference_lifecycle_event, issue_authenticated_first_party_room_join,
     prepare_authenticated_first_party_room_call, reconcile_canonical_conference_permissions,
 };
-use ucr_core::{DurableRecordStatus, DurableStoreError, GroupCallLookupStore, UniversalConferenceStore};
+use ucr_core::{
+    DurableRecordStatus, DurableStoreError, GroupCallLookupStore, UniversalConferenceStore,
+};
 use ucr_model::{
     ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, UniversalConferenceLifecycle,
     UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
@@ -394,10 +396,12 @@ fn go_live_room(
         .store
         .active_calls_for_group(&auth.subject.scope, &room_id, 2)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    if calls.len() != 1 || calls.pop().is_none_or(|call| {
-        call.signalling_state != CallSignallingState::Active
-            || call.initiated_by != auth.subject.principal
-    }) {
+    if calls.len() != 1
+        || calls.pop().is_none_or(|call| {
+            call.signalling_state != CallSignallingState::Active
+                || call.initiated_by != auth.subject.principal
+        })
+    {
         return Err(StatusCode::CONFLICT);
     }
     let group = state
@@ -1048,11 +1052,7 @@ fn room_call(
         .ok_or(StatusCode::NOT_FOUND)?;
     let attendee = state
         .store
-        .universal_conference_participant(
-            &auth.subject.scope,
-            room_id,
-            &auth.subject.principal,
-        )
+        .universal_conference_participant(&auth.subject.scope, room_id, &auth.subject.principal)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::FORBIDDEN)?;
     if room.integration_id != integration()? || !attendee.active {
@@ -1067,9 +1067,11 @@ fn room_call(
     }
     let call = calls.pop();
     if let Some(current) = &call {
-        if !current.participants.iter().any(|p| {
-            p.principal == auth.subject.principal && p.left_revision.is_none()
-        }) {
+        if !current
+            .participants
+            .iter()
+            .any(|p| p.principal == auth.subject.principal && p.left_revision.is_none())
+        {
             return Err(StatusCode::FORBIDDEN);
         }
     }
@@ -1106,8 +1108,7 @@ fn accept_room_call(
 ) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
-    let call = room_call(state, auth, &room_id)?
-        .ok_or(StatusCode::CONFLICT)?;
+    let call = room_call(state, auth, &room_id)?.ok_or(StatusCode::CONFLICT)?;
     if call.revision != input.expected_call_revision
         || !call.participants.iter().any(|p| {
             p.principal == auth.subject.principal
