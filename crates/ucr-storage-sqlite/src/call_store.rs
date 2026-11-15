@@ -2011,8 +2011,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn room_end_and_group_call_creation_share_one_sqlite_lifecycle_fence() {
+    struct RoomCallFenceFixture {
+        _db: TestDb,
+        store: SqliteLocalStore,
+        joining: SqliteLocalStore,
+        active_call: CallSession,
+        alice: ScopedPrincipal,
+        room_id: GroupId,
+        live_revision: u64,
+    }
+
+    fn room_call_fence_fixture() -> RoomCallFenceFixture {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(db.path()).expect("open");
         let joining = SqliteLocalStore::open(db.path()).expect("independent Call connection");
@@ -2047,7 +2056,6 @@ mod tests {
         store
             .create_group(&room_conversation, &group, &alice)
             .expect("canonical room Group");
-
         let room = ucr_model::UniversalConferenceProfile {
             scope: scope(),
             conference_id: room_id.clone(),
@@ -2089,7 +2097,7 @@ mod tests {
             )
             .expect("room live");
 
-        active_call.conversation = room_conversation.conversation.clone();
+        active_call.conversation = room_conversation.conversation;
         active_call.call_id = CallId::from_opaque(oid("room-active-call"));
         let active_call = canonical_call_creation(&active_call, &alice.scope, &alice.principal)
             .expect("canonical active group Call");
@@ -2103,61 +2111,82 @@ mod tests {
             replace_participants(&transaction, &active_call).expect("insert Call participants");
             transaction.commit().expect("commit active Call");
         }
+        RoomCallFenceFixture {
+            _db: db,
+            store,
+            joining,
+            active_call,
+            alice,
+            room_id,
+            live_revision: live.revision,
+        }
+    }
 
+    fn room_call_end_event(live_revision: u64) -> Event {
         let mut end_event = event("room-call-end-event");
         end_event.event_type = "ucr.conference.ended".to_owned();
-        end_event.logical_order = live.revision + 1;
+        end_event.logical_order = live_revision + 1;
         end_event.actor.on_behalf_of = Some(PrincipalId::from_opaque(oid("room-call-integration")));
+        end_event
+    }
 
+    fn terminate_room_call(joining: &SqliteLocalStore, call_id: &CallId) {
+        let mut connection = joining.lock_connection().expect("connection");
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("transaction");
+        transaction
+            .execute(
+                "UPDATE calls SET signalling_state = 'terminated'
+                 WHERE tenant_id = ?1 AND namespace_present = ?2
+                   AND namespace_id = ?3 AND call_id = ?4",
+                params![
+                    scope().tenant_id.as_opaque().as_str(),
+                    namespace_storage_key(&scope()).present,
+                    namespace_storage_key(&scope()).value,
+                    call_id.as_opaque().as_str(),
+                ],
+            )
+            .expect("terminate canonical Call");
+        transaction.commit().expect("commit termination");
+    }
+
+    #[test]
+    fn active_group_call_blocks_room_end_across_sqlite_handles() {
+        let fixture = room_call_fence_fixture();
+        let end_event = room_call_end_event(fixture.live_revision);
         assert_eq!(
-            store.end_universal_conference_if_no_active_group_calls(
+            fixture.store.end_universal_conference_if_no_active_group_calls(
                 &scope(),
-                &room_id,
-                live.revision,
+                &fixture.room_id,
+                fixture.live_revision,
                 Some(&end_event),
             ),
             Err(DurableStoreError::Conflict),
             "an active canonical Group Call must prevent Ended"
         );
+    }
 
-        {
-            let mut connection = joining.lock_connection().expect("connection");
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .expect("transaction");
-            transaction
-                .execute(
-                    "UPDATE calls SET signalling_state = 'terminated'
-                     WHERE tenant_id = ?1 AND namespace_present = ?2
-                       AND namespace_id = ?3 AND call_id = ?4",
-                    params![
-                        scope().tenant_id.as_opaque().as_str(),
-                        namespace_storage_key(&scope()).present,
-                        namespace_storage_key(&scope()).value,
-                        active_call.call_id.as_opaque().as_str(),
-                    ],
-                )
-                .expect("terminate canonical Call");
-            transaction.commit().expect("commit termination");
-        }
-
-        let ended = store
+    #[test]
+    fn ended_room_rejects_late_group_call_creation_across_sqlite_handles() {
+        let fixture = room_call_fence_fixture();
+        terminate_room_call(&fixture.joining, &fixture.active_call.call_id);
+        let end_event = room_call_end_event(fixture.live_revision);
+        let ended = fixture
+            .store
             .end_universal_conference_if_no_active_group_calls(
                 &scope(),
-                &room_id,
-                live.revision,
+                &fixture.room_id,
+                fixture.live_revision,
                 Some(&end_event),
             )
             .expect("room can end after all Calls are terminal");
-        assert_eq!(
-            ended.lifecycle,
-            ucr_model::UniversalConferenceLifecycle::Ended
-        );
+        assert_eq!(ended.lifecycle, ucr_model::UniversalConferenceLifecycle::Ended);
 
-        let mut late_call = active_call;
+        let mut late_call = fixture.active_call;
         late_call.call_id = CallId::from_opaque(oid("room-late-call"));
         assert_eq!(
-            joining.create_call(&alice, &late_call),
+            fixture.joining.create_call(&fixture.alice, &late_call),
             Err(DurableStoreError::PermissionDenied),
             "Call creation must observe Ended under its own canonical write transaction"
         );
