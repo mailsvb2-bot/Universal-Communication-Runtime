@@ -1192,6 +1192,16 @@ fn start_call(state: &State, session: &Session, intent: &StartIntent) -> Result<
     to_call(state, &current)
 }
 
+fn has_derived_direct_media(kind: &ucr_model::ConversationKind) -> Result<bool, StatusCode> {
+    match kind {
+        ucr_model::ConversationKind::Direct => Ok(true),
+        // A webinar Room's Group Call IS its media Call. It has no derived
+        // direct-media child and must use the canonical Call lifecycle itself.
+        ucr_model::ConversationKind::PrivateGroup => Ok(false),
+        _ => Err(StatusCode::CONFLICT),
+    }
+}
+
 fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<Value, StatusCode> {
     let before = get_call(state, session, &req.call_id)?;
     if before.revision != req.expected_revision {
@@ -1218,13 +1228,7 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
         kind: action,
     };
     let runtime = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref());
-    let has_derived_media = match before.conversation.kind {
-        ConversationKind::Direct => true,
-        // A webinar Room's Group Call IS its media Call. It has no derived
-        // direct-media child and must use the canonical Call lifecycle itself.
-        ConversationKind::PrivateGroup => false,
-        _ => return Err(StatusCode::CONFLICT),
-    };
+    let has_derived_media = has_derived_direct_media(&before.conversation.kind)?;
     if ends_media && has_derived_media {
         // The existing canonical CallStore owns BOTH transitions. An immediate
         // SQLite transaction (or the Memory owner mutex) fences concurrent
@@ -3078,6 +3082,18 @@ mod tests {
         assert!(
             MAX_MLS_TRANSITION_BODY_BYTES > 3 * 10_000 + 2 * 1024,
             "the aggregate limit must fit three individually bounded base64 MLS artifacts and JSON metadata"
+        );
+    }
+
+    #[test]
+    fn group_room_calls_never_create_or_terminate_a_derived_direct_media_child() {
+        assert_eq!(
+            has_derived_direct_media(&ucr_model::ConversationKind::Direct),
+            Ok(true)
+        );
+        assert_eq!(
+            has_derived_direct_media(&ucr_model::ConversationKind::PrivateGroup),
+            Ok(false)
         );
     }
 
