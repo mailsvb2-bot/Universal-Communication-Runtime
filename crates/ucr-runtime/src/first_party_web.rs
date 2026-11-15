@@ -3079,10 +3079,12 @@ mod tests {
             first_party_body_limit("/v1/first-party/signup/finish"),
             MAX_BODY
         );
-        assert!(
-            MAX_MLS_TRANSITION_BODY_BYTES > 3 * 10_000 + 2 * 1024,
-            "the aggregate limit must fit three individually bounded base64 MLS artifacts and JSON metadata"
-        );
+        const {
+            assert!(
+                MAX_MLS_TRANSITION_BODY_BYTES > 3 * 10_000 + 2 * 1024,
+                "the aggregate limit must fit three individually bounded base64 MLS artifacts and JSON metadata"
+            );
+        }
     }
 
     #[test]
