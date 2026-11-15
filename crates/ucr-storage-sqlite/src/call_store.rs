@@ -2021,13 +2021,12 @@ mod tests {
         live_revision: u64,
     }
 
-    fn room_call_fence_fixture() -> RoomCallFenceFixture {
-        let db = TestDb::new();
-        let store = SqliteLocalStore::open(db.path()).expect("open");
-        let joining = SqliteLocalStore::open(db.path()).expect("independent Call connection");
-        let (mut active_call, alice, _bob) = session();
-        let room_id = GroupId::from_opaque(oid("room-call-group"));
-        let room_conversation = ucr_model::ConversationRecord {
+    fn create_room_group(
+        store: &SqliteLocalStore,
+        alice: &ScopedPrincipal,
+        room_id: &GroupId,
+    ) -> ucr_model::ConversationRecord {
+        let conversation = ucr_model::ConversationRecord {
             scope: scope(),
             conversation: ConversationRef {
                 conversation_id: ConversationId::from_opaque(oid("room-call-conversation")),
@@ -2038,7 +2037,7 @@ mod tests {
         let group = ucr_model::GroupRecord {
             scope: scope(),
             group_id: room_id.clone(),
-            conversation: room_conversation.conversation.clone(),
+            conversation: conversation.conversation.clone(),
             ownership: ucr_model::GroupOwnership::PersonOwned(alice.principal.clone()),
             history_policy: ucr_model::GroupHistoryPolicy::NoHistory,
             delivery_policy: ucr_model::DeliveryPolicy::NoExternalBridge,
@@ -2054,8 +2053,12 @@ mod tests {
             revision: 0,
         };
         store
-            .create_group(&room_conversation, &group, &alice)
+            .create_group(&conversation, &group, alice)
             .expect("canonical room Group");
+        conversation
+    }
+
+    fn create_live_room_profile(store: &SqliteLocalStore, room_id: &GroupId) -> u64 {
         let room = ucr_model::UniversalConferenceProfile {
             scope: scope(),
             conference_id: room_id.clone(),
@@ -2081,36 +2084,54 @@ mod tests {
         let waiting = store
             .transition_universal_conference(
                 &scope(),
-                &room_id,
+                room_id,
                 1,
                 ucr_model::UniversalConferenceLifecycle::Waiting,
                 true,
             )
             .expect("room waiting");
-        let live = store
+        store
             .transition_universal_conference(
                 &scope(),
-                &room_id,
+                room_id,
                 waiting.revision,
                 ucr_model::UniversalConferenceLifecycle::Live,
                 true,
             )
-            .expect("room live");
+            .expect("room live")
+            .revision
+    }
 
-        active_call.conversation = room_conversation.conversation;
+    fn insert_room_group_call(
+        joining: &SqliteLocalStore,
+        mut active_call: CallSession,
+        alice: &ScopedPrincipal,
+        conversation: &ucr_model::ConversationRecord,
+    ) -> CallSession {
+        active_call.conversation = conversation.conversation.clone();
         active_call.call_id = CallId::from_opaque(oid("room-active-call"));
         let active_call = canonical_call_creation(&active_call, &alice.scope, &alice.principal)
             .expect("canonical active group Call");
         let fingerprint = call_creation_fingerprint(&active_call).expect("Call fingerprint");
-        {
-            let mut connection = joining.lock_connection().expect("connection");
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .expect("transaction");
-            insert_call(&transaction, &active_call, &fingerprint).expect("insert active Call");
-            replace_participants(&transaction, &active_call).expect("insert Call participants");
-            transaction.commit().expect("commit active Call");
-        }
+        let mut connection = joining.lock_connection().expect("connection");
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("transaction");
+        insert_call(&transaction, &active_call, &fingerprint).expect("insert active Call");
+        replace_participants(&transaction, &active_call).expect("insert Call participants");
+        transaction.commit().expect("commit active Call");
+        active_call
+    }
+
+    fn room_call_fence_fixture() -> RoomCallFenceFixture {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let joining = SqliteLocalStore::open(db.path()).expect("independent Call connection");
+        let (active_call, alice, _bob) = session();
+        let room_id = GroupId::from_opaque(oid("room-call-group"));
+        let conversation = create_room_group(&store, &alice, &room_id);
+        let live_revision = create_live_room_profile(&store, &room_id);
+        let active_call = insert_room_group_call(&joining, active_call, &alice, &conversation);
         RoomCallFenceFixture {
             _db: db,
             store,
@@ -2118,7 +2139,7 @@ mod tests {
             active_call,
             alice,
             room_id,
-            live_revision: live.revision,
+            live_revision,
         }
     }
 
