@@ -2059,12 +2059,12 @@ mod tests {
             schedule: ucr_model::ConferenceScheduleMetadata {
                 starts_at_unix_ms: 1_000,
                 planned_end_unix_ms: None,
-                join_before_seconds: 0,
+                join_before_seconds: 900,
                 join_after_seconds: 0,
-                timezone: None,
+                timezone: Some("UTC".to_owned()),
             },
             metadata: Vec::new(),
-            entry_open: true,
+            entry_open: false,
             revision: 1,
         };
         store
