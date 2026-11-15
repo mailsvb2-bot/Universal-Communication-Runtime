@@ -2162,5 +2162,4 @@ mod tests {
             "Call creation must observe Ended under its own canonical write transaction"
         );
     }
-
 }
