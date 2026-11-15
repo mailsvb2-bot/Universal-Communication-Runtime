@@ -373,6 +373,76 @@ fn change_room_entry(
 // atomic lifecycle/Event transition as universal conference integrations.
 // Live rooms must use their own media teardown first; they cannot be silently
 // marked Ended while SFU or MLS sessions are still present.
+// A Waiting Room cannot go Live on the strength of a button or a Join URL.
+// Require one Active canonical Call whose endpoint-owned MLS Group is
+// committed and not held in the server's OpenMLS provider.
+fn go_live_room(
+    state: &State,
+    auth: &Session,
+    input: &RoomEntryChange,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let (room, _) = owned_room(state, auth, &room_id)?;
+    if room.revision != input.expected_revision
+        || room.lifecycle != UniversalConferenceLifecycle::Waiting
+        || !room.entry_open
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let mut calls = state
+        .store
+        .active_calls_for_group(&auth.subject.scope, &room_id, 2)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if calls.len() != 1 || calls.pop().is_none_or(|call| {
+        call.signalling_state != CallSignallingState::Active
+            || call.initiated_by != auth.subject.principal
+    }) {
+        return Err(StatusCode::CONFLICT);
+    }
+    let group = state
+        .store
+        .group(&auth.subject.scope, &room_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::CONFLICT)?;
+    if group.crypto_state.capability_id.as_deref() != Some(ucr_protocol::GROUP_MLS_CAPABILITY)
+        || group.crypto_state.epoch == 0
+        || ucr_group_mls::GroupMlsServerCustodyProbe::server_possesses_mls_group(
+            state.store.as_ref(),
+            &auth.subject.scope,
+            &room_id,
+        )
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let command_id = ucr_model::CommandId::from_opaque(
+        generate_opaque_id().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+    );
+    let key = format!("fp-room-live-{}-{}", input.room_id, room.revision);
+    let event = canonical_universal_conference_lifecycle_event(
+        &room,
+        UniversalConferenceLifecycle::Live,
+        &command_id,
+        &key,
+        now_unix_ms()?,
+    )
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let current = state
+        .store
+        .transition_universal_conference_with_event(
+            &auth.subject.scope,
+            &room_id,
+            room.revision,
+            UniversalConferenceLifecycle::Live,
+            true,
+            Some(&event),
+        )
+        .map_err(|_| StatusCode::CONFLICT)?;
+    Ok(describe_room(&current, false))
+}
+
 fn end_unstarted_room(
     state: &State,
     auth: &Session,
@@ -1141,6 +1211,10 @@ pub(super) fn dispatch(
         "/v1/first-party/room/close" => {
             let request: RoomEntryChange = parse(body)?;
             change_room_entry(state, auth, &request, false)
+        }
+        "/v1/first-party/room/go-live" => {
+            let request: RoomEntryChange = parse(body)?;
+            go_live_room(state, auth, &request)
         }
         "/v1/first-party/room/end" => {
             let request: RoomEntryChange = parse(body)?;
