@@ -94,10 +94,10 @@ pub use recording_service::{
 
 mod universal_conference_service;
 pub use universal_conference_service::{
-    FirstPartyRoomJoinAttempt, GrpcUniversalConferenceService, UniversalConferenceRuntimeCapabilities,
-    canonical_universal_conference_lifecycle_event, issue_authenticated_first_party_room_join,
-    prepare_authenticated_first_party_room_call, reconcile_canonical_conference_permissions,
-    universal_conference_service_server,
+    FirstPartyRoomJoinAttempt, GrpcUniversalConferenceService,
+    UniversalConferenceRuntimeCapabilities, canonical_universal_conference_lifecycle_event,
+    issue_authenticated_first_party_room_join, prepare_authenticated_first_party_room_call,
+    reconcile_canonical_conference_permissions, universal_conference_service_server,
 };
 
 mod operator_runtime_service;
