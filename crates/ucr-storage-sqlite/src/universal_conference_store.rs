@@ -847,11 +847,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
             return Err(DurableStoreError::Conflict);
         }
         ensure_participant_capacity(&tx, &attendee.scope, &attendee.conference_id)?;
-        ensure_integration_participant_quota(
-            &tx,
-            &attendee.scope,
-            &attendee.integration_id,
-        )?;
+        ensure_integration_participant_quota(&tx, &attendee.scope, &attendee.integration_id)?;
         insert_participant(&tx, attendee)?;
         tx.commit().map_err(|error| map_sqlite_error(&error))?;
         Ok(DurableRecordStatus::Persisted)
