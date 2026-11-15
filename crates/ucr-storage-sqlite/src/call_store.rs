@@ -2034,9 +2034,9 @@ mod tests {
             history_policy: ucr_model::GroupHistoryPolicy::NoHistory,
             delivery_policy: ucr_model::DeliveryPolicy::NoExternalBridge,
             crypto_state: ucr_model::GroupCryptoState {
-                capability_id: Some(ucr_protocol::GROUP_MLS_CAPABILITY.to_owned()),
+                capability_id: None,
                 epoch: 0,
-                state_ref: Some(oid("room-call-state")),
+                state_ref: None,
             },
             public_policy: None,
             media_state: ucr_model::GroupMediaState::Idle,
