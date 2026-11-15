@@ -3214,20 +3214,7 @@ where
     }
 }
 
-/// The request-specific replay key and clock, kept together for the canonical
-/// durable Join issuance boundary.
-
-/// Issues an authenticated first-party room Join through the SAME durable
-/// universal-conference issuer, `CommandAcceptanceStore`, Device projection
-/// and active Group Call lookup used by machine-authenticated conference joins.
-/// This is never a substitute for endpoint MLS or SFU readiness.
-///
-/// The HTTP first-party host must independently verify the cookie, Device
-/// signer, exact binding, and per-Device revocation fences before calling.
-///
-/// # Errors
-/// Rejects foreign principal/Device, closed room, missing active Group Call,
-/// expired schedule, idempotency conflicts and unavailable canonical storage.
+/// Replay key and clock for one canonical first-party Room Join attempt.
 pub struct FirstPartyRoomJoinAttempt<'a> {
     pub idempotency_key: &'a str,
     pub now_unix_ms: i64,
