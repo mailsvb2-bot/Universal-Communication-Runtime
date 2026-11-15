@@ -3190,7 +3190,7 @@ where
         idempotency_key: idempotency_key.to_owned(),
     };
     let payload = request.encode_to_vec();
-    issue_join_grant(
+    let grant = issue_join_grant(
         store,
         issuer,
         IssueJoinGrantInput {
@@ -3206,7 +3206,24 @@ where
         },
         payload,
         now_unix_ms,
-    )
+    )?;
+    // The owner may have closed the Room while grant signing persisted its
+    // durable row. Do not return a stale bearer; revoke both the canonical
+    // durable record and issuer-local compatibility grant before rejecting.
+    let current = store
+        .universal_conference_profile(scope, room_id)
+        .map_err(map_store_error)?;
+    if current.as_ref() != Some(&room) {
+        let session_id = SessionId::from_opaque(decode_opaque(grant.session_id.clone())?);
+        store
+            .revoke_conference_join_grant(scope, &session_id)
+            .map_err(map_store_error)?;
+        issuer
+            .revoke(scope, &session_id)
+            .map_err(map_join_token_error)?;
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    Ok(grant)
 }
 
 fn issue_join_grant<S>(
