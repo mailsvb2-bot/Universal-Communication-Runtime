@@ -2662,7 +2662,7 @@ where
     let input = PrepareConferenceRuntimeInput {
         scope: scope.clone(),
         conference_id: room_id.clone(),
-        integration_id,
+        integration_id: integration_id.clone(),
         idempotency_key: idempotency_key.to_owned(),
     };
     let room = conference_for_integration(store, scope, room_id, &input.integration_id)?;
@@ -3433,8 +3433,8 @@ where
         IssueJoinGrantInput {
             scope: scope.clone(),
             conference_id: room_id.clone(),
-            integration_id,
-            external_user_id: enrolled.external_user_id,
+            integration_id: integration_id.clone(),
+            external_user_id: enrolled.external_user_id.clone(),
             ttl_seconds: 900,
             use_policy: RealtimeJoinGrantUsePolicy::Reusable,
             not_before_unix_ms: None,
