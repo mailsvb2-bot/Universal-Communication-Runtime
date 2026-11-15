@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -7,7 +8,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use webrtc::{data_channel::RTCDataChannel, peer_connection::RTCPeerConnection};
 
 use ucr_model::{SessionId, SfuForwardEnvelope};
@@ -173,11 +174,67 @@ impl LiveWebRtcE2eeChannel {
     }
 }
 
+async fn wait_for_matching_close(
+    close_rx: &mut broadcast::Receiver<crate::LiveWebRtcCloseSignal>,
+    session_key: &str,
+    offer_id: &str,
+) {
+    loop {
+        match close_rx.recv().await {
+            Ok((closed_session, closed_offer))
+                if closed_session.is_empty()
+                    || (closed_session == session_key
+                        && closed_offer.as_deref().is_none_or(|expected| expected == offer_id)) =>
+            {
+                return;
+            }
+            Ok(_) => {}
+            // A lost close signal must fail closed. The provider's bounded Close
+            // remains queued on the control channel and will retire the peer.
+            Err(broadcast::error::RecvError::Lagged(_) | broadcast::error::RecvError::Closed) => {
+                return;
+            }
+        }
+    }
+}
+
+async fn cancellable_transport_operation<T, F>(
+    operation: F,
+    deadline: Instant,
+    close_rx: &mut broadcast::Receiver<crate::LiveWebRtcCloseSignal>,
+    session_key: &str,
+    offer_id: &str,
+    map: impl FnOnce(F::Output) -> Result<T, crate::WebRtcProviderError>,
+) -> Result<T, crate::WebRtcProviderError>
+where
+    F: Future,
+{
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?
+        .min(std::time::Duration::from_millis(250));
+    tokio::select! {
+        biased;
+        () = wait_for_matching_close(close_rx, session_key, offer_id) => {
+            Err(crate::WebRtcProviderError::SessionUnavailable)
+        }
+        result = tokio::time::timeout(remaining, operation) => {
+            match result {
+                Ok(value) => map(value),
+                Err(_) => Err(crate::WebRtcProviderError::TemporarilyUnavailable),
+            }
+        }
+    }
+}
+
 impl LiveWebRtcE2eeChannel {
     pub(crate) async fn send(
         &mut self,
         envelope: &SfuForwardEnvelope,
         deadline: Instant,
+        close_rx: &mut broadcast::Receiver<crate::LiveWebRtcCloseSignal>,
+        session_key: &str,
+        offer_id: &str,
     ) -> Result<(), crate::WebRtcProviderError> {
         let message_id = self.next_message_id;
         self.next_message_id = self
@@ -196,31 +253,31 @@ impl LiveWebRtcE2eeChannel {
                     .map_err(|_| crate::WebRtcProviderError::Internal)?,
             ),
         };
-        // This channel is driven by the single canonical WebRTC worker.
-        // Awaiting a stale/disconnected DataChannel without a deadline blocks
-        // EVERY later Create, ICE and Close operation in that worker.
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?
-            .min(std::time::Duration::from_millis(250));
-        let buffered = tokio::time::timeout(remaining, channel.buffered_amount())
-            .await
-            .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?;
+        // Close is queued before its matching cancellation signal. This select
+        // drops a blocked DataChannel future so the sole worker can process that
+        // control command; no later chunk is submitted after the fence.
+        let buffered = cancellable_transport_operation(
+            channel.buffered_amount(),
+            deadline,
+            close_rx,
+            session_key,
+            offer_id,
+            Ok,
+        )
+        .await?;
         if buffered > MAX_WEBRTC_E2EE_BUFFERED_BYTES {
             return Err(crate::WebRtcProviderError::CapacityExceeded);
         }
         for chunk in chunks {
-            if Instant::now() >= deadline {
-                return Err(crate::WebRtcProviderError::TemporarilyUnavailable);
-            }
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?
-                .min(std::time::Duration::from_millis(250));
-            tokio::time::timeout(remaining, channel.send(&Bytes::from(chunk)))
-                .await
-                .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?
-                .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?;
+            cancellable_transport_operation(
+                channel.send(&Bytes::from(chunk)),
+                deadline,
+                close_rx,
+                session_key,
+                offer_id,
+                |result| result.map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -666,6 +723,76 @@ mod tests {
 
     fn id(value: &str) -> OpaqueId {
         OpaqueId::new(value).expect("id")
+    }
+
+    #[tokio::test]
+    async fn matching_close_cancels_an_inflight_datachannel_acceptance() {
+        let (close_tx, _) = broadcast::channel(4);
+        let mut close_rx = close_tx.subscribe();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let (accept_tx, accept_rx) = tokio::sync::oneshot::channel::<()>();
+        let operation_started = Arc::clone(&started);
+        let operation = async move {
+            operation_started.notify_one();
+            accept_rx.await.map_err(|_| ())
+        };
+        let task = tokio::spawn(async move {
+            cancellable_transport_operation(
+                operation,
+                Instant::now() + std::time::Duration::from_secs(2),
+                &mut close_rx,
+                "session-a",
+                "offer-a",
+                |result| result.map(|()| ()).map_err(|_| crate::WebRtcProviderError::Internal),
+            )
+            .await
+        });
+
+        started.notified().await;
+        close_tx
+            .send(("session-a".to_owned(), Some("offer-a".to_owned())))
+            .expect("in-flight sender subscribed before command enqueue");
+
+        assert_eq!(
+            task.await.expect("send task"),
+            Err(crate::WebRtcProviderError::SessionUnavailable)
+        );
+        assert!(
+            accept_tx.send(()).is_err(),
+            "matching Close must drop the pending DataChannel acceptance future"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_offer_close_does_not_cancel_the_current_datachannel_attempt() {
+        let (close_tx, _) = broadcast::channel(4);
+        let mut close_rx = close_tx.subscribe();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let (accept_tx, accept_rx) = tokio::sync::oneshot::channel::<()>();
+        let operation_started = Arc::clone(&started);
+        let operation = async move {
+            operation_started.notify_one();
+            accept_rx.await.map_err(|_| ())
+        };
+        let task = tokio::spawn(async move {
+            cancellable_transport_operation(
+                operation,
+                Instant::now() + std::time::Duration::from_secs(2),
+                &mut close_rx,
+                "session-a",
+                "offer-current",
+                |result| result.map(|()| ()).map_err(|_| crate::WebRtcProviderError::Internal),
+            )
+            .await
+        });
+
+        started.notified().await;
+        close_tx
+            .send(("session-a".to_owned(), Some("offer-stale".to_owned())))
+            .expect("in-flight sender subscribed before command enqueue");
+        accept_tx.send(()).expect("stale close must not cancel current send");
+
+        assert_eq!(task.await.expect("send task"), Ok(()));
     }
 
     fn envelope() -> SfuForwardEnvelope {
