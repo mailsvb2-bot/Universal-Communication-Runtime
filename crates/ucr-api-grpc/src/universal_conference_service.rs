@@ -3341,7 +3341,7 @@ where
         .active_trusted_signing_key(scope, device_id)
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
-    if active_key.key_id.as_opaque().as_str() != signer_key_id {
+    if active_key.key_id.as_opaque().as_str() != attempt.signer_key_id {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
     let call_id = resolve_first_party_room_call(store, scope, room_id, participant)?;
