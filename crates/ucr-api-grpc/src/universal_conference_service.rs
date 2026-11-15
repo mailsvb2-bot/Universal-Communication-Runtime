@@ -23,7 +23,7 @@ use ucr_core::{
     GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
-    UniversalConferenceStore,
+    TrustedSigningKeyStore, UniversalConferenceStore,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver};
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsServerCustodyProbe, GroupMlsStoreError};
@@ -3221,6 +3221,63 @@ pub struct FirstPartyRoomJoinAttempt<'a> {
     pub now_unix_ms: i64,
 }
 
+fn validate_first_party_room_call_member(
+    call: &CallSession,
+    participant: &PrincipalRef,
+) -> Result<(), CanonicalError> {
+    if call.signalling_state != CallSignallingState::Active
+        || !call.participants.iter().any(|member| {
+            member.principal == *participant
+                && member.state == CallParticipantState::Accepted
+                && member.left_revision.is_none()
+        })
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    Ok(())
+}
+
+fn resolve_first_party_room_call<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participant: &PrincipalRef,
+) -> Result<CallId, CanonicalError>
+where
+    S: GroupCallLookupStore,
+{
+    let mut calls = store
+        .active_calls_for_group(scope, room_id, 2)
+        .map_err(map_store_error)?
+        .into_iter();
+    let call = match (calls.next(), calls.next()) {
+        (Some(call), None) => call,
+        (None, _) => return Err(CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)),
+        (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    };
+    validate_first_party_room_call_member(&call, participant)?;
+    Ok(call.call_id)
+}
+
+fn revoke_issued_room_join<S>(
+    store: &S,
+    issuer: &JoinTokenIssuer,
+    scope: &TenantScope,
+    grant: &pb::ConferenceJoinGrant,
+) -> Result<(), CanonicalError>
+where
+    S: ConferenceJoinGrantStore,
+{
+    let session_id = SessionId::from_opaque(decode_opaque(grant.session_id.clone())?);
+    store
+        .revoke_conference_join_grant(scope, &session_id)
+        .map_err(map_store_error)?;
+    issuer
+        .revoke(scope, &session_id)
+        .map_err(map_join_token_error)?;
+    Ok(())
+}
+
 /// Issues an authenticated first-party room Join through the canonical durable
 /// conference issuer after independent first-party Device authorization.
 ///
@@ -3233,6 +3290,7 @@ pub fn issue_authenticated_first_party_room_join<S>(
     room_id: &GroupId,
     participant: &PrincipalRef,
     device_id: &DeviceId,
+    signer_key_id: &str,
     attempt: FirstPartyRoomJoinAttempt<'_>,
 ) -> Result<pb::ConferenceJoinGrant, CanonicalError>
 where
@@ -3241,6 +3299,7 @@ where
         + CommandAcceptanceStore
         + PrincipalIdentityBindingStore
         + IdentityDeviceLookupStore
+        + TrustedSigningKeyStore
         + GroupCallLookupStore
         + GroupStore
         + GroupMlsServerCustodyProbe,
@@ -3260,10 +3319,7 @@ where
     if room.integration_id != integration_id
         || room.mode != UniversalConferenceMode::Webinar
         || !room.entry_open
-        || !matches!(
-            room.lifecycle,
-            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
-        )
+        || room.lifecycle != UniversalConferenceLifecycle::Live
     {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
@@ -3281,6 +3337,14 @@ where
     if &current_device != device_id {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
+    let active_key = store
+        .active_trusted_signing_key(scope, device_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
+    if active_key.key_id.as_opaque().as_str() != signer_key_id {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    let call_id = resolve_first_party_room_call(store, scope, room_id, participant)?;
     // Unlike generic integrations, PetrelLink's first-party Room may NOT
     // join a server-custodied MLS group. The realtime authority independently
     // rechecks this at MLS admission; guard signed credentials here as well.
@@ -3296,6 +3360,8 @@ where
     {
         return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
     }
+    let group_revision = group.revision;
+    let group_crypto_state = group.crypto_state.clone();
     let request = pb::UniversalIssueJoinGrantRequest {
         scope: Some(pb_scope(scope)),
         conference_id: Some(pb_opaque(room_id.as_opaque())),
@@ -3325,23 +3391,48 @@ where
         payload,
         attempt.now_unix_ms,
     )?;
-    // The owner may have closed the Room while grant signing persisted its
-    // durable row. Do not return a stale bearer; revoke both the canonical
-    // durable record and issuer-local compatibility grant before rejecting.
-    let current = store
-        .universal_conference_profile(scope, room_id)
-        .map_err(map_store_error)?;
-    if current.as_ref() != Some(&room) {
-        let session_id = SessionId::from_opaque(decode_opaque(grant.session_id.clone())?);
-        store
-            .revoke_conference_join_grant(scope, &session_id)
+    // Signing is not the authorization boundary. Re-read the canonical Room,
+    // accepted Call, Device, active signer and endpoint-owned Group after the
+    // durable grant write. A cross-process Hangup, revoke, key rotation, Room
+    // close or MLS custody/epoch change retires both durable and issuer copies.
+    let fence = (|| {
+        let current_room = store
+            .universal_conference_profile(scope, room_id)
             .map_err(map_store_error)?;
-        issuer
-            .revoke(scope, &session_id)
-            .map_err(map_join_token_error)?;
-        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        let current_device = resolve_join_device(store, scope, participant)?;
+        let current_key = store
+            .active_trusted_signing_key(scope, device_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
+        let current_call = resolve_first_party_room_call(store, scope, room_id, participant)?;
+        let current_group = store
+            .group(scope, room_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+        let server_has_group = store
+            .server_possesses_mls_group(scope, room_id)
+            .map_err(|error| map_group_mls_error(&error))?;
+        Ok::<bool, CanonicalError>(
+            current_room.as_ref() == Some(&room)
+                && current_device == *device_id
+                && current_key.key_id.as_opaque().as_str() == signer_key_id
+                && current_call == call_id
+                && current_group.revision == group_revision
+                && current_group.crypto_state == group_crypto_state
+                && !server_has_group,
+        )
+    })();
+    match fence {
+        Ok(true) => Ok(grant),
+        result => {
+            revoke_issued_room_join(store, issuer, scope, &grant)?;
+            match result {
+                Ok(false) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+                Err(error) => Err(error),
+                Ok(true) => unreachable!("successful fence returned above"),
+            }
+        }
     }
-    Ok(grant)
 }
 
 fn issue_join_grant<S>(
