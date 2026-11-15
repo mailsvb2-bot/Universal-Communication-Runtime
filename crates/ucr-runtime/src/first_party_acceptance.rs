@@ -17,7 +17,7 @@ use ucr_crypto::{
 use ucr_group_mls::{
     GroupMlsServerCustodyProbe, MlsDeviceAdmission, MlsTransitionInput, browser_memory_provider,
     create_device_key_package, create_group, export_group_media_secret, join_from_welcome,
-    merge_pending, stage_transition,
+    merge_pending, process_commit, stage_transition,
 };
 use ucr_model::AuthorizationRequest;
 use ucr_model::{
@@ -1178,20 +1178,53 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             .server_possesses_mls_group(&scope, &group_id)
             .unwrap()
     );
-    // An SFU/server that only stores the signed Commit, Welcome and the
-    // forwarded ciphertext cannot synthesize the endpoint's MLS exporter.
-    // Prove that a fabricated exporter fails authentic AEAD opening while
-    // the independently joined Bob endpoint succeeds above.
-    let server_without_exporter = ucr_crypto::GroupMediaEpochSecret::from_exporter_bytes([0; 32]);
+    // Exercise a separate server-side OpenMLS provider, not a fabricated
+    // zero exporter. The server may know the public Group ID and signed
+    // Commit/Welcome bytes, but it has no endpoint KeyPackage private state.
+    // A same-ID group created with the reserved relay Device is unrelated and
+    // cannot process the endpoint-only Add or derive the recipient's exporter.
+    let server_provider = browser_memory_provider();
+    let server_device =
+        ucr_model::DeviceId::from_opaque(opaque("fp-media-host-device").unwrap());
+    let server_key_package =
+        create_device_key_package(&server_provider, &scope, &server_device).unwrap();
+    let (mut server_group, server_state) = create_group(
+        &server_provider,
+        &scope,
+        &group_id,
+        &server_device,
+        &server_key_package.signer_public_key,
+    )
+    .expect("isolated relay provider can only create its own unrelated MLS group");
+    let server_secret = export_group_media_secret(
+        &server_provider,
+        &server_group,
+        &scope,
+        &group_id,
+        &server_state,
+    )
+    .expect("relay can export only its unrelated epoch-zero group secret");
+    assert!(
+        process_commit(
+            &server_provider,
+            &mut server_group,
+            &scope,
+            &group_id,
+            &artifacts.commit,
+            &artifacts.next_crypto_state,
+        )
+        .is_err(),
+        "server-held relay provider must not process the endpoint-only MLS Add"
+    );
     assert!(
         open_endpoint_group_media_wire(
-            &server_without_exporter,
+            &server_secret,
             &media_context,
             &wire,
             signing_key.verifying_key(),
         )
         .is_err(),
-        "server-side ciphertext and public MLS state must not open media without endpoint exporter"
+        "server-held relay provider must not decrypt the authenticated endpoint video wire"
     );
     // The durable media epoch is not a decryption key. Even with the
     // authentic captured ciphertext and sender signature, a caller using
