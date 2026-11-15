@@ -6072,7 +6072,9 @@ mod universal_runtime_tests {
             external_group_id: b"external-room".to_vec(),
         });
         assert!(
-            super::validate_first_party_room_group_owner(&store, &scope, &room_id, &owner, &bridged)
+            super::validate_first_party_room_group_owner(
+                &store, &scope, &room_id, &owner, &bridged
+            )
             .is_err()
         );
 
