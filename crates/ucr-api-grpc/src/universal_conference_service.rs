@@ -5995,10 +5995,10 @@ mod universal_runtime_tests {
             revision: 1,
         };
 
-        assert!(super::validate_first_party_room_group_owner(
-            &store, &scope, &room_id, &owner, &group
-        )
-        .is_ok());
+        assert!(
+            super::validate_first_party_room_group_owner(&store, &scope, &room_id, &owner, &group)
+                .is_ok()
+        );
 
         let mut public = group.clone();
         public.public_policy = Some(PublicGroupPolicy {
@@ -6006,34 +6006,51 @@ mod universal_runtime_tests {
             discovery: PublicGroupDiscovery::Unlisted,
             indexed: false,
         });
-        assert!(super::validate_first_party_room_group_owner(
-            &store, &scope, &room_id, &owner, &public
-        )
-        .is_err());
+        assert!(
+            super::validate_first_party_room_group_owner(&store, &scope, &room_id, &owner, &public)
+                .is_err()
+        );
 
         let mut historical = group.clone();
         historical.history_policy = GroupHistoryPolicy::FullHistory;
-        assert!(super::validate_first_party_room_group_owner(
-            &store, &scope, &room_id, &owner, &historical
-        )
-        .is_err());
+        assert!(
+            super::validate_first_party_room_group_owner(
+                &store,
+                &scope,
+                &room_id,
+                &owner,
+                &historical
+            )
+            .is_err()
+        );
 
         let mut bridged = group.clone();
         bridged.bridge_mappings.push(GroupBridgeMapping {
             integration_id: IntegrationId::from_opaque(oid("fp-room-external-bridge")),
             external_group_id: b"external-room".to_vec(),
         });
-        assert!(super::validate_first_party_room_group_owner(
-            &store, &scope, &room_id, &owner, &bridged
-        )
-        .is_err());
+        assert!(
+            super::validate_first_party_room_group_owner(
+                &store,
+                &scope,
+                &room_id,
+                &owner,
+                &bridged
+            )
+            .is_err()
+        );
 
         let mut externally_delivered = group;
         externally_delivered.delivery_policy = DeliveryPolicy::BestEffort;
-        assert!(super::validate_first_party_room_group_owner(
-            &store, &scope, &room_id, &owner, &externally_delivered
-        )
-        .is_err());
+        assert!(
+            super::validate_first_party_room_group_owner(
+                &store,
+                &scope,
+                &room_id,
+                &owner,
+                &externally_delivered
+            )
+            .is_err()
+        );
     }
-
 }
