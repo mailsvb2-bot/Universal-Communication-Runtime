@@ -2637,6 +2637,12 @@ where
     Ok(())
 }
 
+/// Prepares the canonical media Call only after the Room roster and endpoint-owned
+/// MLS Group have been independently validated.
+///
+/// # Errors
+/// Rejects a closed or foreign Room, a server-custodied Group, an untrusted or
+/// missing Device, incomplete MLS membership, or a conflicting Call mutation.
 pub fn prepare_authenticated_first_party_room_call<S>(
     store: &S,
     scope: &TenantScope,
@@ -3335,24 +3341,24 @@ where
     Ok(())
 }
 
-/// Issues an authenticated first-party room Join through the canonical durable
-/// conference issuer after independent first-party Device authorization.
-///
-/// # Errors
-/// Rejects invalid trust, scope, lifecycle, replay keys or storage failure.
-pub fn issue_authenticated_first_party_room_join<S>(
+struct FirstPartyRoomJoinSnapshot {
+    room: UniversalConferenceProfile,
+    owner: PrincipalRef,
+    enrolled: UniversalConferenceParticipantProfile,
+    group: GroupRecord,
+    call_id: CallId,
+}
+
+fn validate_first_party_room_join<S>(
     store: &S,
-    issuer: &JoinTokenIssuer,
     scope: &TenantScope,
     room_id: &GroupId,
     participant: &PrincipalRef,
     device_id: &DeviceId,
-    attempt: FirstPartyRoomJoinAttempt<'_>,
-) -> Result<pb::ConferenceJoinGrant, CanonicalError>
+    signer_key_id: &str,
+) -> Result<FirstPartyRoomJoinSnapshot, CanonicalError>
 where
     S: UniversalConferenceStore
-        + ConferenceJoinGrantStore
-        + CommandAcceptanceStore
         + PrincipalIdentityBindingStore
         + IdentityDeviceLookupStore
         + TrustedSigningKeyStore
@@ -3360,7 +3366,6 @@ where
         + GroupStore
         + GroupMlsServerCustodyProbe,
 {
-    validate_mutation_idempotency_key(attempt.idempotency_key)?;
     if participant.kind != PrincipalKind::Person {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
@@ -3395,9 +3400,6 @@ where
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
     validate_first_party_room_group_owner(store, scope, room_id, &owner, &group)?;
     validate_first_party_room_group_member(store, scope, room_id, &enrolled)?;
-    // JoinTokenIssuer must bind to this *exact* authenticated Device. The
-    // generic integration API resolves one active Device; compare before
-    // handing off so a different logged-in Device cannot receive that grant.
     let current_device = resolve_join_device(store, scope, participant)?;
     if &current_device != device_id {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
@@ -3406,20 +3408,118 @@ where
         .active_trusted_signing_key(scope, device_id)
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
-    if active_key.key_id.as_opaque().as_str() != attempt.signer_key_id {
+    if active_key.key_id.as_opaque().as_str() != signer_key_id {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
     let call_id = resolve_first_party_room_call(store, scope, room_id, &owner, participant)?;
-    // Unlike generic integrations, PetrelLink's first-party Room may NOT
-    // join a server-custodied MLS group. The same canonical validator is used
-    // by Room preparation and Join issuance; realtime rechecks at admission.
-    let group_revision = group.revision;
-    let group_crypto_state = group.crypto_state.clone();
+    Ok(FirstPartyRoomJoinSnapshot {
+        room,
+        owner,
+        enrolled,
+        group,
+        call_id,
+    })
+}
+
+fn first_party_room_join_fence<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participant: &PrincipalRef,
+    device_id: &DeviceId,
+    attempt: FirstPartyRoomJoinAttempt<'_>,
+    snapshot: &FirstPartyRoomJoinSnapshot,
+) -> Result<bool, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + TrustedSigningKeyStore
+        + GroupCallLookupStore
+        + GroupStore
+        + GroupMlsServerCustodyProbe,
+{
+    let integration_id = IntegrationId::from_opaque(
+        OpaqueId::new("ucr-first-party-room")
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
+    let current_room = store
+        .universal_conference_profile(scope, room_id)
+        .map_err(map_store_error)?;
+    let current_participants = active_conference_participants(store, scope, room_id)?;
+    let current_owner = first_party_room_owner(&current_participants, &integration_id)?;
+    let current_enrolled = current_participants
+        .iter()
+        .find(|candidate| &candidate.participant == participant)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
+    let current_device = resolve_join_device(store, scope, participant)?;
+    let current_key = store
+        .active_trusted_signing_key(scope, device_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
+    let current_call = resolve_first_party_room_call(store, scope, room_id, &current_owner, participant)?;
+    let current_group = store
+        .group(scope, room_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+    validate_first_party_room_group_owner(store, scope, room_id, &current_owner, &current_group)?;
+    validate_first_party_room_group_member(store, scope, room_id, current_enrolled)?;
+    Ok(
+        current_room.as_ref() == Some(&snapshot.room)
+            && current_owner == snapshot.owner
+            && current_enrolled == &snapshot.enrolled
+            && current_device == *device_id
+            && current_key.key_id.as_opaque().as_str() == attempt.signer_key_id
+            && current_call == snapshot.call_id
+            && current_group.revision == snapshot.group.revision
+            && current_group.crypto_state == snapshot.group.crypto_state
+            && current_group.ownership == snapshot.group.ownership,
+    )
+}
+
+/// Issues an authenticated first-party room Join through the canonical durable
+/// conference issuer after independent first-party Device authorization.
+///
+/// # Errors
+/// Rejects invalid trust, scope, lifecycle, replay keys or storage failure.
+pub fn issue_authenticated_first_party_room_join<S>(
+    store: &S,
+    issuer: &JoinTokenIssuer,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participant: &PrincipalRef,
+    device_id: &DeviceId,
+    attempt: FirstPartyRoomJoinAttempt<'_>,
+) -> Result<pb::ConferenceJoinGrant, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + ConferenceJoinGrantStore
+        + CommandAcceptanceStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + TrustedSigningKeyStore
+        + GroupCallLookupStore
+        + GroupStore
+        + GroupMlsServerCustodyProbe,
+{
+    validate_mutation_idempotency_key(attempt.idempotency_key)?;
+    let snapshot = validate_first_party_room_join(
+        store,
+        scope,
+        room_id,
+        participant,
+        device_id,
+        attempt.signer_key_id,
+    )?;
+    let integration_id = IntegrationId::from_opaque(
+        OpaqueId::new("ucr-first-party-room")
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
     let request = pb::UniversalIssueJoinGrantRequest {
         scope: Some(pb_scope(scope)),
         conference_id: Some(pb_opaque(room_id.as_opaque())),
         integration_id: Some(pb_opaque(integration_id.as_opaque())),
-        external_user_id: enrolled.external_user_id.clone(),
+        external_user_id: snapshot.enrolled.external_user_id.clone(),
         ttl_seconds: 900,
         use_policy: pb::JoinGrantUsePolicy::Reusable as i32,
         not_before_unix_ms: None,
@@ -3433,8 +3533,8 @@ where
         IssueJoinGrantInput {
             scope: scope.clone(),
             conference_id: room_id.clone(),
-            integration_id: integration_id.clone(),
-            external_user_id: enrolled.external_user_id.clone(),
+            integration_id,
+            external_user_id: snapshot.enrolled.external_user_id.clone(),
             ttl_seconds: 900,
             use_policy: RealtimeJoinGrantUsePolicy::Reusable,
             not_before_unix_ms: None,
@@ -3444,52 +3544,17 @@ where
         payload,
         attempt.now_unix_ms,
     )?;
-    // Signing is not the authorization boundary. Re-read the canonical Room,
-    // accepted Call, Device, active signer and endpoint-owned Group after the
-    // durable grant write. A cross-process Hangup, revoke, key rotation, Room
-    // close or MLS custody/epoch change retires both durable and issuer copies.
-    let fence = (|| {
-        let current_room = store
-            .universal_conference_profile(scope, room_id)
-            .map_err(map_store_error)?;
-        let current_participants = active_conference_participants(store, scope, room_id)?;
-        let current_owner = first_party_room_owner(&current_participants, &integration_id)?;
-        let current_enrolled = current_participants
-            .iter()
-            .find(|candidate| &candidate.participant == participant)
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
-        let current_device = resolve_join_device(store, scope, participant)?;
-        let current_key = store
-            .active_trusted_signing_key(scope, device_id)
-            .map_err(map_store_error)?
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
-        let current_call =
-            resolve_first_party_room_call(store, scope, room_id, &current_owner, participant)?;
-        let current_group = store
-            .group(scope, room_id)
-            .map_err(map_store_error)?
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
-        validate_first_party_room_group_owner(
-            store,
-            scope,
-            room_id,
-            &current_owner,
-            &current_group,
-        )?;
-        validate_first_party_room_group_member(store, scope, room_id, current_enrolled)?;
-        Ok::<bool, CanonicalError>(
-            current_room.as_ref() == Some(&room)
-                && current_owner == owner
-                && current_enrolled == &enrolled
-                && current_device == *device_id
-                && current_key.key_id.as_opaque().as_str() == attempt.signer_key_id
-                && current_call == call_id
-                && current_group.revision == group_revision
-                && current_group.crypto_state == group_crypto_state
-                && current_group.ownership == group.ownership,
-        )
-    })();
-    match fence {
+    // Signing is not the authorization boundary. Re-read canonical state after
+    // the durable grant write; any changed authority retires both grant copies.
+    match first_party_room_join_fence(
+        store,
+        scope,
+        room_id,
+        participant,
+        device_id,
+        attempt,
+        &snapshot,
+    ) {
         Ok(true) => Ok(grant),
         result => {
             revoke_issued_room_join(store, issuer, scope, &grant)?;
