@@ -2177,12 +2177,14 @@ mod tests {
         let fixture = room_call_fence_fixture();
         let end_event = room_call_end_event(fixture.live_revision);
         assert_eq!(
-            fixture.store.end_universal_conference_if_no_active_group_calls(
-                &scope(),
-                &fixture.room_id,
-                fixture.live_revision,
-                Some(&end_event),
-            ),
+            fixture
+                .store
+                .end_universal_conference_if_no_active_group_calls(
+                    &scope(),
+                    &fixture.room_id,
+                    fixture.live_revision,
+                    Some(&end_event),
+                ),
             Err(DurableStoreError::Conflict),
             "an active canonical Group Call must prevent Ended"
         );
@@ -2202,7 +2204,10 @@ mod tests {
                 Some(&end_event),
             )
             .expect("room can end after all Calls are terminal");
-        assert_eq!(ended.lifecycle, ucr_model::UniversalConferenceLifecycle::Ended);
+        assert_eq!(
+            ended.lifecycle,
+            ucr_model::UniversalConferenceLifecycle::Ended
+        );
 
         let mut late_call = fixture.active_call;
         late_call.call_id = CallId::from_opaque(oid("room-late-call"));
