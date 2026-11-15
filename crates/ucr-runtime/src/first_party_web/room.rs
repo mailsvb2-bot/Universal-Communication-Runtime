@@ -432,10 +432,7 @@ fn go_live_room(
 // realtime admission gate, and Call termination has already revoked the exact
 // Call-scoped media permissions. In-flight provider close remains a separate
 // realtime lifecycle proof (#336), never inferred from this control-plane event.
-fn room_end_allowed(
-    lifecycle: UniversalConferenceLifecycle,
-    active_call_count: usize,
-) -> bool {
+fn room_end_allowed(lifecycle: UniversalConferenceLifecycle, active_call_count: usize) -> bool {
     active_call_count == 0
         && matches!(
             lifecycle,
@@ -445,11 +442,7 @@ fn room_end_allowed(
         )
 }
 
-fn end_room(
-    state: &State,
-    auth: &Session,
-    input: &RoomEntryChange,
-) -> Result<Value, StatusCode> {
+fn end_room(state: &State, auth: &Session, input: &RoomEntryChange) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
     let (profile, _) = owned_room(state, auth, &room_id)?;
