@@ -7,7 +7,8 @@
 
 use super::*;
 use ucr_api_grpc::{
-    canonical_universal_conference_lifecycle_event, reconcile_canonical_conference_permissions,
+    canonical_universal_conference_lifecycle_event, issue_authenticated_first_party_room_join,
+    reconcile_canonical_conference_permissions,
 };
 use ucr_core::{DurableRecordStatus, DurableStoreError, UniversalConferenceStore};
 use ucr_model::{
@@ -37,6 +38,14 @@ struct RoomEntryChange {
     binding: Binding,
     room_id: String,
     expected_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomJoin {
+    binding: Binding,
+    room_id: String,
+    idempotency_key: String,
 }
 
 fn integration() -> Result<IntegrationId, StatusCode> {
@@ -362,6 +371,42 @@ fn end_unstarted_room(
     Ok(describe_room(&ended, false))
 }
 
+// Exact canonical Person/Device session is checked by the enclosing first-
+// party BFF. This route uses only the already-mounted production issuer/store;
+// it creates no synthetic attendee, MLS leaf or second grant signer.
+fn issue_room_join(
+    state: &State,
+    auth: &Session,
+    input: &RoomJoin,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let grant = issue_authenticated_first_party_room_join(
+        state.store.as_ref(),
+        state.issuer.as_ref(),
+        &auth.subject.scope,
+        &room_id,
+        &auth.subject.principal,
+        &device(&auth.binding)?,
+        &input.idempotency_key,
+        now_unix_ms()?,
+    )
+    .map_err(|_| StatusCode::CONFLICT)?;
+    let fragment = grant
+        .join_url
+        .split_once('#')
+        .map(|(_, fragment)| format!("#{fragment}"))
+        .filter(|fragment| fragment.starts_with("#ucr_join="))
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(json!({
+        "roomId": input.room_id,
+        "joinFragment": fragment,
+        "expiresAtUnixMs": grant.expires_at_unix_ms,
+        // A signed grant is not evidence that browser endpoint MLS joined.
+        "mediaReady": false
+    }))
+}
+
 fn describe_room(profile: &UniversalConferenceProfile, media_ready: bool) -> Value {
     let lifecycle = match profile.lifecycle {
         UniversalConferenceLifecycle::Scheduled => "scheduled",
@@ -401,6 +446,10 @@ pub(super) fn dispatch(
         "/v1/first-party/room/end" => {
             let request: RoomEntryChange = parse(body)?;
             end_unstarted_room(state, auth, &request)
+        }
+        "/v1/first-party/room/join" => {
+            let request: RoomJoin = parse(body)?;
+            issue_room_join(state, auth, &request)
         }
         "/v1/first-party/room/attend" => {
             let request: RoomRef = parse(body)?;
