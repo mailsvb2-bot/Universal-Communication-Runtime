@@ -3214,6 +3214,9 @@ where
     }
 }
 
+/// The request-specific replay key and clock, kept together for the canonical
+/// durable Join issuance boundary.
+
 /// Issues an authenticated first-party room Join through the SAME durable
 /// universal-conference issuer, `CommandAcceptanceStore`, Device projection
 /// and active Group Call lookup used by machine-authenticated conference joins.
@@ -3225,13 +3228,16 @@ where
 /// # Errors
 /// Rejects foreign principal/Device, closed room, missing active Group Call,
 /// expired schedule, idempotency conflicts and unavailable canonical storage.
-/// The request-specific replay key and clock, kept together for the canonical
-/// durable Join issuance boundary.
 pub struct FirstPartyRoomJoinAttempt<'a> {
     pub idempotency_key: &'a str,
     pub now_unix_ms: i64,
 }
 
+/// Issues an authenticated first-party room Join through the canonical durable
+/// conference issuer after independent first-party Device authorization.
+///
+/// # Errors
+/// Rejects invalid trust, scope, lifecycle, replay keys or storage failure.
 pub fn issue_authenticated_first_party_room_join<S>(
     store: &S,
     issuer: &JoinTokenIssuer,
@@ -3251,7 +3257,7 @@ where
         + GroupStore
         + GroupMlsServerCustodyProbe,
 {
-    validate_mutation_attempt.idempotency_key(attempt.idempotency_key)?;
+    validate_mutation_idempotency_key(attempt.idempotency_key)?;
     if participant.kind != PrincipalKind::Person {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
@@ -3311,7 +3317,7 @@ where
         use_policy: pb::JoinGrantUsePolicy::Reusable as i32,
         not_before_unix_ms: None,
         not_after_unix_ms: None,
-        attempt.idempotency_key: attempt.idempotency_key.to_owned(),
+        idempotency_key: attempt.idempotency_key.to_owned(),
     };
     let payload = request.encode_to_vec();
     let grant = issue_join_grant(
@@ -3326,7 +3332,7 @@ where
             use_policy: RealtimeJoinGrantUsePolicy::Reusable,
             not_before_unix_ms: None,
             not_after_unix_ms: None,
-            attempt.idempotency_key: attempt.idempotency_key.to_owned(),
+            idempotency_key: attempt.idempotency_key.to_owned(),
         },
         payload,
         attempt.now_unix_ms,
