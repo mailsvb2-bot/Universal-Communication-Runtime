@@ -6,7 +6,7 @@
 //! endpoint MLS and the universal conference runtime still own media admission.
 
 use super::*;
-use ucr_core::{DurableRecordStatus, UniversalConferenceStore};
+use ucr_core::{DurableRecordStatus, DurableStoreError, UniversalConferenceStore};
 use ucr_model::{
     ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, UniversalConferenceLifecycle,
     UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
@@ -57,7 +57,12 @@ fn scoped_room_id(auth: &Session, key: &str) -> Result<GroupId, StatusCode> {
         }
         None => digest.update([0]),
     }
-    let identifier = format!("fp-room-{digest:x}");
+    let mut identifier = String::from("fp-room-");
+    for byte in digest.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut identifier, "{byte:02x}")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
     Ok(GroupId::from_opaque(opaque(&identifier)?))
 }
 
@@ -65,13 +70,20 @@ fn owned_room(
     state: &State,
     auth: &Session,
     room_id: &GroupId,
-) -> Result<(UniversalConferenceProfile, UniversalConferenceParticipantProfile), StatusCode> {
+) -> Result<
+    (
+        UniversalConferenceProfile,
+        UniversalConferenceParticipantProfile,
+    ),
+    StatusCode,
+> {
     let profile = state
         .store
         .universal_conference_profile(&auth.subject.scope, room_id)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    if profile.integration_id != integration()? || profile.mode != UniversalConferenceMode::Webinar {
+    if profile.integration_id != integration()? || profile.mode != UniversalConferenceMode::Webinar
+    {
         return Err(StatusCode::NOT_FOUND);
     }
     let owner = state
@@ -125,9 +137,7 @@ fn create_room(state: &State, auth: &Session, input: &CreateRoom) -> Result<Valu
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
     {
         let (_, recorded_owner) = owned_room(state, auth, &room_id)?;
-        if existing.create_idempotency_key != input.idempotency_key
-            || recorded_owner != owner
-        {
+        if existing.create_idempotency_key != input.idempotency_key || recorded_owner != owner {
             return Err(StatusCode::CONFLICT);
         }
         return Ok(describe_room(&existing, false));
@@ -151,12 +161,14 @@ fn create_room(state: &State, auth: &Session, input: &CreateRoom) -> Result<Valu
         entry_open: false,
         revision: 1,
     };
-    let inserted = state.store.persist_first_party_room_with_owner(&profile, &owner);
+    let inserted = state
+        .store
+        .persist_first_party_room_with_owner(&profile, &owner);
     match inserted {
         Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => {
             Ok(describe_room(&profile, false))
         }
-        Err(_) => {
+        Err(DurableStoreError::Conflict) => {
             // Exact safe reconciliation of two devices racing with the same
             // owner/key; never accept only a coordinator without its owner.
             let (found, saved_owner) = owned_room(state, auth, &room_id)?;
@@ -165,6 +177,9 @@ fn create_room(state: &State, auth: &Session, input: &CreateRoom) -> Result<Valu
             }
             Ok(describe_room(&found, false))
         }
+        Err(DurableStoreError::Full) => Err(StatusCode::TOO_MANY_REQUESTS),
+        Err(DurableStoreError::InvalidRecord) => Err(StatusCode::BAD_REQUEST),
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 
@@ -214,6 +229,9 @@ mod tests {
     #[test]
     fn owner_role_cannot_be_downgraded_by_room_policy() {
         assert_eq!(INTEGRATION, "ucr-first-party-room");
-        assert_ne!(ConferenceParticipantRole::Owner, ConferenceParticipantRole::Attendee);
+        assert_ne!(
+            ConferenceParticipantRole::Owner,
+            ConferenceParticipantRole::Attendee
+        );
     }
 }
