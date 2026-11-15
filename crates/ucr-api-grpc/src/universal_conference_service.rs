@@ -26,7 +26,7 @@ use ucr_core::{
     UniversalConferenceStore,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver};
-use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError};
+use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsServerCustodyProbe, GroupMlsStoreError};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipant, CallParticipantState,
     CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind, CallSignallingState,
@@ -3123,7 +3123,9 @@ where
         + CommandAcceptanceStore
         + PrincipalIdentityBindingStore
         + IdentityDeviceLookupStore
-        + GroupCallLookupStore,
+        + GroupCallLookupStore
+        + GroupStore
+        + GroupMlsServerCustodyProbe,
 {
     validate_mutation_idempotency_key(idempotency_key)?;
     if participant.kind != PrincipalKind::Person {
@@ -3160,6 +3162,21 @@ where
     let current_device = resolve_join_device(store, scope, participant)?;
     if &current_device != device_id {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    // Unlike generic integrations, PetrelLink's first-party Room may NOT
+    // join a server-custodied MLS group. The realtime authority independently
+    // rechecks this at MLS admission; guard signed credentials here as well.
+    let group = store
+        .group(scope, room_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+    if group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
+        || group.crypto_state.epoch == 0
+        || store
+            .server_possesses_mls_group(scope, room_id)
+            .map_err(map_group_mls_error)?
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
     }
     let request = pb::UniversalIssueJoinGrantRequest {
         scope: Some(pb_scope(scope)),
