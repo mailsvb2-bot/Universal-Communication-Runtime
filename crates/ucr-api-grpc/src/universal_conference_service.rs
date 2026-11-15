@@ -2610,10 +2610,7 @@ where
         .iter()
         .filter(|person| person.role == ConferenceParticipantRole::Owner)
         .collect::<Vec<_>>();
-    if owners.len() != 1
-        || &owners[0].participant != owner
-        || owner.kind != PrincipalKind::Person
-    {
+    if owners.len() != 1 || &owners[0].participant != owner || owner.kind != PrincipalKind::Person {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
     let group = store
@@ -2645,7 +2642,10 @@ where
         {
             return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
         }
-        ready.push(RuntimeReadyParticipant { profile: person, device_id });
+        ready.push(RuntimeReadyParticipant {
+            profile: person,
+            device_id,
+        });
     }
     if ready.len() < 2 {
         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
