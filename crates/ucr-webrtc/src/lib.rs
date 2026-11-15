@@ -425,6 +425,7 @@ enum LiveWebRtcCommand {
     },
     SendE2ee {
         session_id: SessionId,
+        offer_id: String,
         envelope: Box<SfuForwardEnvelope>,
         close_rx: tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>,
         deadline: Instant,
@@ -679,9 +680,14 @@ impl LiveWebRtcProvider {
         session_id: &SessionId,
         envelope: &SfuForwardEnvelope,
     ) -> Result<(), WebRtcProviderError> {
+        // Bind the queued media command to the exact peer attempt before it
+        // enters the lower-priority media queue. A delayed old send must never
+        // attach itself to a replacement peer that reuses the SessionId.
+        let offer_id = self.session_offer_id(session_id)?;
         let close_rx = self.close_tx.subscribe();
         self.request_media(|reply, deadline| LiveWebRtcCommand::SendE2ee {
             session_id: session_id.clone(),
+            offer_id,
             envelope: Box::new(envelope.clone()),
             close_rx,
             deadline,
@@ -951,6 +957,7 @@ async fn run_live_webrtc_worker(
             }
             LiveWebRtcCommand::SendE2ee {
                 session_id,
+                offer_id,
                 envelope,
                 mut close_rx,
                 deadline,
@@ -959,6 +966,7 @@ async fn run_live_webrtc_worker(
                 handle_live_send_e2ee(
                     &mut sessions,
                     session_id,
+                    offer_id,
                     *envelope,
                     &mut close_rx,
                     deadline,
@@ -1208,6 +1216,7 @@ async fn handle_live_remote_candidate(
 async fn handle_live_send_e2ee(
     sessions: &mut HashMap<String, LiveWebRtcSession>,
     session_id: SessionId,
+    offer_id: String,
     envelope: SfuForwardEnvelope,
     close_rx: &mut tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>,
     deadline: Instant,
@@ -1219,8 +1228,7 @@ async fn handle_live_send_e2ee(
     }
     let key = session_key(&session_id);
     let result = match sessions.get_mut(&key) {
-        Some(session) if !session.shutdown_pending => {
-            let offer_id = session.offer_id.clone();
+        Some(session) if !session.shutdown_pending && session.offer_id == offer_id => {
             match session.e2ee_channel.as_mut() {
                 Some(channel) => {
                     channel
