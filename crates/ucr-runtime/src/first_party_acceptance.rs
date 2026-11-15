@@ -1188,6 +1188,17 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         ucr_model::DeviceId::from_opaque(opaque("fp-media-host-device").unwrap());
     let server_key_package =
         create_device_key_package(&server_provider, &scope, &server_device).unwrap();
+    assert!(
+        join_from_welcome(
+            &server_provider,
+            &scope,
+            &group_id,
+            &delivered_welcome,
+            &artifacts.next_crypto_state,
+        )
+        .is_err(),
+        "the relay's independent Device KeyPackage cannot consume Bob's recipient-only Welcome"
+    );
     let (mut server_group, server_state) = create_group(
         &server_provider,
         &scope,
