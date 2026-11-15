@@ -403,7 +403,9 @@ mod tests {
     fn cancellation_persists_canonical_ended_event_and_frees_room_quota() {
         let temp = std::env::temp_dir().join(format!(
             "ucr-canonical-room-cancel-{}.sqlite",
-            generate_opaque_id().expect("unique test identifier").as_str()
+            generate_opaque_id()
+                .expect("unique test identifier")
+                .as_str()
         ));
         let store = SqliteLocalStore::open(&temp).expect("test storage");
         let scope = TenantScope {
@@ -456,9 +458,8 @@ mod tests {
             store.persist_first_party_room_with_owner(&profile, &owner),
             Ok(DurableRecordStatus::Persisted)
         );
-        let command_id = ucr_model::CommandId::from_opaque(
-            opaque("room-test-end-command").unwrap(),
-        );
+        let command_id =
+            ucr_model::CommandId::from_opaque(opaque("room-test-end-command").unwrap());
         let event = canonical_universal_conference_lifecycle_event(
             &profile,
             UniversalConferenceLifecycle::Ended,
