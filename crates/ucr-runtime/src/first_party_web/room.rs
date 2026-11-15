@@ -1462,9 +1462,7 @@ mod tests {
             namespace_id: None,
         };
         let owner = ucr_model::PrincipalRef {
-            principal_id: ucr_model::PrincipalId::from_opaque(
-                opaque("room-join-owner").unwrap(),
-            ),
+            principal_id: ucr_model::PrincipalId::from_opaque(opaque("room-join-owner").unwrap()),
             kind: PrincipalKind::Person,
         };
         let attendee = ucr_model::PrincipalRef {
