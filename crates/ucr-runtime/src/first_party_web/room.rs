@@ -8,6 +8,7 @@
 use super::*;
 use ucr_api_grpc::{
     canonical_universal_conference_lifecycle_event, issue_authenticated_first_party_room_join,
+    FirstPartyRoomJoinAttempt,
     prepare_authenticated_first_party_room_call, reconcile_canonical_conference_permissions,
 };
 use ucr_core::{
@@ -1158,8 +1159,10 @@ fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Va
         &room_id,
         &auth.subject.principal,
         &device(&auth.binding)?,
-        &input.idempotency_key,
-        now_unix_ms()?,
+        FirstPartyRoomJoinAttempt {
+            idempotency_key: &input.idempotency_key,
+            now_unix_ms: now_unix_ms()?,
+        },
     )
     .map_err(|_| StatusCode::CONFLICT)?;
     let fragment = grant
