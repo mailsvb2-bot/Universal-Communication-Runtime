@@ -68,6 +68,25 @@ struct RoomMlsOffer {
     signature_base64_url: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomMlsAddMember {
+    binding: Binding,
+    room_id: String,
+    expected_room_revision: u64,
+    group_revision: u64,
+    event_id: String,
+    crypto_epoch: u64,
+    crypto_state_ref: String,
+    recipient_device_id: String,
+    recipient_signer_key_id: String,
+    recipient_key_package_base64_url: String,
+    recipient_signature_base64_url: String,
+    commit_base64_url: String,
+    welcome_base64_url: String,
+    signature_base64_url: String,
+}
+
 fn integration() -> Result<IntegrationId, StatusCode> {
     Ok(IntegrationId::from_opaque(opaque(INTEGRATION)?))
 }
@@ -691,6 +710,191 @@ fn load_room_mls_offers(
     Ok(json!({"roomId":input.room_id,"offers":offers}))
 }
 
+// Adds one canonical enrolled Person Device to the endpoint-owned Group.
+// The Owner signs the entire commitment and the recipient signs its own public
+// KeyPackage. The server verifies both Device signers, then delegates the
+// durable Group CAS + MLS Commit/Welcome to EndpointMlsCommitStore.
+fn commit_room_endpoint_member(
+    state: &State,
+    auth: &Session,
+    input: &RoomMlsAddMember,
+) -> Result<Value, StatusCode> {
+    ensure_binding(&input.binding, auth)?;
+    let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
+    let (room, _) = owned_room(state, auth, &room_id)?;
+    if room.revision != input.expected_room_revision
+        || !room.entry_open
+        || room.lifecycle != UniversalConferenceLifecycle::Waiting
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let group = state
+        .store
+        .group(&auth.subject.scope, &room_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::CONFLICT)?;
+    if group.ownership != GroupOwnership::PersonOwned(auth.subject.principal.clone()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let recipient_device = DeviceId::from_opaque(opaque(&input.recipient_device_id)?);
+    let descriptor = state
+        .store
+        .device(&auth.subject.scope, &recipient_device)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if !ucr_protocol::device_allows_protected_access(&descriptor) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let participants = state
+        .store
+        .active_universal_conference_participants(&auth.subject.scope, &room_id, 1025)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut recipient = None;
+    for person in participants {
+        if person.role != ConferenceParticipantRole::Attendee {
+            continue;
+        }
+        let Some(binding) = state
+            .store
+            .principal_identity_binding(&auth.subject.scope, &person.participant)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        else {
+            continue;
+        };
+        if binding.identity_id == descriptor.identity_id {
+            if recipient.is_some() {
+                return Err(StatusCode::CONFLICT);
+            }
+            recipient = Some(person);
+        }
+    }
+    let recipient = recipient.ok_or(StatusCode::FORBIDDEN)?;
+    let current_signer = state
+        .store
+        .active_trusted_signing_key(&auth.subject.scope, &recipient_device)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if current_signer.key_id.as_opaque().as_str() != input.recipient_signer_key_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let offer = state
+        .store
+        .endpoint_mls_offer(&auth.subject.scope, &room_id, &recipient_device)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if offer.signer_key_id != input.recipient_signer_key_id
+        || URL_SAFE_NO_PAD.encode(&offer.signature) != input.recipient_signature_base64_url
+        || URL_SAFE_NO_PAD.encode(&offer.package) != input.recipient_key_package_base64_url
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let package = decode_mls_public_wire(&input.recipient_key_package_base64_url)?;
+    let commit = decode_mls_public_wire(&input.commit_base64_url)?;
+    let welcome = decode_mls_public_wire(&input.welcome_base64_url)?;
+    let signer_key: [u8; 32] = current_signer
+        .public_key
+        .try_into()
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let recipient_identity = String::from_utf8(recipient.external_user_id.clone())
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let offer_proof = encoded_proof(
+        "ucr-first-party-room-endpoint-mls-key-package.v1",
+        &json!([
+            auth.binding.tenant_id,
+            auth.binding.namespace_id,
+            recipient_identity,
+            input.recipient_device_id,
+            input.recipient_signer_key_id,
+            input.room_id,
+            sha256_b64(&package),
+        ]),
+    )?;
+    verify_ed25519(
+        signer_key,
+        &offer_proof,
+        &input.recipient_signature_base64_url,
+    )?;
+    let owner_proof = encoded_proof(
+        "ucr-first-party-room-endpoint-mls-add-member.v1",
+        &json!([
+            auth.binding.tenant_id,
+            auth.binding.namespace_id,
+            auth.binding.participant_id,
+            auth.binding.device,
+            auth.signer_key_id,
+            input.room_id,
+            input.expected_room_revision,
+            input.group_revision,
+            input.event_id,
+            input.crypto_epoch,
+            input.crypto_state_ref,
+            input.recipient_device_id,
+            input.recipient_signer_key_id,
+            sha256_b64(&package),
+            sha256_b64(&commit),
+            sha256_b64(&welcome),
+        ]),
+    )?;
+    verify_ed25519(
+        auth.signer_public_key,
+        &owner_proof,
+        &input.signature_base64_url,
+    )?;
+    let fingerprint: [u8; 32] = Sha256::digest(owner_proof.as_bytes()).into();
+    let change = GroupChange {
+        event_id: EventId::from_opaque(opaque(&input.event_id)?),
+        scope: auth.subject.scope.clone(),
+        group_id: room_id.clone(),
+        expected_revision: input.group_revision,
+        kind: GroupChangeKind::AddMember {
+            member: recipient.participant,
+            role: GroupRole::Member,
+        },
+        next_crypto_state: None,
+    };
+    let artifacts = MlsCommitArtifacts {
+        commit,
+        welcome: Some(welcome),
+        next_crypto_state: GroupCryptoState {
+            capability_id: Some(ucr_protocol::GROUP_MLS_CAPABILITY.to_owned()),
+            epoch: input.crypto_epoch,
+            state_ref: Some(opaque(&input.crypto_state_ref)?),
+        },
+    };
+    let status = state
+        .store
+        .persist_endpoint_mls_commit(
+            &auth.subject,
+            &device(&auth.binding)?,
+            &change,
+            &MlsDeviceAdmission {
+                device_id: recipient_device,
+                key_package: package,
+            },
+            &artifacts,
+            fingerprint,
+        )
+        .map_err(|_| StatusCode::CONFLICT)?;
+    // A close racing an accepted endpoint Commit must not yield a false live
+    // acknowledgement, and the unchanged room is never automatically reopened.
+    let latest = state
+        .store
+        .universal_conference_profile(&auth.subject.scope, &room_id)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::CONFLICT)?;
+    if latest != room {
+        return Err(StatusCode::CONFLICT);
+    }
+    Ok(json!({
+        "roomId": input.room_id,
+        "groupId": input.room_id,
+        "recipientDeviceId": input.recipient_device_id,
+        "cryptoEpoch": input.crypto_epoch,
+        "commitAccepted": matches!(status, ucr_core::DurableRecordStatus::Persisted | ucr_core::DurableRecordStatus::Duplicate),
+        "mediaReady": false
+    }))
+}
+
 fn issue_room_join(state: &State, auth: &Session, input: &RoomJoin) -> Result<Value, StatusCode> {
     ensure_binding(&input.binding, auth)?;
     let room_id = GroupId::from_opaque(opaque(&input.room_id)?);
@@ -771,6 +975,10 @@ pub(super) fn dispatch(
         "/v1/first-party/room/mls-offers" => {
             let request: RoomRef = parse(body)?;
             load_room_mls_offers(state, auth, &request)
+        }
+        "/v1/first-party/room/mls-add-member" => {
+            let request: RoomMlsAddMember = parse(body)?;
+            commit_room_endpoint_member(state, auth, &request)
         }
         "/v1/first-party/room/prepare" => {
             let request: RoomJoin = parse(body)?;
