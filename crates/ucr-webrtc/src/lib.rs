@@ -901,91 +901,100 @@ async fn run_live_webrtc_worker(
         if shutdown.load(Ordering::Acquire) {
             break;
         }
-        match command {
-            LiveWebRtcCommand::Create {
-                config,
-                deadline,
-                reply,
-            } => {
-                handle_live_create(
-                    &mut sessions,
-                    &shutdown,
-                    e2ee_ingress.as_ref(),
-                    config,
-                    deadline,
-                    reply,
-                )
-                .await;
-            }
-            LiveWebRtcCommand::Restart {
-                config,
-                deadline,
-                reply,
-            } => handle_live_restart(&mut sessions, config, deadline, reply).await,
-            LiveWebRtcCommand::GetOfferId {
-                session_id,
-                deadline,
-                reply,
-            } => {
-                let result = if command_expired(deadline) {
-                    Err(WebRtcProviderError::TemporarilyUnavailable)
-                } else {
-                    sessions
-                        .get(&session_key(&session_id))
-                        .filter(|session| session.permits_signaling_and_media())
-                        .map(|session| session.offer_id.clone())
-                        .ok_or(WebRtcProviderError::SessionUnavailable)
-                };
-                let _ = reply.send(result);
-            }
-            LiveWebRtcCommand::SetRemoteDescription {
-                description,
-                offer_id,
-                deadline,
-                reply,
-            } => {
-                handle_live_remote_description(&sessions, description, offer_id, deadline, reply)
-                    .await;
-            }
-            LiveWebRtcCommand::AddRemoteCandidate {
-                candidate,
-                offer_id,
-                deadline,
-                reply,
-            } => {
-                handle_live_remote_candidate(&sessions, candidate, offer_id, deadline, reply).await;
-            }
-            LiveWebRtcCommand::SendE2ee {
-                session_id,
-                offer_id,
-                envelope,
-                mut close_rx,
-                deadline,
-                reply,
-            } => {
-                handle_live_send_e2ee(
-                    &mut sessions,
-                    session_id,
-                    &offer_id,
-                    *envelope,
-                    &mut close_rx,
-                    deadline,
-                    reply,
-                )
-                .await;
-            }
-            LiveWebRtcCommand::Close {
-                session_id,
-                offer_id,
-                deadline,
-                reply,
-            } => handle_live_close(&mut sessions, session_id, offer_id, deadline, reply).await,
-        }
+        handle_live_webrtc_command(command, &mut sessions, &shutdown, e2ee_ingress.as_ref())
+            .await;
     }
     commands.close();
     media_commands.close();
     for (_, session) in sessions {
         let _ = bounded_peer_close(&session.peer_connection).await;
+    }
+}
+
+async fn handle_live_webrtc_command(
+    command: LiveWebRtcCommand,
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
+    shutdown: &AtomicBool,
+    e2ee_ingress: Option<&tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
+) {
+    match command {
+        LiveWebRtcCommand::Create {
+            config,
+            deadline,
+            reply,
+        } => {
+            handle_live_create(
+                sessions,
+                shutdown,
+                e2ee_ingress,
+                config,
+                deadline,
+                reply,
+            )
+            .await;
+        }
+        LiveWebRtcCommand::Restart {
+            config,
+            deadline,
+            reply,
+        } => handle_live_restart(sessions, config, deadline, reply).await,
+        LiveWebRtcCommand::GetOfferId {
+            session_id,
+            deadline,
+            reply,
+        } => {
+            let result = if command_expired(deadline) {
+                Err(WebRtcProviderError::TemporarilyUnavailable)
+            } else {
+                sessions
+                    .get(&session_key(&session_id))
+                    .filter(|session| session.permits_signaling_and_media())
+                    .map(|session| session.offer_id.clone())
+                    .ok_or(WebRtcProviderError::SessionUnavailable)
+            };
+            let _ = reply.send(result);
+        }
+        LiveWebRtcCommand::SetRemoteDescription {
+            description,
+            offer_id,
+            deadline,
+            reply,
+        } => {
+            handle_live_remote_description(sessions, description, offer_id, deadline, reply).await;
+        }
+        LiveWebRtcCommand::AddRemoteCandidate {
+            candidate,
+            offer_id,
+            deadline,
+            reply,
+        } => {
+            handle_live_remote_candidate(sessions, candidate, offer_id, deadline, reply).await;
+        }
+        LiveWebRtcCommand::SendE2ee {
+            session_id,
+            offer_id,
+            envelope,
+            mut close_rx,
+            deadline,
+            reply,
+        } => {
+            handle_live_send_e2ee(
+                sessions,
+                session_id,
+                &offer_id,
+                *envelope,
+                &mut close_rx,
+                deadline,
+                reply,
+            )
+            .await;
+        }
+        LiveWebRtcCommand::Close {
+            session_id,
+            offer_id,
+            deadline,
+            reply,
+        } => handle_live_close(sessions, session_id, offer_id, deadline, reply).await,
     }
 }
 
