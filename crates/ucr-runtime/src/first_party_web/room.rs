@@ -440,6 +440,7 @@ fn end_room(state: &State, auth: &Session, input: &RoomEntryChange) -> Result<Va
             UniversalConferenceLifecycle::Scheduled
                 | UniversalConferenceLifecycle::Waiting
                 | UniversalConferenceLifecycle::Live
+                | UniversalConferenceLifecycle::Ending
         )
     {
         return Err(StatusCode::CONFLICT);
