@@ -2430,9 +2430,19 @@ impl ProductionRuntime {
         let first_party_config = first_party_web::Configuration::from_env()?;
         let first_party_store = Arc::clone(&store);
         let first_party_issuer = Arc::clone(&join_issuer);
+        // Share the exact configured Realtime/provider owner with the BFF so
+        // a terminal first-party Direct Call can await the same close/retry
+        // boundary used by the gRPC cleanup worker.
+        let first_party_realtime_service = realtime_service.clone();
         let first_party_listener = async move {
             if let Some(config) = first_party_config {
-                first_party_web::serve(config, first_party_store, first_party_issuer).await
+                first_party_web::serve(
+                    config,
+                    first_party_store,
+                    first_party_issuer,
+                    first_party_realtime_service,
+                )
+                .await
             } else {
                 std::future::pending::<Result<(), String>>().await
             }
