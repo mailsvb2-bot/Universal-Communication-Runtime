@@ -1245,11 +1245,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     .unwrap();
     let mut rekey_context = media_context.clone();
     rekey_context.crypto_epoch = rekey_artifacts.next_crypto_state.epoch;
-    rekey_context.crypto_state_ref = rekey_artifacts
-        .next_crypto_state
-        .state_ref
-        .clone()
-        .unwrap();
+    rekey_context.crypto_state_ref = rekey_artifacts.next_crypto_state.state_ref.clone().unwrap();
     let rekey_wire = seal_endpoint_group_media_wire(
         &alice_rekey_secret,
         &rekey_context,
@@ -2015,7 +2011,10 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .expect("hangup waits for the shared Realtime provider-close boundary");
     assert_eq!(hung["state"], "terminated");
     assert!(
-        realtime_registry.pending_webrtc_closes().unwrap().is_empty(),
+        realtime_registry
+            .pending_webrtc_closes()
+            .unwrap()
+            .is_empty(),
         "BFF must not confirm terminal Direct Call while a local provider close remains pending"
     );
     assert!(
