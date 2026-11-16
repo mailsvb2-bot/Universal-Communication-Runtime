@@ -93,7 +93,7 @@ const CHALLENGE_TTL: Duration = Duration::from_secs(90);
 const SESSION_TTL: Duration = Duration::from_mins(30);
 const COOKIE_NAME: &str = "__Host-ucr_fp";
 type HttpResponse = Response<Full<Bytes>>;
-type FirstPartyRealtimeService = GrpcRealtimeService<
+pub(super) type FirstPartyRealtimeService = GrpcRealtimeService<
     ucr_core::SystemServiceQuotaClock,
     SqliteLocalStore,
     SqliteLocalStore,
