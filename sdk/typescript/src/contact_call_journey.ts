@@ -299,7 +299,9 @@ export function createUcrContactCallJourney(
            !["inviting","ringing"].includes(before.state))) {
         throw new Error("only the initiator may cancel an unanswered Call");
       }
-      if (action==="hangup" && !["active","reconnecting"].includes(before.state)) {
+      const alreadyTerminated=action==="hangup"&&before.state==="terminated";
+      if (action==="hangup"&&!alreadyTerminated&&
+          !["active","reconnecting"].includes(before.state)) {
         throw new Error("no active Call to end");
       }
       await prepare(auth);
@@ -308,7 +310,13 @@ export function createUcrContactCallJourney(
         callId,action,expectedRevision:before.revision,
       }),auth);
       assertCallIdentity(before,result);
-      if (result.revision<=before.revision) throw new Error("Call signal not committed");
+      if (alreadyTerminated) {
+        if(result.state!=="terminated"||result.revision!==before.revision){
+          throw new Error("idempotent Hangup changed a terminal Call");
+        }
+      } else if (result.revision<=before.revision) {
+        throw new Error("Call signal not committed");
+      }
       // A successful HTTP response is not proof that the requested canonical
       // transition happened. Never report a completed hangup while the Call
       // owner still considers the microphone/video session active.
