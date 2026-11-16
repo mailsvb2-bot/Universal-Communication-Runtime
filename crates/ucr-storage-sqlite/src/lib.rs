@@ -4661,6 +4661,20 @@ mod tests {
             reopened.authorization_revision().expect("new revision") > expected,
             "the committed revoke advances the canonical revision"
         );
+        let mut stale_sink_invoked = false;
+        assert_eq!(
+            AuthorizationEvaluator::with_authorization_revision_fence(
+                &reopened,
+                expected,
+                &mut || {
+                    stale_sink_invoked = true;
+                    Ok(())
+                },
+            ),
+            Err(DurableStoreError::Conflict),
+            "a stale revision must reject the sink callback"
+        );
+        assert!(!stale_sink_invoked);
     }
 
     #[test]
