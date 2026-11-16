@@ -1786,11 +1786,16 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     // cross-process Join revoke and terminal Call transaction. Check through
     // both independent BFF handles, not only the writer's in-memory view.
     assert!(
-        !server.store.server_possesses_mls_group(&claims[0].scope, &group_id).unwrap(),
+        !server
+            .store
+            .server_possesses_mls_group(&claims[0].scope, &group_id)
+            .unwrap(),
         "server OpenMLS provider must not gain endpoint Group state after Hangup"
     );
     assert!(
-        !other_store.server_possesses_mls_group(&claims[0].scope, &group_id).unwrap(),
+        !other_store
+            .server_possesses_mls_group(&claims[0].scope, &group_id)
+            .unwrap(),
         "an independent SQLite/BFF connection must observe the same server-blind custody result"
     );
     // Hangup must atomically revoke BOTH already-issued durable bearers,
