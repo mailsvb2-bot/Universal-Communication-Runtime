@@ -2923,7 +2923,7 @@ async function hangupFirstPartyDirectCall(callId){
   try{
     user=await host.resumeAuthenticatedDevice();
   }catch(error){
-    if(!/HTTP 401\\b/.test(String(error?.message||error)))throw error;
+    if(!/HTTP 401\b/.test(String(error?.message||error)))throw error;
     const reauthenticate=window.ucrRefreshFirstPartyDeviceSession;
     if(typeof reauthenticate!=="function")throw error;
     await reauthenticate();
@@ -2965,7 +2965,8 @@ async function leave(){
   const leavingClaims=wasActive?body():null;
   const leavingSequence=activeSessionSequence;
   const leavingOfferId=startWebRtc.offerId;
-  const directCallId=retireGrant&&claims?.call_id?.startsWith("fp-m-")
+  const isFirstPartyDirectCall=retireGrant&&claims?.call_id?.startsWith("fp-m-");
+  const directCallId=isFirstPartyDirectCall
     ?sessionStorage.getItem("ucrFirstPartyDirectCall"):null;
   cancelMediaStartupWatchdog();
   // A late Leave from this grant must never compete with another Join using
@@ -2990,7 +2991,7 @@ async function leave(){
     try{await closeServerPeer(false,leavingOfferId,leavingClaims);}catch(_){}
   }
   let remoteStopConfirmed=!wasActive||!leavingClaims||leavingSequence<=0;
-  if(wasActive&&leavingClaims&&leavingSequence>0){
+  if(isFirstPartyDirectCall){
     if(directCallId){
       ui.status.textContent="Завершаем защищённый вызов и подтверждаем закрытие медиасессии…";
       try{
@@ -2998,24 +2999,36 @@ async function leave(){
         remoteStopConfirmed=true;
         sessionStorage.removeItem("ucrFirstPartyDirectCall");
       }catch(_){
+        remoteStopConfirmed=false;
         // The local capture is already stopped. Best-effort exact-session Leave
         // is still useful if BFF Hangup failed before revocation; it does not
         // count as confirmation that the whole Direct Call has stopped.
+        if(wasActive&&leavingClaims&&leavingSequence>0){
+          try{
+            await api("/v1/realtime/leave",{
+              ...leavingClaims,expected_session_sequence:leavingSequence
+            });
+          }catch(__){}
+        }
+      }
+    }else{
+      remoteStopConfirmed=false;
+      if(wasActive&&leavingClaims&&leavingSequence>0){
         try{
           await api("/v1/realtime/leave",{
             ...leavingClaims,expected_session_sequence:leavingSequence
           });
-        }catch(__){}
+        }catch(_){}
       }
-    }else{
-      ui.status.textContent="Закрываем медиасессию на сервере…";
-      try{
-        await api("/v1/realtime/leave",{
-          ...leavingClaims,expected_session_sequence:leavingSequence
-        });
-        remoteStopConfirmed=true;
-      }catch(_){}
     }
+  }else if(wasActive&&leavingClaims&&leavingSequence>0){
+    ui.status.textContent="Закрываем медиасессию на сервере…";
+    try{
+      await api("/v1/realtime/leave",{
+        ...leavingClaims,expected_session_sequence:leavingSequence
+      });
+      remoteStopConfirmed=true;
+    }catch(_){}
   }
   if(!remoteStopConfirmed&&typeof ucrRecordDiagnostic==="function"){
     ucrRecordDiagnostic("Local capture stopped; server provider-close confirmation unavailable","lifecycle");
@@ -3028,7 +3041,7 @@ async function leave(){
   if(leaveGeneration===sessionLifecycleGeneration){
     ui.state.textContent=remoteStopConfirmed?"Left":"Local media stopped";
     ui.status.textContent=remoteStopConfirmed
-      ?(directCallId
+      ?(isFirstPartyDirectCall
         ?"Вызов завершён. Сервер подтвердил закрытие медиасессии."
         :"Сеанс конференции закрыт. Сервер подтвердил закрытие медиасессии.")
       :"Локальные камера и микрофон выключены. Сервер пока не подтвердил закрытие медиасессии; повторная очистка продолжается. Этот сеанс нельзя использовать повторно.";
