@@ -724,7 +724,10 @@ revision. The sink could then accept ciphertext under a revoked Join even
 though the post-send recheck rejected the response.
 
 Schema v59 adds INSERT/UPDATE/DELETE revision triggers for the existing
-canonical `conference_join_grants` table and verifies all three on reopen.
+canonical `conference_join_grants`, `universal_conferences` and
+`universal_conference_participants` tables and verifies all nine on reopen.
+The latter two tables are also read by realtime admission for conference
+lifecycle and participant media permissions.
 The v58-to-v59 migration is transactional; no grant rows, keys or phone data
 are copied into a second store. A regression creates the canonical grant row,
 revokes it through an independent SQLite store connection, and proves that
