@@ -1218,6 +1218,14 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
     if before.revision != req.expected_revision {
         return Err(StatusCode::CONFLICT);
     }
+    // A retry after the canonical Hangup committed but provider cleanup
+    // timed out must re-enter the same targeted close boundary below.
+    // get_call already authenticated this participant and active Device.
+    if req.action == "hangup"
+        && before.signalling_state == CallSignallingState::Terminated
+    {
+        return to_call(state, &before);
+    }
     let action = match req.action.as_str() {
         "accept" => CallSignalKind::Accept,
         "reject" => CallSignalKind::Reject,
