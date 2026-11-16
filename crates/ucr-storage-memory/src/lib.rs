@@ -460,7 +460,15 @@ impl AuthorizationEvaluator for MemoryLocalStore {
     ) -> Result<(), DurableStoreError> {
         // Mutable MemoryLocalStore operations hold this mutex and publish their
         // revision before releasing it. Keep it held through sink acceptance.
-        let _state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let _state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(DurableStoreError::Unavailable);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(DurableStoreError::Internal);
+            }
+        };
         if self.authorization_revision.load(AtomicOrdering::SeqCst) != expected_revision {
             return Err(DurableStoreError::Conflict);
         }
