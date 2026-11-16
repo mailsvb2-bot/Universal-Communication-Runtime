@@ -283,11 +283,16 @@ jobs:
         run: adb emu kill >/dev/null 2>&1 || true
 
   ios-safari-attempts:
+    # One real iOS Safari + Desktop Safari run is release-critical. The older
+    # Intel runner repeatedly stalls in Apple's CoreSimulator before testing
+    # the application and is not an independent browser compatibility signal.
+    # Keep the ARM macOS probe mandatory and require its real evidence below;
+    # do not claim unsupported Intel-specific coverage.
     name: mobile-ios-safari-attempt-${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-15-intel]
+        runner: [macos-15]
     runs-on: ${{ matrix.runner }}
     # iOS Safari is release-critical; do not hide failures as successes.
     timeout-minutes: 45
