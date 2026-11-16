@@ -24,11 +24,11 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto,
 };
-use ucr_api_grpc::GrpcRealtimeService;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
+use ucr_api_grpc::GrpcRealtimeService;
 use ucr_core::{
     AuthorizedDurableRuntime, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
     GroupStore, IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
@@ -93,11 +93,8 @@ const CHALLENGE_TTL: Duration = Duration::from_secs(90);
 const SESSION_TTL: Duration = Duration::from_mins(30);
 const COOKIE_NAME: &str = "__Host-ucr_fp";
 type HttpResponse = Response<Full<Bytes>>;
-pub(super) type FirstPartyRealtimeService = GrpcRealtimeService<
-    ucr_core::SystemServiceQuotaClock,
-    SqliteLocalStore,
-    SqliteLocalStore,
->;
+pub(super) type FirstPartyRealtimeService =
+    GrpcRealtimeService<ucr_core::SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1221,9 +1218,7 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
     // A retry after the canonical Hangup committed but provider cleanup
     // timed out must re-enter the same targeted close boundary below.
     // get_call already authenticated this participant and active Device.
-    if req.action == "hangup"
-        && before.signalling_state == CallSignallingState::Terminated
-    {
+    if req.action == "hangup" && before.signalling_state == CallSignallingState::Terminated {
         return to_call(state, &before);
     }
     let action = match req.action.as_str() {
@@ -2248,7 +2243,8 @@ async fn dispatch(
     }
     // Typed decoding rejects extraneous fields; account/scope is verified against
     // the independent server session on every route.
-    let response = dispatch_post_with_provider_cleanup(state, path, &body, session.as_ref()).await?;
+    let response =
+        dispatch_post_with_provider_cleanup(state, path, &body, session.as_ref()).await?;
     body.clear();
     Ok(response)
 }
