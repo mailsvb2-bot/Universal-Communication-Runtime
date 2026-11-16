@@ -881,7 +881,7 @@ async fn first_party_browser_webrtc_peer(
 /// a third party, an unaccepted callee and a hung-up Call stay refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)] // One end-to-end acceptance narrative.
-async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_participants_only() {
+async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanly() {
     use ucr_api_grpc::{
         GrpcRealtimeService, RealtimeWebRtcDependencies, pb,
         pb::realtime_service_server::RealtimeService as _,
