@@ -246,6 +246,25 @@ pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
     fn authorization_revision(&self) -> Option<u64> {
         None
     }
+
+    /// Pins every durable fact represented by `authorization_revision` while one
+    /// bounded infrastructure handoff is accepted.
+    ///
+    /// Implementations MUST hold the same transaction/lock used by every writer
+    /// that can change an authorization outcome for the entire callback. A
+    /// revision mismatch returns `Conflict` without invoking the callback.
+    /// The callback MUST be bounded and MUST NOT re-enter this authorization
+    /// store. Implementations without this atomic boundary fail closed.
+    ///
+    /// # Errors
+    /// Returns `Conflict` for stale authorization, or an explicit store error.
+    fn with_authorization_revision_fence(
+        &self,
+        _expected_revision: u64,
+        _action: &mut dyn FnMut() -> Result<(), DurableStoreError>,
+    ) -> Result<(), DurableStoreError> {
+        Err(DurableStoreError::PermissionDenied)
+    }
 }
 
 /// Durable owner of permissions bound to exactly one Call (never tenant-wide).
