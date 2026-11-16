@@ -4664,6 +4664,8 @@ mod tests {
         // the canonical grant row's INSERT/UPDATE lifecycle, not conference creation.
         // Production writers still persist this same row under their normal FK checks.
         let raw = rusqlite::Connection::open(db.path()).expect("raw grant fixture connection");
+        raw.pragma_update(None, "foreign_keys", "OFF")
+            .expect("isolate fixture from group foreign key setup");
         raw.execute(
             "INSERT INTO conference_join_grants (
                 tenant_id, namespace_present, namespace_id, session_id, conference_id,
