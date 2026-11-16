@@ -207,6 +207,7 @@ pub(super) fn test_drop_v59_sql() -> String {
     sql
 }
 
+#[cfg(test)]
 pub(super) fn test_drop_sql() -> String {
     let mut sql = String::new();
     for table in AUTHORIZATION_TABLES_V58 {
