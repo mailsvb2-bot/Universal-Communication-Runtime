@@ -1,4 +1,4 @@
-//! Monotonic authorization revision (schema v58).
+//! Monotonic authorization revision (schema v59).
 //!
 //! One singleton counter is bumped by triggers, inside the SAME transaction,
 //! on every INSERT/UPDATE/DELETE of a table that any authorization decision
@@ -15,7 +15,7 @@ use ucr_core::DurableStoreError;
 
 use super::{SqliteLocalStore, map_schema_change_error, map_sqlite_error, verify_table_columns};
 
-/// Every table whose content can change an authorization outcome.
+/// Tables covered by the initial schema-v58 authorization revision fence.
 pub(super) const AUTHORIZATION_TABLES_V58: &[&str] = &[
     "calls",
     "call_participants",
