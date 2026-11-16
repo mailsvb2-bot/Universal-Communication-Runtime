@@ -1282,8 +1282,7 @@ async fn handle_live_close(
             let closed = bounded_peer_close(&session.peer_connection).await;
             match (drained, closed) {
                 (Ok(()), Ok(())) => Ok(()),
-                (Err(error), _) => Err(error),
-                (_, Err(error)) => Err(error),
+                (Err(error), _) | (_, Err(error)) => Err(error),
             }
         }
         None => Err(WebRtcProviderError::SessionUnavailable),
