@@ -40,7 +40,11 @@ pub(super) const AUTHORIZATION_TABLES_V58: &[&str] = &[
 /// Tables added to the authorization revision fence after schema v58.
 /// A durable Join grant is checked on every realtime media frame and therefore
 /// must invalidate a revision captured before its cross-process revocation.
-pub(super) const AUTHORIZATION_TABLES_V59: &[&str] = &["conference_join_grants"];
+pub(super) const AUTHORIZATION_TABLES_V59: &[&str] = &[
+    "conference_join_grants",
+    "universal_conferences",
+    "universal_conference_participants",
+];
 
 const OPERATIONS: &[(&str, &str)] = &[("ins", "INSERT"), ("upd", "UPDATE"), ("del", "DELETE")];
 
