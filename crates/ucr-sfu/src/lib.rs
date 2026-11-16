@@ -1051,15 +1051,14 @@ where
 
 /// Dispatches an encrypted batch only through the canonical live SFU runtime.
 ///
-/// A prepared batch is NOT a durable permission grant. Before each sink side effect,
-/// the current Call, Group/MLS, source Device/signature and send/receive authority
-/// are revalidated for that exact target. This also fences a batch that was prepared
-/// before Hangup, Device revocation, key rotation or a permission revoke.
+/// A prepared batch is NOT a durable permission grant. This standalone entry point captures the
+/// authorization revision before its per-target revalidation and uses that same revision through
+/// every sink acceptance.
 ///
-/// An asynchronous transport MUST recheck through this boundary at its actual send
-/// point; queueing a batch or receiving an earlier validation is not send authority.
-/// An in-flight sink operation is not cancelled by this synchronous check: provider
-/// close and physical remote-capture stop require separate lifecycle enforcement.
+/// Callers that performed additional session-scoped authentication before this boundary MUST use
+/// `dispatch_validated_forward_batch_at_revision` with a revision captured before that
+/// authentication. Otherwise a session revoke between preflight and this function could be
+/// mistaken for the new baseline.
 ///
 /// # Errors
 /// Rejects stale/revoked authority before the next sink call, or returns the exact
@@ -1079,15 +1078,45 @@ where
     E: GroupMediaE2eeCapabilityProvider,
     C: SfuCapabilityProvider,
 {
+    let expected_revision = runtime
+        .authorization
+        .authorization_revision()
+        .ok_or(SfuError::AuthorizationFenceUnavailable)?;
+    dispatch_validated_forward_batch_at_revision(runtime, batch, expected_revision, sink)
+}
+
+/// Dispatches an encrypted batch against the authorization revision captured by its caller.
+///
+/// This is the session-scoped boundary: the caller captures the revision before checking signed
+/// Join, Device, Call and media admission. The same revision is held through every actual sink
+/// acceptance, so a cross-process revoke between preflight and fan-out cannot become the new
+/// baseline. The callback remains bounded and MUST NOT re-enter the canonical authorization store.
+///
+/// # Errors
+/// Rejects any authorization mutation since `expected_revision` before the next sink call, or
+/// returns the exact partial-acceptance count and bounded sink error from the first failed target.
+pub fn dispatch_validated_forward_batch_at_revision<A, S, E, C>(
+    runtime: &SfuRuntime<'_, A, S, E, C>,
+    batch: &SfuValidatedForwardBatch,
+    expected_revision: u64,
+    sink: &dyn SfuForwardSink,
+) -> Result<SfuForwardOutcome, SfuError>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+    E: GroupMediaE2eeCapabilityProvider,
+    C: SfuCapabilityProvider,
+{
     let source = ScopedPrincipal {
         scope: batch.envelope.frame.header.scope.clone(),
         principal: batch.envelope.frame.header.source.clone(),
     };
     let device_id = &batch.envelope.frame.header.source_device_id;
     for (accepted, target) in batch.targets.iter().enumerate() {
-        // Capture BEFORE revalidation. Any authorization mutation between this
-        // read and the sink fence must make the fence reject the handoff.
-        let expected_revision = runtime.authorization.authorization_revision();
         let current = runtime.prepare_forward_selected(
             &source,
             device_id,
@@ -1099,7 +1128,6 @@ where
         {
             return Err(SfuError::SourceMismatch);
         }
-        let expected_revision = expected_revision.ok_or(SfuError::AuthorizationFenceUnavailable)?;
         let mut sink_result = None;
         let mut sink_invoked = false;
         runtime
