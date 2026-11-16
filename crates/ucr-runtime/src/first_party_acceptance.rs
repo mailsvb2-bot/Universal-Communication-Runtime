@@ -748,23 +748,17 @@ async fn first_party_browser_webrtc_peer(
     String,
 ) {
     use ucr_api_grpc::{
-        REALTIME_AUTHORIZATION_METADATA_KEY,
-        pb,
-        pb::realtime_service_server::RealtimeService as _,
+        REALTIME_AUTHORIZATION_METADATA_KEY, pb, pb::realtime_service_server::RealtimeService as _,
     };
     use ucr_webrtc::WEBRTC_E2EE_DATA_CHANNEL_LABEL;
     use webrtc::{
         api::{
-            APIBuilder,
-            interceptor_registry::register_default_interceptors,
-            media_engine::MediaEngine,
+            APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
         },
         data_channel::data_channel_state::RTCDataChannelState,
         interceptor::registry::Registry,
         peer_connection::{
-            RTCPeerConnection,
-            configuration::RTCConfiguration,
-            sdp::session_description::RTCSessionDescription,
+            RTCPeerConnection, configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription,
         },
     };
 
@@ -795,7 +789,9 @@ async fn first_party_browser_webrtc_peer(
     let description = offer.description.expect("offer SDP");
 
     let mut media_engine = MediaEngine::default();
-    media_engine.register_default_codecs().expect("default codecs");
+    media_engine
+        .register_default_codecs()
+        .expect("default codecs");
     let interceptors =
         register_default_interceptors(Registry::new(), &mut media_engine).expect("interceptors");
     let api = APIBuilder::new()
@@ -819,7 +815,10 @@ async fn first_party_browser_webrtc_peer(
     )
     .await
     .expect("apply server offer");
-    let answer = peer.create_answer(None).await.expect("create browser answer");
+    let answer = peer
+        .create_answer(None)
+        .await
+        .expect("create browser answer");
     let mut gathering = peer.gathering_complete_promise().await;
     peer.set_local_description(answer)
         .await
@@ -889,11 +888,11 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
     };
     use ucr_core::{CallStore, GroupStore, PermissionGrantStore};
     use ucr_model::{GroupMemberState, PermissionGrant, PermissionScope, PrincipalRef};
+    use ucr_protocol::decode_sfu_forward_envelope;
     use ucr_webrtc::{
         LiveWebRtcProvider, WebRtcE2eeReassembler, WebRtcSessionConfigFactory,
         encode_webrtc_e2ee_chunks,
     };
-    use ucr_protocol::decode_sfu_forward_envelope;
 
     let db = TestDb::new();
     let mut server = state(&db.0);
@@ -1560,10 +1559,7 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
         Arc::clone(&server.issuer),
         Arc::clone(&realtime_registry),
         Arc::new(ucr_conference::ConferenceRuntimeState::new()),
-        RealtimeWebRtcDependencies::new(
-            provider,
-            Arc::new(WebRtcSessionConfigFactory::default()),
-        ),
+        RealtimeWebRtcDependencies::new(provider, Arc::new(WebRtcSessionConfigFactory::default())),
     )
     .with_mls_admission_store(Arc::clone(&realtime_store));
     // The BFF and gRPC surface share the exact provider, registry and close
@@ -1782,11 +1778,15 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
         first_party_browser_webrtc_peer(&realtime, &claims[1], &tokens[1]).await;
     assert_ne!(alice_offer_id, bob_offer_id);
     assert_eq!(
-        live_provider.session_offer_id(&claims[0].session_id).unwrap(),
+        live_provider
+            .session_offer_id(&claims[0].session_id)
+            .unwrap(),
         alice_offer_id
     );
     assert_eq!(
-        live_provider.session_offer_id(&claims[1].session_id).unwrap(),
+        live_provider
+            .session_offer_id(&claims[1].session_id)
+            .unwrap(),
         bob_offer_id
     );
 
@@ -1853,7 +1853,7 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
             scope: live_media_context.scope.clone(),
             call_id: live_media_context.call_id.clone(),
             group_id: live_media_context.group_id.clone(),
-            stream_id: opaque("first-party-live-webrtc-video"),
+            stream_id: opaque("first-party-live-webrtc-video").unwrap(),
             source: alice_session.subject.principal.clone(),
             source_device_id: alice_id.clone(),
             negotiation_ref: live_media_context.negotiation_ref.clone(),
@@ -1869,7 +1869,7 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
             keyframe: true,
         },
         b"first-party endpoint MLS media over live WebRTC",
-        KeyId::from_opaque(opaque(&alice_session.signer_key_id)),
+        KeyId::from_opaque(opaque(&alice_session.signer_key_id).unwrap()),
         &canonical_media_signer,
     )
     .expect("seal canonical endpoint MLS media wire");
@@ -1908,7 +1908,11 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
     let accepted = tokio::task::block_in_place(|| {
         realtime.forward_authenticated_e2ee_media(&ingress_claims, &ingress.envelope, &sink)
     });
-    assert_eq!(accepted, Ok(1), "canonical SFU path must accept one Bob recipient");
+    assert_eq!(
+        accepted,
+        Ok(1),
+        "canonical SFU path must accept one Bob recipient"
+    );
     let received = tokio::time::timeout(std::time::Duration::from_secs(8), delivered_rx.recv())
         .await
         .expect("Bob DataChannel receive deadline")
@@ -2396,11 +2400,15 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
         .expect("hangup waits for the shared Realtime provider-close boundary");
     assert_eq!(hung["state"], "terminated");
     assert!(
-        live_provider.session_offer_id(&claims[0].session_id).is_err(),
+        live_provider
+            .session_offer_id(&claims[0].session_id)
+            .is_err(),
         "BFF Hangup must close Alice's actual live WebRTC provider session"
     );
     assert!(
-        live_provider.session_offer_id(&claims[1].session_id).is_err(),
+        live_provider
+            .session_offer_id(&claims[1].session_id)
+            .is_err(),
         "BFF Hangup must close Bob's actual live WebRTC provider session"
     );
     for channel in [&alice_channel, &bob_channel] {
