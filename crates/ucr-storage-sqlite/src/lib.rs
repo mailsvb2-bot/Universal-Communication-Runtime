@@ -4676,7 +4676,7 @@ mod tests {
                        'fp-m-join-revision', 'person', 'join-revision-person',
                        'join-revision-device', 1, 1, 9999999999999, 'reusable',
                        0, 0, 0, 'join-revision-group')",
-            params![
+            rusqlite::params![
                 scope.tenant_id.as_opaque().as_str(),
                 if scope.namespace_id.is_some() { 1_i64 } else { 0_i64 },
                 scope
