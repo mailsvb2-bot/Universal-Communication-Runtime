@@ -600,6 +600,7 @@ fn rt0_alice_sfu_bob_decrypts_authorized_media_and_rejects_replay() {
 struct Rt0WebRtcSink<'a> {
     provider: &'a ucr_webrtc::LiveWebRtcProvider,
     bob_id: ucr_model::SessionId,
+    bob_offer_id: String,
     bob: PrincipalRef,
 }
 
@@ -613,7 +614,7 @@ impl SfuForwardSink for Rt0WebRtcSink<'_> {
             return Err(SfuForwardSinkError::Rejected);
         }
         self.provider
-            .send_e2ee_envelope(&self.bob_id, envelope)
+            .send_e2ee_envelope_if_offer_matches(&self.bob_id, &self.bob_offer_id, envelope)
             .map_err(|_| SfuForwardSinkError::Unavailable)
     }
 }
@@ -624,6 +625,7 @@ async fn rt0_independent_webrtc_peer(
 ) -> (
     std::sync::Arc<webrtc::peer_connection::RTCPeerConnection>,
     std::sync::Arc<webrtc::data_channel::RTCDataChannel>,
+    String,
 ) {
     use ucr_webrtc::{WebRtcProvider, WebRtcSessionConfig};
     use webrtc::{
@@ -663,6 +665,7 @@ async fn rt0_independent_webrtc_peer(
             ice_transport_policy: IceTransportPolicy::All,
         })
         .expect("server offer");
+    let offer_id = ucr_webrtc::webrtc_offer_id(&offer.sdp);
     peer.set_remote_description(RTCSessionDescription::offer(offer.sdp).expect("parse offer"))
         .await
         .expect("set offer");
@@ -699,7 +702,7 @@ async fn rt0_independent_webrtc_peer(
     })
     .await
     .expect("open DataChannel");
-    (peer, channel)
+    (peer, channel, offer_id)
 }
 
 fn assert_rt0_bob_endpoint_decrypts_and_rejects_replay(
@@ -741,8 +744,10 @@ async fn rt0_real_webrtc_alice_to_authorized_sfu_to_bob_endpoint_decrypt() {
     let provider = LiveWebRtcProvider::with_e2ee_ingress(tx).expect("live provider");
     let alice_id = SessionId::from_opaque(oid("rt0-auth-alice"));
     let bob_id = SessionId::from_opaque(oid("rt0-auth-bob"));
-    let (alice, alice_channel) = rt0_independent_webrtc_peer(&provider, &alice_id).await;
-    let (bob, bob_channel) = rt0_independent_webrtc_peer(&provider, &bob_id).await;
+    let (alice, alice_channel, _alice_offer_id) =
+        rt0_independent_webrtc_peer(&provider, &alice_id).await;
+    let (bob, bob_channel, bob_offer_id) =
+        rt0_independent_webrtc_peer(&provider, &bob_id).await;
     let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::channel(2);
     let reassembler = Arc::new(tokio::sync::Mutex::new(WebRtcE2eeReassembler::new()));
     bob_channel.on_message(Box::new(move |message| {
@@ -781,6 +786,7 @@ async fn rt0_real_webrtc_alice_to_authorized_sfu_to_bob_endpoint_decrypt() {
     let sink = Rt0WebRtcSink {
         provider: &provider,
         bob_id: bob_id.clone(),
+        bob_offer_id,
         bob: fixture.bob.principal.clone(),
     };
     let outsider = principal("rt0-outsider-real-transport");
