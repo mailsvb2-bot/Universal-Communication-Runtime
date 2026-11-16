@@ -753,12 +753,14 @@ async fn first_party_browser_webrtc_peer(
     use ucr_webrtc::WEBRTC_E2EE_DATA_CHANNEL_LABEL;
     use webrtc::{
         api::{
-            APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
+            APIBuilder, interceptor_registry::register_default_interceptors,
+            media_engine::MediaEngine,
         },
         data_channel::data_channel_state::RTCDataChannelState,
         interceptor::registry::Registry,
         peer_connection::{
-            RTCPeerConnection, configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription,
+            RTCPeerConnection, configuration::RTCConfiguration,
+            sdp::session_description::RTCSessionDescription,
         },
     };
 
