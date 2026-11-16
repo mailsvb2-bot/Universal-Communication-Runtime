@@ -4711,7 +4711,10 @@ mod tests {
             Err(DurableStoreError::Conflict),
             "a cross-connection Join revoke between preflight and sink must stale the captured revision"
         );
-        assert!(!sink_invoked, "stale Join grant must not reach the recipient sink");
+        assert!(
+            !sink_invoked,
+            "stale Join grant must not reach the recipient sink"
+        );
     }
 
     #[test]
