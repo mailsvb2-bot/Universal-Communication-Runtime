@@ -1099,8 +1099,7 @@ where
         {
             return Err(SfuError::SourceMismatch);
         }
-        let expected_revision =
-            expected_revision.ok_or(SfuError::AuthorizationFenceUnavailable)?;
+        let expected_revision = expected_revision.ok_or(SfuError::AuthorizationFenceUnavailable)?;
         let mut sink_result = None;
         let mut sink_invoked = false;
         runtime
