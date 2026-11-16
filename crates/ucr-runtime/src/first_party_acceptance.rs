@@ -1123,7 +1123,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     let delivered_welcome = URL_SAFE_NO_PAD
         .decode(handoff["welcomeBase64Url"].as_str().unwrap())
         .unwrap();
-    let bob_mls = join_from_welcome(
+    let mut bob_mls = join_from_welcome(
         &bob_provider,
         &scope,
         &group_id,
@@ -1198,11 +1198,180 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .expect("peer decrypts the same video with a distinct local MLS provider"),
         b"only recipient OpenMLS endpoints can decrypt this video",
     );
+
+    // Exercise a second real endpoint epoch transition (Rekey), then remove
+    // Bob. The old recipient exporter and an isolated relay leaf must not
+    // derive the current epoch's media key after either transition.
+    let rekey_artifacts = stage_transition(
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
+        &MlsTransitionInput::Rekey,
+    )
+    .expect("endpoint-only MLS rekey");
+    process_commit(
+        &bob_provider,
+        &mut bob_mls,
+        &scope,
+        &group_id,
+        &rekey_artifacts.commit,
+        &rekey_artifacts.next_crypto_state,
+    )
+    .expect("remaining endpoint processes rekey commit");
+    merge_pending(
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
+        &rekey_artifacts.next_crypto_state,
+    )
+    .expect("sender merges rekey after local commit");
+    let alice_rekey_secret = export_group_media_secret(
+        &alice_provider,
+        &alice_mls,
+        &scope,
+        &group_id,
+        &rekey_artifacts.next_crypto_state,
+    )
+    .unwrap();
+    let bob_rekey_secret = export_group_media_secret(
+        &bob_provider,
+        &bob_mls,
+        &scope,
+        &group_id,
+        &rekey_artifacts.next_crypto_state,
+    )
+    .unwrap();
+    let mut rekey_context = media_context.clone();
+    rekey_context.crypto_epoch = rekey_artifacts.next_crypto_state.epoch;
+    rekey_context.crypto_state_ref = rekey_artifacts
+        .next_crypto_state
+        .state_ref
+        .clone()
+        .unwrap();
+    let rekey_wire = seal_endpoint_group_media_wire(
+        &alice_rekey_secret,
+        &rekey_context,
+        GroupMediaFrameHeader {
+            scope: scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: group_id.clone(),
+            stream_id: opaque("endpoint-mls-test-video").unwrap(),
+            source: alice_session.subject.principal.clone(),
+            source_device_id: alice_id.clone(),
+            negotiation_ref: rekey_context.negotiation_ref.clone(),
+            negotiation_generation: rekey_context.negotiation_generation,
+            crypto_epoch: rekey_context.crypto_epoch,
+            crypto_state_ref: rekey_context.crypto_state_ref.clone(),
+            crypto_suite: rekey_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 2,
+            media_timestamp: 180_000,
+            keyframe: true,
+        },
+        b"rekeyed endpoint-only video",
+        KeyId::from_opaque(opaque("endpoint-mls-test-signature").unwrap()),
+        &signing_key,
+    )
+    .expect("sender encrypts at the rekeyed epoch");
+    assert_eq!(
+        open_endpoint_group_media_wire(
+            &bob_rekey_secret,
+            &rekey_context,
+            &rekey_wire,
+            signing_key.verifying_key(),
+        )
+        .expect("remaining endpoint decrypts rekeyed media"),
+        b"rekeyed endpoint-only video",
+    );
+
+    let remove_artifacts = stage_transition(
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
+        &MlsTransitionInput::Remove(vec![bob_id.clone()]),
+    )
+    .expect("endpoint-only MLS Remove for revoked Bob Device");
+    merge_pending(
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
+        &remove_artifacts.next_crypto_state,
+    )
+    .expect("remaining endpoint merges Remove after canonical revoke");
+    let alice_after_remove_secret = export_group_media_secret(
+        &alice_provider,
+        &alice_mls,
+        &scope,
+        &group_id,
+        &remove_artifacts.next_crypto_state,
+    )
+    .unwrap();
+    let mut revoked_context = media_context.clone();
+    revoked_context.crypto_epoch = remove_artifacts.next_crypto_state.epoch;
+    revoked_context.crypto_state_ref = remove_artifacts
+        .next_crypto_state
+        .state_ref
+        .clone()
+        .unwrap();
+    let revoked_wire = seal_endpoint_group_media_wire(
+        &alice_after_remove_secret,
+        &revoked_context,
+        GroupMediaFrameHeader {
+            scope: scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: group_id.clone(),
+            stream_id: opaque("endpoint-mls-test-video").unwrap(),
+            source: alice_session.subject.principal.clone(),
+            source_device_id: alice_id.clone(),
+            negotiation_ref: revoked_context.negotiation_ref.clone(),
+            negotiation_generation: revoked_context.negotiation_generation,
+            crypto_epoch: revoked_context.crypto_epoch,
+            crypto_state_ref: revoked_context.crypto_state_ref.clone(),
+            crypto_suite: revoked_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 3,
+            media_timestamp: 270_000,
+            keyframe: true,
+        },
+        b"post-revoke endpoint-only video",
+        KeyId::from_opaque(opaque("endpoint-mls-test-signature").unwrap()),
+        &signing_key,
+    )
+    .expect("remaining endpoint encrypts after member removal");
+    assert_eq!(
+        open_endpoint_group_media_wire(
+            &alice_after_remove_secret,
+            &revoked_context,
+            &revoked_wire,
+            signing_key.verifying_key(),
+        )
+        .expect("remaining endpoint opens post-revoke media"),
+        b"post-revoke endpoint-only video",
+    );
+    assert!(
+        open_endpoint_group_media_wire(
+            &bob_rekey_secret,
+            &revoked_context,
+            &revoked_wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "removed Device's previous epoch exporter cannot decrypt post-revoke media"
+    );
     assert!(
         !server
             .store
             .server_possesses_mls_group(&scope, &group_id)
-            .unwrap()
+            .unwrap(),
+        "server OpenMLS custody remains empty after endpoint rekey and Remove"
     );
     // Exercise a separate server-side OpenMLS provider, not a fabricated
     // zero exporter. The server may know the public Group ID and signed
@@ -1253,6 +1422,30 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "server-held relay provider must not process the endpoint-only MLS Add"
     );
     assert!(
+        process_commit(
+            &server_provider,
+            &mut server_group,
+            &scope,
+            &group_id,
+            &rekey_artifacts.commit,
+            &rekey_artifacts.next_crypto_state,
+        )
+        .is_err(),
+        "server-held relay provider must not process the endpoint-only MLS Rekey"
+    );
+    assert!(
+        process_commit(
+            &server_provider,
+            &mut server_group,
+            &scope,
+            &group_id,
+            &remove_artifacts.commit,
+            &remove_artifacts.next_crypto_state,
+        )
+        .is_err(),
+        "server-held relay provider must not process the endpoint-only MLS Remove"
+    );
+    assert!(
         open_endpoint_group_media_wire(
             &server_secret,
             &media_context,
@@ -1261,6 +1454,26 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         )
         .is_err(),
         "server-held relay provider must not decrypt the authenticated endpoint video wire"
+    );
+    assert!(
+        open_endpoint_group_media_wire(
+            &server_secret,
+            &rekey_context,
+            &rekey_wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "server-held relay provider must not derive the rekeyed endpoint exporter"
+    );
+    assert!(
+        open_endpoint_group_media_wire(
+            &server_secret,
+            &revoked_context,
+            &revoked_wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "server-held relay provider must not derive the post-revoke endpoint exporter"
     );
     // The durable media epoch is not a decryption key. Even with the
     // authentic captured ciphertext and sender signature, a caller using
