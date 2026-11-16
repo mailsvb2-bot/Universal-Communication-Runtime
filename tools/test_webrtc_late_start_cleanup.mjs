@@ -24,6 +24,11 @@ assert.match(engine,/Some\(session\) if !session\.shutdown_pending && session\.o
 assert.match(engine,/fn request_close\([\s\S]*?try_send\(LiveWebRtcCommand::Close[\s\S]*?close_tx\.send/);
 assert.match(e2ee,/async fn wait_for_matching_close\(/);
 assert.match(e2ee,/async fn cancellable_transport_operation</);
+assert.match(e2ee,/async fn wait_for_buffered_amount_zero</);
+assert.match(e2ee,/drain_before_close[\\s\\S]*?wait_for_buffered_amount_zero[\\s\\S]*?unordered\\.channel\\.buffered_amount/);
+assert.match(engine,/let drained = match session\\.e2ee_channel[\\s\\S]*?bounded_peer_close\\(&session\\.peer_connection\\)\\.await[\\s\\S]*?match \\(drained, closed\\)/);
+assert.match(e2ee,/datachannel_drain_waits_for_accepted_ciphertext_before_close_ack/);
+assert.match(e2ee,/datachannel_drain_fails_closed_when_ciphertext_never_leaves_buffer/);
 assert.match(e2ee,/cancellable_transport_operation\([\s\S]*?channel\.send\(/);
 assert.match(e2ee,/cancellable_transport_operation\([\s\S]*?channel\.buffered_amount\(\)/);
 assert.match(e2ee,/matching_close_cancels_an_inflight_datachannel_acceptance/);
