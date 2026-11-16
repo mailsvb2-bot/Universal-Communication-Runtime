@@ -1247,7 +1247,7 @@ async fn handle_live_close(
     sessions: &mut HashMap<String, LiveWebRtcSession>,
     session_id: SessionId,
     offer_id: Option<String>,
-    _deadline: Instant,
+    deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
 ) {
     // Close is a safety operation, not a new admission. A blocked Create or
@@ -1269,9 +1269,22 @@ async fn handle_live_close(
     // revoked session could keep sending after its registry entry is gone.
     let result = match sessions.get_mut(&key) {
         Some(session) => {
-            // Quarantine BEFORE the fallible close: a retained peer is retry-only.
+            // Quarantine BEFORE either fallible operation: a retained peer is retry-only.
             session.shutdown_pending = true;
-            bounded_peer_close(&session.peer_connection).await
+            // The active SendE2ee future has already observed Close and returned.
+            // Drain ciphertext accepted before that signal before acknowledging
+            // provider closure; if the local transport cannot drain within the
+            // bounded request, keep the peer handle for the canonical retry path.
+            let drained = match session.e2ee_channel.as_ref() {
+                Some(channel) => channel.drain_before_close(deadline).await,
+                None => Ok(()),
+            };
+            let closed = bounded_peer_close(&session.peer_connection).await;
+            match (drained, closed) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), _) => Err(error),
+                (_, Err(error)) => Err(error),
+            }
         }
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
