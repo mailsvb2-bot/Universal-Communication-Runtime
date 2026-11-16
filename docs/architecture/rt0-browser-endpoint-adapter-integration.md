@@ -240,6 +240,31 @@ Still open: real A/B media transport, simultaneous capture revocation and
 measured quality/latency across two physical devices and NAT/TURN. Browser
 and CI conformance cannot substitute for those release gates.
 
+### SFU sink acceptance is linearized with canonical revoke
+
+The SFU does not treat a prepared batch or an earlier authorization check as
+send authority. Immediately before each recipient handoff it captures the
+canonical authorization revision, revalidates source Device, Call, Group/MLS
+membership and both send/receive permissions, then invokes the sink only
+inside `AuthorizationEvaluator::with_authorization_revision_fence`. The
+SQLite implementation holds an IMMEDIATE transaction and checks the same
+trigger-maintained revision used by Call, Call-participant, Group/MLS,
+Device, trusted-key and permission writes. A revoke that commits first changes
+the revision and the sink callback is not invoked; a sink acceptance already
+inside the fence completes before another SQLite connection can commit revoke.
+The in-memory store uses its existing canonical state mutex and revision.
+Unrevisioned or non-atomic evaluators fail closed at this boundary. Sink
+callbacks must be bounded and must not re-enter the canonical store.
+
+This establishes an ordering for SFU sink acceptance, not remote delivery.
+A WebRTC provider Close separately cancels the in-flight send and drains every
+still-open E2EE DataChannel before acknowledging closure. If a channel is
+already `Closed`, its remaining local buffer cannot reach the recipient and
+does not block cleanup; an open channel must still drain to zero before Close
+is acknowledged. A timeout keeps the peer quarantined and retryable. None of
+these local proofs substitutes for observing remote capture stop on a physical
+second device.
+
 ### Durable recipient KeyPackage before Welcome (PR #330)
 
 The browser WASM endpoint now provides `seal_unjoined_key_package` and
