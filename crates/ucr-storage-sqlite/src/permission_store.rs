@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use ucr_core::{AuthorizationEvaluator, DurableStoreError, PermissionGrantStore};
 use ucr_model::{
@@ -179,27 +181,44 @@ impl AuthorizationEvaluator for SqliteLocalStore {
         expected_revision: u64,
         action: &mut dyn FnMut() -> Result<(), DurableStoreError>,
     ) -> Result<(), DurableStoreError> {
-        let mut connection = self.lock_connection()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        let mut connection = match self.connection.try_lock() {
+            Ok(connection) => connection,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(DurableStoreError::Unavailable);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(DurableStoreError::Internal);
+            }
+        };
+        // Do not let a media frame wait behind another process's writer for
+        // the normal five-second database timeout. Contention fails closed.
+        connection
+            .busy_timeout(Duration::from_millis(100))
             .map_err(|error| map_sqlite_error(&error))?;
-        let value: i64 = transaction
-            .query_row(
-                "SELECT revision FROM authorization_revision WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| map_sqlite_error(&error))?;
-        let current = u64::try_from(value).map_err(|_| DurableStoreError::Corrupt)?;
-        if current != expected_revision {
-            return Err(DurableStoreError::Conflict);
-        }
-        // This transaction is a read-only writer lock. Roll it back on
-        // drop after the external handoff; a commit error must not turn an
-        // already accepted ciphertext into an ambiguous retry.
-        action()?;
-        drop(transaction);
-        Ok(())
+        let result = (|| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| map_sqlite_error(&error))?;
+            let value: i64 = transaction
+                .query_row(
+                    "SELECT revision FROM authorization_revision WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| map_sqlite_error(&error))?;
+            let current = u64::try_from(value).map_err(|_| DurableStoreError::Corrupt)?;
+            if current != expected_revision {
+                return Err(DurableStoreError::Conflict);
+            }
+            // This transaction is a read-only writer lock. Roll it back on
+            // drop after the external handoff; a commit error must not turn an
+            // already accepted ciphertext into an ambiguous retry.
+            action()
+        })();
+        // Restore the store's normal timeout after the fence. A reset failure
+        // must not turn a completed external handoff into an ambiguous retry.
+        let _ = connection.busy_timeout(super::BUSY_TIMEOUT);
+        result
     }
 }
 
