@@ -213,8 +213,7 @@ where
 {
     let remaining = deadline
         .checked_duration_since(Instant::now())
-        .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?
-        .min(std::time::Duration::from_millis(250));
+        .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?;
     tokio::select! {
         biased;
         () = wait_for_matching_close(close_rx, session_key, offer_id) => {
@@ -309,7 +308,7 @@ impl LiveWebRtcE2eeChannel {
         Ok(())
     }
 
-    /// Waits until every ciphertext chunk already accepted by either DataChannel
+    /// Waits until every ciphertext chunk already accepted by either `DataChannel`
     /// has left its local send buffer. Close acknowledgement must not race a
     /// frame that was accepted before the cancellation signal.
     ///
@@ -833,6 +832,29 @@ mod tests {
         assert!(
             accept_tx.send(()).is_err(),
             "matching Close must drop the pending DataChannel acceptance future"
+        );
+    }
+
+    #[tokio::test]
+    async fn datachannel_acceptance_uses_the_remaining_request_deadline() {
+        let (close_tx, _) = broadcast::channel(4);
+        let mut close_rx = close_tx.subscribe();
+        let operation = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Ok::<(), ()>(())
+        };
+
+        assert_eq!(
+            cancellable_transport_operation(
+                operation,
+                Instant::now() + Duration::from_secs(2),
+                &mut close_rx,
+                "session-a",
+                "offer-a",
+                |result| result.map_err(|_| crate::WebRtcProviderError::Internal),
+            )
+            .await,
+            Ok(())
         );
     }
 
