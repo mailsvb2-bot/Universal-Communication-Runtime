@@ -4678,16 +4678,11 @@ mod tests {
                        0, 0, 0, 'join-revision-group')",
             rusqlite::params![
                 scope.tenant_id.as_opaque().as_str(),
-                if scope.namespace_id.is_some() {
-                    1_i64
-                } else {
-                    0_i64
-                },
+                i64::from(scope.namespace_id.is_some()),
                 scope
                     .namespace_id
                     .as_ref()
-                    .map(|id| id.as_opaque().as_str())
-                    .unwrap_or(""),
+                    .map_or("", |id| id.as_opaque().as_str()),
                 session_id.as_opaque().as_str(),
             ],
         )

@@ -223,7 +223,7 @@ fn local_sfu_sink_acceptance_is_held_inside_revision_fence_before_media_ready() 
 
     let sfu = read("crates/ucr-sfu/src/lib.rs");
     let fence = sfu
-        .split("pub fn dispatch_validated_forward_batch_at_revision(")
+        .split("pub fn dispatch_validated_forward_batch_at_revision<")
         .nth(1)
         .expect("canonical SFU revision-fenced dispatcher");
     let fence = fence

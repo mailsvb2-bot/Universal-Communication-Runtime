@@ -1585,6 +1585,52 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
             other => panic!("direct-call participant was not admitted: {other:?}"),
         }
     }
+    // The live browser explicitly installs its receive selections after Join.
+    // A successful Join is not an implicit Conference subscription: exercise
+    // the same canonical SFU subscription RPC the production client uses,
+    // rather than weakening the SFU's opt-in recipient boundary.
+    let bob_lookup = realtime_join_request(&claims[1], &tokens[1]).into_inner();
+    let alice_source = pb::PrincipalRef {
+        principal_id: Some(pb::OpaqueId {
+            value: claims[0]
+                .participant
+                .principal_id
+                .as_opaque()
+                .as_wire_bytes()
+                .to_vec(),
+        }),
+        kind: pb::PrincipalKind::Person as i32,
+    };
+    let mut subscribe = tonic::Request::new(pb::RealtimeSetSubscriptionsRequest {
+        scope: bob_lookup.scope,
+        call_id: bob_lookup.call_id,
+        session_id: bob_lookup.session_id,
+        subscriptions: [pb::MediaKind::Audio, pb::MediaKind::Video]
+            .into_iter()
+            .map(|media_kind| pb::ConferenceMediaSubscription {
+                source: Some(alice_source.clone()),
+                media_kind: media_kind as i32,
+                stream_id: None,
+            })
+            .collect(),
+    });
+    subscribe.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[1]).parse().unwrap(),
+    );
+    let subscribed = realtime
+        .set_subscriptions(subscribe)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            subscribed.result,
+            Some(pb::realtime_set_subscriptions_response::Result::Acknowledgement(_))
+        ),
+        "Bob must explicitly authorize the canonical encrypted receive path: {subscribed:?}"
+    );
+
     // Heartbeat keeps the Join generation fence.
     for ((claim, token), generation) in claims.iter().zip(&tokens).zip(&generations) {
         let join = realtime_join_request(claim, token).into_inner();
