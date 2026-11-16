@@ -485,24 +485,29 @@ const incomingBegin=source.indexOf("function renderIncoming(items) {");
 const incomingEnd=source.indexOf("async function refresh() {",incomingBegin);
 assert.ok(incomingBegin>=0 && incomingEnd>incomingBegin);
 const handlers=new Map();
+const incomingCall={...call,callerIdentityId:"bob",calleeIdentityId:"alice"};
+let incomingLocator=null,safeAcceptedHints=0;
 const incomingContext={
-  accountScope:scope,uiAuthGeneration:0,active:null,
+  accountScope:scope,uiAuthGeneration:0,active:null,plOwnIdentity:"alice",
   document:{createElement:()=>({append(){},textContent:"",className:""})},
   el:id=>{assert.equal(id,"incoming");return {replaceChildren(){},append(){}};},
   nameFor:id=>id,
   btn:(label,callback)=>{handlers.set(label,callback);return {label};},
-  activeCallLocator:()=>null,
+  activeCallLocator:()=>incomingLocator,
   calls:{},
   host:{},
   principalScope:user=>JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]),
-  rememberActiveCall(){throw Error("stale accept cannot save Call locator");},
+  rememberActiveCall(result,identity){
+    assert.equal(identity,"alice");assert.equal(result.callId,incomingCall.callId);
+    safeAcceptedHints++;incomingLocator="scoped-call-hint";
+  },
   showActive(){throw Error("stale accept cannot paint Call");},
   beginMedia(){throw Error("stale accept cannot join media");},
   refresh(){},
 };
 runInNewContext(source.slice(incomingBegin,incomingEnd)+
   "\nthis.renderIncoming=renderIncoming;",incomingContext);
-incomingContext.renderIncoming([call]);
+incomingContext.renderIncoming([incomingCall]);
 const acceptIncoming=handlers.get("Принять");
 assert.equal(typeof acceptIncoming,"function");
 let finishOldAccept;
@@ -510,33 +515,40 @@ incomingContext.calls.signal=()=>new Promise(resolve=>{finishOldAccept=resolve;}
 incomingContext.host.resumeAuthenticatedDevice=async()=>user;
 const staleAccept=acceptIncoming();
 incomingContext.uiAuthGeneration++;
-finishOldAccept({...call,state:"active"});
+finishOldAccept({...incomingCall,state:"active"});
 await staleAccept;
 assert.equal(incomingContext.active,null,"old generation must not paint accepted Call");
 
 let finishOldSession;
-incomingContext.calls.signal=async()=>({...call,state:"active"});
+incomingContext.calls.signal=async()=>({...incomingCall,state:"active"});
 incomingContext.host.resumeAuthenticatedDevice=()=>new Promise(resolve=>{finishOldSession=resolve;});
 const staleSessionAccept=acceptIncoming();
 // Flush the separate VM context's promise jobs before checking the verifier.
 await new Promise(resolve=>setImmediate(resolve));
 assert.equal(typeof finishOldSession,"function","accept must verify canonical Device");
 incomingContext.uiAuthGeneration++;
+// Logout clears only the local recovery locator; old callback cannot restore it.
+incomingLocator=null;
 finishOldSession(user);
 await staleSessionAccept;
 assert.equal(incomingContext.active,null,"late Device verification must not paint Call");
 
 let savedAccepts=0,mediaAccepts=0;
 incomingContext.host.resumeAuthenticatedDevice=async()=>user;
-incomingContext.rememberActiveCall=()=>{savedAccepts++;};
+incomingContext.rememberActiveCall=(result,identity)=>{
+  assert.equal(result.callId,incomingCall.callId);
+  assert.equal(identity,"alice");
+  incomingLocator="scoped-call-hint";savedAccepts++;
+};
 incomingContext.showActive=()=>{};
 incomingContext.beginMedia=async()=>{mediaAccepts++;};
 await acceptIncoming();
 assert.equal(incomingContext.active.call.callId,call.callId);
-assert.equal(savedAccepts,1);
+assert.equal(savedAccepts,2,"acceptance records recoverable locator before and after Device recheck");
 assert.equal(mediaAccepts,1,"fresh accepted Call must still enter canonical media");
 
 incomingContext.active=null;
+incomingLocator=null;
 incomingContext.host.resumeAuthenticatedDevice=async()=>({...user,deviceId:"other-device"});
 await assert.rejects(acceptIncoming(),/Device changed during Call acceptance/);
 assert.equal(incomingContext.active,null,"wrong Device must not adopt accepted Call");
@@ -549,6 +561,9 @@ assert.ok(authBegin>=0 && authEnd>authBegin);
 let reauthCount=0;
 const authContext={
   uiAuthGeneration:0,
+  SessionSuperseded:class SessionSuperseded extends Error{
+    constructor(){super("Device session changed during authentication");}
+  },
   host:{},vault:{},location:{origin:"https://localhost"},
   authTrace:async(_stage,op)=>op(),lastBinding:()=>user,
   authHttpCode:error=>Number(String(error.message).match(/HTTP (\d+)/)?.[1]??0),

@@ -22,6 +22,9 @@ const {
 } = media;
 
 const el = (id) => document.getElementById(id);
+// Async work belonging to an old login must never repaint or reauthenticate
+// the account after explicit Logout, revocation or a Device switch.
+class SessionSuperseded extends Error { constructor(){super("Device session changed during authentication");} }
 // Integrity failure of THIS endpoint's MLS state. Only such a failure makes a
 // Call "compromised" and offers the explicit new-secure-call recovery; an
 // ordinary hangup, reject or timeout never shows that button.
@@ -553,20 +556,20 @@ async function restoreSession() {
   const generation=uiAuthGeneration;
   try {
     const resumed=await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());
-    if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+    if(generation!==uiAuthGeneration)throw new SessionSuperseded();
     return resumed;
   } catch(error) {
-    if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+    if(generation!==uiAuthGeneration)throw new SessionSuperseded();
     // Only an expired/absent cookie (401) authorizes a fresh possession proof.
     // A transient network/5xx failure, rate limit or 403 must not silently
     // issue another session or turn a failed status check into a login attempt.
     if(authHttpCode(error)!==401)throw error;
     try {
       const retried=await authTrace("resume_session",()=>host.resumeAuthenticatedDevice());
-      if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+      if(generation!==uiAuthGeneration)throw new SessionSuperseded();
       return retried;
     } catch(retryError) {
-      if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+      if(generation!==uiAuthGeneration)throw new SessionSuperseded();
       if(authHttpCode(retryError)!==401)throw retryError;
     }
     const hint=lastBinding();
@@ -580,7 +583,7 @@ async function restoreSession() {
     // If the server revoked this Device, do not turn the hint into trust.
     const verified=await authTrace("device_reauthentication",()=>authenticateUcrFirstPartyDevice(
       vault,{origin:location.origin},hint));
-    if(generation!==uiAuthGeneration)throw Error("Device session changed during authentication");
+    if(generation!==uiAuthGeneration)throw new SessionSuperseded();
     if(principalScope(verified)!==principalScope(hint)){
       authDiagnostic("device_scope_verification","failed");
       forgetBinding();
@@ -754,6 +757,9 @@ async function run(action) {
   busy = true;
   try {await action();}
   catch(error) {
+    // A late request must never present the previous account's result after
+    // Logout/Device switch. It is neither a current UI error nor new authority.
+    if (error instanceof SessionSuperseded) return;
     if (handleMlsIntegrityError(error)) return;
     message("Действие не подтверждено: " + (error instanceof Error ? error.message : String(error)));}
   finally {busy = false;}
@@ -1455,10 +1461,18 @@ function renderIncoming(items) {
         // never install it under a new (even same-Device) login generation.
         if(accountScope!==scope || uiAuthGeneration!==generation ||
            activeCallLocator()!==locator || (active && active.call.state!=="terminated"))return;
+        // Acceptance is already committed by the canonical Call owner. Save
+        // only its same-tab locator BEFORE an auxiliary Device refresh: if
+        // that refresh times out, the accepted Call can be inspected and
+        // restored after reauthentication instead of becoming orphaned.
+        // This locator grants no media or Call authority by itself.
+        if(plOwnIdentity===result.calleeIdentityId && result.state!=="terminated")
+          rememberActiveCall(result,plOwnIdentity);
+        const acceptedLocator=activeCallLocator();
         const session = await host.resumeAuthenticatedDevice();
         if(principalScope(session)!==scope)throw Error("Device changed during Call acceptance");
         if(accountScope!==scope || uiAuthGeneration!==generation ||
-           activeCallLocator()!==locator || (active && active.call.state!=="terminated"))return;
+           activeCallLocator()!==acceptedLocator || (active && active.call.state!=="terminated"))return;
         active = {call:result,identity:session.participantId};
         rememberActiveCall(result,session.participantId);
         showActive();
@@ -1566,15 +1580,30 @@ async function initialize() {
     renderIncoming([]);
     renderContacts([]);
   }
+  // All remaining async reads belong to this exact authenticated Device.
+  // Explicit Logout or a later login invalidates their UI side effects.
+  const verifiedGeneration=uiAuthGeneration;
+  const requireCurrent=()=>{
+    if(accountScope!==currentScope || uiAuthGeneration!==verifiedGeneration)
+      throw new SessionSuperseded();
+  };
   // A successful canonical Device sign-in is independent of auxiliary
   // contacts/devices reads. Do not leave a registered user on the signup screen.
   el("who").textContent = "Устройство подтверждено";
   plSetSignedIn(user.participantId);
   const optionalErrors=[];
   try {await authTrace("list_contacts",()=>updateContacts());}
-  catch(error) {optionalErrors.push("контакты");renderContacts([]);}
+  catch(error) {
+    requireCurrent();
+    optionalErrors.push("контакты");renderContacts([]);
+  }
+  requireCurrent();
   try {await authTrace("list_devices",()=>updateDevices());}
-  catch(error) {optionalErrors.push("устройства");el("devices").replaceChildren();}
+  catch(error) {
+    requireCurrent();
+    optionalErrors.push("устройства");el("devices").replaceChildren();
+  }
+  requireCurrent();
   if(optionalErrors.length)message("Вы вошли. Временно не удалось загрузить: "+
     optionalErrors.join(", ")+". Повторите проверку входа.");
   // Successful device reauthentication is independent from Call state.
@@ -1582,23 +1611,18 @@ async function initialize() {
   message("Доверенное устройство подтверждено. Проверяем состояние вызовов…");
   try {
     await refresh();
+    requireCurrent();
     message("Устройство подтверждено. Входящие звонки проверяются.");
   } catch (error) {
+    requireCurrent();
     if (!handleMlsIntegrityError(error)) {
       message("Устройство подтверждено; проверка вызовов завершилась ошибкой: " +
         (error instanceof Error ? error.message : String(error)));
     }
   }
+  // The single visibility listener is attached at module scope. Attaching
+  // one per initialize() caused duplicate refreshes after reconnect/re-login.
   let pollTick = 0, pollFailures = 0;
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && !busy && !navigating) {
-      pollTick = 0;
-      void refresh().then(() => { pollFailures = 0; }, err => {
-        authDiagnostic("visibility_refresh", "failed", err);
-        handleMlsIntegrityError(err);
-      });
-    }
-  });
   timer = setInterval(() => {
     // Poll while the page is hidden, too: a remote peer must be able to ring
     // without the recipient watching the foreground tab. Browser suspension
@@ -1840,11 +1864,17 @@ el("logout").addEventListener("click",()=>{
 
 // Mobile tabs become hidden during permission prompts and app switching.
 // Catch up immediately on foreground instead of waiting for the next interval.
+// One global foreground listener for every login generation. The canonical
+// refresh lock coalesces concurrent wake/interval work; stale errors never
+// modify the next account's UI.
 document.addEventListener("visibilitychange",()=>{
   if(document.hidden || !accountScope || navigating || busy)return;
+  const scope=accountScope,generation=uiAuthGeneration;
   void refresh().catch(error=>{
-    authDiagnostic("periodic_refresh","failed",error);
-    message("Не удалось обновить состояние звонков. Повторите проверку входа.");
+    if(scope!==accountScope || generation!==uiAuthGeneration)return;
+    authDiagnostic("visibility_refresh","failed",error);
+    if(!handleMlsIntegrityError(error))
+      message("Не удалось обновить состояние звонков. Повторите проверку входа.");
   });
 });
 window.addEventListener("pagehide", () => clearInterval(timer));
@@ -1864,8 +1894,10 @@ void (async () => {
   busy = true;
   try { await initialize(); }
   catch (error) {
-    explainEntryFailure(error);
-    message("Действие не подтверждено: " + (error instanceof Error ? error.message : String(error)));
+    if(!(error instanceof SessionSuperseded)){
+      explainEntryFailure(error);
+      message("Действие не подтверждено: " + (error instanceof Error ? error.message : String(error)));
+    }
   }
   finally { busy = false; }
 })();
