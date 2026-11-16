@@ -1697,6 +1697,8 @@ fn auth_cache_is_invalidated_by_canonical_call_termination() {
     let batch = bob_batch(&runtime, &fixture);
     let sink = CaptureSink::default();
     dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).expect("warm");
+    let store_revision =
+        AuthorizationEvaluator::authorization_revision(&fixture.store).expect("memory revision");
     let current = fixture
         .store
         .call(&scope(), &fixture.call.call_id)
@@ -1715,6 +1717,20 @@ fn auth_cache_is_invalidated_by_canonical_call_termination() {
             ),
         )
         .expect("canonical Hangup");
+    let mut sink_invoked = false;
+    assert_eq!(
+        AuthorizationEvaluator::with_authorization_revision_fence(
+            &fixture.store,
+            store_revision,
+            &mut || {
+                sink_invoked = true;
+                Ok(())
+            },
+        ),
+        Err(DurableStoreError::Conflict),
+        "MemoryLocalStore must reject a stale delivery fence after Hangup"
+    );
+    assert!(!sink_invoked, "stale fence must not invoke the sink");
     assert!(
         dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).is_err(),
         "store revision moved: cached proof must not survive Hangup"
