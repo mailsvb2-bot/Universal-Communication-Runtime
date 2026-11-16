@@ -3630,12 +3630,8 @@ where
                 CanonicalErrorCode::TemporarilyUnavailable,
             ));
         }
-        self.release_sfu_call_placement_for_call_if_inactive(
-            scope,
-            call_id,
-            self.now()?,
-        )
-        .await?;
+        self.release_sfu_call_placement_for_call_if_inactive(scope, call_id, self.now()?)
+            .await?;
         self.conference_state
             .clear_call_ephemeral_state(scope, call_id)
             .map_err(|error| map_conference_error(&error))?;
