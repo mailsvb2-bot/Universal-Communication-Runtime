@@ -51,6 +51,7 @@ use ucr_realtime::{
 use ucr_sfu::{
     PreparedSfuCapabilities, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
     SfuValidatedForwardBatch, SfuValidatedSourceFrame, dispatch_validated_forward_batch,
+    dispatch_validated_forward_batch_at_revision,
 };
 use ucr_webrtc::{
     PreparedWebRtcProvider, WebRtcProvider, WebRtcProviderError, WebRtcSessionConfigFactory,
@@ -2663,6 +2664,17 @@ where
         envelope: &SfuForwardEnvelope,
         sink: &dyn SfuForwardSink,
     ) -> Result<usize, CanonicalError> {
+        // Snapshot before signed Join/Device/Call preflight. A revocation after this
+        // point must invalidate the eventual recipient sink, not become a new baseline
+        // when SfuRuntime first reads the revision after those checks.
+        let expected_authorization_revision = self
+            .authorization
+            .authorization_revision()
+            .ok_or_else(|| {
+                map_conference_error(&ConferenceError::Sfu(
+                    ucr_sfu::SfuError::AuthorizationFenceUnavailable,
+                ))
+            })?;
         self.require_live_transport_claims(claims)?;
         self.registry
             .require_active_session(claims, self.now()?)
@@ -2724,7 +2736,15 @@ where
                 now_unix_ms,
                 quota_error: Mutex::new(None),
             };
-            match self.dispatch_forward(&sfu, &batch, &quota_sink) {
+            // Session-scoped forwarding deliberately bypasses the optional authorization
+            // cache: the revision snapshot predates Join admission and is held through
+            // the actual sink acceptance.
+            match dispatch_validated_forward_batch_at_revision(
+                &sfu,
+                &batch,
+                expected_authorization_revision,
+                &quota_sink,
+            ) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     if let Some(quota_error) = quota_sink.quota_error()? {
@@ -2734,8 +2754,13 @@ where
                 }
             }
         } else {
-            self.dispatch_forward(&sfu, &batch, sink)
-                .map_err(|error| map_conference_error(&ConferenceError::Sfu(error)))?
+            dispatch_validated_forward_batch_at_revision(
+                &sfu,
+                &batch,
+                expected_authorization_revision,
+                sink,
+            )
+            .map_err(|error| map_conference_error(&ConferenceError::Sfu(error)))?
         };
         // The synchronous sink can finish after a concurrent Hangup, Device revoke,
         // or Leave. As with horizontal routing, never acknowledge stale delivery
