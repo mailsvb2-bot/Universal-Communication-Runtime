@@ -677,3 +677,27 @@ The first-party BFF receives a clone of the exact node-local `GrpcRealtimeServic
 After a successful terminal signal for a canonical `ConversationKind::Direct` Call, the BFF resolves the existing derived media Call and awaits `GrpcRealtimeService::close_terminated_call_sessions` before returning success. This targeted Realtime owner retires only that media Call's sessions, attempts every matching node-local WebRTC provider Close (including an earlier pending Leave), acknowledges only confirmed closes, and awaits the configured SFU placement release. Unrelated Calls cannot delay or fail this response. If any required cleanup step fails or times out, the BFF returns HTTP 503; the Call remains canonically terminated and the existing pending-close coordinates remain available to the background retry worker. The BFF therefore does not report successful direct-call termination while its local provider close is still pending.
 
 This is a node-local provider-close acknowledgement, not proof that every remote browser has stopped camera/microphone capture or that bytes accepted before Close were absent from a remote network buffer. Physical remote capture-stop, remote-node/TURN traversal, measured stop latency and two-device A/V remain release evidence gates. The webinar `PrivateGroup` Room signal path is not covered by this synchronous Direct-Call gate and continues to rely on the existing Realtime cleanup path.
+
+## PR #359: stale browser Leave cannot retire a replacement Join
+
+The reference client captures the lifecycle generation when Leave starts and
+stops the old peer and local capture before its first awaited cleanup. Remote
+provider Close and Realtime Leave may remain pending while a separately issued
+signed Join installs a new session. After those awaits, the old Leave MUST
+compare its captured generation with the current
+`sessionLifecycleGeneration` and return before changing shared session flags,
+timers, streams, or UI when the generation has advanced. Otherwise a late
+successful old Leave can set `sessionActive=false` and `mediaActive=false`
+for the replacement session even though its earlier local teardown was
+correctly scoped to the old peer.
+
+The browser compatibility probe deterministically holds the old heartbeat,
+Close and Leave responses, installs a replacement session, then releases the
+old responses and verifies that the new session, peer offer and UI remain
+active. The architecture source-contract test checks that the lifecycle fence
+precedes post-await shared-state finalization.
+
+**Scope limit:** this prevents a stale local browser continuation from
+corrupting a newer Join. It does not prove remote SFU closure, remote capture
+stop, remote network-buffer discard, or physical-device stop latency; those
+remain #336/#274 release gates.
