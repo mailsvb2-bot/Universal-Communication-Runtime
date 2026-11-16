@@ -2462,13 +2462,22 @@ async fn dispatch_post_with_provider_cleanup(
         {
             let media = first_party_media::media_runtime_ids(&current.scope, &current.call_id)
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-            state
-                .realtime_service
-                .as_ref()
-                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
-                .close_terminated_call_sessions(&current.scope, &media.call_id)
-                .await
+            // A ringing Call may be cancelled before its derived media Call
+            // (and therefore any provider session) exists. That is already a
+            // complete stop; only await provider cleanup when the child exists.
+            let media_call = state
+                .store
+                .call(&current.scope, &media.call_id)
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            if media_call.is_some() {
+                state
+                    .realtime_service
+                    .as_ref()
+                    .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
+                    .close_terminated_call_sessions(&current.scope, &media.call_id)
+                    .await
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            }
         }
     }
     Ok(response)
