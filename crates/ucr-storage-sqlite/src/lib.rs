@@ -4657,6 +4657,7 @@ mod tests {
         .scope;
         let session_id = SessionId::from_opaque(opaque("join-revision-session"));
         let first = SqliteLocalStore::open(db.path()).expect("first connection");
+        let second = SqliteLocalStore::open(db.path()).expect("independent revoke connection");
         let before_insert = first.authorization_revision().expect("initial revision");
 
         // Isolate the revision trigger from FK setup: the behavior under test is
@@ -4689,7 +4690,6 @@ mod tests {
 
         let inserted = first.authorization_revision().expect("insert revision");
         assert!(inserted > before_insert, "grant insertion must advance revision");
-        let second = SqliteLocalStore::open(db.path()).expect("independent revoke connection");
         second
             .revoke_conference_join_grant(&scope, &session_id)
             .expect("revoke canonical Join grant from second connection");
