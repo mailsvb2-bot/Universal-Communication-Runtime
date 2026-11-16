@@ -3591,7 +3591,7 @@ where
             .active_claims_at(now_unix_ms)
             .map_err(map_registry_error)?;
         let mut sweep = RealtimeCleanupSweep::default();
-        let (retired_sessions, attendance_error) = self.retire_closed_call_sessions(
+        let (_retired_sessions, attendance_error) = self.retire_closed_call_sessions(
             scope,
             call_id,
             &active_claims,
