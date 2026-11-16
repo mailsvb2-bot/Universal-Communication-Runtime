@@ -60,6 +60,7 @@ fn state(path: &PathBuf) -> State {
             )
             .expect("test issuer"),
         ),
+        realtime_service: None,
         origin: "https://call.example.invalid".to_owned(),
         registration_scope: Some(TenantScope {
             tenant_id: TenantId::from_opaque(OpaqueId::new("public-self-service").unwrap()),
@@ -622,6 +623,31 @@ fn signal(
     )
 }
 
+async fn signal_with_provider_cleanup(
+    state: &State,
+    binding: &Binding,
+    call_id: &str,
+    revision: u64,
+    action: &str,
+) -> Result<Value, StatusCode> {
+    let session = session_of(state, binding);
+    let body = serde_json::to_vec(&json!({
+        "binding": binding,
+        "callId": call_id,
+        "expectedRevision": revision,
+        "action": action,
+    }))
+    .unwrap();
+    let (response, _) = dispatch_post_with_provider_cleanup(
+        state,
+        "/v1/first-party/call/signal",
+        &body,
+        Some(&session),
+    )
+    .await?;
+    Ok(response)
+}
+
 fn realtime_join_request(
     claims: &ucr_realtime::RealtimeSessionClaims,
     token: &str,
@@ -669,7 +695,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     use ucr_model::{GroupMemberState, PermissionGrant, PermissionScope, PrincipalRef};
 
     let db = TestDb::new();
-    let server = state(&db.0);
+    let mut server = state(&db.0);
     let (alice, alice_signer, alice_recovery) = signup(&server, 41);
     let (bob, bob_signer, _) = signup(&server, 42);
     let (carol, _, _) = signup(&server, 43);
@@ -1398,15 +1424,19 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     // independently instantiated Realtime owner on its next authorization.
     let realtime_store =
         Arc::new(SqliteLocalStore::open(&db.0).expect("independent Realtime SQLite"));
+    let realtime_registry = Arc::new(ucr_realtime::RealtimeSessionRegistry::new(16, 4));
     let realtime = GrpcRealtimeService::new(
         Arc::new(ucr_core::SystemServiceQuotaClock),
         Arc::clone(&realtime_store),
         Arc::clone(&realtime_store),
         Arc::clone(&server.issuer),
-        Arc::new(ucr_realtime::RealtimeSessionRegistry::new(16, 4)),
+        Arc::clone(&realtime_registry),
         Arc::new(ucr_conference::ConferenceRuntimeState::new()),
     )
     .with_mls_admission_store(Arc::clone(&realtime_store));
+    // The BFF and gRPC surface share the exact provider, registry and close
+    // retry queue. A terminal BFF response must await this owner's close ack.
+    server.realtime_service = Some(realtime.clone());
     let mut generations = Vec::new();
     for (claim, token) in claims.iter().zip(&tokens) {
         let joined = realtime
@@ -1767,8 +1797,18 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     );
 
     // Hang-up ends the media Call too; no new Join grant and no re-admission.
-    let hung = signal(&server, &bob, &call_id, revision, "hangup").expect("hangup");
+    let hung = signal_with_provider_cleanup(&server, &bob, &call_id, revision, "hangup")
+        .await
+        .expect("hangup waits for the shared Realtime provider-close boundary");
     assert_eq!(hung["state"], "terminated");
+    assert!(
+        realtime_registry.pending_webrtc_closes().unwrap().is_empty(),
+        "BFF must not confirm terminal Direct Call while a local provider close remains pending"
+    );
+    assert!(
+        realtime_registry.active_claims_at(0).unwrap().is_empty(),
+        "terminal BFF signal must retire both accepted Realtime sessions before success"
+    );
     assert!(
         !server
             .store
