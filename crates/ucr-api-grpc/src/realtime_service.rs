@@ -3559,6 +3559,89 @@ where
     /// Returns explicit durable-store, registry, WebRTC-provider, attendance-event, placement, or
     /// runtime-state failures. Placement release failures remain queued for retry; ephemeral Call
     /// state is cleared only after placement cleanup succeeds.
+    /// Retires and closes every node-local realtime session for one already-terminal Call.
+    ///
+    /// Unlike the periodic global sweep, this targeted boundary is suitable for a
+    /// first-party Hangup response: unrelated Calls cannot delay or fail this Call's
+    /// provider acknowledgement. It uses the same canonical registry, per-Call Join/Leave
+    /// gate, provider-close retry queue and configured SFU placement lifecycle as the
+    /// background cleanup worker.
+    ///
+    /// # Errors
+    /// Returns a canonical conflict if the Call is not terminal, or an explicit
+    /// attendance, provider-close, placement, registry or durable-store failure. A
+    /// failed provider close remains queued for the background retry worker.
+    pub async fn close_terminated_call_sessions(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<usize, CanonicalError> {
+        let now_unix_ms = self.now()?;
+        let placement_guard = self.sfu_placement_transition_guard(scope, call_id).await;
+        if self.cleanup_decision(scope, call_id)? != RuntimeCallCleanupDecision::Cleanup {
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
+        if self.sfu_placement_lifecycle.is_some() {
+            self.registry
+                .queue_call_cleanup_candidate(scope, call_id)
+                .map_err(map_registry_error)?;
+        }
+        let active_claims = self
+            .registry
+            .active_claims_at(now_unix_ms)
+            .map_err(map_registry_error)?;
+        let mut sweep = RealtimeCleanupSweep::default();
+        let (retired_sessions, attendance_error) = self.retire_closed_call_sessions(
+            scope,
+            call_id,
+            &active_claims,
+            now_unix_ms,
+            &mut sweep,
+        )?;
+        drop(placement_guard);
+
+        let mut first_error = attendance_error;
+        // Include closes queued by an earlier failed Leave, not only sessions
+        // retired by this request. Try every exact coordinate before returning.
+        let pending = self
+            .registry
+            .pending_webrtc_closes()
+            .map_err(map_registry_error)?;
+        for (_, _, session_id) in pending
+            .into_iter()
+            .filter(|(pending_scope, pending_call, _)| {
+                pending_scope == scope && pending_call == call_id
+            })
+        {
+            if let Err(error) = self
+                .confirm_pending_webrtc_close(scope, call_id, &session_id)
+                .await
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        let _placement_guard = self.sfu_placement_transition_guard(scope, call_id).await;
+        if self.has_pending_webrtc_close_for_call(scope, call_id)? {
+            return Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable,
+            ));
+        }
+        self.release_sfu_call_placement_for_call_if_inactive(
+            scope,
+            call_id,
+            self.now()?,
+        )
+        .await?;
+        self.conference_state
+            .clear_call_ephemeral_state(scope, call_id)
+            .map_err(|error| map_conference_error(&error))?;
+        Ok(sweep.sessions_reaped)
+    }
+
     pub async fn cleanup_closed_conferences_once(
         &self,
     ) -> Result<RealtimeCleanupSweep, CanonicalError> {
