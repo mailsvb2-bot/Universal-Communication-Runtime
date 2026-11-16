@@ -1,11 +1,11 @@
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use ucr_core::{
-    AuthorizationEvaluator, CallStore, DeviceLifecycleStore, GroupStore, IdentityStore,
-    PrincipalIdentityBindingStore, TrustedSigningKeyStore,
+    AuthorizationEvaluator, CallStore, DeviceLifecycleStore, DurableStoreError, GroupStore,
+    IdentityStore, PrincipalIdentityBindingStore, TrustedSigningKeyStore,
 };
 use ucr_crypto::{GroupMediaEpochSecret, SigningKeyMaterial};
 use ucr_media_e2ee::{GroupMediaE2eeRuntime, PreparedGroupMediaE2eeCapabilities};
@@ -23,11 +23,31 @@ use ucr_sfu::{
 };
 use ucr_storage_memory::MemoryLocalStore;
 
+static ALLOW_ALL_AUTHORIZATION_FENCE: Mutex<()> = Mutex::new(());
+
 #[derive(Debug, Clone, Copy)]
 struct AllowAll;
 impl AuthorizationEvaluator for AllowAll {
     fn authorize(&self, _request: &AuthorizationRequest) -> Result<(), CanonicalError> {
         Ok(())
+    }
+
+    fn authorization_revision(&self) -> Option<u64> {
+        Some(0)
+    }
+
+    fn with_authorization_revision_fence(
+        &self,
+        expected_revision: u64,
+        action: &mut dyn FnMut() -> Result<(), DurableStoreError>,
+    ) -> Result<(), DurableStoreError> {
+        let _guard = ALLOW_ALL_AUTHORIZATION_FENCE
+            .lock()
+            .map_err(|_| DurableStoreError::Internal)?;
+        if expected_revision != 0 {
+            return Err(DurableStoreError::Conflict);
+        }
+        action()
     }
 }
 
@@ -85,6 +105,30 @@ impl AuthorizationEvaluator for DenyScreenShareSend {
         } else {
             Ok(())
         }
+    }
+}
+
+#[derive(Debug)]
+struct BlockingSink {
+    entered: std::sync::mpsc::Sender<()>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl SfuForwardSink for BlockingSink {
+    fn forward_encrypted(
+        &self,
+        _target: &SfuForwardTarget,
+        _envelope: &SfuForwardEnvelope,
+    ) -> Result<(), SfuForwardSinkError> {
+        self.entered
+            .send(())
+            .map_err(|_| SfuForwardSinkError::Unavailable)?;
+        self.release
+            .lock()
+            .map_err(|_| SfuForwardSinkError::Unavailable)?
+            .recv()
+            .map_err(|_| SfuForwardSinkError::Unavailable)?;
+        Ok(())
     }
 }
 
@@ -1475,10 +1519,12 @@ struct RevisionedRevocableAuthorization {
     revoked: AtomicBool,
     revision: AtomicU64,
     checks: AtomicUsize,
+    fence: Mutex<()>,
 }
 
 impl RevisionedRevocableAuthorization {
     fn revoke(&self) {
+        let _guard = self.fence.lock().expect("authorization fence");
         self.revoked.store(true, Ordering::SeqCst);
         self.revision.fetch_add(1, Ordering::SeqCst);
     }
@@ -1497,6 +1543,75 @@ impl AuthorizationEvaluator for RevisionedRevocableAuthorization {
     fn authorization_revision(&self) -> Option<u64> {
         Some(self.revision.load(Ordering::SeqCst))
     }
+
+    fn with_authorization_revision_fence(
+        &self,
+        expected_revision: u64,
+        action: &mut dyn FnMut() -> Result<(), DurableStoreError>,
+    ) -> Result<(), DurableStoreError> {
+        let _guard = self.fence.lock().map_err(|_| DurableStoreError::Internal)?;
+        if self.revision.load(Ordering::SeqCst) != expected_revision {
+            return Err(DurableStoreError::Conflict);
+        }
+        action()
+    }
+}
+
+#[test]
+fn authorization_revoke_waits_for_inflight_sink_acceptance() {
+    let fixture = build_fixture();
+    let authorization = Arc::new(RevisionedRevocableAuthorization::default());
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&*authorization, &fixture.store, &e2ee, &sfu);
+    let batch = bob_batch(&runtime, &fixture);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let sink = BlockingSink {
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+    };
+    let (revoke_started_tx, revoke_started_rx) = std::sync::mpsc::channel();
+    let (revoke_done_tx, revoke_done_rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let dispatch = scope.spawn(|| dispatch_validated_forward_batch(&runtime, &batch, &sink));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("sink entered while the authorization fence is held");
+        let authorization = Arc::clone(&authorization);
+        let revoke = scope.spawn(move || {
+            revoke_started_tx.send(()).expect("revoke started");
+            authorization.revoke();
+            revoke_done_tx.send(()).expect("revoke completed");
+        });
+        revoke_started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("revoke thread started");
+        assert!(
+            revoke_done_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "revoke cannot commit while the sink acceptance callback is in flight"
+        );
+        release_tx.send(()).expect("release sink");
+        assert_eq!(
+            dispatch.join().expect("dispatch thread"),
+            Ok(SfuForwardOutcome {
+                accepted_recipients: 1
+            })
+        );
+        revoke.join().expect("revoke thread");
+        revoke_done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("revoke completes after sink acceptance");
+    });
+
+    assert!(matches!(
+        dispatch_validated_forward_batch(&runtime, &batch, &CaptureSink::default()),
+        Err(SfuError::Authorization(error))
+            if error.code == CanonicalErrorCode::PermissionDenied
+    ));
 }
 
 fn bob_batch<A: AuthorizationEvaluator>(
@@ -1551,7 +1666,7 @@ fn auth_cache_skips_recheck_until_revoke_then_frames_do_not_pass() {
 }
 
 #[test]
-fn auth_cache_is_bypassed_when_evaluator_is_not_revisioned() {
+fn unrevisioned_evaluator_fails_closed_at_sink_acceptance() {
     let fixture = build_fixture();
     let authorization = RevocableSendAuthorization::default();
     let e2ee = PreparedGroupMediaE2eeCapabilities;
@@ -1560,12 +1675,15 @@ fn auth_cache_is_bypassed_when_evaluator_is_not_revisioned() {
     let cache = SfuAuthorizationCache::new();
     let batch = bob_batch(&runtime, &fixture);
     let sink = CaptureSink::default();
-    dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).expect("first");
-    // Revoke WITHOUT any revision signal: must still be caught.
+    assert_eq!(
+        dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink),
+        Err(SfuError::AuthorizationFenceUnavailable),
+        "a revision without an atomic handoff fence is not delivery authority"
+    );
     authorization.revoked.store(true, Ordering::SeqCst);
     assert!(dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).is_err());
     assert_eq!(cache.hits(), 0);
-    assert_eq!(sink.forwarded().len(), 1);
+    assert!(sink.forwarded().is_empty());
 }
 
 #[test]
