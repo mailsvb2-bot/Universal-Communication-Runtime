@@ -254,7 +254,10 @@ the revision and the sink callback is not invoked; a sink acceptance already
 inside the fence completes before another SQLite connection can commit revoke.
 The in-memory store uses its existing canonical state mutex and revision.
 Unrevisioned or non-atomic evaluators fail closed at this boundary. Sink
-callbacks must be bounded and must not re-enter the canonical store.
+callbacks must be bounded and must not re-enter the canonical store. The live
+WebRTC media handoff has a separate 2-second acceptance deadline (control and
+signaling retain their longer timeout), bounding how long the SQLite writer
+fence can be held under backpressure.
 
 This establishes an ordering for SFU sink acceptance, not remote delivery.
 A WebRTC provider Close separately cancels the in-flight send and drains every
