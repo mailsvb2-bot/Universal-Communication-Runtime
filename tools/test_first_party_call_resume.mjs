@@ -692,7 +692,8 @@ assert.doesNotMatch(snippet,/calls\.join\(/,"untrusted locator cannot mint a Joi
 // NEVER trigger automatic camera/microphone capture. Match the exact derived
 // media Call through the canonical authenticated BFF before join().
 const handoffStart=mediaPage.indexOf("async function verifyFirstPartyAutoJoinHandoff(");
-const handoffEnd=mediaPage.indexOf('try{\n  const params=new URLSearchParams(location.hash.slice(1));',handoffStart);
+const handoffBoundary=/\r?\ntry\{\r?\n  const params=new URLSearchParams\(location\.hash\.slice\(1\)\);/.exec(mediaPage.slice(handoffStart));
+const handoffEnd=handoffBoundary?handoffStart+handoffBoundary.index:-1;
 assert.ok(handoffStart>=0&&handoffEnd>handoffStart,"canonical pre-auto-Join binding gate missing");
 const handoffCode=mediaPage.slice(handoffStart,handoffEnd);
 const grant={call_id:"fp-m-matched",tenant_id:"tenant-a",namespace_id:null,
