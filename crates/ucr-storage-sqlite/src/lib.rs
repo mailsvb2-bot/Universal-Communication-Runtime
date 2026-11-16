@@ -4588,6 +4588,82 @@ mod tests {
     }
 
     #[test]
+    fn authorization_revision_fence_blocks_cross_connection_revoke_until_sink_returns() {
+        use ucr_core::{AuthorizationEvaluator, PermissionGrantStore};
+
+        let db = TestDbPath::new();
+        let scope = command("fence-scope", "fence-scope-key", b"", Some("ns-fence")).scope;
+        let subject = ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(opaque("fence-subject")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        let grant = PermissionGrant {
+            grantee: subject,
+            permission: COMMAND_ACCEPT_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope),
+        };
+        let first = SqliteLocalStore::open(db.path()).expect("first connection");
+        let second = SqliteLocalStore::open(db.path()).expect("independent connection");
+        first.grant_permission(&grant).expect("initial grant");
+        let expected = first.authorization_revision().expect("revision");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let fence = std::thread::spawn(move || {
+            let mut action = || {
+                entered_tx
+                    .send(())
+                    .map_err(|_| DurableStoreError::Internal)?;
+                release_rx
+                    .recv()
+                    .map_err(|_| DurableStoreError::Internal)?;
+                Ok(())
+            };
+            AuthorizationEvaluator::with_authorization_revision_fence(
+                &first,
+                expected,
+                &mut action,
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("fence acquired before sink acceptance");
+
+        let (writer_started_tx, writer_started_rx) = std::sync::mpsc::channel();
+        let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            writer_started_tx.send(()).expect("writer started");
+            second.revoke_permission(&grant).expect("cross-connection revoke");
+            writer_done_tx.send(()).expect("writer committed");
+        });
+        writer_started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("revoke thread started");
+        assert!(
+            writer_done_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "a separate SQLite connection cannot commit revoke during sink acceptance"
+        );
+
+        release_tx.send(()).expect("release sink acceptance");
+        assert_eq!(fence.join().expect("fence thread"), Ok(()));
+        writer.join().expect("writer thread");
+        writer_done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("revoke commits after the fence releases");
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert!(
+            reopened.authorization_revision().expect("new revision") > expected,
+            "the committed revoke advances the canonical revision"
+        );
+    }
+
+    #[test]
     fn integration_command_ingress_deduplicates_after_sqlite_restart() {
         let db = TestDbPath::new();
         let scope = command(
