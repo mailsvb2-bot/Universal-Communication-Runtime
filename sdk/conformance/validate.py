@@ -145,6 +145,9 @@ def main() -> None:
     memory_store = read("crates/ucr-storage-memory/src/lib.rs")
     sqlite_service_control = read("crates/ucr-storage-sqlite/src/service_control_store.rs")
     sqlite_store = read("crates/ucr-storage-sqlite/src/lib.rs")
+    sqlite_authorization_revision = read(
+        "crates/ucr-storage-sqlite/src/authorization_revision_store.rs"
+    )
     sqlite_recording_provider = read(
         "crates/ucr-storage-sqlite/src/recording_provider_store.rs"
     )
@@ -313,13 +316,21 @@ def main() -> None:
         and "SQLITE_SCHEMA_V56: u32 = 56" in sqlite_store
         and "SQLITE_SCHEMA_V57: u32 = 57" in sqlite_store
         and "SQLITE_SCHEMA_V58: u32 = 58" in sqlite_store
-        and "SQLITE_SCHEMA_VERSION: u32 = 58" in sqlite_store
+        and "SQLITE_SCHEMA_V59: u32 = 59" in sqlite_store
+        and "SQLITE_SCHEMA_VERSION: u32 = 59" in sqlite_store
         and "migrate_v55_to_v56" in sqlite_store
         and "verify_schema_v56" in sqlite_store
         and "migrate_v56_to_v57" in sqlite_store
         and "verify_schema_v57" in sqlite_store
         and "migrate_v57_to_v58" in sqlite_store
         and "verify_schema_v58" in sqlite_store
+        and "migrate_v58_to_v59" in sqlite_store
+        and "verify_schema_v59" in sqlite_store
+        and "create_v59_objects" in sqlite_authorization_revision
+        and "verify_v59_objects" in sqlite_authorization_revision
+        and '"conference_join_grants"' in sqlite_authorization_revision
+        and '"universal_conferences"' in sqlite_authorization_revision
+        and '"universal_conference_participants"' in sqlite_authorization_revision
         and "migrate_v38_to_v39" in sqlite_store
         and "migrate_v39_to_v40" in sqlite_store
         and "migrate_v40_to_v41" in sqlite_store
@@ -359,7 +370,7 @@ def main() -> None:
         and "group_mls_transition_admissions" in sqlite_group_mls
         and "service_audit_authentication" in sqlite_service_control
         and "verify_v44_objects" in sqlite_service_control,
-        "resource quota v42, runtime worker lease v43, typed audit v44, attachment v45, conference metadata v46, recording provider outbox v47, ready marker v48, device-bound MLS bootstrap v49, standalone MLS transition v50 and indexed privacy cleanup v51 and first-party recovery v52 migration chain missing",
+        "schema v59 migration chain missing: v58-to-v59 authorization revision triggers must cover canonical Join grants and Universal Conference admission",
     )
     for marker in (
         "ServiceResourceQuotaPolicy",
