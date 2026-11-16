@@ -24,6 +24,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto,
 };
+use ucr_api_grpc::GrpcRealtimeService;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -92,6 +93,11 @@ const CHALLENGE_TTL: Duration = Duration::from_secs(90);
 const SESSION_TTL: Duration = Duration::from_mins(30);
 const COOKIE_NAME: &str = "__Host-ucr_fp";
 type HttpResponse = Response<Full<Bytes>>;
+type FirstPartyRealtimeService = GrpcRealtimeService<
+    ucr_core::SystemServiceQuotaClock,
+    SqliteLocalStore,
+    SqliteLocalStore,
+>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -304,6 +310,9 @@ impl SessionLedger {
 struct State {
     store: Arc<SqliteLocalStore>,
     issuer: Arc<JoinTokenIssuer>,
+    /// The same node-local realtime/provider owner used by gRPC. Terminal
+    /// first-party direct Calls await its existing close/retry boundary.
+    realtime_service: Option<FirstPartyRealtimeService>,
     origin: String,
     registration_scope: Option<TenantScope>,
     /// Per-process MAC key sealing stateless challenges. A restart voids them.
@@ -370,6 +379,7 @@ pub(super) async fn serve(
     config: Configuration,
     store: Arc<SqliteLocalStore>,
     issuer: Arc<JoinTokenIssuer>,
+    realtime_service: FirstPartyRealtimeService,
 ) -> Result<(), String> {
     let listener = TcpListener::bind(config.bind)
         .await
@@ -377,6 +387,7 @@ pub(super) async fn serve(
     let state = Arc::new(State {
         store,
         issuer,
+        realtime_service: Some(realtime_service),
         origin: config.origin,
         registration_scope: config.registration_scope,
         challenge_key: random_key().map_err(|_| "first-party challenge key unavailable")?,
@@ -2229,7 +2240,7 @@ async fn dispatch(
     }
     // Typed decoding rejects extraneous fields; account/scope is verified against
     // the independent server session on every route.
-    let response = dispatch_post(state, path, &body, session.as_ref())?;
+    let response = dispatch_post_with_provider_cleanup(state, path, &body, session.as_ref()).await?;
     body.clear();
     Ok(response)
 }
@@ -2428,6 +2439,37 @@ fn dispatch_post(
         return Err(StatusCode::NOT_FOUND);
     };
     Ok((response, None))
+}
+
+/// A terminal first-party Direct Call is not reported complete until the same
+/// node-local Realtime owner has retired its sessions, confirmed provider
+/// Close, and completed any configured SFU placement release. On failure the
+/// canonical Call remains terminated, the retry coordinates remain queued,
+/// and the BFF returns 503 instead of claiming media stop.
+async fn dispatch_post_with_provider_cleanup(
+    state: &State,
+    path: &str,
+    body: &[u8],
+    session: Option<&Session>,
+) -> Result<(Value, Option<String>), StatusCode> {
+    let response = dispatch_post(state, path, body, session)?;
+    if path == "/v1/first-party/call/signal" {
+        let request: SignalRequest = parse(body)?;
+        let auth = session.ok_or(StatusCode::UNAUTHORIZED)?;
+        let current = get_call(state, auth, &request.call_id)?;
+        if current.signalling_state == CallSignallingState::Terminated
+            && current.conversation.kind == ConversationKind::Direct
+        {
+            state
+                .realtime_service
+                .as_ref()
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
+                .cleanup_closed_conferences_once()
+                .await
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        }
+    }
+    Ok(response)
 }
 
 fn recovery_verifier(secret: &str) -> Result<[u8; 32], StatusCode> {
