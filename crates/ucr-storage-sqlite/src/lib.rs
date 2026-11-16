@@ -3197,7 +3197,7 @@ mod tests {
             assert_eq!(super::verify_schema_v56(&connection), Ok(()));
         }
         {
-            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v56 to v58");
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v56 to v59");
             assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
             let connection = migrated.lock_connection().expect("lock migrated store");
             assert_eq!(super::verify_schema_v59(&connection), Ok(()));
@@ -3210,7 +3210,7 @@ mod tests {
                 Ok(())
             );
         }
-        let reopened = SqliteLocalStore::open(db.path()).expect("reopen v58 migration");
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen v59 migration");
         assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         assert_eq!(reopened.health(), Ok(StorageHealth::Healthy));
     }
@@ -3231,7 +3231,7 @@ mod tests {
             assert_eq!(super::verify_schema_v57(&connection), Ok(()));
         }
         {
-            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v57 to v58");
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v57 to v59");
             assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
             let connection = migrated.lock_connection().expect("lock migrated store");
             assert_eq!(super::verify_schema_v59(&connection), Ok(()));
@@ -4675,7 +4675,7 @@ mod tests {
                        0, 0, 0, 'join-revision-group')",
             params![
                 scope.tenant_id.as_opaque().as_str(),
-                i64::from(scope.namespace_id.is_some()),
+                if scope.namespace_id.is_some() { 1_i64 } else { 0_i64 },
                 scope.namespace_id.as_ref().map(|id| id.as_opaque().as_str()).unwrap_or(""),
                 session_id.as_opaque().as_str(),
             ],
