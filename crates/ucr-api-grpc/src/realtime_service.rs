@@ -3638,6 +3638,14 @@ where
         Ok(sweep.sessions_reaped)
     }
 
+    /// Runs one bounded cleanup sweep for durable closed Calls and local realtime providers.
+    ///
+    /// Failed provider closes remain in the canonical retry queue; placement is not released
+    /// until every targeted provider close has been acknowledged.
+    ///
+    /// # Errors
+    /// Returns a canonical error when the clock, durable cleanup, provider close, attendance
+    /// persistence, or SFU placement transition cannot be completed safely.
     pub async fn cleanup_closed_conferences_once(
         &self,
     ) -> Result<RealtimeCleanupSweep, CanonicalError> {
