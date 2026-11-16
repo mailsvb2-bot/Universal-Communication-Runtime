@@ -660,10 +660,14 @@ drained before the provider Close acknowledgement.
 
 **Scope limit:** this is a local WebRTC DataChannel queue fence. It does not
 prove that ciphertext already accepted by a remote network stack has been
-played or discarded, that the SFU's cross-process sink has an atomic revoke
-fence, or that the remote camera/microphone capture tracks have physically
-stopped. Those remain explicit #336/#274 release gates. No production-ready
-or physical two-device A/V claim follows from this code or its CI.
+played or discarded, or that the remote camera/microphone capture tracks have
+physically stopped. PR #359 additionally adds an atomic authorization-revision
+fence at the SFU's local sink-acceptance boundary (SQLite writer transaction or
+the canonical MemoryLocalStore mutex). That source change still requires
+exact-head CI and does not prove delivery/stop on every remote SFU node. These
+transport and physical-device measurements remain explicit #336/#274 release
+gates. No production-ready or physical two-device A/V claim follows from this
+code or its CI.
 
 
 ## First-party direct-call Hangup waits for the existing Realtime provider owner
