@@ -901,8 +901,7 @@ async fn run_live_webrtc_worker(
         if shutdown.load(Ordering::Acquire) {
             break;
         }
-        handle_live_webrtc_command(command, &mut sessions, &shutdown, e2ee_ingress.as_ref())
-            .await;
+        handle_live_webrtc_command(command, &mut sessions, &shutdown, e2ee_ingress.as_ref()).await;
     }
     commands.close();
     media_commands.close();
@@ -923,15 +922,7 @@ async fn handle_live_webrtc_command(
             deadline,
             reply,
         } => {
-            handle_live_create(
-                sessions,
-                shutdown,
-                e2ee_ingress,
-                config,
-                deadline,
-                reply,
-            )
-            .await;
+            handle_live_create(sessions, shutdown, e2ee_ingress, config, deadline, reply).await;
         }
         LiveWebRtcCommand::Restart {
             config,
