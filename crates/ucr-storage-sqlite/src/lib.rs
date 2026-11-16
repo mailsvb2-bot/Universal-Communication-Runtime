@@ -4678,7 +4678,11 @@ mod tests {
                        0, 0, 0, 'join-revision-group')",
             rusqlite::params![
                 scope.tenant_id.as_opaque().as_str(),
-                if scope.namespace_id.is_some() { 1_i64 } else { 0_i64 },
+                if scope.namespace_id.is_some() {
+                    1_i64
+                } else {
+                    0_i64
+                },
                 scope
                     .namespace_id
                     .as_ref()
@@ -4691,12 +4695,20 @@ mod tests {
         drop(raw);
 
         let inserted = first.authorization_revision().expect("insert revision");
-        assert!(inserted > before_insert, "grant insertion must advance revision");
+        assert!(
+            inserted > before_insert,
+            "grant insertion must advance revision"
+        );
         second
             .revoke_conference_join_grant(&scope, &session_id)
             .expect("revoke canonical Join grant from second connection");
-        let revoked = first.authorization_revision().expect("cross-process revoke revision");
-        assert!(revoked > inserted, "Join grant revoke must advance shared revision");
+        let revoked = first
+            .authorization_revision()
+            .expect("cross-process revoke revision");
+        assert!(
+            revoked > inserted,
+            "Join grant revoke must advance shared revision"
+        );
 
         let mut sink_invoked = false;
         assert_eq!(
