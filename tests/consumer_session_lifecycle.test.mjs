@@ -126,3 +126,43 @@ test("accepted incoming call survives transient Device recheck failure without g
   assert.equal(scope.active,null,"no authenticated Device proof means no media");
   assert.equal(mediaStarted,0);
 });
+
+test("ambiguous recipient acceptance remains untrusted until canonical active inspection",async()=>{
+  const sourceCode=extract("function principalScope(user) {","function message(value) {");
+  const user={tenantId:"tenant",namespaceId:null,participantId:"bob",deviceId:"device"};
+  const scopeKey=JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]);
+  let state="ringing",painted=0;
+  const hints=new Map(),hintKey="ucr.first-party.active-call.v1";
+  const call={
+    callId:"incoming-call",callerIdentityId:"alice",calleeIdentityId:"bob",media:"video",state
+  };
+  const ctx={
+    accountScope:scopeKey,uiAuthGeneration:2,active:null,knownContacts:[],
+    sessionStorage:{getItem:k=>hints.get(k)??null,setItem:(k,v)=>hints.set(k,v),removeItem:k=>hints.delete(k)},
+    calls:{inspect:async id=>{assert.equal(id,call.callId);return {...call,state};}},
+    showActive:()=>painted++,authHttpCode:()=>0,
+  };
+  vm.runInNewContext('const ACTIVE_CALL_HINT_KEY="ucr.first-party.active-call.v1";\n'+
+    sourceCode+'\nthis.ops={rememberActiveCall,restoreActiveCall};',ctx);
+  ctx.ops.rememberActiveCall(call,"bob",{acceptPending:true});
+  assert.equal(JSON.parse(hints.get(hintKey)).acceptPending,true);
+  await ctx.ops.restoreActiveCall(user);
+  assert.equal(ctx.active,null,"ringing alone is not evidence of accepted media");
+  assert.equal(painted,0);
+  assert.equal(hints.has(hintKey),true,"briefly retain ambiguous acceptance for late commit");
+  state="active";
+  await ctx.ops.restoreActiveCall(user);
+  assert.equal(ctx.active.call.state,"active");
+  assert.equal(painted,1);
+  assert.equal(JSON.parse(hints.get(hintKey)).acceptPending,undefined,
+    "canonical confirmation clears pending-only marker");
+  ctx.active=null;state="ringing";
+  ctx.ops.rememberActiveCall(call,"bob",{acceptPending:true});
+  const expired=JSON.parse(hints.get(hintKey));
+  expired.acceptPendingAt=Date.now()-20000;
+  hints.set(hintKey,JSON.stringify(expired));
+  await ctx.ops.restoreActiveCall(user);
+  assert.equal(ctx.active,null);
+  assert.equal(hints.has(hintKey),false,
+    "an unconfirmed ringing call must not lock the UI indefinitely");
+});

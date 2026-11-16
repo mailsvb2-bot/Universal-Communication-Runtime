@@ -515,6 +515,7 @@ incomingContext.calls.signal=()=>new Promise(resolve=>{finishOldAccept=resolve;}
 incomingContext.host.resumeAuthenticatedDevice=async()=>user;
 const staleAccept=acceptIncoming();
 incomingContext.uiAuthGeneration++;
+incomingLocator=null; // explicit Logout clears the untrusted pending locator
 finishOldAccept({...incomingCall,state:"active"});
 await staleAccept;
 assert.equal(incomingContext.active,null,"old generation must not paint accepted Call");
@@ -544,7 +545,7 @@ incomingContext.showActive=()=>{};
 incomingContext.beginMedia=async()=>{mediaAccepts++;};
 await acceptIncoming();
 assert.equal(incomingContext.active.call.callId,call.callId);
-assert.equal(savedAccepts,2,"acceptance records recoverable locator before and after Device recheck");
+assert.equal(savedAccepts,3,"pending intent and committed acceptance remain scoped across Device recheck");
 assert.equal(mediaAccepts,1,"fresh accepted Call must still enter canonical media");
 
 incomingContext.active=null;

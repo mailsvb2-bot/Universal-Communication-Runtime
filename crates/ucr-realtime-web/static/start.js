@@ -606,11 +606,17 @@ function principalScope(user) {
 
 // Session storage is only a same-tab locator, never a Call or Identity owner.
 // Every restored Call must be inspected under a fresh canonical Device session.
-function rememberActiveCall(call,identity) {
+function rememberActiveCall(call,identity,{acceptPending=false}={}) {
   if (!accountScope || ![call.callerIdentityId,call.calleeIdentityId].includes(identity) ||
       typeof call.callId !== "string" || !/^[A-Za-z0-9_.:@-]{1,128}$/.test(call.callId)) return;
+  // A recipient may lose the HTTP response AFTER the Call owner commits
+  // acceptance. Persist only the untrusted Call locator before signaling;
+  // no pending hint authorizes Join, microphone, or media.
+  if(acceptPending && (call.calleeIdentityId!==identity ||
+      !["inviting","ringing"].includes(call.state)))return;
   try {sessionStorage.setItem(ACTIVE_CALL_HINT_KEY,JSON.stringify({
     scope:accountScope,callId:call.callId,
+    ...(acceptPending?{acceptPending:true,acceptPendingAt:Date.now()}:{}),
   }));} catch {}
 }
 function activeCallLocator() {
@@ -663,6 +669,21 @@ async function restoreActiveCall(user) {
     // A new Call (or a newer locator) wins over this in-flight inspection.
     if (active || activeCallLocator()!==locator) return;
     if (call.state==="terminated") {forgetActiveCall(locator);return;}
+    if(hint.acceptPending===true){
+      // A prior Accept HTTP response was ambiguous. Only the canonical
+      // Call owner may confirm ACTIVE. While still ringing, keep the hint
+      // briefly for a late commit; then release it so the user can retry.
+      if(call.calleeIdentityId!==user.participantId){
+        forgetActiveCall(locator);return;
+      }
+      if(call.state!=="active"&&call.state!=="reconnecting"){
+        const age=Date.now()-hint.acceptPendingAt;
+        if(!Number.isFinite(age)||age<0||age>15000)forgetActiveCall(locator);
+        return;
+      }
+      // Acceptance is verified, not inferred. Retire the pending marker.
+      rememberActiveCall(call,user.participantId);
+    }
     active={call,identity:user.participantId,terminating:hint.stopRequested===true};
     showActive();
   } catch(error) {
@@ -754,12 +775,15 @@ async function run(action) {
       : "Предыдущее действие ещё выполняется. Повторите после его завершения.");
     return;
   }
+  const startedScope=accountScope,startedGeneration=uiAuthGeneration;
   busy = true;
   try {await action();}
   catch(error) {
     // A late request must never present the previous account's result after
     // Logout/Device switch. It is neither a current UI error nor new authority.
-    if (error instanceof SessionSuperseded) return;
+    if (error instanceof SessionSuperseded ||
+        (startedScope!==null &&
+        (accountScope!==startedScope || uiAuthGeneration!==startedGeneration))) return;
     if (handleMlsIntegrityError(error)) return;
     message("Действие не подтверждено: " + (error instanceof Error ? error.message : String(error)));}
   finally {busy = false;}
@@ -1455,12 +1479,18 @@ function renderIncoming(items) {
         if(!scope)throw Error("Требуется подтверждённая Device-сессия");
         if (active && active.call.state !== "terminated") throw Error("вы уже участвуете в другом вызове");
         if (locator !== null) throw Error("сначала дождитесь проверки незавершённого вызова");
+        // An HTTP failure may occur AFTER canonical acceptance. Preserve
+        // only an expiring, same-tab locator for a later authorized inspect.
+        if(call.calleeIdentityId!==plOwnIdentity)
+          throw Error("Входящий Call не принадлежит текущему получателю");
+        rememberActiveCall(call,plOwnIdentity,{acceptPending:true});
+        const pendingLocator=activeCallLocator();
         const result = await calls.signal(call.callId,"accept");
         if (!result || result.callId !== call.callId) throw Error("Call acceptance mismatch");
         // The server may have accepted this Call, but an old UI callback may
         // never install it under a new (even same-Device) login generation.
         if(accountScope!==scope || uiAuthGeneration!==generation ||
-           activeCallLocator()!==locator || (active && active.call.state!=="terminated"))return;
+           activeCallLocator()!==pendingLocator || (active && active.call.state!=="terminated"))return;
         // Acceptance is already committed by the canonical Call owner. Save
         // only its same-tab locator BEFORE an auxiliary Device refresh: if
         // that refresh times out, the accepted Call can be inspected and
