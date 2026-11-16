@@ -228,15 +228,22 @@ where
     }
 }
 
-async fn wait_for_buffered_amount_zero<F, Fut>(
+async fn wait_for_buffered_amount_zero<F, Fut, C>(
     mut buffered_amount: F,
+    mut is_closed: C,
     deadline: Instant,
 ) -> Result<(), crate::WebRtcProviderError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = usize>,
+    C: FnMut() -> bool,
 {
     loop {
+        // A closed DataChannel cannot deliver its remaining local buffer to
+        // the remote peer. Do not quarantine an otherwise closed peer forever.
+        if is_closed() {
+            return Ok(());
+        }
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?;
@@ -318,9 +325,25 @@ impl LiveWebRtcE2eeChannel {
         &self,
         deadline: Instant,
     ) -> Result<(), crate::WebRtcProviderError> {
-        wait_for_buffered_amount_zero(|| self.channel.buffered_amount(), deadline).await?;
+        wait_for_buffered_amount_zero(
+            || self.channel.buffered_amount(),
+            || {
+                self.channel.ready_state()
+                    == webrtc::data_channel::data_channel_state::RTCDataChannelState::Closed
+            },
+            deadline,
+        )
+        .await?;
         if let Some(unordered) = &self.unordered {
-            wait_for_buffered_amount_zero(|| unordered.channel.buffered_amount(), deadline).await?;
+            wait_for_buffered_amount_zero(
+                || unordered.channel.buffered_amount(),
+                || {
+                    unordered.channel.ready_state()
+                        == webrtc::data_channel::data_channel_state::RTCDataChannelState::Closed
+                },
+                deadline,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -775,6 +798,7 @@ mod tests {
         let task = tokio::spawn(async move {
             wait_for_buffered_amount_zero(
                 || std::future::ready(observed.load(Ordering::Acquire)),
+                || false,
                 Instant::now() + Duration::from_secs(1),
             )
             .await
@@ -788,12 +812,26 @@ mod tests {
     async fn datachannel_drain_fails_closed_when_ciphertext_never_leaves_buffer() {
         let result = wait_for_buffered_amount_zero(
             || std::future::ready(1),
+            || false,
             Instant::now() + Duration::from_millis(15),
         )
         .await;
         assert_eq!(
             result,
             Err(crate::WebRtcProviderError::TemporarilyUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_datachannel_is_drained_even_if_its_local_buffer_is_nonzero() {
+        assert_eq!(
+            wait_for_buffered_amount_zero(
+                || std::future::ready(128),
+                || true,
+                Instant::now() + Duration::from_millis(15),
+            )
+            .await,
+            Ok(())
         );
     }
 
