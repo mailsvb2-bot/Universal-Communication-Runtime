@@ -607,3 +607,26 @@ Call. Cross-process in-flight cancellation, confirmed provider close, two
 physical Devices, public NAT/TURN traversal, remote A/V playback and measured
 revoke/stop remain release blockers. No remote UCR host is authorized by this
 document.
+
+## PR #359: bounded E2EE DataChannel drain before provider Close
+
+The WebRTC provider now treats local ciphertext-buffer drain as part of its
+Close acknowledgement boundary. The active send observes the offer-scoped
+Close signal and returns to the single peer worker; before that worker
+acknowledges Close, it waits for the reliable E2EE DataChannel and any
+negotiated unordered channel to report zero buffered bytes. The wait is
+bounded by the original Close deadline. If a buffer does not drain, the
+provider still attempts to close the peer, returns failure, and retains the
+quarantined session handle for the existing retry path instead of reporting
+successful cleanup.
+
+Rust regressions cover successful drain and bounded fail-closed timeout; the
+Windows first-party source contract checks that both channel buffers are
+drained before the provider Close acknowledgement.
+
+**Scope limit:** this is a local WebRTC DataChannel queue fence. It does not
+prove that ciphertext already accepted by a remote network stack has been
+played or discarded, that the SFU's cross-process sink has an atomic revoke
+fence, or that the remote camera/microphone capture tracks have physically
+stopped. Those remain explicit #336/#274 release gates. No production-ready
+or physical two-device A/V claim follows from this code or its CI.
