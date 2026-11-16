@@ -234,8 +234,9 @@ pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
     }
 
     /// Monotonic revision of every durable fact this evaluator AND its backing
-    /// store consult for authorization (grants, Call participation, Group/MLS
-    /// membership, Devices, trusted keys, identity bindings).
+    /// store consult for authorization (permission and signed Join grants, Call
+    /// participation, Group/MLS membership, Universal Conference lifecycle and
+    /// participant policy, Devices, trusted keys, identity bindings).
     ///
     /// Contract: any change that could turn an `Ok` into an error MUST make a
     /// later call return a different value, and the change must be visible to
@@ -245,6 +246,25 @@ pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
     #[must_use]
     fn authorization_revision(&self) -> Option<u64> {
         None
+    }
+
+    /// Pins every durable fact represented by `authorization_revision` while one
+    /// bounded infrastructure handoff is accepted.
+    ///
+    /// Implementations MUST hold the same transaction/lock used by every writer
+    /// that can change an authorization outcome for the entire callback. A
+    /// revision mismatch returns `Conflict` without invoking the callback; a
+    /// matching revision invokes it exactly once. The callback MUST be bounded and MUST NOT re-enter this authorization
+    /// store. Implementations without this atomic boundary fail closed.
+    ///
+    /// # Errors
+    /// Returns `Conflict` for stale authorization, or an explicit store error.
+    fn with_authorization_revision_fence(
+        &self,
+        _expected_revision: u64,
+        _action: &mut dyn FnMut() -> Result<(), DurableStoreError>,
+    ) -> Result<(), DurableStoreError> {
+        Err(DurableStoreError::PermissionDenied)
     }
 }
 

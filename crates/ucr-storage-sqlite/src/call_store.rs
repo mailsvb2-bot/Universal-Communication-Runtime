@@ -369,6 +369,48 @@ impl GroupCallLookupStore for SqliteLocalStore {
 
 /// One canonical creation path: optional parent Call CAS is checked under the
 /// same `SQLite` write transaction as the derived Call's durable insert.
+fn ensure_conference_accepts_group_calls(
+    transaction: &Transaction<'_>,
+    session: &CallSession,
+) -> Result<(), DurableStoreError> {
+    if !is_group_kind(session.conversation.kind) {
+        return Ok(());
+    }
+    let namespace = namespace_storage_key(&session.scope);
+    let lifecycle: Option<String> = transaction
+        .query_row(
+            "SELECT uc.lifecycle
+             FROM groups AS g
+             JOIN universal_conferences AS uc
+               ON uc.tenant_id = g.tenant_id
+              AND uc.namespace_present = g.namespace_present
+              AND uc.namespace_id = g.namespace_id
+              AND uc.conference_id = g.group_id
+             WHERE g.tenant_id = ?1
+               AND g.namespace_present = ?2
+               AND g.namespace_id = ?3
+               AND g.conversation_id = ?4
+               AND g.conversation_kind = ?5",
+            params![
+                session.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                session.conversation.conversation_id.as_opaque().as_str(),
+                call_conversation_kind_name(session.conversation.kind),
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))?;
+    if lifecycle
+        .as_deref()
+        .is_some_and(|value| value == "ending" || value == "ended")
+    {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    Ok(())
+}
+
 fn create_call_with_parent_guard(
     store: &SqliteLocalStore,
     creator: &ScopedPrincipal,
@@ -430,6 +472,7 @@ fn create_call_with_parent_guard(
             Err(DurableStoreError::Conflict)
         };
     }
+    ensure_conference_accepts_group_calls(&transaction, &session)?;
     require_group_participants_if_needed(&transaction, &session)?;
     insert_call(&transaction, &session, &creation_fingerprint)?;
     replace_participants(&transaction, &session)?;
@@ -1394,7 +1437,10 @@ fn map_call_error(error: ucr_protocol::CallSignallingError) -> DurableStoreError
 mod tests {
     use super::*;
     use crate::{SQLITE_SCHEMA_VERSION, message_store::tests::TestDb};
-    use ucr_core::{CallStore, ConversationStore, EventJournalStore, StorageProvider};
+    use ucr_core::{
+        CallStore, ConversationStore, EventJournalStore, GroupStore, StorageProvider,
+        UniversalConferenceStore,
+    };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CallParticipant, CorrelationContext, DeviceId, DeviceRef,
         EventEnvelope, EventId, IdentityId, ProtocolVersion,
@@ -1962,6 +2008,213 @@ mod tests {
         assert_eq!(
             joining.create_call_if_parent_current(&alice, &child, &active),
             Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
+    struct RoomCallFenceFixture {
+        _db: TestDb,
+        store: SqliteLocalStore,
+        joining: SqliteLocalStore,
+        active_call: CallSession,
+        alice: ScopedPrincipal,
+        room_id: GroupId,
+        live_revision: u64,
+    }
+
+    fn create_room_group(
+        store: &SqliteLocalStore,
+        alice: &ScopedPrincipal,
+        room_id: &GroupId,
+    ) -> ucr_model::ConversationRecord {
+        let conversation = ucr_model::ConversationRecord {
+            scope: scope(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(oid("room-call-conversation")),
+                kind: ConversationKind::PrivateGroup,
+            },
+            parent_conversation_id: None,
+        };
+        let group = ucr_model::GroupRecord {
+            scope: scope(),
+            group_id: room_id.clone(),
+            conversation: conversation.conversation.clone(),
+            ownership: ucr_model::GroupOwnership::PersonOwned(alice.principal.clone()),
+            history_policy: ucr_model::GroupHistoryPolicy::NoHistory,
+            delivery_policy: ucr_model::DeliveryPolicy::NoExternalBridge,
+            crypto_state: ucr_model::GroupCryptoState {
+                capability_id: None,
+                epoch: 0,
+                state_ref: None,
+            },
+            public_policy: None,
+            media_state: ucr_model::GroupMediaState::Idle,
+            bridge_mappings: Vec::new(),
+            replication_generation: 0,
+            revision: 0,
+        };
+        store
+            .create_group(&conversation, &group, alice)
+            .expect("canonical room Group");
+        conversation
+    }
+
+    fn create_live_room_profile(store: &SqliteLocalStore, room_id: &GroupId) -> u64 {
+        let room = ucr_model::UniversalConferenceProfile {
+            scope: scope(),
+            conference_id: room_id.clone(),
+            integration_id: ucr_model::IntegrationId::from_opaque(oid("room-call-integration")),
+            external_conference_id: b"room-call-external".to_vec(),
+            create_idempotency_key: "room-call-create".to_owned(),
+            mode: ucr_model::UniversalConferenceMode::Webinar,
+            lifecycle: ucr_model::UniversalConferenceLifecycle::Scheduled,
+            schedule: ucr_model::ConferenceScheduleMetadata {
+                starts_at_unix_ms: 1_000,
+                planned_end_unix_ms: None,
+                join_before_seconds: 900,
+                join_after_seconds: 0,
+                timezone: Some("UTC".to_owned()),
+            },
+            metadata: Vec::new(),
+            entry_open: false,
+            revision: 1,
+        };
+        store
+            .persist_universal_conference_profile(&room)
+            .expect("canonical room profile");
+        let waiting = store
+            .transition_universal_conference(
+                &scope(),
+                room_id,
+                1,
+                ucr_model::UniversalConferenceLifecycle::Waiting,
+                true,
+            )
+            .expect("room waiting");
+        store
+            .transition_universal_conference(
+                &scope(),
+                room_id,
+                waiting.revision,
+                ucr_model::UniversalConferenceLifecycle::Live,
+                true,
+            )
+            .expect("room live")
+            .revision
+    }
+
+    fn insert_room_group_call(
+        joining: &SqliteLocalStore,
+        mut active_call: CallSession,
+        alice: &ScopedPrincipal,
+        conversation: &ucr_model::ConversationRecord,
+    ) -> CallSession {
+        active_call.conversation = conversation.conversation.clone();
+        active_call.call_id = CallId::from_opaque(oid("room-active-call"));
+        let active_call = canonical_call_creation(&active_call, &alice.scope, &alice.principal)
+            .expect("canonical active group Call");
+        let fingerprint = call_creation_fingerprint(&active_call).expect("Call fingerprint");
+        let mut connection = joining.lock_connection().expect("connection");
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("transaction");
+        insert_call(&transaction, &active_call, &fingerprint).expect("insert active Call");
+        replace_participants(&transaction, &active_call).expect("insert Call participants");
+        transaction.commit().expect("commit active Call");
+        active_call
+    }
+
+    fn room_call_fence_fixture() -> RoomCallFenceFixture {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let joining = SqliteLocalStore::open(db.path()).expect("independent Call connection");
+        let (active_call, alice, _bob) = session();
+        let room_id = GroupId::from_opaque(oid("room-call-group"));
+        let conversation = create_room_group(&store, &alice, &room_id);
+        let live_revision = create_live_room_profile(&store, &room_id);
+        let active_call = insert_room_group_call(&joining, active_call, &alice, &conversation);
+        RoomCallFenceFixture {
+            _db: db,
+            store,
+            joining,
+            active_call,
+            alice,
+            room_id,
+            live_revision,
+        }
+    }
+
+    fn room_call_end_event(live_revision: u64) -> ucr_model::EventEnvelope {
+        let mut end_event = event("room-call-end-event");
+        end_event.event_type = "ucr.conference.ended".to_owned();
+        end_event.logical_order = live_revision + 1;
+        end_event.actor.on_behalf_of = Some(PrincipalId::from_opaque(oid("room-call-integration")));
+        end_event
+    }
+
+    fn terminate_room_call(joining: &SqliteLocalStore, call_id: &CallId) {
+        let mut connection = joining.lock_connection().expect("connection");
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("transaction");
+        transaction
+            .execute(
+                "UPDATE calls SET signalling_state = 'terminated'
+                 WHERE tenant_id = ?1 AND namespace_present = ?2
+                   AND namespace_id = ?3 AND call_id = ?4",
+                params![
+                    scope().tenant_id.as_opaque().as_str(),
+                    namespace_storage_key(&scope()).present,
+                    namespace_storage_key(&scope()).value,
+                    call_id.as_opaque().as_str(),
+                ],
+            )
+            .expect("terminate canonical Call");
+        transaction.commit().expect("commit termination");
+    }
+
+    #[test]
+    fn active_group_call_blocks_room_end_across_sqlite_handles() {
+        let fixture = room_call_fence_fixture();
+        let end_event = room_call_end_event(fixture.live_revision);
+        assert_eq!(
+            fixture
+                .store
+                .end_universal_conference_if_no_active_group_calls(
+                    &scope(),
+                    &fixture.room_id,
+                    fixture.live_revision,
+                    Some(&end_event),
+                ),
+            Err(DurableStoreError::Conflict),
+            "an active canonical Group Call must prevent Ended"
+        );
+    }
+
+    #[test]
+    fn ended_room_rejects_late_group_call_creation_across_sqlite_handles() {
+        let fixture = room_call_fence_fixture();
+        terminate_room_call(&fixture.joining, &fixture.active_call.call_id);
+        let end_event = room_call_end_event(fixture.live_revision);
+        let ended = fixture
+            .store
+            .end_universal_conference_if_no_active_group_calls(
+                &scope(),
+                &fixture.room_id,
+                fixture.live_revision,
+                Some(&end_event),
+            )
+            .expect("room can end after all Calls are terminal");
+        assert_eq!(
+            ended.lifecycle,
+            ucr_model::UniversalConferenceLifecycle::Ended
+        );
+
+        let mut late_call = fixture.active_call;
+        late_call.call_id = CallId::from_opaque(oid("room-late-call"));
+        assert_eq!(
+            fixture.joining.create_call(&fixture.alice, &late_call),
+            Err(DurableStoreError::PermissionDenied),
+            "Call creation must observe Ended under its own canonical write transaction"
         );
     }
 }

@@ -18,15 +18,15 @@ use sha2::{Digest as _, Sha256};
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
-    AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
-    DeviceLifecycleStore, DurableStoreError, EventJournalStore, ExternalIdentityBindingStore,
-    GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
-    PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
-    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
-    UniversalConferenceStore,
+    AuthorizationEvaluator, CallPermissionGrantStore, CallStore, CommandAcceptanceStore,
+    ConferenceJoinGrantStore, DeviceLifecycleStore, DurableStoreError, EventJournalStore,
+    ExternalIdentityBindingStore, GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore,
+    IdentityStore, PermissionGrantStore, PrincipalIdentityBindingStore,
+    PrincipalIdentityLookupStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
+    ServiceQuotaStore, TrustedSigningKeyStore, UniversalConferenceStore,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver};
-use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError};
+use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsServerCustodyProbe, GroupMlsStoreError};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipant, CallParticipantState,
     CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind, CallSignallingState,
@@ -2540,6 +2540,284 @@ struct RuntimeReadyParticipant {
     device_id: DeviceId,
 }
 
+/// Reuses the canonical Universal Conference Call reconciler, but ONLY
+/// after the Owner's browser endpoints have cryptographically committed every
+/// participant to a server-blind MLS Group. This deliberately avoids the
+/// legacy machine integration path that creates a server-custodied Group.
+///
+/// The caller must be an independently authenticated first-party owner. This
+/// method neither trusts a browser roster nor generates MLS private keys.
+///
+/// # Errors
+/// Refuses absent/foreign owners, server-custodied, incomplete or uncommitted
+/// MLS Groups, missing enrolled Devices, changed conference state or Call CAS.
+fn first_party_room_owner(
+    participants: &[UniversalConferenceParticipantProfile],
+    integration_id: &IntegrationId,
+) -> Result<PrincipalRef, CanonicalError> {
+    if participants
+        .iter()
+        .any(|participant| &participant.integration_id != integration_id)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
+    }
+    let owners = participants
+        .iter()
+        .filter(|participant| participant.role == ConferenceParticipantRole::Owner)
+        .collect::<Vec<_>>();
+    let [owner] = owners.as_slice() else {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    };
+    if owner.participant.kind != PrincipalKind::Person {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    Ok(owner.participant.clone())
+}
+
+fn validate_first_party_room_group_owner<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    owner: &PrincipalRef,
+    group: &GroupRecord,
+) -> Result<(), CanonicalError>
+where
+    S: GroupMlsServerCustodyProbe,
+{
+    if group.scope != *scope
+        || group.group_id != *room_id
+        || group.ownership != GroupOwnership::PersonOwned(owner.clone())
+        || group.conversation.kind != ConversationKind::PrivateGroup
+        || group.history_policy != GroupHistoryPolicy::NoHistory
+        || group.delivery_policy != DeliveryPolicy::NoExternalBridge
+        || group.public_policy.is_some()
+        || !group.bridge_mappings.is_empty()
+        || group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
+        || group.crypto_state.epoch == 0
+        || group.crypto_state.state_ref.is_none()
+        || store
+            .server_possesses_mls_group(scope, room_id)
+            .map_err(|error| map_group_mls_error(&error))?
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
+    }
+    Ok(())
+}
+
+fn validate_first_party_room_group_member<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participant: &UniversalConferenceParticipantProfile,
+) -> Result<(), CanonicalError>
+where
+    S: GroupStore,
+{
+    let membership = store
+        .group_membership(scope, room_id, &participant.participant)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+    if membership.state != ucr_model::GroupMemberState::Active
+        || membership.role != runtime_group_role(participant.role)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    Ok(())
+}
+
+fn first_party_room_group_roster_matches(
+    memberships: &[ucr_model::GroupMembership],
+    participants: &[UniversalConferenceParticipantProfile],
+) -> bool {
+    let active = memberships
+        .iter()
+        .filter(|membership| membership.state == ucr_model::GroupMemberState::Active)
+        .collect::<Vec<_>>();
+    active.len() == participants.len()
+        && participants.iter().all(|participant| {
+            active.iter().any(|membership| {
+                membership.member == participant.participant
+                    && membership.role == runtime_group_role(participant.role)
+            })
+        })
+}
+
+fn validate_first_party_room_group_roster<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participants: &[UniversalConferenceParticipantProfile],
+) -> Result<(), CanonicalError>
+where
+    S: GroupStore,
+{
+    let memberships = store
+        .group_memberships(scope, room_id, MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS)
+        .map_err(map_store_error)?;
+    // A result at the scan ceiling may be truncated. Never authorize a partial
+    // MLS roster: every active leaf must map to one current canonical attendee.
+    if memberships.len() >= MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS
+        || !first_party_room_group_roster_matches(&memberships, participants)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    Ok(())
+}
+
+/// Prepares the canonical media Call only after the Room roster and endpoint-owned
+/// MLS Group have been independently validated.
+///
+/// # Errors
+/// Rejects a closed or foreign Room, a server-custodied Group, an untrusted or
+/// missing Device, incomplete MLS membership, or a conflicting Call mutation.
+pub fn prepare_authenticated_first_party_room_call<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    owner: &PrincipalRef,
+    idempotency_key: &str,
+) -> Result<bool, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + CommandAcceptanceStore
+        + GroupStore
+        + GroupMlsServerCustodyProbe
+        + CallStore
+        + CallPermissionGrantStore
+        + GroupCallLookupStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore,
+{
+    validate_mutation_idempotency_key(idempotency_key)?;
+    let integration_id = IntegrationId::from_opaque(
+        OpaqueId::new("ucr-first-party-room")
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
+    let input = PrepareConferenceRuntimeInput {
+        scope: scope.clone(),
+        conference_id: room_id.clone(),
+        integration_id: integration_id.clone(),
+        idempotency_key: idempotency_key.to_owned(),
+    };
+    let room = conference_for_integration(store, scope, room_id, &input.integration_id)?;
+    if room.mode != UniversalConferenceMode::Webinar
+        || !room.entry_open
+        || !matches!(
+            room.lifecycle,
+            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+        )
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    let enrolled = active_conference_participants(store, scope, room_id)?;
+    if first_party_room_owner(&enrolled, &integration_id)? != *owner {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    let group = store
+        .group(scope, room_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+    validate_first_party_room_group_owner(store, scope, room_id, owner, &group)?;
+    validate_first_party_room_group_roster(store, scope, room_id, &enrolled)?;
+    // Do not generate a Group change on the server. Every committed Device
+    // must already be in the endpoint-controlled group transition ledger.
+    let mut ready = Vec::new();
+    for person in enrolled {
+        let device_id = optional_single_active_device(store, scope, &person.participant)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+        validate_first_party_room_group_member(store, scope, room_id, &person)?;
+        ready.push(RuntimeReadyParticipant {
+            profile: person,
+            device_id,
+        });
+    }
+    if ready.len() < 2 {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    // As in the universal runtime: one accepted Command ID owns the stable
+    // media Call identity. Duplicate attempts reconcile rather than fork Calls.
+    let payload = pb::UniversalPrepareConferenceRuntimeRequest {
+        scope: Some(pb_scope(scope)),
+        conference_id: Some(pb_opaque(room_id.as_opaque())),
+        integration_id: Some(pb_opaque(input.integration_id.as_opaque())),
+        idempotency_key: idempotency_key.to_owned(),
+    }
+    .encode_to_vec();
+    let command_id = accept_integration_mutation_id(
+        store,
+        scope,
+        &input.integration_id,
+        "ucr.conference.runtime.prepare.v1",
+        idempotency_key,
+        payload,
+    )?;
+    let actor = ScopedPrincipal {
+        scope: scope.clone(),
+        principal: owner.clone(),
+    };
+    let prepared = reconcile_runtime_call(store, &input, &command_id, &actor, &ready)?;
+    if prepared {
+        reconcile_first_party_room_call_permissions(store, scope, room_id, &ready)?;
+    }
+    Ok(prepared)
+}
+
+fn first_party_room_call_permissions(
+    publish_audio_allowed: bool,
+    publish_video_allowed: bool,
+    screen_share_allowed: bool,
+) -> Vec<&'static str> {
+    let mut permissions = vec![
+        CALL_OBSERVE_PERMISSION,
+        CONFERENCE_SUBSCRIBE_PERMISSION,
+        AUDIO_RECEIVE_PERMISSION,
+        VIDEO_RECEIVE_PERMISSION,
+    ];
+    if publish_audio_allowed {
+        permissions.push(AUDIO_SEND_PERMISSION);
+    }
+    if publish_video_allowed {
+        permissions.push(VIDEO_SEND_PERMISSION);
+    }
+    if screen_share_allowed {
+        permissions.push(SCREEN_SHARE_SEND_PERMISSION);
+    }
+    permissions
+}
+
+fn reconcile_first_party_room_call_permissions<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participants: &[RuntimeReadyParticipant],
+) -> Result<(), CanonicalError>
+where
+    S: CallPermissionGrantStore + GroupCallLookupStore,
+{
+    let calls = store
+        .active_calls_for_group(scope, room_id, 2)
+        .map_err(map_store_error)?;
+    let [call] = calls.as_slice() else {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    };
+    for participant in participants {
+        let permissions = first_party_room_call_permissions(
+            participant.profile.publish_audio_allowed,
+            participant.profile.publish_video_allowed,
+            participant.profile.screen_share_allowed,
+        );
+        store
+            .grant_call_permissions(
+                scope,
+                &call.call_id,
+                std::slice::from_ref(&participant.profile.participant),
+                &permissions,
+            )
+            .map_err(map_store_error)?;
+    }
+    Ok(())
+}
+
 fn prepare_conference_runtime<S>(
     store: &S,
     input: &PrepareConferenceRuntimeInput,
@@ -3077,6 +3355,305 @@ where
         (Some(call), None) => Ok(call.call_id),
         (None, _) => Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied)),
         (Some(_), Some(_)) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    }
+}
+
+/// Replay key and clock for one canonical first-party Room Join attempt.
+#[derive(Debug, Clone, Copy)]
+pub struct FirstPartyRoomJoinAttempt<'a> {
+    pub idempotency_key: &'a str,
+    pub now_unix_ms: i64,
+    pub signer_key_id: &'a str,
+}
+
+fn validate_first_party_room_call_member(
+    call: &CallSession,
+    owner: &PrincipalRef,
+    participant: &PrincipalRef,
+) -> Result<(), CanonicalError> {
+    let accepted = |principal: &PrincipalRef| {
+        call.participants.iter().any(|member| {
+            &member.principal == principal
+                && member.state == CallParticipantState::Accepted
+                && member.left_revision.is_none()
+        })
+    };
+    if call.signalling_state != CallSignallingState::Active
+        || &call.initiated_by != owner
+        || !accepted(owner)
+        || !accepted(participant)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    Ok(())
+}
+
+fn resolve_first_party_room_call<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    owner: &PrincipalRef,
+    participant: &PrincipalRef,
+) -> Result<CallId, CanonicalError>
+where
+    S: GroupCallLookupStore,
+{
+    let mut calls = store
+        .active_calls_for_group(scope, room_id, 2)
+        .map_err(map_store_error)?
+        .into_iter();
+    let call = match (calls.next(), calls.next()) {
+        (Some(call), None) => call,
+        (None, _) => return Err(CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)),
+        (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    };
+    validate_first_party_room_call_member(&call, owner, participant)?;
+    Ok(call.call_id)
+}
+
+fn revoke_issued_room_join<S>(
+    store: &S,
+    issuer: &JoinTokenIssuer,
+    scope: &TenantScope,
+    grant: &pb::ConferenceJoinGrant,
+) -> Result<(), CanonicalError>
+where
+    S: ConferenceJoinGrantStore,
+{
+    let session_id = SessionId::from_opaque(decode_opaque(grant.session_id.clone())?);
+    store
+        .revoke_conference_join_grant(scope, &session_id)
+        .map_err(map_store_error)?;
+    issuer
+        .revoke(scope, &session_id)
+        .map_err(map_join_token_error)?;
+    Ok(())
+}
+
+struct FirstPartyRoomJoinSnapshot {
+    room: UniversalConferenceProfile,
+    owner: PrincipalRef,
+    enrolled: UniversalConferenceParticipantProfile,
+    group: GroupRecord,
+    call_id: CallId,
+}
+
+fn validate_first_party_room_join<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participant: &PrincipalRef,
+    device_id: &DeviceId,
+    signer_key_id: &str,
+) -> Result<FirstPartyRoomJoinSnapshot, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + TrustedSigningKeyStore
+        + GroupCallLookupStore
+        + GroupStore
+        + GroupMlsServerCustodyProbe,
+{
+    if participant.kind != PrincipalKind::Person {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    let integration_id = IntegrationId::from_opaque(
+        OpaqueId::new("ucr-first-party-room")
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
+    let room = store
+        .universal_conference_profile(scope, room_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    if room.integration_id != integration_id
+        || room.mode != UniversalConferenceMode::Webinar
+        || !room.entry_open
+        || room.lifecycle != UniversalConferenceLifecycle::Live
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    let participants = active_conference_participants(store, scope, room_id)?;
+    let owner = first_party_room_owner(&participants, &integration_id)?;
+    let enrolled = participants
+        .iter()
+        .find(|candidate| &candidate.participant == participant)
+        .cloned()
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    if enrolled.integration_id != integration_id {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    let group = store
+        .group(scope, room_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+    validate_first_party_room_group_owner(store, scope, room_id, &owner, &group)?;
+    validate_first_party_room_group_roster(store, scope, room_id, &participants)?;
+    validate_first_party_room_group_member(store, scope, room_id, &enrolled)?;
+    let current_device = resolve_join_device(store, scope, participant)?;
+    if &current_device != device_id {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    let active_key = store
+        .active_trusted_signing_key(scope, device_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
+    if active_key.key_id.as_opaque().as_str() != signer_key_id {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    let call_id = resolve_first_party_room_call(store, scope, room_id, &owner, participant)?;
+    Ok(FirstPartyRoomJoinSnapshot {
+        room,
+        owner,
+        enrolled,
+        group,
+        call_id,
+    })
+}
+
+fn first_party_room_join_fence<S>(
+    store: &S,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participant: &PrincipalRef,
+    device_id: &DeviceId,
+    attempt: FirstPartyRoomJoinAttempt<'_>,
+    snapshot: &FirstPartyRoomJoinSnapshot,
+) -> Result<bool, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + TrustedSigningKeyStore
+        + GroupCallLookupStore
+        + GroupStore
+        + GroupMlsServerCustodyProbe,
+{
+    let integration_id = IntegrationId::from_opaque(
+        OpaqueId::new("ucr-first-party-room")
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
+    let current_room = store
+        .universal_conference_profile(scope, room_id)
+        .map_err(map_store_error)?;
+    let current_participants = active_conference_participants(store, scope, room_id)?;
+    let current_owner = first_party_room_owner(&current_participants, &integration_id)?;
+    let current_enrolled = current_participants
+        .iter()
+        .find(|candidate| &candidate.participant == participant)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
+    let current_device = resolve_join_device(store, scope, participant)?;
+    let current_key = store
+        .active_trusted_signing_key(scope, device_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PermissionDenied))?;
+    let current_call =
+        resolve_first_party_room_call(store, scope, room_id, &current_owner, participant)?;
+    let current_group = store
+        .group(scope, room_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+    validate_first_party_room_group_owner(store, scope, room_id, &current_owner, &current_group)?;
+    validate_first_party_room_group_roster(store, scope, room_id, &current_participants)?;
+    validate_first_party_room_group_member(store, scope, room_id, current_enrolled)?;
+    Ok(current_room.as_ref() == Some(&snapshot.room)
+        && current_owner == snapshot.owner
+        && current_enrolled == &snapshot.enrolled
+        && current_device == *device_id
+        && current_key.key_id.as_opaque().as_str() == attempt.signer_key_id
+        && current_call == snapshot.call_id
+        && current_group.revision == snapshot.group.revision
+        && current_group.crypto_state == snapshot.group.crypto_state
+        && current_group.ownership == snapshot.group.ownership)
+}
+
+/// Issues an authenticated first-party room Join through the canonical durable
+/// conference issuer after independent first-party Device authorization.
+///
+/// # Errors
+/// Rejects invalid trust, scope, lifecycle, replay keys or storage failure.
+pub fn issue_authenticated_first_party_room_join<S>(
+    store: &S,
+    issuer: &JoinTokenIssuer,
+    scope: &TenantScope,
+    room_id: &GroupId,
+    participant: &PrincipalRef,
+    device_id: &DeviceId,
+    attempt: FirstPartyRoomJoinAttempt<'_>,
+) -> Result<pb::ConferenceJoinGrant, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + ConferenceJoinGrantStore
+        + CommandAcceptanceStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + TrustedSigningKeyStore
+        + GroupCallLookupStore
+        + GroupStore
+        + GroupMlsServerCustodyProbe,
+{
+    validate_mutation_idempotency_key(attempt.idempotency_key)?;
+    let snapshot = validate_first_party_room_join(
+        store,
+        scope,
+        room_id,
+        participant,
+        device_id,
+        attempt.signer_key_id,
+    )?;
+    let integration_id = IntegrationId::from_opaque(
+        OpaqueId::new("ucr-first-party-room")
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
+    let request = pb::UniversalIssueJoinGrantRequest {
+        scope: Some(pb_scope(scope)),
+        conference_id: Some(pb_opaque(room_id.as_opaque())),
+        integration_id: Some(pb_opaque(integration_id.as_opaque())),
+        external_user_id: snapshot.enrolled.external_user_id.clone(),
+        ttl_seconds: 900,
+        use_policy: pb::JoinGrantUsePolicy::Reusable as i32,
+        not_before_unix_ms: None,
+        not_after_unix_ms: None,
+        idempotency_key: attempt.idempotency_key.to_owned(),
+    };
+    let payload = request.encode_to_vec();
+    let grant = issue_join_grant(
+        store,
+        issuer,
+        IssueJoinGrantInput {
+            scope: scope.clone(),
+            conference_id: room_id.clone(),
+            integration_id,
+            external_user_id: snapshot.enrolled.external_user_id.clone(),
+            ttl_seconds: 900,
+            use_policy: RealtimeJoinGrantUsePolicy::Reusable,
+            not_before_unix_ms: None,
+            not_after_unix_ms: None,
+            idempotency_key: attempt.idempotency_key.to_owned(),
+        },
+        payload,
+        attempt.now_unix_ms,
+    )?;
+    // Signing is not the authorization boundary. Re-read canonical state after
+    // the durable grant write; any changed authority retires both grant copies.
+    match first_party_room_join_fence(
+        store,
+        scope,
+        room_id,
+        participant,
+        device_id,
+        attempt,
+        &snapshot,
+    ) {
+        Ok(true) => Ok(grant),
+        result => {
+            revoke_issued_room_join(store, issuer, scope, &grant)?;
+            match result {
+                Ok(false) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+                Err(error) => Err(error),
+                Ok(true) => unreachable!("successful fence returned above"),
+            }
+        }
     }
 }
 
@@ -3886,6 +4463,30 @@ const fn lifecycle_event_type(lifecycle: UniversalConferenceLifecycle) -> Option
         | UniversalConferenceLifecycle::Waiting
         | UniversalConferenceLifecycle::Ending => None,
     }
+}
+
+/// Builds the exact canonical Conference lifecycle Event used by the
+/// universal conference service. A first-party verified Person may use the
+/// SAME event schema when cancelling a scheduled/waiting room. Callers must
+/// authorize the owner and persist this event atomically with the lifecycle
+/// CAS; creating an Event alone conveys no mutation authority.
+///
+/// # Errors
+/// Returns a canonical error on invalid clock, command identity or encoding.
+pub fn canonical_universal_conference_lifecycle_event(
+    current: &UniversalConferenceProfile,
+    target: UniversalConferenceLifecycle,
+    command_id: &CommandId,
+    idempotency_key: &str,
+    occurred_at_unix_ms: i64,
+) -> Result<Option<EventEnvelope>, CanonicalError> {
+    lifecycle_event(
+        current,
+        target,
+        command_id,
+        idempotency_key,
+        Some(occurred_at_unix_ms),
+    )
 }
 
 fn lifecycle_event(
@@ -5173,6 +5774,45 @@ mod universal_runtime_tests {
     }
 
     #[test]
+    fn first_party_room_join_requires_active_call_and_accepted_non_departed_member() {
+        let owner = principal("room-join-owner");
+        let attendee = principal("room-join-attendee");
+        let conversation = ucr_model::ConversationRef {
+            conversation_id: ucr_model::ConversationId::from_opaque(oid("room-join-conversation")),
+            kind: ucr_model::ConversationKind::PrivateGroup,
+        };
+        let mut call = history_call(
+            conversation,
+            CallId::from_opaque(oid("room-join-call")),
+            &owner,
+            &attendee,
+        );
+
+        assert!(super::validate_first_party_room_call_member(&call, &owner, &attendee).is_err());
+        call.signalling_state = CallSignallingState::Active;
+        assert!(
+            super::validate_first_party_room_call_member(&call, &owner, &attendee).is_err(),
+            "an active Call does not admit an unaccepted attendee"
+        );
+        call.participants[1].state = CallParticipantState::Accepted;
+        assert!(super::validate_first_party_room_call_member(&call, &owner, &attendee).is_ok());
+        call.participants[1].left_revision = Some(2);
+        assert!(
+            super::validate_first_party_room_call_member(&call, &owner, &attendee).is_err(),
+            "a departed attendee cannot renew a signed Join"
+        );
+        assert!(
+            super::validate_first_party_room_call_member(
+                &call,
+                &owner,
+                &principal("room-outsider")
+            )
+            .is_err(),
+            "an unrelated Person cannot receive the Room Join"
+        );
+    }
+
+    #[test]
     fn active_device_projection_ignores_sixty_four_revoked_devices() {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
@@ -5402,5 +6042,231 @@ mod universal_runtime_tests {
         )
         .expect("person principal retry");
         assert_eq!(repeated, resolved);
+    }
+
+    #[test]
+    fn first_party_room_join_rejects_public_history_and_external_bridge_groups() {
+        use ucr_model::{
+            ConversationId, ConversationKind, ConversationRef, DeliveryPolicy, GroupBridgeMapping,
+            GroupCryptoState, GroupHistoryPolicy, GroupMediaState, GroupOwnership, GroupRecord,
+            PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
+        };
+
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("canonical SQLite store");
+        let scope = scope();
+        let room_id = ucr_model::GroupId::from_opaque(oid("fp-room-policy-fence"));
+        let owner = PrincipalRef {
+            principal_id: PrincipalId::from_opaque(oid("fp-room-policy-owner")),
+            kind: PrincipalKind::Person,
+        };
+        let group = GroupRecord {
+            scope: scope.clone(),
+            group_id: room_id.clone(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(oid("fp-room-policy-conversation")),
+                kind: ConversationKind::PrivateGroup,
+            },
+            ownership: GroupOwnership::PersonOwned(owner.clone()),
+            history_policy: GroupHistoryPolicy::NoHistory,
+            delivery_policy: DeliveryPolicy::NoExternalBridge,
+            crypto_state: GroupCryptoState {
+                capability_id: Some(GROUP_MLS_CAPABILITY.to_owned()),
+                epoch: 1,
+                state_ref: Some(oid("fp-room-policy-state")),
+            },
+            public_policy: None,
+            media_state: GroupMediaState::Idle,
+            bridge_mappings: Vec::new(),
+            replication_generation: 0,
+            revision: 1,
+        };
+
+        assert!(
+            super::validate_first_party_room_group_owner(&store, &scope, &room_id, &owner, &group)
+                .is_ok()
+        );
+
+        let mut public = group.clone();
+        public.public_policy = Some(PublicGroupPolicy {
+            join_policy: PublicGroupJoinPolicy::InviteOnly,
+            discovery: PublicGroupDiscovery::Unlisted,
+            indexed: false,
+        });
+        assert!(
+            super::validate_first_party_room_group_owner(&store, &scope, &room_id, &owner, &public)
+                .is_err()
+        );
+
+        let mut historical = group.clone();
+        historical.history_policy = GroupHistoryPolicy::FullHistory;
+        assert!(
+            super::validate_first_party_room_group_owner(
+                &store,
+                &scope,
+                &room_id,
+                &owner,
+                &historical
+            )
+            .is_err()
+        );
+
+        let mut bridged = group.clone();
+        bridged.bridge_mappings.push(GroupBridgeMapping {
+            integration_id: IntegrationId::from_opaque(oid("fp-room-external-bridge")),
+            external_group_id: b"external-room".to_vec(),
+        });
+        assert!(
+            super::validate_first_party_room_group_owner(
+                &store, &scope, &room_id, &owner, &bridged
+            )
+            .is_err()
+        );
+
+        let mut externally_delivered = group;
+        externally_delivered.delivery_policy = DeliveryPolicy::BestEffort;
+        assert!(
+            super::validate_first_party_room_group_owner(
+                &store,
+                &scope,
+                &room_id,
+                &owner,
+                &externally_delivered
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn first_party_room_group_roster_rejects_unenrolled_active_leaves() {
+        use ucr_model::{GroupMemberState, GroupMembership, GroupPermission, GroupRole};
+
+        let room = conference();
+        let participant = |id: &str, role| {
+            let principal = principal(id);
+            let (
+                audio_muted,
+                camera_allowed,
+                publish_audio_allowed,
+                publish_video_allowed,
+                screen_share_allowed,
+            ) = super::participant_defaults(UniversalConferenceMode::Webinar, role);
+            UniversalConferenceParticipantProfile {
+                scope: scope(),
+                conference_id: room.conference_id.clone(),
+                integration_id: room.integration_id.clone(),
+                external_user_id: id.as_bytes().to_vec(),
+                participant: principal,
+                role,
+                audio_muted,
+                camera_allowed,
+                publish_audio_allowed,
+                publish_video_allowed,
+                screen_share_allowed,
+                active: true,
+                revision: 1,
+            }
+        };
+        let membership = |id: &str, role: GroupRole, state: GroupMemberState| GroupMembership {
+            scope: scope(),
+            group_id: room.conference_id.clone(),
+            member: principal(id),
+            role,
+            permissions: Vec::<GroupPermission>::new(),
+            state,
+            joined_revision: 1,
+            removed_revision: (state == GroupMemberState::Removed).then_some(2),
+            history_floor_logical_order: 0,
+        };
+        let participants = vec![
+            participant("room-roster-owner", ConferenceParticipantRole::Owner),
+            participant("room-roster-attendee", ConferenceParticipantRole::Attendee),
+        ];
+        let exact = vec![
+            membership(
+                "room-roster-owner",
+                GroupRole::Owner,
+                GroupMemberState::Active,
+            ),
+            membership(
+                "room-roster-attendee",
+                GroupRole::Member,
+                GroupMemberState::Active,
+            ),
+        ];
+        assert!(super::first_party_room_group_roster_matches(
+            &exact,
+            &participants
+        ));
+
+        let mut outsider = exact.clone();
+        outsider.push(membership(
+            "room-roster-outsider",
+            GroupRole::Member,
+            GroupMemberState::Active,
+        ));
+        assert!(!super::first_party_room_group_roster_matches(
+            &outsider,
+            &participants
+        ));
+
+        let missing = vec![exact[0].clone()];
+        assert!(!super::first_party_room_group_roster_matches(
+            &missing,
+            &participants
+        ));
+
+        let mut wrong_role = exact.clone();
+        wrong_role[1].role = GroupRole::Admin;
+        assert!(!super::first_party_room_group_roster_matches(
+            &wrong_role,
+            &participants
+        ));
+
+        let mut removed_history = exact;
+        removed_history.push(membership(
+            "room-roster-former",
+            GroupRole::Member,
+            GroupMemberState::Removed,
+        ));
+        assert!(super::first_party_room_group_roster_matches(
+            &removed_history,
+            &participants
+        ));
+    }
+}
+
+#[cfg(test)]
+mod first_party_room_permission_tests {
+    use super::first_party_room_call_permissions;
+    use ucr_protocol::{
+        AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CALL_OBSERVE_PERMISSION,
+        CONFERENCE_SUBSCRIBE_PERMISSION, SCREEN_SHARE_SEND_PERMISSION, VIDEO_RECEIVE_PERMISSION,
+        VIDEO_SEND_PERMISSION,
+    };
+
+    #[test]
+    fn room_speaker_and_attendee_permissions_are_minimal_and_role_bound() {
+        assert_eq!(
+            first_party_room_call_permissions(true, true, true),
+            vec![
+                CALL_OBSERVE_PERMISSION,
+                CONFERENCE_SUBSCRIBE_PERMISSION,
+                AUDIO_RECEIVE_PERMISSION,
+                VIDEO_RECEIVE_PERMISSION,
+                AUDIO_SEND_PERMISSION,
+                VIDEO_SEND_PERMISSION,
+                SCREEN_SHARE_SEND_PERMISSION,
+            ]
+        );
+        assert_eq!(
+            first_party_room_call_permissions(false, false, false),
+            vec![
+                CALL_OBSERVE_PERMISSION,
+                CONFERENCE_SUBSCRIBE_PERMISSION,
+                AUDIO_RECEIVE_PERMISSION,
+                VIDEO_RECEIVE_PERMISSION,
+            ]
+        );
     }
 }

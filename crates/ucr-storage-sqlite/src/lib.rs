@@ -122,7 +122,8 @@ const SQLITE_SCHEMA_V55: u32 = 55;
 const SQLITE_SCHEMA_V56: u32 = 56;
 const SQLITE_SCHEMA_V57: u32 = 57;
 const SQLITE_SCHEMA_V58: u32 = 58;
-pub const SQLITE_SCHEMA_VERSION: u32 = 58;
+const SQLITE_SCHEMA_V59: u32 = 59;
+pub const SQLITE_SCHEMA_VERSION: u32 = 59;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -701,7 +702,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v58(connection);
+        return verify_schema_v59(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -769,11 +770,27 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V55 => migrate_v55_to_v56(connection)?,
             SQLITE_SCHEMA_V56 => migrate_v56_to_v57(connection)?,
             SQLITE_SCHEMA_V57 => migrate_v57_to_v58(connection)?,
+            SQLITE_SCHEMA_V58 => migrate_v58_to_v59(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v58(connection)
+    verify_schema_v59(connection)
+}
+
+fn migrate_v58_to_v59(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v58(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    authorization_revision_store::create_v59_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V59)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v59(connection)
 }
 
 fn migrate_v57_to_v58(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -965,6 +982,11 @@ fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreErr
 fn verify_schema_v58(connection: &Connection) -> Result<(), DurableStoreError> {
     verify_schema_v57(connection)?;
     authorization_revision_store::verify_v58_objects(connection)
+}
+
+fn verify_schema_v59(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v58(connection)?;
+    authorization_revision_store::verify_v59_objects(connection)
 }
 
 fn verify_schema_v57(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1168,6 +1190,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     call_permission_grant_store::create_v56_objects(&transaction)?;
     first_party_session_store::create_v57_objects(&transaction)?;
     authorization_revision_store::create_v58_objects(&transaction)?;
+    authorization_revision_store::create_v59_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1179,7 +1202,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
         .map_err(|error| map_sqlite_error(&error))?;
     // Verify the FULL current shape, so a fresh database can never be stamped
     // current while missing a newer object.
-    verify_schema_v58(connection)
+    verify_schema_v59(connection)
 }
 
 fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -2253,7 +2276,13 @@ fn test_restore_v49_mls_transition_shape(connection: &Connection) -> Result<(), 
 }
 
 #[cfg(test)]
+fn test_remove_v59_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(&authorization_revision_store::test_drop_v59_sql())
+}
+
+#[cfg(test)]
 fn test_remove_v58_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v59_objects(connection)?;
     connection.execute_batch(&authorization_revision_store::test_drop_sql())
 }
 
@@ -3153,7 +3182,7 @@ mod tests {
     }
 
     #[test]
-    fn v56_to_v58_first_party_session_and_auth_revision_migration_reopens() {
+    fn v56_to_v59_first_party_session_and_auth_revision_migration_reopens() {
         let db = TestDbPath::new();
         {
             let store = SqliteLocalStore::open(db.path()).expect("create canonical current store");
@@ -3168,26 +3197,26 @@ mod tests {
             assert_eq!(super::verify_schema_v56(&connection), Ok(()));
         }
         {
-            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v56 to v58");
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v56 to v59");
             assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
             let connection = migrated.lock_connection().expect("lock migrated store");
-            assert_eq!(super::verify_schema_v58(&connection), Ok(()));
+            assert_eq!(super::verify_schema_v59(&connection), Ok(()));
             assert_eq!(
                 super::first_party_session_store::verify_v57_objects(&connection),
                 Ok(())
             );
             assert_eq!(
-                super::authorization_revision_store::verify_v58_objects(&connection),
+                super::authorization_revision_store::verify_v59_objects(&connection),
                 Ok(())
             );
         }
-        let reopened = SqliteLocalStore::open(db.path()).expect("reopen v58 migration");
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen v59 migration");
         assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         assert_eq!(reopened.health(), Ok(StorageHealth::Healthy));
     }
 
     #[test]
-    fn v57_to_v58_auth_revision_migration_reopens() {
+    fn v57_to_v59_auth_revision_migration_reopens() {
         let db = TestDbPath::new();
         {
             let store = SqliteLocalStore::open(db.path()).expect("create canonical current store");
@@ -3202,12 +3231,38 @@ mod tests {
             assert_eq!(super::verify_schema_v57(&connection), Ok(()));
         }
         {
-            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v57 to v58");
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v57 to v59");
             assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
             let connection = migrated.lock_connection().expect("lock migrated store");
+            assert_eq!(super::verify_schema_v59(&connection), Ok(()));
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen v59 migration");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        assert_eq!(reopened.health(), Ok(StorageHealth::Healthy));
+    }
+
+    #[test]
+    fn v58_to_v59_join_grant_revision_migration_reopens() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create canonical current store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open v58 fixture");
+            super::test_remove_v59_objects(&connection).expect("remove v59 join-grant triggers");
+            connection
+                .pragma_update(None, "user_version", super::SQLITE_SCHEMA_V58)
+                .expect("stamp v58 fixture");
             assert_eq!(super::verify_schema_v58(&connection), Ok(()));
         }
-        let reopened = SqliteLocalStore::open(db.path()).expect("reopen v58 migration");
+        {
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v58 to v59");
+            assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+            let connection = migrated.lock_connection().expect("lock migrated store");
+            assert_eq!(super::verify_schema_v59(&connection), Ok(()));
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen v59 migration");
         assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         assert_eq!(reopened.health(), Ok(StorageHealth::Healthy));
     }
@@ -4585,6 +4640,174 @@ mod tests {
         drop(store);
         let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
         assert_eq!(reopened.authorization_revision(), Some(revoked), "durable");
+    }
+
+    #[test]
+    fn authorization_revision_tracks_cross_connection_join_grant_revoke() {
+        use ucr_core::{AuthorizationEvaluator, ConferenceJoinGrantStore};
+        use ucr_model::SessionId;
+
+        let db = TestDbPath::new();
+        let scope = command(
+            "join-revision-scope",
+            "join-revision-scope-key",
+            b"",
+            Some("ns-join-revision"),
+        )
+        .scope;
+        let session_id = SessionId::from_opaque(opaque("join-revision-session"));
+        let first = SqliteLocalStore::open(db.path()).expect("first connection");
+        let second = SqliteLocalStore::open(db.path()).expect("independent revoke connection");
+        let before_insert = first.authorization_revision().expect("initial revision");
+
+        // Isolate the revision trigger from FK setup: the behavior under test is
+        // the canonical grant row's INSERT/UPDATE lifecycle, not conference creation.
+        // Production writers still persist this same row under their normal FK checks.
+        let raw = rusqlite::Connection::open(db.path()).expect("raw grant fixture connection");
+        raw.pragma_update(None, "foreign_keys", "OFF")
+            .expect("isolate fixture from group foreign key setup");
+        raw.execute(
+            "INSERT INTO conference_join_grants (
+                tenant_id, namespace_present, namespace_id, session_id, conference_id,
+                integration_id, call_id, participant_kind, participant_id, device_id,
+                issued_at_unix_ms, not_before_unix_ms, expires_at_unix_ms, use_policy,
+                revoked, redeemed, metadata_redacted, media_group_id
+             ) VALUES (?1, ?2, ?3, ?4, NULL, 'ucr-first-party-direct-media',
+                       'fp-m-join-revision', 'person', 'join-revision-person',
+                       'join-revision-device', 1, 1, 9999999999999, 'reusable',
+                       0, 0, 0, 'join-revision-group')",
+            rusqlite::params![
+                scope.tenant_id.as_opaque().as_str(),
+                i64::from(scope.namespace_id.is_some()),
+                scope
+                    .namespace_id
+                    .as_ref()
+                    .map_or("", |id| id.as_opaque().as_str()),
+                session_id.as_opaque().as_str(),
+            ],
+        )
+        .expect("insert canonical grant row");
+        drop(raw);
+
+        let inserted = first.authorization_revision().expect("insert revision");
+        assert!(
+            inserted > before_insert,
+            "grant insertion must advance revision"
+        );
+        second
+            .revoke_conference_join_grant(&scope, &session_id)
+            .expect("revoke canonical Join grant from second connection");
+        let revoked = first
+            .authorization_revision()
+            .expect("cross-process revoke revision");
+        assert!(
+            revoked > inserted,
+            "Join grant revoke must advance shared revision"
+        );
+
+        let mut sink_invoked = false;
+        assert_eq!(
+            AuthorizationEvaluator::with_authorization_revision_fence(
+                &first,
+                inserted,
+                &mut || {
+                    sink_invoked = true;
+                    Ok(())
+                },
+            ),
+            Err(DurableStoreError::Conflict),
+            "a cross-connection Join revoke between preflight and sink must stale the captured revision"
+        );
+        assert!(
+            !sink_invoked,
+            "stale Join grant must not reach the recipient sink"
+        );
+    }
+
+    #[test]
+    fn authorization_revision_fence_blocks_cross_connection_revoke_until_sink_returns() {
+        use ucr_core::{AuthorizationEvaluator, PermissionGrantStore};
+
+        let db = TestDbPath::new();
+        let scope = command("fence-scope", "fence-scope-key", b"", Some("ns-fence")).scope;
+        let subject = ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(opaque("fence-subject")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        let grant = PermissionGrant {
+            grantee: subject,
+            permission: COMMAND_ACCEPT_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope),
+        };
+        let first = SqliteLocalStore::open(db.path()).expect("first connection");
+        let second = SqliteLocalStore::open(db.path()).expect("independent connection");
+        first.grant_permission(&grant).expect("initial grant");
+        let expected = first.authorization_revision().expect("revision");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let fence = std::thread::spawn(move || {
+            let mut action = || {
+                entered_tx
+                    .send(())
+                    .map_err(|_| DurableStoreError::Internal)?;
+                release_rx.recv().map_err(|_| DurableStoreError::Internal)?;
+                Ok(())
+            };
+            AuthorizationEvaluator::with_authorization_revision_fence(&first, expected, &mut action)
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("fence acquired before sink acceptance");
+
+        let (writer_started_tx, writer_started_rx) = std::sync::mpsc::channel();
+        let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            writer_started_tx.send(()).expect("writer started");
+            second
+                .revoke_permission(&grant)
+                .expect("cross-connection revoke");
+            writer_done_tx.send(()).expect("writer committed");
+        });
+        writer_started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("revoke thread started");
+        assert!(
+            writer_done_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "a separate SQLite connection cannot commit revoke during sink acceptance"
+        );
+
+        release_tx.send(()).expect("release sink acceptance");
+        assert_eq!(fence.join().expect("fence thread"), Ok(()));
+        writer.join().expect("writer thread");
+        writer_done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("revoke commits after the fence releases");
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert!(
+            reopened.authorization_revision().expect("new revision") > expected,
+            "the committed revoke advances the canonical revision"
+        );
+        let mut stale_sink_invoked = false;
+        assert_eq!(
+            AuthorizationEvaluator::with_authorization_revision_fence(
+                &reopened,
+                expected,
+                &mut || {
+                    stale_sink_invoked = true;
+                    Ok(())
+                },
+            ),
+            Err(DurableStoreError::Conflict),
+            "a stale revision must reject the sink callback"
+        );
+        assert!(!stale_sink_invoked);
     }
 
     #[test]

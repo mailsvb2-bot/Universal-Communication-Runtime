@@ -17,8 +17,22 @@ assert.match(engine,/self\.request_media\(\|reply, deadline\| LiveWebRtcCommand:
 assert.match(engine,/biased;[\s\S]*?commands\.recv\(\)[\s\S]*?media_commands\.recv\(\)/);
 assert.match(engine,/async fn bounded_peer_close\(/);
 assert.match(engine,/session\.shutdown_pending = true;[\s\S]*?bounded_peer_close\(&session\.peer_connection\)\.await/);
-assert.match(e2ee,/tokio::time::timeout\(remaining, channel\.send\(/);
-assert.match(e2ee,/tokio::time::timeout\(remaining, channel\.buffered_amount\(\)\)/);
+assert.match(engine,/close_rx: tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>/);
+assert.match(engine,/SendE2ee \{\s*session_id: SessionId,\s*offer_id: String/);
+assert.match(engine,/let offer_id = self\.session_offer_id\(session_id\)\?;[\s\S]*?self\.request_media/);
+assert.match(engine,/Some\(session\) if !session\.shutdown_pending && session\.offer_id == offer_id/);
+assert.match(engine,/fn request_close\([\s\S]*?try_send\(LiveWebRtcCommand::Close[\s\S]*?close_tx\.send/);
+assert.match(e2ee,/async fn wait_for_matching_close\(/);
+assert.match(e2ee,/async fn cancellable_transport_operation</);
+assert.match(e2ee,/async fn wait_for_buffered_amount_zero</);
+assert.match(e2ee,/drain_before_close[\s\S]*?wait_for_buffered_amount_zero[\s\S]*?unordered\.channel\.buffered_amount/);
+assert.match(engine,/let drained = match session\.e2ee_channel[\s\S]*?bounded_peer_close\(&session\.peer_connection\)\.await[\s\S]*?match \(drained, closed\)/);
+assert.match(e2ee,/datachannel_drain_waits_for_accepted_ciphertext_before_close_ack/);
+assert.match(e2ee,/datachannel_drain_fails_closed_when_ciphertext_never_leaves_buffer/);
+assert.match(e2ee,/cancellable_transport_operation\([\s\S]*?channel\.send\(/);
+assert.match(e2ee,/cancellable_transport_operation\([\s\S]*?channel\.buffered_amount\(\)/);
+assert.match(e2ee,/matching_close_cancels_an_inflight_datachannel_acceptance/);
+assert.match(e2ee,/stale_offer_close_does_not_cancel_the_current_datachannel_attempt/);
 
 function section(begin,end){
   const from=source.indexOf(begin),to=source.indexOf(end,from+begin.length);

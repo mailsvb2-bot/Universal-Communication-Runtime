@@ -9,10 +9,14 @@ on:
       - 'tools/test_first_party_invite_onboarding.mjs'
       - 'tools/test_first_party_mls_coordinator.mjs'
       - 'tools/test_webrtc_late_start_cleanup.mjs'
+      - 'crates/ucr-webrtc/src/lib.rs'
+      - 'crates/ucr-webrtc/src/e2ee_bridge.rs'
       - 'tools/test_encrypted_media_survival.mjs'
       - 'tools/check_first_party_call_revision_contract.py'
       - 'tools/check_first_party_media_admission_contract.py'
       - 'crates/ucr-realtime-web/static/client.html'
+      - 'crates/ucr-realtime-web/src/main.rs'
+      - 'tests/consumer_room_availability.test.mjs'
       - 'sdk/typescript/src/reference_browser_media_installer.ts'
       - 'sdk/typescript/src/canonical_browser_media_factory.ts'
       - 'sdk/typescript/src/contact_call_journey.ts'
@@ -70,6 +74,9 @@ jobs:
       - name: Check canonical media admission boundary
         shell: pwsh
         run: python tools/check_first_party_media_admission_contract.py
+      - name: Verify room readiness and canonical backend gating
+        shell: pwsh
+        run: node --test tests/consumer_room_availability.test.mjs
       - name: Exercise fail-closed remote-host preflight
         shell: pwsh
         run: .\\scripts\\windows\\start-remote-device-test.ps1 -SelfTest

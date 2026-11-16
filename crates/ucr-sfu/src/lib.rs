@@ -571,7 +571,9 @@ pub enum SfuForwardSinkError {
 ///
 /// Implementations receive no plaintext media or key material. Returning success means only that
 /// the SFU routing sink accepted this ciphertext for that recipient; it is not Delivery/Read
-/// evidence and does not create durable Conference/subscription state.
+/// evidence and does not create durable Conference/subscription state. The call runs while the
+/// canonical authorization revision fence is held, so implementations MUST be bounded and MUST
+/// NOT re-enter the canonical authorization store.
 pub trait SfuForwardSink: fmt::Debug + Send + Sync {
     /// Forwards one canonical encrypted envelope without mutating authenticated frame fields.
     ///
@@ -662,6 +664,8 @@ pub enum SfuError {
     Authorization(CanonicalError),
     Store(DurableStoreError),
     CapabilityUnavailable,
+    AuthorizationFenceUnavailable,
+    AuthorizationFenceStale,
     SourceMismatch,
     RecipientMembershipUnavailable,
     NoRecipients,
@@ -1047,15 +1051,14 @@ where
 
 /// Dispatches an encrypted batch only through the canonical live SFU runtime.
 ///
-/// A prepared batch is NOT a durable permission grant. Before each sink side effect,
-/// the current Call, Group/MLS, source Device/signature and send/receive authority
-/// are revalidated for that exact target. This also fences a batch that was prepared
-/// before Hangup, Device revocation, key rotation or a permission revoke.
+/// A prepared batch is NOT a durable permission grant. This standalone entry point captures the
+/// authorization revision before its per-target revalidation and uses that same revision through
+/// every sink acceptance.
 ///
-/// An asynchronous transport MUST recheck through this boundary at its actual send
-/// point; queueing a batch or receiving an earlier validation is not send authority.
-/// An in-flight sink operation is not cancelled by this synchronous check: provider
-/// close and physical remote-capture stop require separate lifecycle enforcement.
+/// Callers that performed additional session-scoped authentication before this boundary MUST use
+/// `dispatch_validated_forward_batch_at_revision` with a revision captured before that
+/// authentication. Otherwise a session revoke between preflight and this function could be
+/// mistaken for the new baseline.
 ///
 /// # Errors
 /// Rejects stale/revoked authority before the next sink call, or returns the exact
@@ -1063,6 +1066,39 @@ where
 pub fn dispatch_validated_forward_batch<A, S, E, C>(
     runtime: &SfuRuntime<'_, A, S, E, C>,
     batch: &SfuValidatedForwardBatch,
+    sink: &dyn SfuForwardSink,
+) -> Result<SfuForwardOutcome, SfuError>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+    E: GroupMediaE2eeCapabilityProvider,
+    C: SfuCapabilityProvider,
+{
+    let expected_revision = runtime
+        .authorization
+        .authorization_revision()
+        .ok_or(SfuError::AuthorizationFenceUnavailable)?;
+    dispatch_validated_forward_batch_at_revision(runtime, batch, expected_revision, sink)
+}
+
+/// Dispatches an encrypted batch against the authorization revision captured by its caller.
+///
+/// This is the session-scoped boundary: the caller captures the revision before checking signed
+/// Join, Device, Call and media admission. The same revision is held through every actual sink
+/// acceptance, so a cross-process revoke between preflight and fan-out cannot become the new
+/// baseline. The callback remains bounded and MUST NOT re-enter the canonical authorization store.
+///
+/// # Errors
+/// Rejects any authorization mutation since `expected_revision` before the next sink call, or
+/// returns the exact partial-acceptance count and bounded sink error from the first failed target.
+pub fn dispatch_validated_forward_batch_at_revision<A, S, E, C>(
+    runtime: &SfuRuntime<'_, A, S, E, C>,
+    batch: &SfuValidatedForwardBatch,
+    expected_revision: u64,
     sink: &dyn SfuForwardSink,
 ) -> Result<SfuForwardOutcome, SfuError>
 where
@@ -1092,11 +1128,32 @@ where
         {
             return Err(SfuError::SourceMismatch);
         }
-        if let Err(error) = sink.forward_encrypted(target, &batch.envelope) {
-            return Err(SfuError::Sink {
-                accepted_before_failure: accepted,
-                error,
-            });
+        let mut sink_result = None;
+        let mut sink_invoked = false;
+        runtime
+            .authorization
+            .with_authorization_revision_fence(expected_revision, &mut || {
+                if sink_invoked {
+                    return Err(DurableStoreError::Internal);
+                }
+                sink_invoked = true;
+                sink_result = Some(sink.forward_encrypted(target, &batch.envelope));
+                Ok(())
+            })
+            .map_err(|error| match error {
+                DurableStoreError::Conflict => SfuError::AuthorizationFenceStale,
+                DurableStoreError::PermissionDenied => SfuError::AuthorizationFenceUnavailable,
+                other => SfuError::Store(other),
+            })?;
+        match sink_result {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                return Err(SfuError::Sink {
+                    accepted_before_failure: accepted,
+                    error,
+                });
+            }
+            None => return Err(SfuError::AuthorizationFenceUnavailable),
         }
     }
     Ok(SfuForwardOutcome {
@@ -1944,15 +2001,12 @@ struct SfuAuthorityKey {
     crypto_state_ref: ucr_model::OpaqueId,
 }
 
-/// Opt-in per-target authorization cache for SFU fan-out (flag
-/// `UCR_SFU_AUTH_CACHE`, default off).
+/// Optional bounded SFU authority-key observation cache for embedders.
 ///
-/// An entry is reused only while BOTH the evaluator and the store report the
-/// exact same monotonic `authorization_revision()` they reported when the
-/// entry was proved. Any revoke, Leave, Hangup/Call end, Group membership or
-/// MLS transition, Device revocation or trusted-key change bumps a revision,
-/// so the very next frame takes the full re-check path again. If either side
-/// returns `None` the cache is bypassed entirely.
+/// Entries are diagnostic only: no cached key can authorize a media sink.
+/// Every forwarding attempt still passes the canonical revision-fenced
+/// dispatcher, including when both authority revisions remain unchanged.
+/// The production gRPC runtime does not enable this observation cache.
 #[derive(Debug, Default)]
 pub struct SfuAuthorizationCache {
     entries: std::sync::Mutex<SfuAuthorizationCacheState>,
@@ -1974,7 +2028,8 @@ impl SfuAuthorizationCache {
         Self::default()
     }
 
-    /// Reads `UCR_SFU_AUTH_CACHE` (`1`/`true`/`on` enables). Default: off.
+    /// Legacy embedder setting for optional cache observations. The production
+    /// media path never enables this cache or skips live authorization.
     #[must_use]
     pub fn enabled_from_env() -> bool {
         std::env::var("UCR_SFU_AUTH_CACHE").is_ok_and(|value| {
@@ -1985,7 +2040,7 @@ impl SfuAuthorizationCache {
         })
     }
 
-    /// Number of re-checks skipped so far (diagnostics/tests).
+    /// Number of stable authority-key observations (not authorization skips).
     #[must_use]
     pub fn hits(&self) -> u64 {
         self.entries.lock().map_or(0, |state| state.hits)
@@ -2023,8 +2078,9 @@ impl SfuAuthorizationCache {
     }
 }
 
-/// Same contract as [`dispatch_validated_forward_batch`], but skips the
-/// per-target authority re-check when `cache` proves nothing relevant changed.
+/// Same fail-closed delivery contract as [`dispatch_validated_forward_batch`].
+/// Cache entries are non-authoritative diagnostics and never skip the live
+/// revision-fenced authorization and recipient checks.
 ///
 /// # Errors
 /// Same as [`dispatch_validated_forward_batch`].
@@ -2057,8 +2113,8 @@ where
 
 /// Same as [`dispatch_validated_forward_batch_cached`] for embedders whose
 /// store type is not statically an [`AuthorizationEvaluator`]: the caller
-/// supplies the store's monotonic authorization revision. `None` bypasses
-/// the cache.
+/// supplies the store's monotonic authorization revision for cache bookkeeping.
+/// `None` disables bookkeeping, but cannot bypass the live authorization fence.
 ///
 /// # Errors
 /// Same as [`dispatch_validated_forward_batch`].
@@ -2079,55 +2135,34 @@ where
     E: GroupMediaE2eeCapabilityProvider,
     C: SfuCapabilityProvider,
 {
-    let header = &batch.envelope.frame.header;
-    let source = ScopedPrincipal {
-        scope: header.scope.clone(),
-        principal: header.source.clone(),
-    };
-    for (accepted, target) in batch.targets.iter().enumerate() {
-        // Read the revision BEFORE checking: a concurrent revoke then makes
-        // the stored revision stale rather than masking the revoke.
-        let revision = runtime
-            .authorization
-            .authorization_revision()
-            .zip(store_revision());
-        let key = SfuAuthorityKey {
-            target: target.clone(),
-            scope: header.scope.clone(),
-            call_id: header.call_id.clone(),
-            group_id: header.group_id.clone(),
-            source: header.source.clone(),
-            source_device_id: header.source_device_id.clone(),
-            negotiation_ref: header.negotiation_ref.clone(),
-            negotiation_generation: header.negotiation_generation,
-            crypto_epoch: header.crypto_epoch,
-            crypto_state_ref: header.crypto_state_ref.clone(),
-        };
-        let cached = revision.is_some_and(|revision| cache.lookup(revision, &key));
-        if !cached {
-            let current = runtime.prepare_forward_selected(
-                &source,
-                &header.source_device_id,
-                &batch.envelope,
-                std::slice::from_ref(&target.recipient),
-            )?;
-            if current.targets.as_slice() != std::slice::from_ref(target)
-                || current.envelope != batch.envelope
-            {
-                return Err(SfuError::SourceMismatch);
-            }
-            if let Some(revision) = revision {
+    // The cache may record a stable authority key, but a cache hit is never
+    // authorization to emit media. Source, recipient and revocation state must
+    // be checked by the same revision-fenced dispatcher used by uncached calls.
+    // An absent store revision disables only cache bookkeeping, not the fence.
+    let revision = runtime
+        .authorization
+        .authorization_revision()
+        .zip(store_revision());
+    let outcome = dispatch_validated_forward_batch(runtime, batch, sink)?;
+    if let Some(revision) = revision {
+        let header = &batch.envelope.frame.header;
+        for target in &batch.targets {
+            let key = SfuAuthorityKey {
+                target: target.clone(),
+                scope: header.scope.clone(),
+                call_id: header.call_id.clone(),
+                group_id: header.group_id.clone(),
+                source: header.source.clone(),
+                source_device_id: header.source_device_id.clone(),
+                negotiation_ref: header.negotiation_ref.clone(),
+                negotiation_generation: header.negotiation_generation,
+                crypto_epoch: header.crypto_epoch,
+                crypto_state_ref: header.crypto_state_ref.clone(),
+            };
+            if !cache.lookup(revision, &key) {
                 cache.remember(revision, key);
             }
         }
-        if let Err(error) = sink.forward_encrypted(target, &batch.envelope) {
-            return Err(SfuError::Sink {
-                accepted_before_failure: accepted,
-                error,
-            });
-        }
     }
-    Ok(SfuForwardOutcome {
-        accepted_recipients: batch.targets.len(),
-    })
+    Ok(outcome)
 }

@@ -1,10 +1,11 @@
-//! Monotonic authorization revision (schema v58).
+//! Monotonic authorization revision (schema v59).
 //!
 //! One singleton counter is bumped by triggers, inside the SAME transaction,
 //! on every INSERT/UPDATE/DELETE of a table that any authorization decision
-//! (tenant grants, Call-scoped grants, Call participation, Group/MLS
-//! membership, Device and trusted-key lifecycle, identity bindings,
-//! organization management, service credentials) reads. A cache keyed by this
+//! (tenant and Call-scoped grants, signed Join grants, Call participation,
+//! Group/MLS membership, Universal Conference lifecycle and participant policy,
+//! Device and trusted-key lifecycle, identity bindings, organization management,
+//! service credentials) reads. A cache keyed by this
 //! revision therefore can never outlive a revoke, Leave, Hangup, membership
 //! rekey or Device revocation, including one committed by another process
 //! sharing the same file.
@@ -15,8 +16,8 @@ use ucr_core::DurableStoreError;
 
 use super::{SqliteLocalStore, map_schema_change_error, map_sqlite_error, verify_table_columns};
 
-/// Every table whose content can change an authorization outcome.
-pub(super) const AUTHORIZATION_TABLES: &[&str] = &[
+/// Tables covered by the initial schema-v58 authorization revision fence.
+pub(super) const AUTHORIZATION_TABLES_V58: &[&str] = &[
     "calls",
     "call_participants",
     "call_permission_grants",
@@ -37,6 +38,15 @@ pub(super) const AUTHORIZATION_TABLES: &[&str] = &[
     "service_credentials",
 ];
 
+/// Tables added to the authorization revision fence after schema v58.
+/// A durable Join grant is checked on every realtime media frame and therefore
+/// must invalidate a revision captured before its cross-process revocation.
+pub(super) const AUTHORIZATION_TABLES_V59: &[&str] = &[
+    "conference_join_grants",
+    "universal_conferences",
+    "universal_conference_participants",
+];
+
 const OPERATIONS: &[(&str, &str)] = &[("ins", "INSERT"), ("upd", "UPDATE"), ("del", "DELETE")];
 
 pub(super) fn trigger_name(table: &str, suffix: &str) -> String {
@@ -51,7 +61,26 @@ pub(super) fn create_v58_objects(transaction: &Transaction<'_>) -> Result<(), Du
          );
          INSERT INTO authorization_revision(singleton, revision) VALUES (1, 0);",
     );
-    for table in AUTHORIZATION_TABLES {
+    for table in AUTHORIZATION_TABLES_V58 {
+        for (suffix, operation) in OPERATIONS {
+            let _ = write!(
+                sql,
+                "CREATE TRIGGER {} AFTER {operation} ON {table} BEGIN
+                     UPDATE authorization_revision SET revision = revision + 1
+                      WHERE singleton = 1;
+                 END;",
+                trigger_name(table, suffix)
+            );
+        }
+    }
+    transaction
+        .execute_batch(&sql)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn create_v59_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    let mut sql = String::new();
+    for table in AUTHORIZATION_TABLES_V59 {
         for (suffix, operation) in OPERATIONS {
             let _ = write!(
                 sql,
@@ -85,7 +114,37 @@ pub(super) fn verify_v58_objects(connection: &Connection) -> Result<(), DurableS
     if rows != 1 {
         return Err(DurableStoreError::Corrupt);
     }
-    for table in AUTHORIZATION_TABLES {
+    for table in AUTHORIZATION_TABLES_V58 {
+        for (suffix, operation) in OPERATIONS {
+            let name = trigger_name(table, suffix);
+            let sql: Option<String> = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2",
+                    [name.as_str(), table],
+                    |row| row.get(0),
+                )
+                .map_or_else(
+                    |error| match error {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                        other => Err(map_sqlite_error(&other)),
+                    },
+                    |value| Ok(Some(value)),
+                )?;
+            let valid = sql.is_some_and(|sql| {
+                sql.contains(&format!("AFTER {operation} ON {table}"))
+                    && sql.contains("UPDATE authorization_revision SET revision = revision + 1")
+            });
+            if !valid {
+                return Err(DurableStoreError::Corrupt);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn verify_v59_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_v58_objects(connection)?;
+    for table in AUTHORIZATION_TABLES_V59 {
         for (suffix, operation) in OPERATIONS {
             let name = trigger_name(table, suffix);
             let sql: Option<String> = connection
@@ -132,9 +191,24 @@ impl SqliteLocalStore {
 }
 
 #[cfg(test)]
+pub(super) fn test_drop_v59_sql() -> String {
+    let mut sql = String::new();
+    for table in AUTHORIZATION_TABLES_V59 {
+        for (suffix, _) in OPERATIONS {
+            let _ = write!(
+                sql,
+                "DROP TRIGGER IF EXISTS {};",
+                trigger_name(table, suffix)
+            );
+        }
+    }
+    sql
+}
+
+#[cfg(test)]
 pub(super) fn test_drop_sql() -> String {
     let mut sql = String::new();
-    for table in AUTHORIZATION_TABLES {
+    for table in AUTHORIZATION_TABLES_V58 {
         for (suffix, _) in OPERATIONS {
             let _ = write!(
                 sql,

@@ -391,7 +391,10 @@ fn turn_rest_secret_from_material(material: &[u8]) -> Result<TurnRestSecret, Tur
 pub const LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY: usize = 256;
 pub const LIVE_WEBRTC_MAX_SESSIONS: usize = 1_024;
 pub const LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS: u64 = 20;
+pub const LIVE_WEBRTC_MEDIA_REQUEST_TIMEOUT_MILLIS: u64 = 2_000;
 pub const LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS: u64 = 12;
+
+pub(crate) type LiveWebRtcCloseSignal = (String, Option<String>);
 
 enum LiveWebRtcCommand {
     Create {
@@ -423,7 +426,9 @@ enum LiveWebRtcCommand {
     },
     SendE2ee {
         session_id: SessionId,
+        offer_id: String,
         envelope: Box<SfuForwardEnvelope>,
+        close_rx: tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>,
         deadline: Instant,
         reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
     },
@@ -440,6 +445,9 @@ pub struct LiveWebRtcProvider {
     // Media frames share the SAME worker/session map, but cannot starve
     // security-critical Join, Close or ICE control operations.
     media_tx: Option<tokio::sync::mpsc::Sender<LiveWebRtcCommand>>,
+    // Broadcast is only a cancellation signal for in-flight transport futures;
+    // canonical Call/Device authorization remains in the existing stores.
+    close_tx: tokio::sync::broadcast::Sender<LiveWebRtcCloseSignal>,
     worker: Option<thread::JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<tokio::sync::Notify>,
@@ -495,6 +503,7 @@ impl LiveWebRtcProvider {
         let (command_tx, command_rx) =
             tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
         let (media_tx, media_rx) = tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
+        let (close_tx, _) = tokio::sync::broadcast::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
@@ -528,6 +537,7 @@ impl LiveWebRtcProvider {
             Ok(Ok(())) => Ok(Self {
                 command_tx: Some(command_tx),
                 media_tx: Some(media_tx),
+                close_tx,
                 worker: Some(worker),
                 shutdown,
                 shutdown_notify,
@@ -584,8 +594,15 @@ impl LiveWebRtcProvider {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(WebRtcProviderError::TemporarilyUnavailable);
         }
+        // The SFU may hold a canonical authorization transaction across this
+        // handoff. Keep media acceptance bounded independently from signaling.
+        let timeout = if media {
+            Duration::from_millis(LIVE_WEBRTC_MEDIA_REQUEST_TIMEOUT_MILLIS)
+        } else {
+            self.request_timeout
+        };
         let deadline = Instant::now()
-            .checked_add(self.request_timeout)
+            .checked_add(timeout)
             .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
         let (reply_tx, reply_rx) = std_mpsc::channel();
         sender
@@ -598,6 +615,46 @@ impl LiveWebRtcProvider {
                     WebRtcProviderError::TemporarilyUnavailable
                 }
             })?;
+        reply_rx
+            .recv_timeout(timeout)
+            .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?
+    }
+
+    fn request_close(
+        &self,
+        session_id: &SessionId,
+        offer_id: Option<String>,
+    ) -> Result<(), WebRtcProviderError> {
+        let sender = self
+            .command_tx
+            .as_ref()
+            .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(WebRtcProviderError::TemporarilyUnavailable);
+        }
+        let deadline = Instant::now()
+            .checked_add(self.request_timeout)
+            .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        // Queue the safety operation FIRST. The worker gives this control queue
+        // priority over media; the following signal interrupts a send already
+        // selected by that worker without racing a new post-Close media command.
+        sender
+            .try_send(LiveWebRtcCommand::Close {
+                session_id: session_id.clone(),
+                offer_id: offer_id.clone(),
+                deadline,
+                reply: reply_tx,
+            })
+            .map_err(|error| match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    WebRtcProviderError::CapacityExceeded
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    WebRtcProviderError::TemporarilyUnavailable
+                }
+            })?;
+        let _ = self.close_tx.send((session_key(session_id), offer_id));
         reply_rx
             .recv_timeout(self.request_timeout)
             .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?
@@ -631,9 +688,33 @@ impl LiveWebRtcProvider {
         session_id: &SessionId,
         envelope: &SfuForwardEnvelope,
     ) -> Result<(), WebRtcProviderError> {
+        let offer_id = self.session_offer_id(session_id)?;
+        self.send_e2ee_envelope_if_offer_matches(session_id, &offer_id, envelope)
+    }
+
+    /// Sends ciphertext only when it still belongs to the caller's captured peer offer.
+    ///
+    /// Callers that already own the immutable offer ID should use this method rather than
+    /// synchronously querying the worker for every frame. The worker remains the sole owner of
+    /// peer state and rejects stale offer IDs before touching the `DataChannel`.
+    ///
+    /// # Errors
+    /// Returns a bounded session, backpressure or transport failure.
+    pub fn send_e2ee_envelope_if_offer_matches(
+        &self,
+        session_id: &SessionId,
+        offer_id: &str,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<(), WebRtcProviderError> {
+        if offer_id.is_empty() || offer_id.len() > 64 {
+            return Err(WebRtcProviderError::SessionUnavailable);
+        }
+        let close_rx = self.close_tx.subscribe();
         self.request_media(|reply, deadline| LiveWebRtcCommand::SendE2ee {
             session_id: session_id.clone(),
+            offer_id: offer_id.to_owned(),
             envelope: Box::new(envelope.clone()),
+            close_rx,
             deadline,
             reply,
         })
@@ -643,6 +724,7 @@ impl LiveWebRtcProvider {
 impl Drop for LiveWebRtcProvider {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        let _ = self.close_tx.send((String::new(), None));
         self.shutdown_notify.notify_one();
         self.command_tx.take();
         self.media_tx.take();
@@ -746,12 +828,7 @@ impl WebRtcProvider for LiveWebRtcProvider {
     }
 
     fn close_session(&self, session_id: &SessionId) -> Result<(), WebRtcProviderError> {
-        self.request(|reply, deadline| LiveWebRtcCommand::Close {
-            session_id: session_id.clone(),
-            offer_id: None,
-            deadline,
-            reply,
-        })
+        self.request_close(session_id, None)
     }
 
     fn close_session_if_offer_matches(
@@ -762,12 +839,7 @@ impl WebRtcProvider for LiveWebRtcProvider {
         if offer_id.is_empty() || offer_id.len() > 64 {
             return Err(WebRtcProviderError::SessionUnavailable);
         }
-        self.request(|reply, deadline| LiveWebRtcCommand::Close {
-            session_id: session_id.clone(),
-            offer_id: Some(offer_id.to_owned()),
-            deadline,
-            reply,
-        })
+        self.request_close(session_id, Some(offer_id.to_owned()))
     }
 }
 
@@ -854,80 +926,91 @@ async fn run_live_webrtc_worker(
         if shutdown.load(Ordering::Acquire) {
             break;
         }
-        match command {
-            LiveWebRtcCommand::Create {
-                config,
-                deadline,
-                reply,
-            } => {
-                handle_live_create(
-                    &mut sessions,
-                    &shutdown,
-                    e2ee_ingress.as_ref(),
-                    config,
-                    deadline,
-                    reply,
-                )
-                .await;
-            }
-            LiveWebRtcCommand::Restart {
-                config,
-                deadline,
-                reply,
-            } => handle_live_restart(&mut sessions, config, deadline, reply).await,
-            LiveWebRtcCommand::GetOfferId {
-                session_id,
-                deadline,
-                reply,
-            } => {
-                let result = if command_expired(deadline) {
-                    Err(WebRtcProviderError::TemporarilyUnavailable)
-                } else {
-                    sessions
-                        .get(&session_key(&session_id))
-                        .filter(|session| session.permits_signaling_and_media())
-                        .map(|session| session.offer_id.clone())
-                        .ok_or(WebRtcProviderError::SessionUnavailable)
-                };
-                let _ = reply.send(result);
-            }
-            LiveWebRtcCommand::SetRemoteDescription {
-                description,
-                offer_id,
-                deadline,
-                reply,
-            } => {
-                handle_live_remote_description(&sessions, description, offer_id, deadline, reply)
-                    .await;
-            }
-            LiveWebRtcCommand::AddRemoteCandidate {
-                candidate,
-                offer_id,
-                deadline,
-                reply,
-            } => {
-                handle_live_remote_candidate(&sessions, candidate, offer_id, deadline, reply).await;
-            }
-            LiveWebRtcCommand::SendE2ee {
-                session_id,
-                envelope,
-                deadline,
-                reply,
-            } => {
-                handle_live_send_e2ee(&mut sessions, session_id, *envelope, deadline, reply).await;
-            }
-            LiveWebRtcCommand::Close {
-                session_id,
-                offer_id,
-                deadline,
-                reply,
-            } => handle_live_close(&mut sessions, session_id, offer_id, deadline, reply).await,
-        }
+        handle_live_webrtc_command(command, &mut sessions, &shutdown, e2ee_ingress.as_ref()).await;
     }
     commands.close();
     media_commands.close();
     for (_, session) in sessions {
         let _ = bounded_peer_close(&session.peer_connection).await;
+    }
+}
+
+async fn handle_live_webrtc_command(
+    command: LiveWebRtcCommand,
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
+    shutdown: &AtomicBool,
+    e2ee_ingress: Option<&tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
+) {
+    match command {
+        LiveWebRtcCommand::Create {
+            config,
+            deadline,
+            reply,
+        } => {
+            handle_live_create(sessions, shutdown, e2ee_ingress, config, deadline, reply).await;
+        }
+        LiveWebRtcCommand::Restart {
+            config,
+            deadline,
+            reply,
+        } => handle_live_restart(sessions, config, deadline, reply).await,
+        LiveWebRtcCommand::GetOfferId {
+            session_id,
+            deadline,
+            reply,
+        } => {
+            let result = if command_expired(deadline) {
+                Err(WebRtcProviderError::TemporarilyUnavailable)
+            } else {
+                sessions
+                    .get(&session_key(&session_id))
+                    .filter(|session| session.permits_signaling_and_media())
+                    .map(|session| session.offer_id.clone())
+                    .ok_or(WebRtcProviderError::SessionUnavailable)
+            };
+            let _ = reply.send(result);
+        }
+        LiveWebRtcCommand::SetRemoteDescription {
+            description,
+            offer_id,
+            deadline,
+            reply,
+        } => {
+            handle_live_remote_description(sessions, description, offer_id, deadline, reply).await;
+        }
+        LiveWebRtcCommand::AddRemoteCandidate {
+            candidate,
+            offer_id,
+            deadline,
+            reply,
+        } => {
+            handle_live_remote_candidate(sessions, candidate, offer_id, deadline, reply).await;
+        }
+        LiveWebRtcCommand::SendE2ee {
+            session_id,
+            offer_id,
+            envelope,
+            mut close_rx,
+            deadline,
+            reply,
+        } => {
+            handle_live_send_e2ee(
+                sessions,
+                session_id,
+                &offer_id,
+                *envelope,
+                &mut close_rx,
+                deadline,
+                reply,
+            )
+            .await;
+        }
+        LiveWebRtcCommand::Close {
+            session_id,
+            offer_id,
+            deadline,
+            reply,
+        } => handle_live_close(sessions, session_id, offer_id, deadline, reply).await,
     }
 }
 
@@ -1158,7 +1241,9 @@ async fn handle_live_remote_candidate(
 async fn handle_live_send_e2ee(
     sessions: &mut HashMap<String, LiveWebRtcSession>,
     session_id: SessionId,
+    offer_id: &str,
     envelope: SfuForwardEnvelope,
+    close_rx: &mut tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>,
     deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
 ) {
@@ -1166,12 +1251,18 @@ async fn handle_live_send_e2ee(
         let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
         return;
     }
-    let result = match sessions.get_mut(&session_key(&session_id)) {
-        Some(LiveWebRtcSession {
-            e2ee_channel: Some(channel),
-            shutdown_pending: false,
-            ..
-        }) => channel.send(&envelope, deadline).await,
+    let key = session_key(&session_id);
+    let result = match sessions.get_mut(&key) {
+        Some(session) if !session.shutdown_pending && session.offer_id == offer_id => {
+            match session.e2ee_channel.as_mut() {
+                Some(channel) => {
+                    channel
+                        .send(&envelope, deadline, close_rx, &key, offer_id)
+                        .await
+                }
+                None => Err(WebRtcProviderError::SessionUnavailable),
+            }
+        }
         Some(_) | None => Err(WebRtcProviderError::SessionUnavailable),
     };
     let _ = reply.send(result);
@@ -1181,7 +1272,7 @@ async fn handle_live_close(
     sessions: &mut HashMap<String, LiveWebRtcSession>,
     session_id: SessionId,
     offer_id: Option<String>,
-    _deadline: Instant,
+    deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
 ) {
     // Close is a safety operation, not a new admission. A blocked Create or
@@ -1203,9 +1294,21 @@ async fn handle_live_close(
     // revoked session could keep sending after its registry entry is gone.
     let result = match sessions.get_mut(&key) {
         Some(session) => {
-            // Quarantine BEFORE the fallible close: a retained peer is retry-only.
+            // Quarantine BEFORE either fallible operation: a retained peer is retry-only.
             session.shutdown_pending = true;
-            bounded_peer_close(&session.peer_connection).await
+            // The active SendE2ee future has already observed Close and returned.
+            // Drain ciphertext accepted before that signal before acknowledging
+            // provider closure; if the local transport cannot drain within the
+            // bounded request, keep the peer handle for the canonical retry path.
+            let drained = match session.e2ee_channel.as_ref() {
+                Some(channel) => channel.drain_before_close(deadline).await,
+                None => Ok(()),
+            };
+            let closed = bounded_peer_close(&session.peer_connection).await;
+            match (drained, closed) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), _) | (_, Err(error)) => Err(error),
+            }
         }
         None => Err(WebRtcProviderError::SessionUnavailable),
     };

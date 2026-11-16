@@ -452,6 +452,28 @@ impl AuthorizationEvaluator for MemoryLocalStore {
     fn authorization_revision(&self) -> Option<u64> {
         Some(self.authorization_revision.load(AtomicOrdering::SeqCst))
     }
+
+    fn with_authorization_revision_fence(
+        &self,
+        expected_revision: u64,
+        action: &mut dyn FnMut() -> Result<(), DurableStoreError>,
+    ) -> Result<(), DurableStoreError> {
+        // Mutable MemoryLocalStore operations hold this mutex and publish their
+        // revision before releasing it. Keep it held through sink acceptance.
+        let _state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(DurableStoreError::Unavailable);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(DurableStoreError::Internal);
+            }
+        };
+        if self.authorization_revision.load(AtomicOrdering::SeqCst) != expected_revision {
+            return Err(DurableStoreError::Conflict);
+        }
+        action()
+    }
 }
 
 impl ServiceCredentialStore for MemoryLocalStore {

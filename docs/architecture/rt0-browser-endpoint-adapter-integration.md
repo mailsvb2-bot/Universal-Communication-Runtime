@@ -112,12 +112,22 @@ awaited before media capture, and a stale join lifecycle is rejected after its
 completion. The hook is **not** yet a first-party registration implementation;
 the host must supply its authenticated backend and device-key vault.
 
-**This still requires an independently authenticated first-party host.**
-The UCR reference web gateway still has no standalone enrollment credential,
-trusted first-party route to enroll a device, provision/recover a local
-signing key, and publish its trusted descriptor. Such a
-route must be implemented against the existing canonical Device/Identity/Trust
-owners before an unembedded user can complete a real two-device media call.
+**Current first-party host status (2026-11-15).**
+The reference UCR gateway now exposes the same-origin authenticated BFF routes
+for signup, login, recovery, Device inspection/revocation and canonical direct
+Calls. The `start.js` page composes the existing protected browser Device vault,
+`createUcrFirstPartyHttpHost` and `createUcrContactCallJourney` against the
+existing canonical Identity/Device/TrustedSigningKey, Call and SQLite owners.
+This is one first-party authority, not a second identity or crypto store.
+Self-service signup records `IdentityEvidence::SelfAsserted`; it proves
+possession of the enrolled signing key, not externally verified real-world
+identity.
+
+This direct-contact path is separate from the webinar `/room` path. PR #359 adds
+canonical authenticated Room routes, but its public `/room` browser lobby is
+still on the legacy `/v1/room/enter` protocol and is not yet wired to those
+routes. Keep #358 open until that UI uses the first-party BFF and canonical
+Room/MLS/Call/Join flow.
 
 ## Required canonical host integration — cannot be replaced with synthetic trust
 
@@ -155,17 +165,20 @@ canonical negotiated binding, and wraps per-frame authorization in the same
 live admission guard. Revocation before `start()` also permanently revokes the
 bridge.
 
-**Important:** the repository currently does NOT yet provide a first-party
-authenticated browser route that provisions/recovers the device signing seed,
-publishes the device's trusted key, or supplies the complete live negotiation
-binding and source trust map. The already-implemented server MLS bootstrap
-alone does not supply those identity and authorization values. Do not
-`crypto.getRandomValues()` a new signing key on each join and pretend it is
-registered/trusted by the server; do not accept in-band source keys.
+**Current integration boundary (2026-11-15).**
+The first-party direct-contact browser path now installs the canonical
+Device/Trust authority from the authenticated BFF and composes the existing
+endpoint admission resolver for the accepted direct Call. It still fails closed
+if the protected Device signer, active TrustedSigningKey, current MLS roster,
+or live Call/negotiation binding cannot be independently verified.
 
-Until a host supplies this canonical authority, the bundled installer emits
-`Canonical device media signing/trust authority is not wired` and the DataChannel
-is closed. That is deliberate and secure, **not a passing two-device test**.
+The separate `/room` lobby is not yet wired to this host; it still uses the
+legacy local-room enrollment protocol and must not be treated as a production
+first-party path. Do not call `crypto.getRandomValues()` to create a new signing
+key on each join and pretend it is registered/trusted by the server; do not
+accept in-band source keys. A passing browser self-probe or repository
+acceptance test is not a physical two-device A/V call, TURN/NAT traversal,
+measured revoke/stop, or production-readiness evidence.
 
 ### First-party pre-Join OpenMLS orchestration (draft PR #330)
 
@@ -226,6 +239,40 @@ test. Neither proves power-loss durability on a physical device.
 Still open: real A/B media transport, simultaneous capture revocation and
 measured quality/latency across two physical devices and NAT/TURN. Browser
 and CI conformance cannot substitute for those release gates.
+
+### SFU sink acceptance is linearized with canonical revoke
+
+The SFU does not treat a prepared batch or an earlier authorization check as
+send authority. Immediately before each recipient handoff it captures the
+canonical authorization revision, revalidates source Device, Call, Group/MLS
+membership and both send/receive permissions, then invokes the sink only
+inside `AuthorizationEvaluator::with_authorization_revision_fence`. The SQLite implementation uses an IMMEDIATE transaction and checks the same
+trigger-maintained revision used by Call, Call-participant, Group/MLS,
+Device, trusted-key and permission writes. Fence acquisition uses a nonblocking
+connection mutex and a 100 ms SQLite busy timeout; contention fails closed
+instead of waiting behind an unrelated writer. A revoke that commits first
+changes the revision and the sink callback is not invoked; a sink acceptance
+already inside the fence completes before another SQLite connection can commit
+revoke. The in-memory store uses its existing canonical state mutex and
+revision, also failing fast when the mutex is already held. Unrevisioned or
+non-atomic evaluators fail closed at this boundary. Sink callbacks must be
+bounded and must not re-enter the canonical store. The live WebRTC media
+handoff has a separate 2-second acceptance deadline (control and signaling
+retain their longer timeout), bounding the time spent inside the writer fence.
+The revision is currently global and intentionally conservative: an unrelated
+authorization write may reject one frame, and the SQLite writer fence
+serializes all Calls. This is correctness-first behavior, not a throughput or
+production-scale claim; per-Call contention and p50/p95 media latency still
+require measurement.
+
+This establishes an ordering for SFU sink acceptance, not remote delivery.
+A WebRTC provider Close separately cancels the in-flight send and drains every
+still-open E2EE DataChannel before acknowledging closure. If a channel is
+already `Closed`, its remaining local buffer cannot reach the recipient and
+does not block cleanup; an open channel must still drain to zero before Close
+is acknowledged. A timeout keeps the peer quarantined and retryable. None of
+these local proofs substitutes for observing remote capture stop on a physical
+second device.
 
 ### Durable recipient KeyPackage before Welcome (PR #330)
 
@@ -529,16 +576,44 @@ trusted peer signing descriptor. It never selects the peer from a Welcome,
 SFU frame or join fragment. The Rust/WASM exact two-leaf roster check is a
 separate, mandatory cryptographic enforcement layer.
 
-**Remaining release blockers:** This device-pair fence does **not** orchestrate
-the initial endpoint-owned group creation, recipient KeyPackage publication,
-Commit/Welcome delivery and sealed cross-page state handoff from
-`start.js`. The reference `client.html` still uses the legacy realtime
-bootstrap flow for that stage. No two physical Devices, NAT/TURN, real A/V
-media, revocation measurement or production-readiness evidence is established
-by this change. Both PR #329 (host-decrypt reproducer) and PR #330 remain
-draft; the endpoint-only path must be integrated end-to-end before merge.
+**Current first-party direct-call browser integration (verified in repository code on
+2026-11-15):** the endpoint-owned OpenMLS preflight is now implemented in
+`start.js` and runs before the signed media Join:
 
-## Draft #335: canonical direct-Call / derived-media Hangup transaction
+- `prepareFirstPartyEndpointMls` rechecks the selected Call, authenticated
+  Device, canonical Call state and UI generation after every asynchronous
+  boundary. A stale Call, logout, Device switch or Hangup cancels preparation.
+- The creator creates and seals its epoch-zero Group locally before publishing
+  only the public crypto-state reference through the first-party BFF.
+- The recipient creates and seals its own KeyPackage before publishing its
+  signed offer. The creator accepts exactly one recipient offer, stages the
+  MLS Add/Commit/Welcome, writes a sealed transition journal before the BFF
+  commit, and rereads the canonical descriptor before promoting local state.
+- The recipient obtains only its Device-bound Welcome and subsequent Commit
+  chain, joins locally, and verifies the same canonical Group, epoch and state
+  reference. Both endpoints enforce the exact two-Device direct-call roster.
+- `beginMedia` requests the signed Join only after endpoint MLS is ready.
+  `client.html` then reauthenticates the same Device, verifies the accepted
+  Call/Group/epoch and restores the sealed local MLS snapshot. First-party
+  `fp-m-*` Calls fail closed if the legacy server-owned MLS mode is returned.
+
+Private MLS state remains in the existing Device-local protected IndexedDB
+stores. The BFF stores signed public Commit/Welcome material and canonical
+metadata, not an endpoint private seed or exporter. The browser uses the
+first-party session; no ServicePrincipal secret is placed in browser code.
+
+This is repository-level integration, **not proof of a real call**. Two
+physical Devices, public NAT/TURN traversal, permission prompts, remote audio
+and video playback, and measured revoke/stop are still unverified. The
+webinar/Room UI is a separate path: `client.html` still uses the legacy
+`/v1/room/enter` flow there; issue #358 tracks wiring that UI to the new
+canonical first-party Room API. Do not conflate Room readiness with the
+direct-contact E2EE path.
+
+PR #330 merged on 2026-10-30; PR #335 merged on 2026-11-03. PR #329 is
+closed without merge and is not an active implementation branch.
+
+## Merged #335: canonical direct-Call / derived-media Hangup transaction
 
 The first-party `hangup` route now delegates to the **existing** authorized
 Call runtime and one `CallStore::terminate_direct_call_with_derived` operation.
@@ -557,9 +632,110 @@ a new media Call *after* committed Hangup. Tests cover a conflicting derived
 binding (neither termination may commit), an absent child and stale Join
 creation from another SQLite connection.
 
-**Verification pending on the exact draft HEAD:** these repository-local
-regressions do not prove that a remote WebRTC provider has physically stopped
-transmitting, nor that in-flight encrypted packets are cancelled. They do not
-remove the current explicit administrative media-grant requirement. Real
-two-device NAT/TURN E2EE A/V and measured revoke/stop remain release blockers.
-No remote UCR host is authorized by this document.
+**Verification boundary:** the merged transaction and exact Call-scoped
+media grants do not prove that a remote WebRTC provider has physically stopped
+transmitting, nor that an in-flight encrypted packet is cancelled at the
+transport boundary. First-party self-service does not mint tenant-wide media
+grants; the existing grant owner scopes media admission to the accepted direct
+Call. Cross-process in-flight cancellation, confirmed provider close, two
+physical Devices, public NAT/TURN traversal, remote A/V playback and measured
+revoke/stop remain release blockers. No remote UCR host is authorized by this
+document.
+
+## PR #359: bounded E2EE DataChannel drain before provider Close
+
+The WebRTC provider now treats local ciphertext-buffer drain as part of its
+Close acknowledgement boundary. The active send observes the offer-scoped
+Close signal and returns to the single peer worker; before that worker
+acknowledges Close, it waits for the reliable E2EE DataChannel and any
+negotiated unordered channel to report zero buffered bytes. The wait is
+bounded by the original Close deadline. If a buffer does not drain, the
+provider still attempts to close the peer, returns failure, and retains the
+quarantined session handle for the existing retry path instead of reporting
+successful cleanup.
+
+Rust regressions cover successful drain and bounded fail-closed timeout; the
+Windows first-party source contract checks that both channel buffers are
+drained before the provider Close acknowledgement.
+
+**Scope limit:** this is a local WebRTC DataChannel queue fence. It does not
+prove that ciphertext already accepted by a remote network stack has been
+played or discarded, or that the remote camera/microphone capture tracks have
+physically stopped. PR #359 additionally adds an atomic authorization-revision
+fence at the SFU's local sink-acceptance boundary (SQLite writer transaction or
+the canonical MemoryLocalStore mutex). That source change still requires
+exact-head CI and does not prove delivery/stop on every remote SFU node. These
+transport and physical-device measurements remain explicit #336/#274 release
+gates. No production-ready or physical two-device A/V claim follows from this
+code or its CI.
+
+
+## First-party direct-call Hangup waits for the existing Realtime provider owner
+
+The first-party BFF receives a clone of the exact node-local `GrpcRealtimeService` already serving the gRPC Realtime API. This is shared ownership of the existing provider, registry, per-Call transition locks and pending-close retry queue; it is not a second session or provider registry.
+
+After a successful terminal signal for a canonical `ConversationKind::Direct` Call, the BFF resolves the existing derived media Call and awaits `GrpcRealtimeService::close_terminated_call_sessions` before returning success. This targeted Realtime owner retires only that media Call's sessions, attempts every matching node-local WebRTC provider Close (including an earlier pending Leave), acknowledges only confirmed closes, and awaits the configured SFU placement release. Unrelated Calls cannot delay or fail this response. If any required cleanup step fails or times out, the BFF returns HTTP 503; the Call remains canonically terminated and the existing pending-close coordinates remain available to the background retry worker. The BFF therefore does not report successful direct-call termination while its local provider close is still pending.
+
+This is a node-local provider-close acknowledgement, not proof that every remote browser has stopped camera/microphone capture or that bytes accepted before Close were absent from a remote network buffer. Physical remote capture-stop, remote-node/TURN traversal, measured stop latency and two-device A/V remain release evidence gates. The webinar `PrivateGroup` Room signal path is not covered by this synchronous Direct-Call gate and continues to rely on the existing Realtime cleanup path.
+
+## PR #359: stale browser Leave cannot retire a replacement Join
+
+The reference client captures the lifecycle generation when Leave starts and
+stops the old peer and local capture before its first awaited cleanup. Remote
+provider Close and Realtime Leave may remain pending while a separately issued
+signed Join installs a new session. After those awaits, the old Leave MUST
+compare its captured generation with the current
+`sessionLifecycleGeneration` and return before changing shared session flags,
+timers, streams, or UI when the generation has advanced. Otherwise a late
+successful old Leave can set `sessionActive=false` and `mediaActive=false`
+for the replacement session even though its earlier local teardown was
+correctly scoped to the old peer.
+
+The browser compatibility probe deterministically holds the old heartbeat,
+Close and Leave responses, installs a replacement session, then releases the
+old responses and verifies that the new session, peer offer and UI remain
+active. The architecture source-contract test checks that the lifecycle fence
+precedes post-await shared-state finalization.
+
+**Scope limit:** this prevents a stale local browser continuation from
+corrupting a newer Join. It does not prove remote SFU closure, remote capture
+stop, remote network-buffer discard, or physical-device stop latency; those
+remain #336/#274 release gates.
+
+
+## PR #359: first-party endpoint MLS through live WebRTC loopback
+
+The acceptance test `first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanly` now joins the previously separate first-party MLS/Join and live-WebRTC transport proofs in one repo-local scenario. It creates two independent `RTCPeerConnection` peers against the same `LiveWebRtcProvider` owned by `GrpcRealtimeService`; obtains each offer through the authenticated `RealtimeStartWebRtc` RPC; applies offer-bound answers; and sends an endpoint MLS-protected media envelope from A's actual E2EE DataChannel.
+
+The test consumes the provider's reassembled ingress frame using the same session-id/Call-id `active_claims_for_ingress` binding used by the runtime bridge, then calls the existing `GrpcRealtimeService::forward_authenticated_e2ee_media` path. That path rechecks the durable signed Join grant, canonical Device and accepted Call, then runs the canonical SFU validation/authorization-revision fence before the node-local provider sink sends ciphertext to B's DataChannel. B reassembles the received envelope and decrypts it with B's independently exported MLS epoch secret. The frame is bound to the derived media Call's persisted negotiation reference/generation and the canonical Alice Device signing key, not the parent contact Call or an untrusted test key.
+
+The same test revokes A's durable Join grant through a second SQLite connection while the Call remains active and asserts that the next media forward is rejected before another recipient sink acceptance. It then exercises the BFF Hangup path and requires both real provider sessions and both remote DataChannels to close before the terminal response is accepted.
+
+**Evidence boundary:** this is a local loopback WebRTC/DataChannel integration test, not a physical-device call. Both peers run in one test process and use host candidates only; the test payload is an encrypted media-frame fixture, not captured/encoded camera or microphone media. It does not execute the browser `/start.js` click path, browser WebCrypto/OS keystore, camera/microphone permission prompts, audio/video codecs or playback, public STUN/TURN, NAT traversal, mobile browsers, or physical remote capture-stop measurements. Exact-head CI must pass before even the loopback result is considered verified. This closes the repo-local first-party-Join-to-live-DataChannel integration gap but does **not** establish the first real one-click physical A↔B call or production readiness.
+
+
+## PR #359: durable Join-grant revocation is part of the SFU revision fence
+
+Realtime media preflight reads the canonical `conference_join_grants` row on
+every frame. Schema v58's authorization revision trigger set omitted that
+table, so a separate process could revoke one session grant after preflight
+but before the SFU acquired its revision fence without changing the captured
+revision. The sink could then accept ciphertext under a revoked Join even
+though the post-send recheck rejected the response.
+
+Schema v59 adds INSERT/UPDATE/DELETE revision triggers for the existing
+canonical `conference_join_grants`, `universal_conferences` and
+`universal_conference_participants` tables and verifies all nine on reopen.
+The latter two tables are also read by realtime admission for conference
+lifecycle and participant media permissions.
+The v58-to-v59 migration is transactional; no grant rows, keys or phone data
+are copied into a second store. A regression creates the canonical grant row,
+revokes it through an independent SQLite store connection, and proves that
+the pre-revoke revision cannot invoke the sink callback. The existing writer
+transaction still prevents a revoke from committing while a matching sink
+acceptance is already in progress.
+
+**Scope limit:** this closes the durable Join-row gap in the local SQLite
+authorization revision fence. It does not make a node-local fence global
+across independent SFU databases or prove remote network-buffer discard,
+physical capture stop, public TURN/NAT or two-device A/V.

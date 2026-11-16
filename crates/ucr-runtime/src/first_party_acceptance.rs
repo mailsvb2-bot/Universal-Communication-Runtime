@@ -5,19 +5,23 @@ use ed25519_dalek::{Signer, SigningKey};
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
 };
 use ucr_core::{
     AuthorizationEvaluator, ConferenceJoinGrantStore, IdentityDeviceLookupStore,
     TrustedSigningKeyStore,
 };
 use ucr_crypto::{
-    SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+    SigningKeyMaterial, open_endpoint_group_media_payload, open_endpoint_group_media_wire,
+    seal_endpoint_group_media_wire,
 };
 use ucr_group_mls::{
     GroupMlsServerCustodyProbe, MlsDeviceAdmission, MlsTransitionInput, browser_memory_provider,
     create_device_key_package, create_group, export_group_media_secret, join_from_welcome,
-    merge_pending, stage_transition,
+    merge_pending, process_commit, stage_transition,
 };
 use ucr_model::AuthorizationRequest;
 use ucr_model::{
@@ -25,6 +29,7 @@ use ucr_model::{
     VideoSourceKind,
 };
 use ucr_realtime::JoinTokenKey;
+use ucr_webrtc::WebRtcProvider;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(600_000);
 
@@ -60,6 +65,7 @@ fn state(path: &PathBuf) -> State {
             )
             .expect("test issuer"),
         ),
+        realtime_service: None,
         origin: "https://call.example.invalid".to_owned(),
         registration_scope: Some(TenantScope {
             tenant_id: TenantId::from_opaque(OpaqueId::new("public-self-service").unwrap()),
@@ -622,6 +628,31 @@ fn signal(
     )
 }
 
+async fn signal_with_provider_cleanup(
+    state: &State,
+    binding: &Binding,
+    call_id: &str,
+    revision: u64,
+    action: &str,
+) -> Result<Value, StatusCode> {
+    let session = session_of(state, binding);
+    let body = serde_json::to_vec(&json!({
+        "binding": binding,
+        "callId": call_id,
+        "expectedRevision": revision,
+        "action": action,
+    }))
+    .unwrap();
+    let (response, _) = dispatch_post_with_provider_cleanup(
+        state,
+        "/v1/first-party/call/signal",
+        &body,
+        Some(&session),
+    )
+    .await?;
+    Ok(response)
+}
+
 fn realtime_join_request(
     claims: &ucr_realtime::RealtimeSessionClaims,
     token: &str,
@@ -654,22 +685,239 @@ fn realtime_join_request(
     request
 }
 
+#[derive(Debug)]
+struct FirstPartyWebRtcForwardSink {
+    registry: Arc<ucr_realtime::RealtimeSessionRegistry>,
+    provider: Arc<ucr_webrtc::LiveWebRtcProvider>,
+    accepted: Arc<AtomicUsize>,
+}
+
+impl ucr_sfu::SfuForwardSink for FirstPartyWebRtcForwardSink {
+    fn forward_encrypted(
+        &self,
+        target: &ucr_model::SfuForwardTarget,
+        envelope: &ucr_model::SfuForwardEnvelope,
+    ) -> Result<(), ucr_sfu::SfuForwardSinkError> {
+        let now = now_unix_ms().map_err(|_| ucr_sfu::SfuForwardSinkError::Unavailable)?;
+        let sessions = self
+            .registry
+            .active_session_ids_for_recipient(
+                &envelope.frame.header.scope,
+                &envelope.frame.header.call_id,
+                &target.recipient,
+                now,
+            )
+            .map_err(|_| ucr_sfu::SfuForwardSinkError::Unavailable)?;
+        if sessions.is_empty() {
+            return Err(ucr_sfu::SfuForwardSinkError::Unavailable);
+        }
+        let mut accepted = false;
+        let mut backpressure = false;
+        for session_id in sessions {
+            match self.provider.send_e2ee_envelope(&session_id, envelope) {
+                Ok(()) => {
+                    accepted = true;
+                    self.accepted.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(ucr_webrtc::WebRtcProviderError::SessionUnavailable) => {}
+                Err(ucr_webrtc::WebRtcProviderError::CapacityExceeded) => backpressure = true,
+                Err(_) => return Err(ucr_sfu::SfuForwardSinkError::Unavailable),
+            }
+        }
+        if accepted {
+            Ok(())
+        } else if backpressure {
+            Err(ucr_sfu::SfuForwardSinkError::Backpressure)
+        } else {
+            Err(ucr_sfu::SfuForwardSinkError::Unavailable)
+        }
+    }
+}
+
+async fn first_party_webrtc_offer(
+    realtime: &ucr_api_grpc::GrpcRealtimeService<
+        ucr_core::SystemServiceQuotaClock,
+        ucr_storage_sqlite::SqliteLocalStore,
+        ucr_storage_sqlite::SqliteLocalStore,
+    >,
+    claims: &ucr_realtime::RealtimeSessionClaims,
+    token: &str,
+) -> (
+    ucr_api_grpc::pb::RealtimeJoinRequest,
+    String,
+    ucr_api_grpc::pb::WebRtcDescription,
+) {
+    use ucr_api_grpc::{
+        REALTIME_AUTHORIZATION_METADATA_KEY, pb, pb::realtime_service_server::RealtimeService as _,
+    };
+    let lookup = realtime_join_request(claims, token).into_inner();
+    let mut start = tonic::Request::new(pb::RealtimeStartWebRtcRequest {
+        scope: lookup.scope.clone(),
+        call_id: lookup.call_id.clone(),
+        session_id: lookup.session_id.clone(),
+    });
+    start.metadata_mut().insert(
+        REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let started = realtime
+        .start_web_rtc(start)
+        .await
+        .expect("first-party WebRTC offer RPC")
+        .into_inner();
+    let offer = match started.result {
+        Some(pb::realtime_start_web_rtc_response::Result::Offer(offer)) => offer,
+        other => panic!("first-party WebRTC offer must be admitted: {other:?}"),
+    };
+    assert!(
+        offer.ice_servers.is_empty(),
+        "this loopback proof must not depend on an external STUN/TURN server"
+    );
+    let offer_id = offer.offer_id.expect("offer identity");
+    let description = offer.description.expect("offer SDP");
+
+    (lookup, offer_id, description)
+}
+
+async fn first_party_browser_webrtc_peer(
+    realtime: &ucr_api_grpc::GrpcRealtimeService<
+        ucr_core::SystemServiceQuotaClock,
+        ucr_storage_sqlite::SqliteLocalStore,
+        ucr_storage_sqlite::SqliteLocalStore,
+    >,
+    claims: &ucr_realtime::RealtimeSessionClaims,
+    token: &str,
+) -> (
+    Arc<webrtc::peer_connection::RTCPeerConnection>,
+    Arc<webrtc::data_channel::RTCDataChannel>,
+    String,
+) {
+    use ucr_api_grpc::{
+        REALTIME_AUTHORIZATION_METADATA_KEY, pb, pb::realtime_service_server::RealtimeService as _,
+    };
+    use ucr_webrtc::WEBRTC_E2EE_DATA_CHANNEL_LABEL;
+    use webrtc::{
+        api::{
+            APIBuilder, interceptor_registry::register_default_interceptors,
+            media_engine::MediaEngine,
+        },
+        data_channel::data_channel_state::RTCDataChannelState,
+        interceptor::registry::Registry,
+        peer_connection::{
+            configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription,
+        },
+    };
+
+    let (lookup, offer_id, description) = first_party_webrtc_offer(realtime, claims, token).await;
+
+    let mut media_engine = MediaEngine::default();
+    media_engine
+        .register_default_codecs()
+        .expect("default codecs");
+    let interceptors =
+        register_default_interceptors(Registry::new(), &mut media_engine).expect("interceptors");
+    let api = APIBuilder::new()
+        .with_media_engine(media_engine)
+        .with_interceptor_registry(interceptors)
+        .build();
+    let peer = Arc::new(
+        api.new_peer_connection(RTCConfiguration::default())
+            .await
+            .expect("independent browser peer"),
+    );
+    let (channel_tx, mut channel_rx) = tokio::sync::mpsc::channel(1);
+    peer.on_data_channel(Box::new(move |channel| {
+        let channel_tx = channel_tx.clone();
+        Box::pin(async move {
+            let _ = channel_tx.try_send(channel);
+        })
+    }));
+    peer.set_remote_description(
+        RTCSessionDescription::offer(description.sdp).expect("canonical server offer"),
+    )
+    .await
+    .expect("apply server offer");
+    let answer = peer
+        .create_answer(None)
+        .await
+        .expect("create browser answer");
+    let mut gathering = peer.gathering_complete_promise().await;
+    peer.set_local_description(answer)
+        .await
+        .expect("set browser answer");
+    tokio::time::timeout(std::time::Duration::from_secs(12), gathering.recv())
+        .await
+        .expect("browser ICE gathering deadline");
+
+    let answer_sdp = peer
+        .local_description()
+        .await
+        .expect("browser local answer")
+        .sdp;
+    let mut set_remote = tonic::Request::new(pb::RealtimeSetWebRtcRemoteDescriptionRequest {
+        scope: lookup.scope,
+        call_id: lookup.call_id,
+        session_id: lookup.session_id,
+        offer_id: Some(offer_id.clone()),
+        description: Some(pb::WebRtcDescription {
+            sdp_type: pb::WebRtcSdpType::Answer as i32,
+            sdp: answer_sdp,
+        }),
+    });
+    set_remote.metadata_mut().insert(
+        REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let applied = realtime
+        .set_web_rtc_remote_description(set_remote)
+        .await
+        .expect("offer-bound answer RPC")
+        .into_inner();
+    assert!(
+        matches!(
+            applied.result,
+            Some(pb::realtime_set_web_rtc_remote_description_response::Result::Acknowledgement(_))
+        ),
+        "Realtime must accept only the answer for this exact offer: {applied:?}"
+    );
+
+    let channel = tokio::time::timeout(std::time::Duration::from_secs(15), channel_rx.recv())
+        .await
+        .expect("server-created E2EE DataChannel deadline")
+        .expect("server-created E2EE DataChannel");
+    assert_eq!(channel.label(), WEBRTC_E2EE_DATA_CHANNEL_LABEL);
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while channel.ready_state() != RTCDataChannelState::Open {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("E2EE DataChannel open deadline");
+    (peer, channel, offer_id)
+}
+
 /// Regression: a first-party direct Call started through `/start` was refused
 /// by Realtime with 401 "realtime join rejected" because Realtime admits only
 /// Group Calls. Both accepted participants must now be admitted to the derived
 /// media Group Call through the SAME issuer and canonical `SQLite` owner, while
 /// a third party, an unaccepted callee and a hung-up Call stay refused.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)] // One end-to-end acceptance narrative.
-async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_participants_only() {
+async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanly() {
     use ucr_api_grpc::{
-        GrpcRealtimeService, pb, pb::realtime_service_server::RealtimeService as _,
+        GrpcRealtimeService, RealtimeWebRtcDependencies, pb,
+        pb::realtime_service_server::RealtimeService as _,
     };
     use ucr_core::{CallStore, GroupStore, PermissionGrantStore};
     use ucr_model::{GroupMemberState, PermissionGrant, PermissionScope, PrincipalRef};
+    use ucr_protocol::decode_sfu_forward_envelope;
+    use ucr_webrtc::{
+        LiveWebRtcProvider, WebRtcE2eeReassembler, WebRtcSessionConfigFactory,
+        encode_webrtc_e2ee_chunks,
+    };
 
     let db = TestDb::new();
-    let server = state(&db.0);
+    let mut server = state(&db.0);
     let (alice, alice_signer, alice_recovery) = signup(&server, 41);
     let (bob, bob_signer, _) = signup(&server, 42);
     let (carol, _, _) = signup(&server, 43);
@@ -1097,7 +1345,7 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     let delivered_welcome = URL_SAFE_NO_PAD
         .decode(handoff["welcomeBase64Url"].as_str().unwrap())
         .unwrap();
-    let bob_mls = join_from_welcome(
+    let mut bob_mls = join_from_welcome(
         &bob_provider,
         &scope,
         &group_id,
@@ -1171,43 +1419,6 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         )
         .expect("peer decrypts the same video with a distinct local MLS provider"),
         b"only recipient OpenMLS endpoints can decrypt this video",
-    );
-    assert!(
-        !server
-            .store
-            .server_possesses_mls_group(&scope, &group_id)
-            .unwrap()
-    );
-    // An SFU/server that only stores the signed Commit, Welcome and the
-    // forwarded ciphertext cannot synthesize the endpoint's MLS exporter.
-    // Prove that a fabricated exporter fails authentic AEAD opening while
-    // the independently joined Bob endpoint succeeds above.
-    let server_without_exporter = ucr_crypto::GroupMediaEpochSecret::from_exporter_bytes([0; 32]);
-    assert!(
-        open_endpoint_group_media_wire(
-            &server_without_exporter,
-            &media_context,
-            &wire,
-            signing_key.verifying_key(),
-        )
-        .is_err(),
-        "server-side ciphertext and public MLS state must not open media without endpoint exporter"
-    );
-    // The durable media epoch is not a decryption key. Even with the
-    // authentic captured ciphertext and sender signature, a caller using
-    // a different MLS epoch cannot open the frame. Keep this negative
-    // cryptographic assertion in the same real Call/Join acceptance test.
-    let mut wrong_epoch_context = media_context.clone();
-    wrong_epoch_context.crypto_epoch = media_context.crypto_epoch + 1;
-    assert!(
-        open_endpoint_group_media_wire(
-            &bob_secret,
-            &wrong_epoch_context,
-            &wire,
-            signing_key.verifying_key(),
-        )
-        .is_err(),
-        "media ciphertext must remain bound to the admitted MLS epoch"
     );
 
     // Self-service accounts own NO tenant-wide media permissions. Joining an
@@ -1355,15 +1566,27 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
     // independently instantiated Realtime owner on its next authorization.
     let realtime_store =
         Arc::new(SqliteLocalStore::open(&db.0).expect("independent Realtime SQLite"));
-    let realtime = GrpcRealtimeService::new(
+    let realtime_registry = Arc::new(ucr_realtime::RealtimeSessionRegistry::new(16, 4));
+    let (e2ee_ingress_tx, mut e2ee_ingress_rx) =
+        tokio::sync::mpsc::channel(ucr_webrtc::LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
+    let live_provider = Arc::new(
+        LiveWebRtcProvider::with_e2ee_ingress(e2ee_ingress_tx)
+            .expect("live first-party WebRTC provider"),
+    );
+    let provider: Arc<dyn WebRtcProvider> = live_provider.clone();
+    let realtime = GrpcRealtimeService::with_webrtc(
         Arc::new(ucr_core::SystemServiceQuotaClock),
         Arc::clone(&realtime_store),
         Arc::clone(&realtime_store),
         Arc::clone(&server.issuer),
-        Arc::new(ucr_realtime::RealtimeSessionRegistry::new(16, 4)),
+        Arc::clone(&realtime_registry),
         Arc::new(ucr_conference::ConferenceRuntimeState::new()),
+        RealtimeWebRtcDependencies::new(provider, Arc::new(WebRtcSessionConfigFactory::default())),
     )
     .with_mls_admission_store(Arc::clone(&realtime_store));
+    // The BFF and gRPC surface share the exact provider, registry and close
+    // retry queue. A terminal BFF response must await this owner's close ack.
+    server.realtime_service = Some(realtime.clone());
     let mut generations = Vec::new();
     for (claim, token) in claims.iter().zip(&tokens) {
         let joined = realtime
@@ -1382,6 +1605,52 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             other => panic!("direct-call participant was not admitted: {other:?}"),
         }
     }
+    // The live browser explicitly installs its receive selections after Join.
+    // A successful Join is not an implicit Conference subscription: exercise
+    // the same canonical SFU subscription RPC the production client uses,
+    // rather than weakening the SFU's opt-in recipient boundary.
+    let bob_lookup = realtime_join_request(&claims[1], &tokens[1]).into_inner();
+    let alice_source = pb::PrincipalRef {
+        principal_id: Some(pb::OpaqueId {
+            value: claims[0]
+                .participant
+                .principal_id
+                .as_opaque()
+                .as_wire_bytes()
+                .to_vec(),
+        }),
+        kind: pb::PrincipalKind::Person as i32,
+    };
+    let mut subscribe = tonic::Request::new(pb::RealtimeSetSubscriptionsRequest {
+        scope: bob_lookup.scope,
+        call_id: bob_lookup.call_id,
+        session_id: bob_lookup.session_id,
+        subscriptions: [pb::MediaKind::Audio, pb::MediaKind::Video]
+            .into_iter()
+            .map(|media_kind| pb::ConferenceMediaSubscription {
+                source: Some(alice_source.clone()),
+                media_kind: media_kind as i32,
+                stream_id: None,
+            })
+            .collect(),
+    });
+    subscribe.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[1]).parse().unwrap(),
+    );
+    let subscribed = realtime
+        .set_subscriptions(subscribe)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            subscribed.result.as_ref(),
+            Some(pb::realtime_set_subscriptions_response::Result::Acknowledgement(_))
+        ),
+        "Bob must explicitly authorize the canonical encrypted receive path: {subscribed:?}"
+    );
+
     // Heartbeat keeps the Join generation fence.
     for ((claim, token), generation) in claims.iter().zip(&tokens).zip(&generations) {
         let join = realtime_join_request(claim, token).into_inner();
@@ -1566,6 +1835,175 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         );
     }
 
+    // Exercise the complete repo-local first-party media path with two independent
+    // LiveWebRtcProvider peers. This is real loopback WebRTC/DataChannel transport,
+    // not a browser mock, but it intentionally does not claim physical devices,
+    // camera/microphone capture, public TURN or production NAT traversal.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (alice_peer, alice_channel, alice_offer_id) =
+        first_party_browser_webrtc_peer(&realtime, &claims[0], &tokens[0]).await;
+    let (bob_peer, bob_channel, bob_offer_id) =
+        first_party_browser_webrtc_peer(&realtime, &claims[1], &tokens[1]).await;
+    assert_ne!(alice_offer_id, bob_offer_id);
+    assert_eq!(
+        live_provider
+            .session_offer_id(&claims[0].session_id)
+            .unwrap(),
+        alice_offer_id
+    );
+    assert_eq!(
+        live_provider
+            .session_offer_id(&claims[1].session_id)
+            .unwrap(),
+        bob_offer_id
+    );
+
+    let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::channel(2);
+    let bob_reassembler = Arc::new(tokio::sync::Mutex::new(WebRtcE2eeReassembler::new()));
+    bob_channel.on_message(Box::new(move |message| {
+        let delivered_tx = delivered_tx.clone();
+        let bob_reassembler = Arc::clone(&bob_reassembler);
+        Box::pin(async move {
+            if message.is_string {
+                let _ = delivered_tx
+                    .send(Err("unexpected text on the E2EE DataChannel".to_owned()))
+                    .await;
+                return;
+            }
+            let mut reassembler = bob_reassembler.lock().await;
+            match reassembler.push_chunk(message.data.as_ref()) {
+                Ok(Some(envelope)) => {
+                    let _ = delivered_tx.send(Ok(envelope)).await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = delivered_tx.send(Err(format!("{error:?}"))).await;
+                }
+            }
+        })
+    }));
+
+    // Bind the media frame to the actual derived Call, its durable negotiation
+    // generation and the endpoint-owned MLS epoch, not the parent contact Call.
+    let media_call_record = realtime_store
+        .call(&claims[0].scope, &claims[0].call_id)
+        .unwrap()
+        .expect("canonical derived media Call");
+    let live_negotiation_ref = media_call_record
+        .media_negotiation_ref
+        .clone()
+        .expect("canonical media negotiation reference");
+    assert!(media_call_record.media_negotiation_generation > 0);
+    let live_media_context = GroupMediaE2eeContext {
+        scope: claims[0].scope.clone(),
+        call_id: claims[0].call_id.clone(),
+        group_id: group_id.clone(),
+        negotiation_ref: live_negotiation_ref,
+        negotiation_generation: media_call_record.media_negotiation_generation,
+        crypto_epoch: artifacts.next_crypto_state.epoch,
+        crypto_state_ref: artifacts
+            .next_crypto_state
+            .state_ref
+            .clone()
+            .expect("committed endpoint MLS state reference"),
+        crypto_suite: CryptoSuite::UcrV1,
+    };
+    let canonical_media_signer = SigningKeyMaterial::from_seed([41; 32]);
+    assert_eq!(
+        canonical_media_signer.verifying_key().0,
+        alice_signer.verifying_key().to_bytes(),
+        "media frames must use Alice's canonical trusted Device signing key"
+    );
+    let live_wire = seal_endpoint_group_media_wire(
+        &alice_secret,
+        &live_media_context,
+        GroupMediaFrameHeader {
+            scope: live_media_context.scope.clone(),
+            call_id: live_media_context.call_id.clone(),
+            group_id: live_media_context.group_id.clone(),
+            stream_id: opaque("first-party-live-webrtc-video").unwrap(),
+            source: alice_session.subject.principal.clone(),
+            source_device_id: alice_id.clone(),
+            negotiation_ref: live_media_context.negotiation_ref.clone(),
+            negotiation_generation: live_media_context.negotiation_generation,
+            crypto_epoch: live_media_context.crypto_epoch,
+            crypto_state_ref: live_media_context.crypto_state_ref.clone(),
+            crypto_suite: live_media_context.crypto_suite,
+            header_version: 2,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 1,
+            media_timestamp: 90_000,
+            keyframe: true,
+        },
+        b"first-party endpoint MLS media over live WebRTC",
+        KeyId::from_opaque(opaque(&alice_session.signer_key_id).unwrap()),
+        &canonical_media_signer,
+    )
+    .expect("seal canonical endpoint MLS media wire");
+    let live_envelope =
+        decode_sfu_forward_envelope(&live_wire).expect("decode canonical SFU envelope");
+    for chunk in encode_webrtc_e2ee_chunks(&live_envelope, 100).expect("chunk E2EE envelope") {
+        alice_channel
+            .send(&bytes::Bytes::from(chunk))
+            .await
+            .expect("Alice sends encrypted media over live WebRTC");
+    }
+
+    let ingress = tokio::time::timeout(std::time::Duration::from_secs(8), e2ee_ingress_rx.recv())
+        .await
+        .expect("live provider ingress deadline")
+        .expect("live provider must emit Alice's reassembled E2EE envelope");
+    assert_eq!(ingress.session_id, claims[0].session_id);
+    assert_eq!(ingress.envelope, live_envelope);
+    let ingress_claims = realtime_registry
+        .active_claims_for_ingress(
+            &ingress.session_id,
+            &ingress.envelope.frame.header.scope,
+            &ingress.envelope.frame.header.call_id,
+            now_unix_ms().unwrap(),
+        )
+        .expect("bind DataChannel ingress to Alice's active signed Join");
+    assert_eq!(ingress_claims.session_id, claims[0].session_id);
+    assert_eq!(ingress_claims.device_id, claims[0].device_id);
+
+    let sink_accepted = Arc::new(AtomicUsize::new(0));
+    let sink = FirstPartyWebRtcForwardSink {
+        registry: Arc::clone(&realtime_registry),
+        provider: Arc::clone(&live_provider),
+        accepted: Arc::clone(&sink_accepted),
+    };
+    let accepted = tokio::task::block_in_place(|| {
+        realtime.forward_authenticated_e2ee_media(&ingress_claims, &ingress.envelope, &sink)
+    });
+    assert_eq!(
+        accepted,
+        Ok(1),
+        "canonical SFU path must accept one Bob recipient"
+    );
+    let received = tokio::time::timeout(std::time::Duration::from_secs(8), delivered_rx.recv())
+        .await
+        .expect("Bob DataChannel receive deadline")
+        .expect("Bob must receive the forwarded E2EE envelope")
+        .expect("Bob DataChannel must receive canonical binary chunks");
+    assert_eq!(received, ingress.envelope);
+    let plaintext = open_endpoint_group_media_payload(
+        &bob_secret,
+        &live_media_context,
+        &received.frame,
+        canonical_media_signer.verifying_key(),
+    )
+    .expect("Bob decrypts with his independently exported endpoint MLS secret");
+    assert_eq!(
+        plaintext,
+        b"first-party endpoint MLS media over live WebRTC"
+    );
+    assert_eq!(sink_accepted.load(Ordering::SeqCst), 1);
+    assert!(
+        delivered_rx.try_recv().is_err(),
+        "one source envelope must not be duplicated to Bob"
+    );
+
     // A second BFF process can revoke Alice's durable Join while the parent
     // and derived media Calls are STILL ACTIVE. This is a stronger regression
     // than a denial after Hangup: the live Call cannot mask a missing grant
@@ -1602,6 +2040,18 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
             Some(pb::realtime_get_mls_admission_context_response::Result::Error(_))
         ),
         "revoked Alice must lose MLS admission before Hangup: {revoked_mls:?}"
+    );
+    let revoked_media_forward = tokio::task::block_in_place(|| {
+        realtime.forward_authenticated_e2ee_media(&ingress_claims, &ingress.envelope, &sink)
+    });
+    assert!(
+        revoked_media_forward.is_err(),
+        "a cross-process Join tombstone must stop the live WebRTC→SFU media path while the Call remains active"
+    );
+    assert_eq!(
+        sink_accepted.load(Ordering::SeqCst),
+        1,
+        "revoked Alice must be denied before another recipient sink acceptance"
     );
     // A revoked Join must also lose its active media-operation authority,
     // not merely access to MLS descriptors. Audio-level reporting is an
@@ -1723,15 +2173,365 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "revoking Alice must not revoke Bob's independently admitted Device: {bob_live_mls:?}"
     );
 
+    // Exercise a second real endpoint epoch transition (Rekey), then remove
+    // Bob. The old recipient exporter and an isolated relay leaf must not
+    // derive the current epoch's media key after either transition.
+    let rekey_artifacts = stage_transition(
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
+        &MlsTransitionInput::Rekey,
+    )
+    .expect("endpoint-only MLS rekey");
+    process_commit(
+        &bob_provider,
+        &mut bob_mls,
+        &scope,
+        &group_id,
+        &rekey_artifacts.commit,
+        &rekey_artifacts.next_crypto_state,
+    )
+    .expect("remaining endpoint processes rekey commit");
+    merge_pending(
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
+        &rekey_artifacts.next_crypto_state,
+    )
+    .expect("sender merges rekey after local commit");
+    let alice_rekey_secret = export_group_media_secret(
+        &alice_provider,
+        &alice_mls,
+        &scope,
+        &group_id,
+        &rekey_artifacts.next_crypto_state,
+    )
+    .unwrap();
+    let bob_rekey_secret = export_group_media_secret(
+        &bob_provider,
+        &bob_mls,
+        &scope,
+        &group_id,
+        &rekey_artifacts.next_crypto_state,
+    )
+    .unwrap();
+    let mut rekey_context = media_context.clone();
+    rekey_context.crypto_epoch = rekey_artifacts.next_crypto_state.epoch;
+    rekey_context.crypto_state_ref = rekey_artifacts.next_crypto_state.state_ref.clone().unwrap();
+    let rekey_wire = seal_endpoint_group_media_wire(
+        &alice_rekey_secret,
+        &rekey_context,
+        GroupMediaFrameHeader {
+            scope: scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: group_id.clone(),
+            stream_id: opaque("endpoint-mls-test-video").unwrap(),
+            source: alice_session.subject.principal.clone(),
+            source_device_id: alice_id.clone(),
+            negotiation_ref: rekey_context.negotiation_ref.clone(),
+            negotiation_generation: rekey_context.negotiation_generation,
+            crypto_epoch: rekey_context.crypto_epoch,
+            crypto_state_ref: rekey_context.crypto_state_ref.clone(),
+            crypto_suite: rekey_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 2,
+            media_timestamp: 180_000,
+            keyframe: true,
+        },
+        b"rekeyed endpoint-only video",
+        KeyId::from_opaque(opaque("endpoint-mls-test-signature").unwrap()),
+        &signing_key,
+    )
+    .expect("sender encrypts at the rekeyed epoch");
+    assert_eq!(
+        open_endpoint_group_media_wire(
+            &bob_rekey_secret,
+            &rekey_context,
+            &rekey_wire,
+            signing_key.verifying_key(),
+        )
+        .expect("remaining endpoint decrypts rekeyed media"),
+        b"rekeyed endpoint-only video",
+    );
+
+    let remove_artifacts = stage_transition(
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
+        &MlsTransitionInput::Remove(vec![bob_id.clone()]),
+    )
+    .expect("endpoint-only MLS Remove for revoked Bob Device");
+    merge_pending(
+        &alice_provider,
+        &mut alice_mls,
+        &scope,
+        &group_id,
+        &remove_artifacts.next_crypto_state,
+    )
+    .expect("remaining endpoint merges Remove after canonical revoke");
+    let alice_after_remove_secret = export_group_media_secret(
+        &alice_provider,
+        &alice_mls,
+        &scope,
+        &group_id,
+        &remove_artifacts.next_crypto_state,
+    )
+    .unwrap();
+    let mut revoked_context = media_context.clone();
+    revoked_context.crypto_epoch = remove_artifacts.next_crypto_state.epoch;
+    revoked_context.crypto_state_ref = remove_artifacts
+        .next_crypto_state
+        .state_ref
+        .clone()
+        .unwrap();
+    let revoked_wire = seal_endpoint_group_media_wire(
+        &alice_after_remove_secret,
+        &revoked_context,
+        GroupMediaFrameHeader {
+            scope: scope.clone(),
+            call_id: media_context.call_id.clone(),
+            group_id: group_id.clone(),
+            stream_id: opaque("endpoint-mls-test-video").unwrap(),
+            source: alice_session.subject.principal.clone(),
+            source_device_id: alice_id.clone(),
+            negotiation_ref: revoked_context.negotiation_ref.clone(),
+            negotiation_generation: revoked_context.negotiation_generation,
+            crypto_epoch: revoked_context.crypto_epoch,
+            crypto_state_ref: revoked_context.crypto_state_ref.clone(),
+            crypto_suite: revoked_context.crypto_suite,
+            header_version: ucr_protocol::SFU_FORWARD_WIRE_VERSION,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 3,
+            media_timestamp: 270_000,
+            keyframe: true,
+        },
+        b"post-revoke endpoint-only video",
+        KeyId::from_opaque(opaque("endpoint-mls-test-signature").unwrap()),
+        &signing_key,
+    )
+    .expect("remaining endpoint encrypts after member removal");
+    assert_eq!(
+        open_endpoint_group_media_wire(
+            &alice_after_remove_secret,
+            &revoked_context,
+            &revoked_wire,
+            signing_key.verifying_key(),
+        )
+        .expect("remaining endpoint opens post-revoke media"),
+        b"post-revoke endpoint-only video",
+    );
+    assert!(
+        open_endpoint_group_media_wire(
+            &bob_rekey_secret,
+            &revoked_context,
+            &revoked_wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "removed Device's previous epoch exporter cannot decrypt post-revoke media"
+    );
+    assert!(
+        !server
+            .store
+            .server_possesses_mls_group(&scope, &group_id)
+            .unwrap(),
+        "server OpenMLS custody remains empty after endpoint rekey and Remove"
+    );
+    // Exercise a separate server-side OpenMLS provider, not a fabricated
+    // zero exporter. The server may know the public Group ID and signed
+    // Commit/Welcome bytes, but it has no endpoint KeyPackage private state.
+    // A same-ID group created with the reserved relay Device is unrelated and
+    // cannot process the endpoint-only Add or derive the recipient's exporter.
+    let server_provider = browser_memory_provider();
+    let server_device = ucr_model::DeviceId::from_opaque(opaque("fp-media-host-device").unwrap());
+    let server_key_package =
+        create_device_key_package(&server_provider, &scope, &server_device).unwrap();
+    assert!(
+        join_from_welcome(
+            &server_provider,
+            &scope,
+            &group_id,
+            &delivered_welcome,
+            &artifacts.next_crypto_state,
+        )
+        .is_err(),
+        "the relay's independent Device KeyPackage cannot consume Bob's recipient-only Welcome"
+    );
+    let (mut server_group, server_state) = create_group(
+        &server_provider,
+        &scope,
+        &group_id,
+        &server_device,
+        &server_key_package.signer_public_key,
+    )
+    .expect("isolated relay provider can only create its own unrelated MLS group");
+    let server_secret = export_group_media_secret(
+        &server_provider,
+        &server_group,
+        &scope,
+        &group_id,
+        &server_state,
+    )
+    .expect("relay can export only its unrelated epoch-zero group secret");
+    assert!(
+        process_commit(
+            &server_provider,
+            &mut server_group,
+            &scope,
+            &group_id,
+            &artifacts.commit,
+            &artifacts.next_crypto_state,
+        )
+        .is_err(),
+        "server-held relay provider must not process the endpoint-only MLS Add"
+    );
+    assert!(
+        process_commit(
+            &server_provider,
+            &mut server_group,
+            &scope,
+            &group_id,
+            &rekey_artifacts.commit,
+            &rekey_artifacts.next_crypto_state,
+        )
+        .is_err(),
+        "server-held relay provider must not process the endpoint-only MLS Rekey"
+    );
+    assert!(
+        process_commit(
+            &server_provider,
+            &mut server_group,
+            &scope,
+            &group_id,
+            &remove_artifacts.commit,
+            &remove_artifacts.next_crypto_state,
+        )
+        .is_err(),
+        "server-held relay provider must not process the endpoint-only MLS Remove"
+    );
+    assert!(
+        open_endpoint_group_media_wire(
+            &server_secret,
+            &media_context,
+            &wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "server-held relay provider must not decrypt the authenticated endpoint video wire"
+    );
+    assert!(
+        open_endpoint_group_media_wire(
+            &server_secret,
+            &rekey_context,
+            &rekey_wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "server-held relay provider must not derive the rekeyed endpoint exporter"
+    );
+    assert!(
+        open_endpoint_group_media_wire(
+            &server_secret,
+            &revoked_context,
+            &revoked_wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "server-held relay provider must not derive the post-revoke endpoint exporter"
+    );
+    // The durable media epoch is not a decryption key. Even with the
+    // authentic captured ciphertext and sender signature, a caller using
+    // a different MLS epoch cannot open the frame. Keep this negative
+    // cryptographic assertion in the same real Call/Join acceptance test.
+    let mut wrong_epoch_context = media_context.clone();
+    wrong_epoch_context.crypto_epoch = media_context.crypto_epoch + 1;
+    assert!(
+        open_endpoint_group_media_wire(
+            &bob_secret,
+            &wrong_epoch_context,
+            &wire,
+            signing_key.verifying_key(),
+        )
+        .is_err(),
+        "media ciphertext must remain bound to the admitted MLS epoch"
+    );
+
     // Hang-up ends the media Call too; no new Join grant and no re-admission.
-    let hung = signal(&server, &bob, &call_id, revision, "hangup").expect("hangup");
+    let hung = signal_with_provider_cleanup(&server, &bob, &call_id, revision, "hangup")
+        .await
+        .expect("hangup waits for the shared Realtime provider-close boundary");
     assert_eq!(hung["state"], "terminated");
+    assert!(
+        live_provider
+            .session_offer_id(&claims[0].session_id)
+            .is_err(),
+        "BFF Hangup must close Alice's actual live WebRTC provider session"
+    );
+    assert!(
+        live_provider
+            .session_offer_id(&claims[1].session_id)
+            .is_err(),
+        "BFF Hangup must close Bob's actual live WebRTC provider session"
+    );
+    for channel in [&alice_channel, &bob_channel] {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while channel.ready_state()
+                != webrtc::data_channel::data_channel_state::RTCDataChannelState::Closed
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("Hangup must close both remote E2EE DataChannels");
+    }
+    alice_peer.close().await.expect("close Alice browser peer");
+    bob_peer.close().await.expect("close Bob browser peer");
+    assert!(
+        realtime_registry
+            .pending_webrtc_closes()
+            .unwrap()
+            .is_empty(),
+        "BFF must not confirm terminal Direct Call while a local provider close remains pending"
+    );
+    assert!(
+        realtime_registry.active_claims_at(0).unwrap().is_empty(),
+        "terminal BFF signal must retire both accepted Realtime sessions before success"
+    );
+    assert!(
+        !server
+            .store
+            .server_possesses_mls_group(&scope, &group_id)
+            .unwrap(),
+        "Hangup/revoke must not leave target Group private state in the server OpenMLS provider"
+    );
     let media = server
         .store
         .call(&claims[0].scope, &claims[0].call_id)
         .unwrap()
         .unwrap();
     assert_eq!(media.signalling_state, CallSignallingState::Terminated);
+    // The actual server SQLite OpenMLS provider must remain empty after the
+    // cross-process Join revoke and terminal Call transaction. Check through
+    // both independent BFF handles, not only the writer's in-memory view.
+    assert!(
+        !server
+            .store
+            .server_possesses_mls_group(&claims[0].scope, &group_id)
+            .unwrap(),
+        "server OpenMLS provider must not gain endpoint Group state after Hangup"
+    );
+    assert!(
+        !other_store
+            .server_possesses_mls_group(&claims[0].scope, &group_id)
+            .unwrap(),
+        "an independent SQLite/BFF connection must observe the same server-blind custody result"
+    );
     // Hangup must atomically revoke BOTH already-issued durable bearers,
     // not merely depend on a later Realtime read of the terminal media Call.
     // A separate SQLite connection must see the tombstones immediately.

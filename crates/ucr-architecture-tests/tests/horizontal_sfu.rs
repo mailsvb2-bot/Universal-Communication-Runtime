@@ -195,29 +195,44 @@ fn horizontal_sfu_remote_ingress_rechecks_authority_and_stale_receipts_fail_clos
 }
 
 #[test]
-fn local_sfu_sink_receipt_rechecks_live_claims_before_media_ready() {
+fn local_sfu_sink_acceptance_is_held_inside_revision_fence_before_media_ready() {
     let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
     let local = realtime
         .split("    pub fn forward_authenticated_e2ee_media(")
         .nth(1)
         .expect("local encrypted SFU media route");
+    let revision = local
+        .find("let expected_authorization_revision =")
+        .expect("preflight authorization revision");
+    let preflight = local
+        .find("self.require_live_transport_claims(claims)?;")
+        .expect("live signed Join and Device preflight");
     let dispatch = local
-        .find("self.dispatch_forward(&sfu, &batch, sink)")
-        .expect("live SFU dispatch boundary");
-    // The dispatch helper re-checks authority per target on every frame
-    // unless the opt-in revision cache proves nothing changed (item C1).
-    let helper = realtime
-        .split("    fn dispatch_forward(")
-        .nth(1)
-        .expect("dispatch helper");
-    assert!(helper.contains("dispatch_validated_forward_batch_cached_with("));
-    assert!(helper.contains("None => dispatch_validated_forward_batch(sfu, batch, sink)"));
-    let ready = local[dispatch..]
+        .find("dispatch_validated_forward_batch_at_revision(")
+        .expect("revision-fenced local SFU sink boundary");
+    let ready = local
         .find(".mark_media_ready(claims, self.now()?)")
         .expect("local media-ready transition");
-    let completion = &local[dispatch..dispatch + ready];
+    assert!(revision < preflight && preflight < dispatch && dispatch < ready);
+
+    let completion = &local[dispatch..ready];
+    assert!(completion.contains("expected_authorization_revision"));
+    assert!(completion.contains("sink,"));
     assert!(completion.contains("self.require_live_transport_claims(claims)?;"));
     assert!(completion.contains(".require_active_session(claims, self.now()?)"));
+
+    let sfu = read("crates/ucr-sfu/src/lib.rs");
+    let fence = sfu
+        .split("pub fn dispatch_validated_forward_batch_at_revision<")
+        .nth(1)
+        .expect("canonical SFU revision-fenced dispatcher");
+    let fence = fence
+        .split("\nfn validate_selected_recipients(")
+        .next()
+        .expect("bounded dispatcher implementation");
+    assert!(fence.contains(".with_authorization_revision_fence(expected_revision, &mut ||"));
+    assert!(fence.contains("sink.forward_encrypted(target, &batch.envelope)"));
+    assert!(fence.contains("sink_invoked"));
 }
 
 #[test]

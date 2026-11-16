@@ -278,7 +278,24 @@ fn cross_device_call_survives_congestion_and_keeps_rejoin() {
     // Explicit Leave must retire authority even before media becomes active.
     assert!(browser.contains("if(retireGrant)signedGrantRetired=true"));
     assert!(browser.contains("signedGrantRetired=true;"));
-    assert!(browser.contains("if(!retireGrant)await leaving"));
+    assert!(browser.contains("if(isFirstPartyDirectCall){"));
+    assert!(browser.contains("await hangupFirstPartyDirectCall(directCallId);"));
+    assert!(browser.contains("else if(wasActive&&leavingClaims&&leavingSequence>0){"));
+    let leave_start = browser.find("async function leave(){");
+    let leave_fence = leave_start.and_then(|start| {
+        browser[start..]
+            .find("if(leaveGeneration!==sessionLifecycleGeneration)return;")
+            .map(|offset| start + offset)
+    });
+    let leave_finalize = leave_start.and_then(|start| {
+        browser[start..]
+            .find("ui.privacyMode.disabled=false;")
+            .map(|offset| start + offset)
+    });
+    assert!(
+        leave_fence.is_some_and(|fence| leave_finalize.is_some_and(|finalize| fence < finalize)),
+        "late remote Leave must not finalize a replacement Join's browser state"
+    );
     assert!(browser.contains(r"\b401\b|\b403\b|not_found|offer_not_found"));
     assert!(browser.contains("ucrJoinFailureMessage"));
 

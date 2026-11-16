@@ -94,7 +94,9 @@ pub use recording_service::{
 
 mod universal_conference_service;
 pub use universal_conference_service::{
-    GrpcUniversalConferenceService, UniversalConferenceRuntimeCapabilities,
+    FirstPartyRoomJoinAttempt, GrpcUniversalConferenceService,
+    UniversalConferenceRuntimeCapabilities, canonical_universal_conference_lifecycle_event,
+    issue_authenticated_first_party_room_join, prepare_authenticated_first_party_room_call,
     universal_conference_service_server,
 };
 

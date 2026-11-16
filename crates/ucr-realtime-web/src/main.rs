@@ -753,6 +753,38 @@ fn first_party_static_response(path: &str) -> Option<HttpResponse> {
     })
 }
 
+async fn handle_room_proxy(
+    request: Request<Incoming>,
+    room_api: SocketAddr,
+    path: &str,
+    origin: Option<&str>,
+) -> HttpResponse {
+    let authorization = optional_authorization(request.headers());
+    let body = match bounded_body(request.into_body()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    if body.len() > MAX_ROOM_PROXY_BODY_BYTES {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "body_too_large",
+            "room request is too large",
+        );
+    }
+    if !canonical_room_ready(room_api).await {
+        return with_cors(
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "room_backend_unavailable",
+                "Эфир временно недоступен: production-сервис комнаты не готов",
+            ),
+            origin,
+        );
+    }
+    let response = proxy_room_post(room_api, path, &body, authorization.as_deref()).await;
+    with_cors(response, origin)
+}
+
 async fn handle_request(
     request: Request<Incoming>,
     state: AppState,
@@ -778,6 +810,9 @@ async fn handle_request(
         && let Some(response) = first_party_static_response(&path)
     {
         return Ok(response);
+    }
+    if method == Method::GET && path == "/v1/room/status" {
+        return Ok(room_status_response(state.room_api).await);
     }
     if method == Method::GET && path == "/room" {
         return Ok(html_body_response(StatusCode::OK, room_page()));
@@ -830,21 +865,7 @@ async fn handle_request(
     // A bearer is optional. When the browser sends one, it is forwarded so
     // the room can tell a speaker from an attendee. It is not logged.
     if room_proxy_path(&path) {
-        let authorization = optional_authorization(request.headers());
-        let body = match bounded_body(request.into_body()).await {
-            Ok(body) => body,
-            Err(error) => return Ok(error.into_response()),
-        };
-        if body.len() > MAX_ROOM_PROXY_BODY_BYTES {
-            return Ok(api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "body_too_large",
-                "room request is too large",
-            ));
-        }
-        let response =
-            proxy_room_post(state.room_api, &path, &body, authorization.as_deref()).await;
-        return Ok(with_cors(response, origin.as_deref()));
+        return Ok(handle_room_proxy(request, state.room_api, &path, origin.as_deref()).await);
     }
 
     let token = match bearer_from_headers(request.headers()) {
@@ -3372,6 +3393,43 @@ fn parse_room_api_socket(base: &str) -> Result<SocketAddr, String> {
         .parse()
         .map_err(|_| "room API port is invalid".to_owned())?;
     Ok(SocketAddr::new(ip, port_number))
+}
+
+async fn room_status_response(addr: SocketAddr) -> HttpResponse {
+    if canonical_room_ready(addr).await {
+        json_bytes_response(
+            StatusCode::OK,
+            br#"{"ok":true,"transport":"canonical-room-ready"}"#.to_vec(),
+        )
+    } else {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "room_backend_unavailable",
+            "Эфир временно недоступен: production-сервис комнаты не готов",
+        )
+    }
+}
+
+async fn canonical_room_ready(addr: SocketAddr) -> bool {
+    // A listening port is insufficient: ucr-dev --room owns an unrelated
+    // SQLite store and grants, and must never be accepted as production.
+    // Only a same-loopback adapter backed by the canonical runtime may
+    // acknowledge this dedicated production contract. Do not infer E2EE
+    // or signed-grant admission from generic /readyz.
+    matches!(
+        tokio::time::timeout(
+            Duration::from_millis(900),
+            read_room_proxy(addr, "/v1/room/capabilities", b"{}", None)
+        ).await,
+        Ok(Ok((status, payload))) if status == StatusCode::OK
+            && serde_json::from_slice::<serde_json::Value>(&payload).ok().is_some_and(|value| {
+                value.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
+                    && value.get("owner").and_then(serde_json::Value::as_str)
+                        == Some("canonical-ucr-runtime")
+                    && value.get("capability").and_then(serde_json::Value::as_str)
+                        == Some("production-room-enrollment-v1")
+            })
+    )
 }
 
 async fn proxy_room_post(

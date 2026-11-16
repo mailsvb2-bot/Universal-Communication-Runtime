@@ -21,6 +21,7 @@ ucr-secrets = { path = "../ucr-secrets" }
 
 [dev-dependencies]
 rustls = { version = "=0.23.46", features = ["ring"] }
+tokio = { version = "=1.53.3", features = ["macros"] }
 
 [lints]
 workspace = true

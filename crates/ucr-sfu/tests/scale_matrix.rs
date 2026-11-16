@@ -1,8 +1,8 @@
 use std::sync::Mutex;
 
 use ucr_core::{
-    AuthorizationEvaluator, CallStore, DeviceLifecycleStore, GroupStore, IdentityStore,
-    PrincipalIdentityBindingStore, TrustedSigningKeyStore,
+    AuthorizationEvaluator, CallStore, DeviceLifecycleStore, DurableStoreError, GroupStore,
+    IdentityStore, PrincipalIdentityBindingStore, TrustedSigningKeyStore,
 };
 use ucr_crypto::{GroupMediaEpochSecret, SigningKeyMaterial};
 use ucr_media_e2ee::{GroupMediaE2eeRuntime, PreparedGroupMediaE2eeCapabilities};
@@ -17,12 +17,32 @@ use ucr_sfu::{
 };
 use ucr_storage_memory::MemoryLocalStore;
 
+static ALLOW_ALL_AUTHORIZATION_FENCE: Mutex<()> = Mutex::new(());
+
 #[derive(Debug, Clone, Copy)]
 struct AllowAll;
 
 impl AuthorizationEvaluator for AllowAll {
     fn authorize(&self, _request: &AuthorizationRequest) -> Result<(), CanonicalError> {
         Ok(())
+    }
+
+    fn authorization_revision(&self) -> Option<u64> {
+        Some(0)
+    }
+
+    fn with_authorization_revision_fence(
+        &self,
+        expected_revision: u64,
+        action: &mut dyn FnMut() -> Result<(), DurableStoreError>,
+    ) -> Result<(), DurableStoreError> {
+        let _guard = ALLOW_ALL_AUTHORIZATION_FENCE
+            .lock()
+            .map_err(|_| DurableStoreError::Internal)?;
+        if expected_revision != 0 {
+            return Err(DurableStoreError::Conflict);
+        }
+        action()
     }
 }
 

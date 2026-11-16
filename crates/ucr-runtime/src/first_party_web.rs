@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
+use ucr_api_grpc::GrpcRealtimeService;
 use ucr_core::{
     AuthorizedDurableRuntime, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
     GroupStore, IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
@@ -51,7 +52,25 @@ use ucr_storage_sqlite::{EndpointMlsKeyPackageOffer, NewFirstPartySession, Sqlit
 
 use crate::first_party_media;
 
+mod room;
+
 const MAX_BODY: usize = 16 * 1024;
+// A signed endpoint MLS Add carries three independently bounded public wire
+// values (KeyPackage, Commit and Welcome). Keep ordinary first-party requests
+// small, but let the canonical MLS transition fit its own strict 10 KB/field
+// decoder limits without being truncated by the generic 16 KB envelope.
+const MAX_MLS_TRANSITION_BODY_BYTES: usize = 40 * 1024;
+
+fn first_party_body_limit(path: &str) -> usize {
+    if matches!(
+        path,
+        "/v1/first-party/call/mls-add-peer" | "/v1/first-party/room/mls-add-member"
+    ) {
+        MAX_MLS_TRANSITION_BODY_BYTES
+    } else {
+        MAX_BODY
+    }
+}
 /// Successfully proven challenges remembered (only until expiry) to reject replay.
 /// Unproven challenges consume NO server memory, so anonymous challenge
 /// requests can never exhaust a shared pool and lock other users out.
@@ -74,6 +93,8 @@ const CHALLENGE_TTL: Duration = Duration::from_secs(90);
 const SESSION_TTL: Duration = Duration::from_mins(30);
 const COOKIE_NAME: &str = "__Host-ucr_fp";
 type HttpResponse = Response<Full<Bytes>>;
+pub(super) type FirstPartyRealtimeService =
+    GrpcRealtimeService<ucr_core::SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -286,6 +307,9 @@ impl SessionLedger {
 struct State {
     store: Arc<SqliteLocalStore>,
     issuer: Arc<JoinTokenIssuer>,
+    /// The same node-local realtime/provider owner used by gRPC. Terminal
+    /// first-party direct Calls await its existing close/retry boundary.
+    realtime_service: Option<FirstPartyRealtimeService>,
     origin: String,
     registration_scope: Option<TenantScope>,
     /// Per-process MAC key sealing stateless challenges. A restart voids them.
@@ -352,6 +376,7 @@ pub(super) async fn serve(
     config: Configuration,
     store: Arc<SqliteLocalStore>,
     issuer: Arc<JoinTokenIssuer>,
+    realtime_service: FirstPartyRealtimeService,
 ) -> Result<(), String> {
     let listener = TcpListener::bind(config.bind)
         .await
@@ -359,6 +384,7 @@ pub(super) async fn serve(
     let state = Arc::new(State {
         store,
         issuer,
+        realtime_service: Some(realtime_service),
         origin: config.origin,
         registration_scope: config.registration_scope,
         challenge_key: random_key().map_err(|_| "first-party challenge key unavailable")?,
@@ -1174,10 +1200,26 @@ fn start_call(state: &State, session: &Session, intent: &StartIntent) -> Result<
     to_call(state, &current)
 }
 
+fn has_derived_direct_media(kind: ucr_model::ConversationKind) -> Result<bool, StatusCode> {
+    match kind {
+        ucr_model::ConversationKind::Direct => Ok(true),
+        // A webinar Room's Group Call IS its media Call. It has no derived
+        // direct-media child and must use the canonical Call lifecycle itself.
+        ucr_model::ConversationKind::PrivateGroup => Ok(false),
+        _ => Err(StatusCode::CONFLICT),
+    }
+}
+
 fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<Value, StatusCode> {
     let before = get_call(state, session, &req.call_id)?;
     if before.revision != req.expected_revision {
         return Err(StatusCode::CONFLICT);
+    }
+    // A retry after the canonical Hangup committed but provider cleanup
+    // timed out must re-enter the same targeted close boundary below.
+    // get_call already authenticated this participant and active Device.
+    if req.action == "hangup" && before.signalling_state == CallSignallingState::Terminated {
+        return to_call(state, &before);
     }
     let action = match req.action.as_str() {
         "accept" => CallSignalKind::Accept,
@@ -1200,7 +1242,8 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
         kind: action,
     };
     let runtime = AuthorizedDurableRuntime::new(state.store.as_ref(), state.store.as_ref());
-    if ends_media {
+    let has_derived_media = has_derived_direct_media(before.conversation.kind)?;
+    if ends_media && has_derived_media {
         // The existing canonical CallStore owns BOTH transitions. An immediate
         // SQLite transaction (or the Memory owner mutex) fences concurrent
         // Join and guarantees that neither Call can be left half-terminated.
@@ -1225,7 +1268,10 @@ fn signal_call(state: &State, session: &Session, req: &SignalRequest) -> Result<
             .map_err(|_| StatusCode::CONFLICT)?;
     }
     let current = get_call(state, session, &req.call_id)?;
-    if !ends_media && current.signalling_state == CallSignallingState::Terminated {
+    if has_derived_media
+        && !ends_media
+        && current.signalling_state == CallSignallingState::Terminated
+    {
         first_party_media::end_direct_call_media(state.store.as_ref(), &current)
             .map_err(|_| StatusCode::CONFLICT)?;
     }
@@ -2183,12 +2229,13 @@ async fn dispatch(
     }
     // Bound the stream before aggregating DATA frames. A Content-Length check
     // or collect().await would permit unbounded memory growth from chunked POST.
+    let body_limit = first_party_body_limit(path);
     let mut incoming = request.into_body();
     let mut body = Vec::with_capacity(1024);
     while let Some(frame) = incoming.frame().await {
         let frame = frame.map_err(|_| StatusCode::BAD_REQUEST)?;
         if let Some(data) = frame.data_ref() {
-            if data.len() > MAX_BODY.saturating_sub(body.len()) {
+            if data.len() > body_limit.saturating_sub(body.len()) {
                 return Err(StatusCode::PAYLOAD_TOO_LARGE);
             }
             body.extend_from_slice(data);
@@ -2196,7 +2243,8 @@ async fn dispatch(
     }
     // Typed decoding rejects extraneous fields; account/scope is verified against
     // the independent server session on every route.
-    let response = dispatch_post(state, path, &body, session.as_ref())?;
+    let response =
+        dispatch_post_with_provider_cleanup(state, path, &body, session.as_ref()).await?;
     body.clear();
     Ok(response)
 }
@@ -2389,10 +2437,54 @@ fn dispatch_post(
         device_route(state, auth, path, body)?
     } else if path.starts_with("/v1/first-party/call/") {
         call_route(state, auth, path, body)?
+    } else if path.starts_with("/v1/first-party/room/") {
+        room::dispatch(state, auth, path, body)?
     } else {
         return Err(StatusCode::NOT_FOUND);
     };
     Ok((response, None))
+}
+
+/// A terminal first-party Direct Call is not reported complete until the same
+/// node-local Realtime owner has retired its sessions, confirmed provider
+/// Close, and completed any configured SFU placement release. On failure the
+/// canonical Call remains terminated, the retry coordinates remain queued,
+/// and the BFF returns 503 instead of claiming media stop.
+async fn dispatch_post_with_provider_cleanup(
+    state: &State,
+    path: &str,
+    body: &[u8],
+    session: Option<&Session>,
+) -> Result<(Value, Option<String>), StatusCode> {
+    let response = dispatch_post(state, path, body, session)?;
+    if path == "/v1/first-party/call/signal" {
+        let request: SignalRequest = parse(body)?;
+        let auth = session.ok_or(StatusCode::UNAUTHORIZED)?;
+        let current = get_call(state, auth, &request.call_id)?;
+        if current.signalling_state == CallSignallingState::Terminated
+            && current.conversation.kind == ConversationKind::Direct
+        {
+            let media = first_party_media::media_runtime_ids(&current.scope, &current.call_id)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            // A ringing Call may be cancelled before its derived media Call
+            // (and therefore any provider session) exists. That is already a
+            // complete stop; only await provider cleanup when the child exists.
+            let media_call = state
+                .store
+                .call(&current.scope, &media.call_id)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            if media_call.is_some() {
+                state
+                    .realtime_service
+                    .as_ref()
+                    .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
+                    .close_terminated_call_sessions(&current.scope, &media.call_id)
+                    .await
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            }
+        }
+    }
+    Ok(response)
 }
 
 fn recovery_verifier(secret: &str) -> Result<[u8; 32], StatusCode> {
@@ -3023,6 +3115,44 @@ mod tests {
             )
             .is_err(),
             "Device-only Join cannot be smuggled through accepted-Call admission"
+        );
+    }
+
+    #[test]
+    fn only_endpoint_mls_add_routes_receive_the_expanded_bounded_body_budget() {
+        assert_eq!(
+            first_party_body_limit("/v1/first-party/call/mls-add-peer"),
+            MAX_MLS_TRANSITION_BODY_BYTES
+        );
+        assert_eq!(
+            first_party_body_limit("/v1/first-party/room/mls-add-member"),
+            MAX_MLS_TRANSITION_BODY_BYTES
+        );
+        assert_eq!(
+            first_party_body_limit("/v1/first-party/room/mls-offer"),
+            MAX_BODY
+        );
+        assert_eq!(
+            first_party_body_limit("/v1/first-party/signup/finish"),
+            MAX_BODY
+        );
+        const {
+            assert!(
+                MAX_MLS_TRANSITION_BODY_BYTES > 3 * 10_000 + 2 * 1024,
+                "the aggregate limit must fit three individually bounded base64 MLS artifacts and JSON metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn group_room_calls_never_create_or_terminate_a_derived_direct_media_child() {
+        assert_eq!(
+            has_derived_direct_media(ucr_model::ConversationKind::Direct),
+            Ok(true)
+        );
+        assert_eq!(
+            has_derived_direct_media(ucr_model::ConversationKind::PrivateGroup),
+            Ok(false)
         );
     }
 

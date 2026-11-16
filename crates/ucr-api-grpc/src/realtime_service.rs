@@ -50,7 +50,8 @@ use ucr_realtime::{
 };
 use ucr_sfu::{
     PreparedSfuCapabilities, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
-    SfuValidatedForwardBatch, SfuValidatedSourceFrame, dispatch_validated_forward_batch,
+    SfuValidatedForwardBatch, SfuValidatedSourceFrame,
+    dispatch_validated_forward_batch_at_revision,
 };
 use ucr_webrtc::{
     PreparedWebRtcProvider, WebRtcProvider, WebRtcProviderError, WebRtcSessionConfigFactory,
@@ -376,14 +377,6 @@ pub struct GrpcRealtimeService<C, A, S> {
     mls_bootstrap_store: Option<Arc<dyn GroupMlsBootstrapStore + Send + Sync>>,
     mls_admission_store: Option<Arc<dyn RealtimeMlsAdmissionStore>>,
     sfu_placement_transition: Arc<[Arc<tokio::sync::Mutex<()>>]>,
-    sfu_authorization_cache: Option<SfuAuthorizationCacheWiring>,
-}
-
-/// Item C1 hot-path wiring: cache + the store's revision source.
-#[derive(Clone)]
-struct SfuAuthorizationCacheWiring {
-    cache: Arc<ucr_sfu::SfuAuthorizationCache>,
-    store_revision: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S> {
@@ -435,7 +428,6 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             sfu_placement_transition: (0..SFU_PLACEMENT_LOCK_STRIPES)
                 .map(|_| Arc::new(tokio::sync::Mutex::new(())))
                 .collect(),
-            sfu_authorization_cache: None,
         }
     }
 
@@ -465,22 +457,6 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         observer: Arc<dyn RealtimeValidatedMediaObserver>,
     ) -> Self {
         self.validated_media_observer = Some(observer);
-        self
-    }
-
-    /// Enables the per-target SFU authorization cache (item C1). The caller
-    /// supplies the store's monotonic authorization revision (e.g.
-    /// `AuthorizationEvaluator::authorization_revision` of the canonical
-    /// store). Without this call (default) every frame re-checks authority.
-    #[must_use]
-    pub fn with_sfu_authorization_cache(
-        mut self,
-        store_revision: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
-    ) -> Self {
-        self.sfu_authorization_cache = Some(SfuAuthorizationCacheWiring {
-            cache: Arc::new(ucr_sfu::SfuAuthorizationCache::new()),
-            store_revision,
-        });
         self
     }
 
@@ -975,7 +951,6 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             mls_bootstrap_store: self.mls_bootstrap_store.clone(),
             mls_admission_store: self.mls_admission_store.clone(),
             sfu_placement_transition: Arc::clone(&self.sfu_placement_transition),
-            sfu_authorization_cache: self.sfu_authorization_cache.clone(),
         }
     }
 }
@@ -2504,30 +2479,6 @@ where
         + ConferenceJoinGrantStore
         + ServiceQuotaStore,
 {
-    fn dispatch_forward(
-        &self,
-        sfu: &ucr_sfu::SfuRuntime<
-            '_,
-            A,
-            S,
-            PreparedGroupMediaE2eeCapabilities,
-            PreparedSfuCapabilities,
-        >,
-        batch: &SfuValidatedForwardBatch,
-        sink: &dyn SfuForwardSink,
-    ) -> Result<ucr_sfu::SfuForwardOutcome, ucr_sfu::SfuError> {
-        match &self.sfu_authorization_cache {
-            Some(wiring) => ucr_sfu::dispatch_validated_forward_batch_cached_with(
-                sfu,
-                &wiring.cache,
-                &*wiring.store_revision,
-                batch,
-                sink,
-            ),
-            None => dispatch_validated_forward_batch(sfu, batch, sink),
-        }
-    }
-
     fn prepare_observed_forward(
         &self,
         claims: &RealtimeSessionClaims,
@@ -2663,6 +2614,15 @@ where
         envelope: &SfuForwardEnvelope,
         sink: &dyn SfuForwardSink,
     ) -> Result<usize, CanonicalError> {
+        // Snapshot before signed Join/Device/Call preflight. A revocation after this
+        // point must invalidate the eventual recipient sink, not become a new baseline
+        // when SfuRuntime first reads the revision after those checks.
+        let expected_authorization_revision =
+            self.authorization.authorization_revision().ok_or_else(|| {
+                map_conference_error(&ConferenceError::Sfu(
+                    ucr_sfu::SfuError::AuthorizationFenceUnavailable,
+                ))
+            })?;
         self.require_live_transport_claims(claims)?;
         self.registry
             .require_active_session(claims, self.now()?)
@@ -2724,7 +2684,15 @@ where
                 now_unix_ms,
                 quota_error: Mutex::new(None),
             };
-            match self.dispatch_forward(&sfu, &batch, &quota_sink) {
+            // Session-scoped forwarding deliberately bypasses the optional authorization
+            // cache: the revision snapshot predates Join admission and is held through
+            // the actual sink acceptance.
+            match dispatch_validated_forward_batch_at_revision(
+                &sfu,
+                &batch,
+                expected_authorization_revision,
+                &quota_sink,
+            ) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     if let Some(quota_error) = quota_sink.quota_error()? {
@@ -2734,8 +2702,13 @@ where
                 }
             }
         } else {
-            self.dispatch_forward(&sfu, &batch, sink)
-                .map_err(|error| map_conference_error(&ConferenceError::Sfu(error)))?
+            dispatch_validated_forward_batch_at_revision(
+                &sfu,
+                &batch,
+                expected_authorization_revision,
+                sink,
+            )
+            .map_err(|error| map_conference_error(&ConferenceError::Sfu(error)))?
         };
         // The synchronous sink can finish after a concurrent Hangup, Device revoke,
         // or Leave. As with horizontal routing, never acknowledge stale delivery
@@ -3559,6 +3532,93 @@ where
     /// Returns explicit durable-store, registry, WebRTC-provider, attendance-event, placement, or
     /// runtime-state failures. Placement release failures remain queued for retry; ephemeral Call
     /// state is cleared only after placement cleanup succeeds.
+    /// Retires and closes every node-local realtime session for one already-terminal Call.
+    ///
+    /// Unlike the periodic global sweep, this targeted boundary is suitable for a
+    /// first-party Hangup response: unrelated Calls cannot delay or fail this Call's
+    /// provider acknowledgement. It uses the same canonical registry, per-Call Join/Leave
+    /// gate, provider-close retry queue and configured SFU placement lifecycle as the
+    /// background cleanup worker.
+    ///
+    /// # Errors
+    /// Returns a canonical conflict if the Call is not terminal, or an explicit
+    /// attendance, provider-close, placement, registry or durable-store failure. A
+    /// failed provider close remains queued for the background retry worker.
+    pub async fn close_terminated_call_sessions(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<usize, CanonicalError> {
+        let now_unix_ms = self.now()?;
+        let placement_guard = self.sfu_placement_transition_guard(scope, call_id).await;
+        if self.cleanup_decision(scope, call_id)? != RuntimeCallCleanupDecision::Cleanup {
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
+        if self.sfu_placement_lifecycle.is_some() {
+            self.registry
+                .queue_call_cleanup_candidate(scope, call_id)
+                .map_err(map_registry_error)?;
+        }
+        let active_claims = self
+            .registry
+            .active_claims_at(now_unix_ms)
+            .map_err(map_registry_error)?;
+        let mut sweep = RealtimeCleanupSweep::default();
+        let (_retired_sessions, attendance_error) = self.retire_closed_call_sessions(
+            scope,
+            call_id,
+            &active_claims,
+            now_unix_ms,
+            &mut sweep,
+        )?;
+        drop(placement_guard);
+
+        let mut first_error = attendance_error;
+        // Include closes queued by an earlier failed Leave, not only sessions
+        // retired by this request. Try every exact coordinate before returning.
+        let pending = self
+            .registry
+            .pending_webrtc_closes()
+            .map_err(map_registry_error)?;
+        for (_, _, session_id) in pending
+            .into_iter()
+            .filter(|(pending_scope, pending_call, _)| {
+                pending_scope == scope && pending_call == call_id
+            })
+        {
+            if let Err(error) = self
+                .confirm_pending_webrtc_close(scope, call_id, &session_id)
+                .await
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        let _placement_guard = self.sfu_placement_transition_guard(scope, call_id).await;
+        if self.has_pending_webrtc_close_for_call(scope, call_id)? {
+            return Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable,
+            ));
+        }
+        self.release_sfu_call_placement_for_call_if_inactive(scope, call_id, self.now()?)
+            .await?;
+        self.conference_state
+            .clear_call_ephemeral_state(scope, call_id)
+            .map_err(|error| map_conference_error(&error))?;
+        Ok(sweep.sessions_reaped)
+    }
+
+    /// Runs one bounded cleanup sweep for durable closed Calls and local realtime providers.
+    ///
+    /// Failed provider closes remain in the canonical retry queue; placement is not released
+    /// until every targeted provider close has been acknowledged.
+    ///
+    /// # Errors
+    /// Returns a canonical error when the clock, durable cleanup, provider close, attendance
+    /// persistence, or SFU placement transition cannot be completed safely.
     pub async fn cleanup_closed_conferences_once(
         &self,
     ) -> Result<RealtimeCleanupSweep, CanonicalError> {

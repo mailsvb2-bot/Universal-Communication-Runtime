@@ -2430,9 +2430,19 @@ impl ProductionRuntime {
         let first_party_config = first_party_web::Configuration::from_env()?;
         let first_party_store = Arc::clone(&store);
         let first_party_issuer = Arc::clone(&join_issuer);
+        // Share the exact configured Realtime/provider owner with the BFF so
+        // a terminal first-party Direct Call can await the same close/retry
+        // boundary used by the gRPC cleanup worker.
+        let first_party_realtime_service = realtime_service.clone();
         let first_party_listener = async move {
             if let Some(config) = first_party_config {
-                first_party_web::serve(config, first_party_store, first_party_issuer).await
+                first_party_web::serve(
+                    config,
+                    first_party_store,
+                    first_party_issuer,
+                    first_party_realtime_service,
+                )
+                .await
             } else {
                 std::future::pending::<Result<(), String>>().await
             }
@@ -2469,6 +2479,9 @@ impl ProductionRuntime {
         };
         let public_and_first_party =
             async move { tokio::try_join!(public_and_operator, first_party_listener).map(|_| ()) };
+        // Keep the composed public/first-party listener future off the stack: the
+        // first-party route tree makes this future large even before SFU is enabled.
+        let public_and_first_party = Box::pin(public_and_first_party);
         let server_result = match (sfu_node_media_config, sfu_node_media_service) {
             (Some(config), Some(service)) => tokio::try_join!(
                 public_and_first_party,
@@ -2545,7 +2558,6 @@ impl ProductionRuntime {
         .with_mls_bootstrap_store(Arc::clone(&store))
         .with_mls_admission_store(Arc::clone(&store))
         .with_validated_media_observer(recording_media_observer);
-        let realtime_service = configure_sfu_authorization_cache(realtime_service, &store);
         let (realtime_service, sfu_expiry_task) = configure_sfu_placement_lifecycle(
             realtime_service,
             &sfu_placement_service,
@@ -3487,21 +3499,6 @@ const fn health_label(health: StorageHealth) -> &'static str {
         StorageHealth::Unavailable => "unavailable",
         StorageHealth::Corrupt => "corrupt",
     }
-}
-
-/// Item C1: opt-in per-target SFU authorization cache (`UCR_SFU_AUTH_CACHE`,
-/// default off). Reuse requires the canonical store revision to be unchanged.
-fn configure_sfu_authorization_cache<C, A>(
-    service: GrpcRealtimeService<C, A, SqliteLocalStore>,
-    store: &Arc<SqliteLocalStore>,
-) -> GrpcRealtimeService<C, A, SqliteLocalStore> {
-    if !ucr_sfu::SfuAuthorizationCache::enabled_from_env() {
-        return service;
-    }
-    let revision_store = Arc::clone(store);
-    service.with_sfu_authorization_cache(Arc::new(move || {
-        ucr_core::AuthorizationEvaluator::authorization_revision(&*revision_store)
-    }))
 }
 
 #[cfg(test)]

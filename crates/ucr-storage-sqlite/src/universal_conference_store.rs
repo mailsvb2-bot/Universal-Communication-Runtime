@@ -398,7 +398,294 @@ struct StoredParticipant {
     revision: Vec<u8>,
 }
 
+fn ensure_no_active_group_calls(
+    transaction: &Transaction<'_>,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+) -> Result<(), DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let has_active_call: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM groups AS g
+                JOIN calls AS c
+                  ON c.tenant_id = g.tenant_id
+                 AND c.namespace_present = g.namespace_present
+                 AND c.namespace_id = g.namespace_id
+                 AND c.conversation_id = g.conversation_id
+                 AND c.conversation_kind = g.conversation_kind
+                WHERE g.tenant_id = ?1
+                  AND g.namespace_present = ?2
+                  AND g.namespace_id = ?3
+                  AND g.group_id = ?4
+                  AND c.signalling_state <> 'terminated'
+            )",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                conference_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if has_active_call {
+        Err(DurableStoreError::Conflict)
+    } else {
+        Ok(())
+    }
+}
+
+enum ConferenceLifecycleTransition<'a> {
+    Standard {
+        scope: &'a TenantScope,
+        conference_id: &'a GroupId,
+        expected_revision: u64,
+        lifecycle: UniversalConferenceLifecycle,
+        entry_open: bool,
+        event: Option<&'a EventEnvelope>,
+    },
+    EndAfterCallsClosed {
+        scope: &'a TenantScope,
+        conference_id: &'a GroupId,
+        expected_revision: u64,
+        event: Option<&'a EventEnvelope>,
+    },
+}
+
+fn transition_universal_conference_with_event_in_transaction(
+    transaction: &Transaction<'_>,
+    transition: &ConferenceLifecycleTransition<'_>,
+) -> Result<UniversalConferenceProfile, DurableStoreError> {
+    let (
+        scope,
+        conference_id,
+        expected_revision,
+        lifecycle,
+        entry_open,
+        event,
+        allow_live_end_without_calls,
+    ) = match transition {
+        ConferenceLifecycleTransition::Standard {
+            scope,
+            conference_id,
+            expected_revision,
+            lifecycle,
+            entry_open,
+            event,
+        } => (
+            *scope,
+            *conference_id,
+            *expected_revision,
+            *lifecycle,
+            *entry_open,
+            *event,
+            false,
+        ),
+        ConferenceLifecycleTransition::EndAfterCallsClosed {
+            scope,
+            conference_id,
+            expected_revision,
+            event,
+        } => {
+            ensure_no_active_group_calls(transaction, scope, conference_id)?;
+            (
+                *scope,
+                *conference_id,
+                *expected_revision,
+                UniversalConferenceLifecycle::Ended,
+                false,
+                *event,
+                true,
+            )
+        }
+    };
+    let current =
+        load_profile(transaction, scope, conference_id)?.ok_or(DurableStoreError::Conflict)?;
+    validate_conference_lifecycle_event(&current, expected_revision, lifecycle, event)?;
+
+    if current.revision == expected_revision.saturating_add(1)
+        && current.lifecycle == lifecycle
+        && current.entry_open == entry_open
+    {
+        if let Some(event) = event {
+            let _ = append_event_in_transaction(transaction, event)?;
+        }
+        return Ok(current);
+    }
+
+    let lifecycle_change_allowed = valid_lifecycle_transition(current.lifecycle, lifecycle)
+        || (allow_live_end_without_calls
+            && current.lifecycle == UniversalConferenceLifecycle::Live
+            && lifecycle == UniversalConferenceLifecycle::Ended);
+    if current.revision != expected_revision || !lifecycle_change_allowed {
+        return Err(DurableStoreError::Conflict);
+    }
+    if !conference_consumes_resource_quota(current.lifecycle)
+        && conference_consumes_resource_quota(lifecycle)
+    {
+        ensure_integration_conference_quota(transaction, scope, &current.integration_id)?;
+    }
+
+    persist_conference_lifecycle_change(
+        transaction,
+        scope,
+        conference_id,
+        expected_revision,
+        lifecycle,
+        entry_open,
+        event,
+    )
+}
+
+fn persist_conference_lifecycle_change(
+    transaction: &Transaction<'_>,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    expected_revision: u64,
+    lifecycle: UniversalConferenceLifecycle,
+    entry_open: bool,
+    event: Option<&EventEnvelope>,
+) -> Result<UniversalConferenceProfile, DurableStoreError> {
+    let next_revision = expected_revision
+        .checked_add(1)
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    if let Some(event) = event
+        && event.logical_order != next_revision
+    {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+
+    let namespace = namespace_storage_key(scope);
+    let changed = transaction
+        .execute(
+            "UPDATE universal_conferences \
+             SET lifecycle = ?1, entry_open = ?2, revision = ?3 \
+             WHERE tenant_id = ?4 AND namespace_present = ?5 AND namespace_id = ?6 \
+               AND conference_id = ?7 AND revision = ?8",
+            params![
+                lifecycle_text(lifecycle),
+                bool_to_i64(entry_open),
+                encode_u64(next_revision).as_slice(),
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                conference_id.as_opaque().as_str(),
+                encode_u64(expected_revision).as_slice(),
+            ],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if changed != 1 {
+        return Err(DurableStoreError::Conflict);
+    }
+
+    if let Some(event) = event {
+        let _ = append_event_in_transaction(transaction, event)?;
+    }
+
+    load_profile(transaction, scope, conference_id)?.ok_or(DurableStoreError::Corrupt)
+}
+
 impl UniversalConferenceStore for SqliteLocalStore {
+    fn persist_first_party_room_with_owner(
+        &self,
+        room: &UniversalConferenceProfile,
+        owner: &UniversalConferenceParticipantProfile,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_profile(room)?;
+        validate_participant(owner)?;
+        // The owner and the conference must be a single source of truth, never
+        // two independent writes separated by a process crash or concurrent join.
+        if room.scope != owner.scope
+            || room.conference_id != owner.conference_id
+            || room.integration_id != owner.integration_id
+            || room.mode != UniversalConferenceMode::Webinar
+            || room.lifecycle != UniversalConferenceLifecycle::Scheduled
+            || room.entry_open
+            || room.revision != 1
+            || owner.participant.kind != PrincipalKind::Person
+            || owner.role != ConferenceParticipantRole::Owner
+            || !owner.active
+            || owner.revision != 1
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+
+        // Both canonical identities must match an exact idempotent retry.
+        // Never treat an orphaned room (or an unexpected new owner) as success.
+        if let Some(existing) = load_profile_for_external(
+            &tx,
+            &room.scope,
+            &room.integration_id,
+            &room.external_conference_id,
+        )? {
+            let existing_owner =
+                load_participant(&tx, &room.scope, &room.conference_id, &owner.participant)?;
+            return if existing == *room && existing_owner.as_ref() == Some(owner) {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if load_profile(&tx, &room.scope, &room.conference_id)?.is_some() {
+            return Err(DurableStoreError::Conflict);
+        }
+        // One authenticated Person may have only a bounded set of unfinished
+        // webinars. This is checked under the same IMMEDIATE transaction as
+        // creation, not in an advisory preflight vulnerable to concurrent tabs.
+        let namespace = namespace_storage_key(&room.scope);
+        let open_for_owner: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM universal_conference_participants AS participant
+             JOIN universal_conferences AS conference
+               ON participant.tenant_id = conference.tenant_id
+              AND participant.namespace_present = conference.namespace_present
+              AND participant.namespace_id = conference.namespace_id
+              AND participant.conference_id = conference.conference_id
+             WHERE participant.tenant_id = ?1
+               AND participant.namespace_present = ?2
+               AND participant.namespace_id = ?3
+               AND participant.principal_kind = 'person'
+               AND participant.principal_id = ?4
+               AND participant.role = 'owner'
+               AND participant.active = 1
+               AND conference.integration_id = ?5
+               AND conference.lifecycle != 'ended'",
+                params![
+                    room.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    owner.participant.principal_id.as_opaque().as_str(),
+                    room.integration_id.as_opaque().as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if open_for_owner >= 8 {
+            return Err(DurableStoreError::Full);
+        }
+        ensure_integration_conference_quota(&tx, &room.scope, &room.integration_id)?;
+        ensure_integration_participant_quota(&tx, &room.scope, &room.integration_id)?;
+        insert_profile(&tx, room)?;
+        ensure_participant_capacity(&tx, &room.scope, &room.conference_id)?;
+        ensure_unique_active_owner(
+            &tx,
+            &room.scope,
+            &room.conference_id,
+            &owner.participant,
+            owner.role,
+            owner.active,
+        )?;
+        insert_participant(&tx, owner)?;
+        tx.commit().map_err(|error| map_sqlite_error(&error))?;
+        Ok(DurableRecordStatus::Persisted)
+    }
+
     fn persist_universal_conference_profile(
         &self,
         profile: &UniversalConferenceProfile,
@@ -600,77 +887,129 @@ impl UniversalConferenceStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        let current =
-            load_profile(&transaction, scope, conference_id)?.ok_or(DurableStoreError::Conflict)?;
-
-        validate_conference_lifecycle_event(&current, expected_revision, lifecycle, event)?;
-
-        if current.revision == expected_revision.saturating_add(1)
-            && current.lifecycle == lifecycle
-            && current.entry_open == entry_open
-        {
-            if let Some(event) = event {
-                let _ = append_event_in_transaction(&transaction, event)?;
-            }
-            transaction
-                .commit()
-                .map_err(|error| map_sqlite_error(&error))?;
-            return Ok(current);
-        }
-
-        if current.revision != expected_revision
-            || !valid_lifecycle_transition(current.lifecycle, lifecycle)
-        {
-            return Err(DurableStoreError::Conflict);
-        }
-        if !conference_consumes_resource_quota(current.lifecycle)
-            && conference_consumes_resource_quota(lifecycle)
-        {
-            ensure_integration_conference_quota(&transaction, scope, &current.integration_id)?;
-        }
-
-        let next_revision = expected_revision
-            .checked_add(1)
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        if let Some(event) = event
-            && event.logical_order != next_revision
-        {
-            return Err(DurableStoreError::InvalidRecord);
-        }
-
-        let namespace = namespace_storage_key(scope);
-        let changed = transaction
-            .execute(
-                "UPDATE universal_conferences \
-                 SET lifecycle = ?1, entry_open = ?2, revision = ?3 \
-                 WHERE tenant_id = ?4 AND namespace_present = ?5 AND namespace_id = ?6 \
-                   AND conference_id = ?7 AND revision = ?8",
-                params![
-                    lifecycle_text(lifecycle),
-                    bool_to_i64(entry_open),
-                    encode_u64(next_revision).as_slice(),
-                    scope.tenant_id.as_opaque().as_str(),
-                    namespace.present,
-                    namespace.value,
-                    conference_id.as_opaque().as_str(),
-                    encode_u64(expected_revision).as_slice(),
-                ],
-            )
-            .map_err(|error| map_sqlite_error(&error))?;
-        if changed != 1 {
-            return Err(DurableStoreError::Conflict);
-        }
-
-        if let Some(event) = event {
-            let _ = append_event_in_transaction(&transaction, event)?;
-        }
-
-        let updated =
-            load_profile(&transaction, scope, conference_id)?.ok_or(DurableStoreError::Corrupt)?;
+        let updated = transition_universal_conference_with_event_in_transaction(
+            &transaction,
+            &ConferenceLifecycleTransition::Standard {
+                scope,
+                conference_id,
+                expected_revision,
+                lifecycle,
+                entry_open,
+                event,
+            },
+        )?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(updated)
+    }
+
+    fn end_universal_conference_if_no_active_group_calls(
+        &self,
+        scope: &TenantScope,
+        conference_id: &GroupId,
+        expected_revision: u64,
+        event: Option<&EventEnvelope>,
+    ) -> Result<UniversalConferenceProfile, DurableStoreError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let ended = transition_universal_conference_with_event_in_transaction(
+            &transaction,
+            &ConferenceLifecycleTransition::EndAfterCallsClosed {
+                scope,
+                conference_id,
+                expected_revision,
+                event,
+            },
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(ended)
+    }
+
+    fn persist_first_party_room_attendee(
+        &self,
+        attendee: &UniversalConferenceParticipantProfile,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_participant(attendee)?;
+        if attendee.participant.kind != PrincipalKind::Person
+            || attendee.role != ConferenceParticipantRole::Attendee
+            || !attendee.active
+            || attendee.revision != 1
+            || !attendee.audio_muted
+            || attendee.camera_allowed
+            || attendee.publish_audio_allowed
+            || attendee.publish_video_allowed
+            || attendee.screen_share_allowed
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let profile = load_profile(&tx, &attendee.scope, &attendee.conference_id)?
+            .ok_or(DurableStoreError::Conflict)?;
+        if profile.integration_id != attendee.integration_id
+            || profile.mode != UniversalConferenceMode::Webinar
+            || !profile.entry_open
+            || !matches!(
+                profile.lifecycle,
+                UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+            )
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        let namespace = namespace_storage_key(&attendee.scope);
+        let active_owner_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM universal_conference_participants
+                 WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+                   AND conference_id = ?4 AND role = 'owner' AND active = 1
+                   AND principal_kind = 'person'",
+                params![
+                    attendee.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    attendee.conference_id.as_opaque().as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if active_owner_count != 1 {
+            return Err(DurableStoreError::Conflict);
+        }
+        if let Some(current) = load_participant(
+            &tx,
+            &attendee.scope,
+            &attendee.conference_id,
+            &attendee.participant,
+        )? {
+            return if current == *attendee {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if load_participant_for_external(
+            &tx,
+            &attendee.scope,
+            &attendee.conference_id,
+            &attendee.integration_id,
+            &attendee.external_user_id,
+        )?
+        .is_some()
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        ensure_participant_capacity(&tx, &attendee.scope, &attendee.conference_id)?;
+        ensure_integration_participant_quota(&tx, &attendee.scope, &attendee.integration_id)?;
+        insert_participant(&tx, attendee)?;
+        tx.commit().map_err(|error| map_sqlite_error(&error))?;
+        Ok(DurableRecordStatus::Persisted)
     }
 
     fn persist_universal_conference_participant(
@@ -1611,10 +1950,12 @@ const fn valid_lifecycle_transition(
         (current, next),
         (
             UniversalConferenceLifecycle::Scheduled,
-            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+            UniversalConferenceLifecycle::Waiting
+                | UniversalConferenceLifecycle::Live
+                | UniversalConferenceLifecycle::Ended
         ) | (
             UniversalConferenceLifecycle::Waiting,
-            UniversalConferenceLifecycle::Live
+            UniversalConferenceLifecycle::Live | UniversalConferenceLifecycle::Ended
         ) | (
             UniversalConferenceLifecycle::Live,
             UniversalConferenceLifecycle::Ending
