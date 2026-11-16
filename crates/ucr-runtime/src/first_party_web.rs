@@ -2460,11 +2460,13 @@ async fn dispatch_post_with_provider_cleanup(
         if current.signalling_state == CallSignallingState::Terminated
             && current.conversation.kind == ConversationKind::Direct
         {
+            let media = first_party_media::media_runtime_ids(&current.scope, &current.call_id)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
             state
                 .realtime_service
                 .as_ref()
                 .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
-                .cleanup_closed_conferences_once()
+                .close_terminated_call_sessions(&current.scope, &media.call_id)
                 .await
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         }
