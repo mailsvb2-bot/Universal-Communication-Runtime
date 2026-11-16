@@ -735,4 +735,59 @@ hint="fp-v-12345678-1234-1234-1234-1234567890ab";
 handoffContext.signedGrantRetired=true;
 await assert.rejects(handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",grant),/binding mismatch/);
 assert.match(mediaPage,/verifyFirstPartyAutoJoinHandoff\(directCall,handoffClaims\)\.then\(\(\)=>\{/);
-console.log("PASS: canonical Call resume, ambiguous acceptance and exact pre-auto-Join media binding");
+// Only an explicitly missing/expired cookie (401) may trigger the existing
+// trusted-Device possession proof. Network/5xx, rate limits and revocation
+// must fail closed without issuing a replacement session.
+const authorityBegin=mediaPage.indexOf("async function installFirstPartyDeviceAuthority(){");
+const authorityFinish=mediaPage.indexOf("function requireCanonicalMediaHostReady(){",authorityBegin);
+assert.ok(authorityBegin>=0&&authorityFinish>authorityBegin);
+const authorityImpl=mediaPage.slice(authorityBegin,authorityFinish)
+  .replace('await import("./endpoint-media/reference_browser_media_installer.js")',
+    "await installerStub");
+async function authorityCase(error){
+  let retries=0,inspections=0;
+  const signer={keyId:"own-key",publicKey:new Uint8Array(32)};
+  const host={
+    resumeAuthenticatedDevice:async()=>{throw error;},
+    inspect:async()=>{inspections++;return {
+      deviceActive:true,deviceRevoked:false,activeKey:signer
+    };},
+  };
+  const context={
+    claims:{call_id:"fp-m-target",tenant_id:user.tenantId,namespace_id:null,
+      participant_id:user.participantId,device_id:user.deviceId},
+    sessionStorage:{getItem:()=>null},
+    location:{origin:"https://app.petrellink.ru"},
+    window:{},Uint8Array,
+    installerStub:{
+      createUcrBrowserProtectedDeviceVault:()=>({load:async()=>signer}),
+      createUcrFirstPartyHttpHost:()=>host,
+      authenticateUcrFirstPartyDevice:async()=>{
+        retries++;return user;
+      },
+    },
+    createEndpointAdmissionResolver:()=>()=>{},
+  };
+  runInNewContext("let firstPartyDeviceAuthorityPromise=null,firstPartyCanonicalHttpHost=null;\n"+
+    authorityImpl+"\nthis.install=installFirstPartyDeviceAuthority;",context);
+  let thrown=null;
+  try{await context.install();}catch(e){thrown=e;}
+  return {retries,inspections,thrown,context};
+}
+for(const failure of [
+  new Error("first-party canonical authority rejected request: HTTP 503"),
+  new Error("first-party canonical authority rejected request: HTTP 403"),
+  new Error("first-party canonical authority rejected request: HTTP 429"),
+  new TypeError("network offline"),
+]){
+  const result=await authorityCase(failure);
+  assert.equal(result.thrown,failure);
+  assert.equal(result.retries,0,"non-401 cannot silently reauthenticate media Device");
+  assert.equal(result.inspections,0);
+}
+const expiredAuthority=await authorityCase(
+  new Error("first-party canonical authority rejected request: HTTP 401"));
+assert.equal(expiredAuthority.thrown,null);
+assert.equal(expiredAuthority.retries,1);
+assert.equal(expiredAuthority.inspections,1);
+console.log("PASS: canonical Call resume, pre-auto-Join binding and 401-only media reauthentication");

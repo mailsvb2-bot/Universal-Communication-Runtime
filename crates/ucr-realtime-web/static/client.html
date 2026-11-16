@@ -1439,7 +1439,11 @@ async function installFirstPartyDeviceAuthority(){
     // possession of the already-enrolled, protected Device signing key.
     let user;
     try{user=await host.resumeAuthenticatedDevice();}
-    catch(_){
+    catch(error){
+      // Only an explicitly expired/missing session (401) may trigger fresh
+      // possession proof. A 403/revocation, 429, 5xx or network failure must
+      // never silently mint another cookie or mask unavailable authority.
+      if(!/\bHTTP 401\b/.test(String(error?.message||"")))throw error;
       user=await module.authenticateUcrFirstPartyDevice(
         vault,{origin:location.origin},claimedBinding);
     }
