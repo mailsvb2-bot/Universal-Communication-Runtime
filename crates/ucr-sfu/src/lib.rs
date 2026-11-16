@@ -571,7 +571,9 @@ pub enum SfuForwardSinkError {
 ///
 /// Implementations receive no plaintext media or key material. Returning success means only that
 /// the SFU routing sink accepted this ciphertext for that recipient; it is not Delivery/Read
-/// evidence and does not create durable Conference/subscription state.
+/// evidence and does not create durable Conference/subscription state. The call runs while the
+/// canonical authorization revision fence is held, so implementations MUST be bounded and MUST
+/// NOT re-enter the canonical authorization store.
 pub trait SfuForwardSink: fmt::Debug + Send + Sync {
     /// Forwards one canonical encrypted envelope without mutating authenticated frame fields.
     ///
@@ -662,6 +664,8 @@ pub enum SfuError {
     Authorization(CanonicalError),
     Store(DurableStoreError),
     CapabilityUnavailable,
+    AuthorizationFenceUnavailable,
+    AuthorizationFenceStale,
     SourceMismatch,
     RecipientMembershipUnavailable,
     NoRecipients,
@@ -1081,6 +1085,9 @@ where
     };
     let device_id = &batch.envelope.frame.header.source_device_id;
     for (accepted, target) in batch.targets.iter().enumerate() {
+        // Capture BEFORE revalidation. Any authorization mutation between this
+        // read and the sink fence must make the fence reject the handoff.
+        let expected_revision = runtime.authorization.authorization_revision();
         let current = runtime.prepare_forward_selected(
             &source,
             device_id,
@@ -1092,11 +1099,29 @@ where
         {
             return Err(SfuError::SourceMismatch);
         }
-        if let Err(error) = sink.forward_encrypted(target, &batch.envelope) {
-            return Err(SfuError::Sink {
-                accepted_before_failure: accepted,
-                error,
-            });
+        let expected_revision =
+            expected_revision.ok_or(SfuError::AuthorizationFenceUnavailable)?;
+        let mut sink_result = None;
+        runtime
+            .authorization
+            .with_authorization_revision_fence(expected_revision, &mut || {
+                sink_result = Some(sink.forward_encrypted(target, &batch.envelope));
+                Ok(())
+            })
+            .map_err(|error| match error {
+                DurableStoreError::Conflict => SfuError::AuthorizationFenceStale,
+                DurableStoreError::PermissionDenied => SfuError::AuthorizationFenceUnavailable,
+                other => SfuError::Store(other),
+            })?;
+        match sink_result {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                return Err(SfuError::Sink {
+                    accepted_before_failure: accepted,
+                    error,
+                });
+            }
+            None => return Err(SfuError::AuthorizationFenceUnavailable),
         }
     }
     Ok(SfuForwardOutcome {
