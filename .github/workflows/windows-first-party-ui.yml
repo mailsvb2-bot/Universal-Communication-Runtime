@@ -20,6 +20,7 @@ on:
       - 'tests/consumer_phonebook.test.mjs'
       - 'tests/consumer_phonebook_lock.test.mjs'
       - 'tests/consumer_user_journey.test.mjs'
+      - 'tests/consumer_session_lifecycle.test.mjs'
       - 'tests/consumer_simple_ui.test.mjs'
       - 'crates/ucr-realtime-web/static/phonebook.js'
       - 'crates/ucr-realtime-web/static/consumer-actions.js'
@@ -82,7 +83,7 @@ jobs:
         run: python tools/check_first_party_media_admission_contract.py
       - name: Lock native phonebook, vCard, invite and first-party contact journey
         shell: pwsh
-        run: node --test tests/consumer_phonebook.test.mjs tests/consumer_phonebook_lock.test.mjs tests/consumer_user_journey.test.mjs tests/consumer_simple_ui.test.mjs
+        run: node --test tests/consumer_phonebook.test.mjs tests/consumer_phonebook_lock.test.mjs tests/consumer_user_journey.test.mjs tests/consumer_session_lifecycle.test.mjs tests/consumer_simple_ui.test.mjs
       - name: Verify room readiness and canonical backend gating
         shell: pwsh
         run: node --test tests/consumer_room_availability.test.mjs
