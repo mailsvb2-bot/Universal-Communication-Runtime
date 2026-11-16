@@ -664,3 +664,12 @@ played or discarded, that the SFU's cross-process sink has an atomic revoke
 fence, or that the remote camera/microphone capture tracks have physically
 stopped. Those remain explicit #336/#274 release gates. No production-ready
 or physical two-device A/V claim follows from this code or its CI.
+
+
+## First-party direct-call Hangup waits for the existing Realtime provider owner
+
+The first-party BFF receives a clone of the exact node-local `GrpcRealtimeService` already serving the gRPC Realtime API. This is shared ownership of the existing provider, registry, per-Call transition locks and pending-close retry queue; it is not a second session or provider registry.
+
+After a successful terminal signal for a canonical `ConversationKind::Direct` Call, the BFF awaits `cleanup_closed_conferences_once` before returning success. The existing Realtime owner retires the derived media-Call sessions, attempts each node-local WebRTC provider Close, acknowledges only confirmed closes, and awaits any configured SFU placement release. If any required cleanup step fails or times out, the BFF returns HTTP 503; the Call remains canonically terminated and the existing pending-close coordinates remain available to the background retry worker. The BFF therefore does not report successful direct-call termination while its local provider close is still pending.
+
+This is a node-local provider-close acknowledgement, not proof that every remote browser has stopped camera/microphone capture or that bytes accepted before Close were absent from a remote network buffer. Physical remote capture-stop, remote-node/TURN traversal, measured stop latency and two-device A/V remain release evidence gates. The webinar `PrivateGroup` Room signal path is not covered by this synchronous Direct-Call gate and continues to rely on the existing Realtime cleanup path.
