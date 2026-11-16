@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use ucr_core::{AuthorizationEvaluator, DurableStoreError, PermissionGrantStore};
 use ucr_model::{
     AuthorizationRequest, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalKind,
@@ -172,6 +172,32 @@ impl AuthorizationEvaluator for SqliteLocalStore {
     fn authorization_revision(&self) -> Option<u64> {
         // A read failure must never be cached as "unchanged".
         self.authorization_revision_value().ok()
+    }
+
+    fn with_authorization_revision_fence(
+        &self,
+        expected_revision: u64,
+        action: &mut dyn FnMut() -> Result<(), DurableStoreError>,
+    ) -> Result<(), DurableStoreError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let value: i64 = transaction
+            .query_row(
+                "SELECT revision FROM authorization_revision WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let current = u64::try_from(value).map_err(|_| DurableStoreError::Corrupt)?;
+        if current != expected_revision {
+            return Err(DurableStoreError::Conflict);
+        }
+        action()?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))
     }
 }
 
