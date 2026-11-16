@@ -2,9 +2,10 @@
 //!
 //! One singleton counter is bumped by triggers, inside the SAME transaction,
 //! on every INSERT/UPDATE/DELETE of a table that any authorization decision
-//! (tenant grants, Call-scoped grants, Call participation, Group/MLS
-//! membership, Device and trusted-key lifecycle, identity bindings,
-//! organization management, service credentials) reads. A cache keyed by this
+//! (tenant and Call-scoped grants, signed Join grants, Call participation,
+//! Group/MLS membership, Universal Conference lifecycle and participant policy,
+//! Device and trusted-key lifecycle, identity bindings, organization management,
+//! service credentials) reads. A cache keyed by this
 //! revision therefore can never outlive a revoke, Leave, Hangup, membership
 //! rekey or Device revocation, including one committed by another process
 //! sharing the same file.
