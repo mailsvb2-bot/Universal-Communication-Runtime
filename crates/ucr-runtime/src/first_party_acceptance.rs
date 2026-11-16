@@ -734,7 +734,7 @@ impl ucr_sfu::SfuForwardSink for FirstPartyWebRtcForwardSink {
     }
 }
 
-async fn first_party_browser_webrtc_peer(
+async fn first_party_webrtc_offer(
     realtime: &ucr_api_grpc::GrpcRealtimeService<
         ucr_core::SystemServiceQuotaClock,
         ucr_storage_sqlite::SqliteLocalStore,
@@ -743,27 +743,13 @@ async fn first_party_browser_webrtc_peer(
     claims: &ucr_realtime::RealtimeSessionClaims,
     token: &str,
 ) -> (
-    Arc<webrtc::peer_connection::RTCPeerConnection>,
-    Arc<webrtc::data_channel::RTCDataChannel>,
+    ucr_api_grpc::pb::RealtimeJoinRequest,
     String,
+    ucr_api_grpc::pb::WebRtcDescription,
 ) {
     use ucr_api_grpc::{
         REALTIME_AUTHORIZATION_METADATA_KEY, pb, pb::realtime_service_server::RealtimeService as _,
     };
-    use ucr_webrtc::WEBRTC_E2EE_DATA_CHANNEL_LABEL;
-    use webrtc::{
-        api::{
-            APIBuilder, interceptor_registry::register_default_interceptors,
-            media_engine::MediaEngine,
-        },
-        data_channel::data_channel_state::RTCDataChannelState,
-        interceptor::registry::Registry,
-        peer_connection::{
-            RTCPeerConnection, configuration::RTCConfiguration,
-            sdp::session_description::RTCSessionDescription,
-        },
-    };
-
     let lookup = realtime_join_request(claims, token).into_inner();
     let mut start = tonic::Request::new(pb::RealtimeStartWebRtcRequest {
         scope: lookup.scope.clone(),
@@ -789,6 +775,40 @@ async fn first_party_browser_webrtc_peer(
     );
     let offer_id = offer.offer_id.expect("offer identity");
     let description = offer.description.expect("offer SDP");
+
+    (lookup, offer_id, description)
+}
+
+async fn first_party_browser_webrtc_peer(
+    realtime: &ucr_api_grpc::GrpcRealtimeService<
+        ucr_core::SystemServiceQuotaClock,
+        ucr_storage_sqlite::SqliteLocalStore,
+        ucr_storage_sqlite::SqliteLocalStore,
+    >,
+    claims: &ucr_realtime::RealtimeSessionClaims,
+    token: &str,
+) -> (
+    Arc<webrtc::peer_connection::RTCPeerConnection>,
+    Arc<webrtc::data_channel::RTCDataChannel>,
+    String,
+) {
+    use ucr_api_grpc::{
+        REALTIME_AUTHORIZATION_METADATA_KEY, pb, pb::realtime_service_server::RealtimeService as _,
+    };
+    use ucr_webrtc::WEBRTC_E2EE_DATA_CHANNEL_LABEL;
+    use webrtc::{
+        api::{
+            APIBuilder, interceptor_registry::register_default_interceptors,
+            media_engine::MediaEngine,
+        },
+        data_channel::data_channel_state::RTCDataChannelState,
+        interceptor::registry::Registry,
+        peer_connection::{
+            configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription,
+        },
+    };
+
+    let (lookup, offer_id, description) = first_party_webrtc_offer(realtime, claims, token).await;
 
     let mut media_engine = MediaEngine::default();
     media_engine
