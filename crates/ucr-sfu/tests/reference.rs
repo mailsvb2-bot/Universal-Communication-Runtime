@@ -794,14 +794,19 @@ async fn rt0_real_webrtc_alice_to_authorized_sfu_to_bob_endpoint_decrypt() {
         ),
         Err(SfuError::InvalidRecipientSet),
     );
-    assert_eq!(
+    // The SFU sink/provider API is synchronous and waits for the peer worker.
+    // Yield this Tokio core while the opposite WebRTC peer processes SCTP delivery.
+    let forward_outcome = tokio::task::block_in_place(|| {
         runtime.forward_selected(
             &fixture.alice,
             &fixture.alice_device,
             &ingress.envelope,
             std::slice::from_ref(&fixture.bob.principal),
             &sink,
-        ),
+        )
+    });
+    assert_eq!(
+        forward_outcome,
         Ok(SfuForwardOutcome {
             accepted_recipients: 1,
         }),
