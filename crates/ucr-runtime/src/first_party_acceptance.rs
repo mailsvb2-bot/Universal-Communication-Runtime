@@ -1782,6 +1782,17 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         .unwrap()
         .unwrap();
     assert_eq!(media.signalling_state, CallSignallingState::Terminated);
+    // The actual server SQLite OpenMLS provider must remain empty after the
+    // cross-process Join revoke and terminal Call transaction. Check through
+    // both independent BFF handles, not only the writer's in-memory view.
+    assert!(
+        !server.store.server_possesses_mls_group(&claims[0].scope, &group_id).unwrap(),
+        "server OpenMLS provider must not gain endpoint Group state after Hangup"
+    );
+    assert!(
+        !other_store.server_possesses_mls_group(&claims[0].scope, &group_id).unwrap(),
+        "an independent SQLite/BFF connection must observe the same server-blind custody result"
+    );
     // Hangup must atomically revoke BOTH already-issued durable bearers,
     // not merely depend on a later Realtime read of the terminal media Call.
     // A separate SQLite connection must see the tombstones immediately.
