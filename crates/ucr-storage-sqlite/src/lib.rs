@@ -1192,7 +1192,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     authorization_revision_store::create_v58_objects(&transaction)?;
     authorization_revision_store::create_v59_objects(&transaction)?;
     transaction
-        .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID
+        .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
@@ -4676,7 +4676,11 @@ mod tests {
             params![
                 scope.tenant_id.as_opaque().as_str(),
                 if scope.namespace_id.is_some() { 1_i64 } else { 0_i64 },
-                scope.namespace_id.as_ref().map(|id| id.as_opaque().as_str()).unwrap_or(""),
+                scope
+                    .namespace_id
+                    .as_ref()
+                    .map(|id| id.as_opaque().as_str())
+                    .unwrap_or(""),
                 session_id.as_opaque().as_str(),
             ],
         )
