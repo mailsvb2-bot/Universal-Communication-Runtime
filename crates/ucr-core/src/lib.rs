@@ -234,8 +234,9 @@ pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
     }
 
     /// Monotonic revision of every durable fact this evaluator AND its backing
-    /// store consult for authorization (grants, Call participation, Group/MLS
-    /// membership, Devices, trusted keys, identity bindings).
+    /// store consult for authorization (permission and signed Join grants, Call
+    /// participation, Group/MLS membership, Universal Conference lifecycle and
+    /// participant policy, Devices, trusted keys, identity bindings).
     ///
     /// Contract: any change that could turn an `Ok` into an error MUST make a
     /// later call return a different value, and the change must be visible to
