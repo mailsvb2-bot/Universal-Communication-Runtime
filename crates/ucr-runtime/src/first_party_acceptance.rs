@@ -29,6 +29,7 @@ use ucr_model::{
     VideoSourceKind,
 };
 use ucr_realtime::JoinTokenKey;
+use ucr_webrtc::WebRtcProvider;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(600_000);
 
@@ -889,7 +890,7 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
     use ucr_core::{CallStore, GroupStore, PermissionGrantStore};
     use ucr_model::{GroupMemberState, PermissionGrant, PermissionScope, PrincipalRef};
     use ucr_webrtc::{
-        LiveWebRtcProvider, WebRtcE2eeReassembler, WebRtcProvider, WebRtcSessionConfigFactory,
+        LiveWebRtcProvider, WebRtcE2eeReassembler, WebRtcSessionConfigFactory,
         encode_webrtc_e2ee_chunks,
     };
     use ucr_protocol::decode_sfu_forward_envelope;
@@ -1774,9 +1775,7 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
     // LiveWebRtcProvider peers. This is real loopback WebRTC/DataChannel transport,
     // not a browser mock, but it intentionally does not claim physical devices,
     // camera/microphone capture, public TURN or production NAT traversal.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("install WebRTC TLS crypto provider");
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let (alice_peer, alice_channel, alice_offer_id) =
         first_party_browser_webrtc_peer(&realtime, &claims[0], &tokens[0]).await;
     let (bob_peer, bob_channel, bob_offer_id) =
