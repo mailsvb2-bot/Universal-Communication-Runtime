@@ -746,8 +746,7 @@ async fn rt0_real_webrtc_alice_to_authorized_sfu_to_bob_endpoint_decrypt() {
     let bob_id = SessionId::from_opaque(oid("rt0-auth-bob"));
     let (alice, alice_channel, _alice_offer_id) =
         rt0_independent_webrtc_peer(&provider, &alice_id).await;
-    let (bob, bob_channel, bob_offer_id) =
-        rt0_independent_webrtc_peer(&provider, &bob_id).await;
+    let (bob, bob_channel, bob_offer_id) = rt0_independent_webrtc_peer(&provider, &bob_id).await;
     let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::channel(2);
     let reassembler = Arc::new(tokio::sync::Mutex::new(WebRtcE2eeReassembler::new()));
     bob_channel.on_message(Box::new(move |message| {
