@@ -2914,6 +2914,46 @@ async function endUnverifiedMedia(generation,message){
   if(signedGrantRetired)return;
   ui.status.textContent=status;
 }
+async function hangupFirstPartyDirectCall(callId){
+  const host=firstPartyCanonicalHttpHost||window.ucrCanonicalDeviceAuthority;
+  if(!host||!/^fp-[av]-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(callId||"")){
+    throw new Error("Authenticated first-party Call authority unavailable");
+  }
+  let user;
+  try{
+    user=await host.resumeAuthenticatedDevice();
+  }catch(error){
+    if(!/HTTP 401\\b/.test(String(error?.message||error)))throw error;
+    const reauthenticate=window.ucrRefreshFirstPartyDeviceSession;
+    if(typeof reauthenticate!=="function")throw error;
+    await reauthenticate();
+    user=await host.resumeAuthenticatedDevice();
+  }
+  if(!claims||user.tenantId!==claims.tenant_id||
+     user.namespaceId!==(claims.namespace_id??null)||
+     user.participantId!==claims.participant_id||
+     user.deviceId!==claims.device_id){
+    throw new Error("Authenticated Device changed before Call Hangup");
+  }
+  const before=await host.getDirectCall(user,callId);
+  if(!before||before.callId!==callId||!Number.isSafeInteger(before.revision)||before.revision<0){
+    throw new Error("Canonical Direct Call revision unavailable");
+  }
+  if(before.state!=="terminated"&&!["active","reconnecting"].includes(before.state)){
+    throw new Error("Canonical Direct Call is not active or terminal");
+  }
+  // The BFF Hangup is idempotent for a terminal Call and awaits the exact
+  // derived media Call's provider-close/placement acknowledgement.
+  const result=await host.signalDirectCall(user,{
+    callId,expectedRevision:before.revision,action:"hangup"
+  });
+  if(!result||result.callId!==callId||result.state!=="terminated"||
+     (before.state==="terminated"
+       ?result.revision!==before.revision
+       :result.revision<=before.revision)){
+    throw new Error("Canonical Direct Call stop was not confirmed");
+  }
+}
 async function leave(){
   if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Leave requested","lifecycle");
   cancelSoftNetworkGrace();
@@ -2925,6 +2965,8 @@ async function leave(){
   const leavingClaims=wasActive?body():null;
   const leavingSequence=activeSessionSequence;
   const leavingOfferId=startWebRtc.offerId;
+  const directCallId=retireGrant&&claims?.call_id?.startsWith("fp-m-")
+    ?sessionStorage.getItem("ucrFirstPartyDirectCall"):null;
   cancelMediaStartupWatchdog();
   // A late Leave from this grant must never compete with another Join using
   // the same session identity. Explicit Leave retires; retryable local failures do not.
@@ -2947,24 +2989,49 @@ async function leave(){
   if(leavingOfferId&&leavingClaims){
     try{await closeServerPeer(false,leavingOfferId,leavingClaims);}catch(_){}
   }
-  // Remote Leave is independent of cosmetic/UI cleanup. Submit it as soon as
-  // physical capture has stopped, even if later controls fail to reset.
-  // Close the WebRTC offer while this grant is valid; only then submit Leave.
+  let remoteStopConfirmed=!wasActive||!leavingClaims||leavingSequence<=0;
   if(wasActive&&leavingClaims&&leavingSequence>0){
-    const leaving=api("/v1/realtime/leave",{...leavingClaims,expected_session_sequence:leavingSequence}).catch(()=>{});
-    if(!retireGrant)await leaving;
-    else void leaving;
+    if(directCallId){
+      ui.status.textContent="Завершаем защищённый вызов и подтверждаем закрытие медиасессии…";
+      try{
+        await hangupFirstPartyDirectCall(directCallId);
+        remoteStopConfirmed=true;
+        sessionStorage.removeItem("ucrFirstPartyDirectCall");
+      }catch(_){
+        // The local capture is already stopped. Best-effort exact-session Leave
+        // is still useful if BFF Hangup failed before revocation; it does not
+        // count as confirmation that the whole Direct Call has stopped.
+        try{
+          await api("/v1/realtime/leave",{
+            ...leavingClaims,expected_session_sequence:leavingSequence
+          });
+        }catch(__){}
+      }
+    }else{
+      ui.status.textContent="Закрываем медиасессию на сервере…";
+      try{
+        await api("/v1/realtime/leave",{
+          ...leavingClaims,expected_session_sequence:leavingSequence
+        });
+        remoteStopConfirmed=true;
+      }catch(_){}
+    }
+  }
+  if(!remoteStopConfirmed&&typeof ucrRecordDiagnostic==="function"){
+    ucrRecordDiagnostic("Local capture stopped; server provider-close confirmation unavailable","lifecycle");
   }
   ui.privacyMode.disabled=false;
   sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
-  // Local capture is already retired. Never silently reuse the same signed
-  // session grant while its asynchronous remote Leave may still be pending.
+  // Local capture is retired synchronously. A "Left" confirmation is shown
+  // only after the canonical BFF/Realtime owner confirms provider cleanup.
   if(leaveGeneration===sessionLifecycleGeneration){
-    ui.state.textContent="Left";
-    ui.status.textContent=signedGrantRetired?
-      "Conference session closed. Open a fresh authorized call link to reconnect.":
-      "Conference session closed.";
+    ui.state.textContent=remoteStopConfirmed?"Left":"Local media stopped";
+    ui.status.textContent=remoteStopConfirmed
+      ?(directCallId
+        ?"Вызов завершён. Сервер подтвердил закрытие медиасессии."
+        :"Сеанс конференции закрыт. Сервер подтвердил закрытие медиасессии.")
+      :"Локальные камера и микрофон выключены. Сервер пока не подтвердил закрытие медиасессии; повторная очистка продолжается. Этот сеанс нельзя использовать повторно.";
     ui.join.disabled=signedGrantRetired;
   }
 }
