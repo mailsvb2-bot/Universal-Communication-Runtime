@@ -391,6 +391,7 @@ fn turn_rest_secret_from_material(material: &[u8]) -> Result<TurnRestSecret, Tur
 pub const LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY: usize = 256;
 pub const LIVE_WEBRTC_MAX_SESSIONS: usize = 1_024;
 pub const LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS: u64 = 20;
+pub const LIVE_WEBRTC_MEDIA_REQUEST_TIMEOUT_MILLIS: u64 = 2_000;
 pub const LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS: u64 = 12;
 
 pub(crate) type LiveWebRtcCloseSignal = (String, Option<String>);
@@ -593,8 +594,15 @@ impl LiveWebRtcProvider {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(WebRtcProviderError::TemporarilyUnavailable);
         }
+        // The SFU may hold a canonical authorization transaction across this
+        // handoff. Keep media acceptance bounded independently from signaling.
+        let timeout = if media {
+            Duration::from_millis(LIVE_WEBRTC_MEDIA_REQUEST_TIMEOUT_MILLIS)
+        } else {
+            self.request_timeout
+        };
         let deadline = Instant::now()
-            .checked_add(self.request_timeout)
+            .checked_add(timeout)
             .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
         let (reply_tx, reply_rx) = std_mpsc::channel();
         sender
@@ -608,7 +616,7 @@ impl LiveWebRtcProvider {
                 }
             })?;
         reply_rx
-            .recv_timeout(self.request_timeout)
+            .recv_timeout(timeout)
             .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?
     }
 
