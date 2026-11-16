@@ -4617,16 +4617,10 @@ mod tests {
                 entered_tx
                     .send(())
                     .map_err(|_| DurableStoreError::Internal)?;
-                release_rx
-                    .recv()
-                    .map_err(|_| DurableStoreError::Internal)?;
+                release_rx.recv().map_err(|_| DurableStoreError::Internal)?;
                 Ok(())
             };
-            AuthorizationEvaluator::with_authorization_revision_fence(
-                &first,
-                expected,
-                &mut action,
-            )
+            AuthorizationEvaluator::with_authorization_revision_fence(&first, expected, &mut action)
         });
         entered_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -4636,7 +4630,9 @@ mod tests {
         let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel();
         let writer = std::thread::spawn(move || {
             writer_started_tx.send(()).expect("writer started");
-            second.revoke_permission(&grant).expect("cross-connection revoke");
+            second
+                .revoke_permission(&grant)
+                .expect("cross-connection revoke");
             writer_done_tx.send(()).expect("writer committed");
         });
         writer_started_rx
