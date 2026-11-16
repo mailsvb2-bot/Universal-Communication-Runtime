@@ -2001,15 +2001,12 @@ struct SfuAuthorityKey {
     crypto_state_ref: ucr_model::OpaqueId,
 }
 
-/// Opt-in per-target authorization cache for SFU fan-out (flag
-/// `UCR_SFU_AUTH_CACHE`, default off).
+/// Optional bounded SFU authority-key observation cache for embedders.
 ///
-/// An entry is reused only while BOTH the evaluator and the store report the
-/// exact same monotonic `authorization_revision()` they reported when the
-/// entry was proved. Any revoke, Leave, Hangup/Call end, Group membership or
-/// MLS transition, Device revocation or trusted-key change bumps a revision,
-/// so the very next frame takes the full re-check path again. If either side
-/// returns `None` the cache is bypassed entirely.
+/// Entries are diagnostic only: no cached key can authorize a media sink.
+/// Every forwarding attempt still passes the canonical revision-fenced
+/// dispatcher, including when both authority revisions remain unchanged.
+/// The production gRPC runtime does not enable this observation cache.
 #[derive(Debug, Default)]
 pub struct SfuAuthorizationCache {
     entries: std::sync::Mutex<SfuAuthorizationCacheState>,
@@ -2031,7 +2028,8 @@ impl SfuAuthorizationCache {
         Self::default()
     }
 
-    /// Reads `UCR_SFU_AUTH_CACHE` (`1`/`true`/`on` enables). Default: off.
+    /// Legacy embedder setting for optional cache observations. The production
+    /// media path never enables this cache or skips live authorization.
     #[must_use]
     pub fn enabled_from_env() -> bool {
         std::env::var("UCR_SFU_AUTH_CACHE").is_ok_and(|value| {
@@ -2042,7 +2040,7 @@ impl SfuAuthorizationCache {
         })
     }
 
-    /// Number of re-checks skipped so far (diagnostics/tests).
+    /// Number of stable authority-key observations (not authorization skips).
     #[must_use]
     pub fn hits(&self) -> u64 {
         self.entries.lock().map_or(0, |state| state.hits)
