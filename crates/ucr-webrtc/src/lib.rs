@@ -680,14 +680,31 @@ impl LiveWebRtcProvider {
         session_id: &SessionId,
         envelope: &SfuForwardEnvelope,
     ) -> Result<(), WebRtcProviderError> {
-        // Bind the queued media command to the exact peer attempt before it
-        // enters the lower-priority media queue. A delayed old send must never
-        // attach itself to a replacement peer that reuses the SessionId.
         let offer_id = self.session_offer_id(session_id)?;
+        self.send_e2ee_envelope_if_offer_matches(session_id, &offer_id, envelope)
+    }
+
+    /// Sends ciphertext only when it still belongs to the caller's captured peer offer.
+    ///
+    /// Callers that already own the immutable offer ID should use this method rather than
+    /// synchronously querying the worker for every frame. The worker remains the sole owner of
+    /// peer state and rejects stale offer IDs before touching the DataChannel.
+    ///
+    /// # Errors
+    /// Returns a bounded session, backpressure or transport failure.
+    pub fn send_e2ee_envelope_if_offer_matches(
+        &self,
+        session_id: &SessionId,
+        offer_id: &str,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<(), WebRtcProviderError> {
+        if offer_id.is_empty() || offer_id.len() > 64 {
+            return Err(WebRtcProviderError::SessionUnavailable);
+        }
         let close_rx = self.close_tx.subscribe();
         self.request_media(|reply, deadline| LiveWebRtcCommand::SendE2ee {
             session_id: session_id.clone(),
-            offer_id,
+            offer_id: offer_id.to_owned(),
             envelope: Box::new(envelope.clone()),
             close_rx,
             deadline,
