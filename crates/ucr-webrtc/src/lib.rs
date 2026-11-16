@@ -688,7 +688,7 @@ impl LiveWebRtcProvider {
     ///
     /// Callers that already own the immutable offer ID should use this method rather than
     /// synchronously querying the worker for every frame. The worker remains the sole owner of
-    /// peer state and rejects stale offer IDs before touching the DataChannel.
+    /// peer state and rejects stale offer IDs before touching the `DataChannel`.
     ///
     /// # Errors
     /// Returns a bounded session, backpressure or transport failure.
