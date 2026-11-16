@@ -52,6 +52,19 @@ impl AuthorizationEvaluator for AllowAll {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct RevisionedButUnfenced;
+
+impl AuthorizationEvaluator for RevisionedButUnfenced {
+    fn authorize(&self, _request: &AuthorizationRequest) -> Result<(), CanonicalError> {
+        Ok(())
+    }
+
+    fn authorization_revision(&self) -> Option<u64> {
+        Some(0)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct DenyReceive;
 impl AuthorizationEvaluator for DenyReceive {
     fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError> {
@@ -1663,6 +1676,22 @@ fn auth_cache_skips_recheck_until_revoke_then_frames_do_not_pass() {
             if error.code == CanonicalErrorCode::PermissionDenied
     ));
     assert_eq!(sink.forwarded().len(), 2, "no frame passes after revoke");
+}
+
+#[test]
+fn revisioned_but_unfenced_evaluator_fails_closed_at_sink_acceptance() {
+    let fixture = build_fixture();
+    let authorization = RevisionedButUnfenced;
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&authorization, &fixture.store, &e2ee, &sfu);
+    let batch = bob_batch(&runtime, &fixture);
+    let sink = CaptureSink::default();
+    assert_eq!(
+        dispatch_validated_forward_batch(&runtime, &batch, &sink),
+        Err(SfuError::AuthorizationFenceUnavailable)
+    );
+    assert!(sink.forwarded().is_empty());
 }
 
 #[test]
