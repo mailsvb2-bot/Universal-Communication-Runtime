@@ -5,14 +5,18 @@ use ed25519_dalek::{Signer, SigningKey};
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
 };
 use ucr_core::{
     AuthorizationEvaluator, ConferenceJoinGrantStore, IdentityDeviceLookupStore,
     TrustedSigningKeyStore,
 };
 use ucr_crypto::{
-    SigningKeyMaterial, open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+    SigningKeyMaterial, open_endpoint_group_media_payload, open_endpoint_group_media_wire,
+    seal_endpoint_group_media_wire,
 };
 use ucr_group_mls::{
     GroupMlsServerCustodyProbe, MlsDeviceAdmission, MlsTransitionInput, browser_memory_provider,
@@ -680,19 +684,215 @@ fn realtime_join_request(
     request
 }
 
+#[derive(Debug)]
+struct FirstPartyWebRtcForwardSink {
+    registry: Arc<ucr_realtime::RealtimeSessionRegistry>,
+    provider: Arc<ucr_webrtc::LiveWebRtcProvider>,
+    accepted: Arc<AtomicUsize>,
+}
+
+impl ucr_sfu::SfuForwardSink for FirstPartyWebRtcForwardSink {
+    fn forward_encrypted(
+        &self,
+        target: &ucr_model::SfuForwardTarget,
+        envelope: &ucr_model::SfuForwardEnvelope,
+    ) -> Result<(), ucr_sfu::SfuForwardSinkError> {
+        let now = now_unix_ms().map_err(|_| ucr_sfu::SfuForwardSinkError::Unavailable)?;
+        let sessions = self
+            .registry
+            .active_session_ids_for_recipient(
+                &envelope.frame.header.scope,
+                &envelope.frame.header.call_id,
+                &target.recipient,
+                now,
+            )
+            .map_err(|_| ucr_sfu::SfuForwardSinkError::Unavailable)?;
+        if sessions.is_empty() {
+            return Err(ucr_sfu::SfuForwardSinkError::Unavailable);
+        }
+        let mut accepted = false;
+        let mut backpressure = false;
+        for session_id in sessions {
+            match self.provider.send_e2ee_envelope(&session_id, envelope) {
+                Ok(()) => {
+                    accepted = true;
+                    self.accepted.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(ucr_webrtc::WebRtcProviderError::SessionUnavailable) => {}
+                Err(ucr_webrtc::WebRtcProviderError::CapacityExceeded) => backpressure = true,
+                Err(_) => return Err(ucr_sfu::SfuForwardSinkError::Unavailable),
+            }
+        }
+        if accepted {
+            Ok(())
+        } else if backpressure {
+            Err(ucr_sfu::SfuForwardSinkError::Backpressure)
+        } else {
+            Err(ucr_sfu::SfuForwardSinkError::Unavailable)
+        }
+    }
+}
+
+async fn first_party_browser_webrtc_peer(
+    realtime: &ucr_api_grpc::GrpcRealtimeService<
+        ucr_core::SystemServiceQuotaClock,
+        ucr_storage_sqlite::SqliteLocalStore,
+        ucr_storage_sqlite::SqliteLocalStore,
+    >,
+    claims: &ucr_realtime::RealtimeSessionClaims,
+    token: &str,
+) -> (
+    Arc<webrtc::peer_connection::RTCPeerConnection>,
+    Arc<webrtc::data_channel::RTCDataChannel>,
+    String,
+) {
+    use ucr_api_grpc::{
+        REALTIME_AUTHORIZATION_METADATA_KEY,
+        pb,
+        pb::realtime_service_server::RealtimeService as _,
+    };
+    use ucr_webrtc::WEBRTC_E2EE_DATA_CHANNEL_LABEL;
+    use webrtc::{
+        api::{
+            APIBuilder,
+            interceptor_registry::register_default_interceptors,
+            media_engine::MediaEngine,
+        },
+        data_channel::data_channel_state::RTCDataChannelState,
+        interceptor::registry::Registry,
+        peer_connection::{
+            RTCPeerConnection,
+            configuration::RTCConfiguration,
+            sdp::session_description::RTCSessionDescription,
+        },
+    };
+
+    let lookup = realtime_join_request(claims, token).into_inner();
+    let mut start = tonic::Request::new(pb::RealtimeStartWebRtcRequest {
+        scope: lookup.scope.clone(),
+        call_id: lookup.call_id.clone(),
+        session_id: lookup.session_id.clone(),
+    });
+    start.metadata_mut().insert(
+        REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let started = realtime
+        .start_web_rtc(start)
+        .await
+        .expect("first-party WebRTC offer RPC")
+        .into_inner();
+    let offer = match started.result {
+        Some(pb::realtime_start_web_rtc_response::Result::Offer(offer)) => offer,
+        other => panic!("first-party WebRTC offer must be admitted: {other:?}"),
+    };
+    assert!(
+        offer.ice_servers.is_empty(),
+        "this loopback proof must not depend on an external STUN/TURN server"
+    );
+    let offer_id = offer.offer_id.expect("offer identity");
+    let description = offer.description.expect("offer SDP");
+
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs().expect("default codecs");
+    let interceptors =
+        register_default_interceptors(Registry::new(), &mut media_engine).expect("interceptors");
+    let api = APIBuilder::new()
+        .with_media_engine(media_engine)
+        .with_interceptor_registry(interceptors)
+        .build();
+    let peer = Arc::new(
+        api.new_peer_connection(RTCConfiguration::default())
+            .await
+            .expect("independent browser peer"),
+    );
+    let (channel_tx, mut channel_rx) = tokio::sync::mpsc::channel(1);
+    peer.on_data_channel(Box::new(move |channel| {
+        let channel_tx = channel_tx.clone();
+        Box::pin(async move {
+            let _ = channel_tx.try_send(channel);
+        })
+    }));
+    peer.set_remote_description(
+        RTCSessionDescription::offer(description.sdp).expect("canonical server offer"),
+    )
+    .await
+    .expect("apply server offer");
+    let answer = peer.create_answer(None).await.expect("create browser answer");
+    let mut gathering = peer.gathering_complete_promise().await;
+    peer.set_local_description(answer)
+        .await
+        .expect("set browser answer");
+    tokio::time::timeout(std::time::Duration::from_secs(12), gathering.recv())
+        .await
+        .expect("browser ICE gathering deadline");
+
+    let answer_sdp = peer
+        .local_description()
+        .await
+        .expect("browser local answer")
+        .sdp;
+    let mut set_remote = tonic::Request::new(pb::RealtimeSetWebRtcRemoteDescriptionRequest {
+        scope: lookup.scope,
+        call_id: lookup.call_id,
+        session_id: lookup.session_id,
+        offer_id: Some(offer_id.clone()),
+        description: Some(pb::WebRtcDescription {
+            sdp_type: pb::WebRtcSdpType::Answer as i32,
+            sdp: answer_sdp,
+        }),
+    });
+    set_remote.metadata_mut().insert(
+        REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let applied = realtime
+        .set_web_rtc_remote_description(set_remote)
+        .await
+        .expect("offer-bound answer RPC")
+        .into_inner();
+    assert!(
+        matches!(
+            applied.result,
+            Some(pb::realtime_set_web_rtc_remote_description_response::Result::Acknowledgement(_))
+        ),
+        "Realtime must accept only the answer for this exact offer: {applied:?}"
+    );
+
+    let channel = tokio::time::timeout(std::time::Duration::from_secs(15), channel_rx.recv())
+        .await
+        .expect("server-created E2EE DataChannel deadline")
+        .expect("server-created E2EE DataChannel");
+    assert_eq!(channel.label(), WEBRTC_E2EE_DATA_CHANNEL_LABEL);
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while channel.ready_state() != RTCDataChannelState::Open {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("E2EE DataChannel open deadline");
+    (peer, channel, offer_id)
+}
+
 /// Regression: a first-party direct Call started through `/start` was refused
 /// by Realtime with 401 "realtime join rejected" because Realtime admits only
 /// Group Calls. Both accepted participants must now be admitted to the derived
 /// media Group Call through the SAME issuer and canonical `SQLite` owner, while
 /// a third party, an unaccepted callee and a hung-up Call stay refused.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)] // One end-to-end acceptance narrative.
 async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_participants_only() {
     use ucr_api_grpc::{
-        GrpcRealtimeService, pb, pb::realtime_service_server::RealtimeService as _,
+        GrpcRealtimeService, RealtimeWebRtcDependencies, pb,
+        pb::realtime_service_server::RealtimeService as _,
     };
     use ucr_core::{CallStore, GroupStore, PermissionGrantStore};
     use ucr_model::{GroupMemberState, PermissionGrant, PermissionScope, PrincipalRef};
+    use ucr_webrtc::{
+        LiveWebRtcProvider, WebRtcE2eeReassembler, WebRtcProvider, WebRtcSessionConfigFactory,
+        encode_webrtc_e2ee_chunks,
+    };
+    use ucr_protocol::decode_sfu_forward_envelope;
 
     let db = TestDb::new();
     let mut server = state(&db.0);
@@ -1199,6 +1399,709 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         b"only recipient OpenMLS endpoints can decrypt this video",
     );
 
+    // Self-service accounts own NO tenant-wide media permissions. Joining an
+    // accepted direct Call must nevertheless succeed end-to-end (signup -> call
+    // -> join -> media) through durable grants bound to exactly the derived
+    // media Call, and must never mint tenant-wide media grants as a side effect.
+    let subjects = [&alice, &bob].map(|binding| session_of(&server, binding).subject);
+    let media_permission_free = |grants: &[PermissionGrant]| {
+        grants.iter().all(|grant| {
+            !first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS.contains(&grant.permission.as_str())
+        })
+    };
+    for subject in &subjects {
+        assert!(media_permission_free(
+            &server.store.permission_grants_for(subject).unwrap()
+        ));
+    }
+    let derived_media_call_id = first_party_media::media_runtime_ids(
+        &scope,
+        &CallId::from_opaque(opaque(&call_id).unwrap()),
+    )
+    .unwrap()
+    .call_id;
+    // A separate explicit grant must survive the entire Call lifecycle.
+    server
+        .store
+        .grant_permission(&PermissionGrant {
+            grantee: subjects[0].clone(),
+            permission: ucr_protocol::CALL_OBSERVE_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope.clone()),
+        })
+        .unwrap();
+    let grants_before_join = subjects
+        .iter()
+        .map(|subject| server.store.permission_grants_for(subject).unwrap())
+        .collect::<Vec<_>>();
+    let media_request = |subject: &ScopedPrincipal, permission: &str| AuthorizationRequest {
+        subject: subject.clone(),
+        permission: permission.to_owned(),
+        resource_scope: subject.scope.clone(),
+    };
+
+    // A third person never sees nor joins the Call.
+    assert!(join_accepted(&server, &carol, &call_id, revision).is_err());
+
+    let grants = [&alice, &bob].map(|binding| {
+        join_accepted(&server, binding, &call_id, revision).expect("accepted participant Join")
+    });
+    let tokens = grants.clone().map(|grant| {
+        // The SDK contract is unchanged: the response names the direct Call.
+        assert_eq!(grant["callId"], call_id.as_str());
+        grant["joinFragment"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("#ucr_join=")
+            .unwrap()
+            .to_owned()
+    });
+    let claims = tokens.clone().map(|token| {
+        server
+            .issuer
+            .verify_signed_claims(&token, now_unix_ms().unwrap())
+            .expect("first-party grant signed by the realtime issuer")
+    });
+    // A separate BFF/realtime process cannot rely on the issuer's in-memory
+    // grants. Both signed Joins must exist in the SAME canonical SQLite owner,
+    // visible through an independent connection and verifiable after restart.
+    let other_store = SqliteLocalStore::open(&db.0).expect("independent SQLite handle");
+    let independent_issuer = JoinTokenIssuer::new(
+        JoinTokenKey::from_bytes([9; 32]),
+        "https://call.example.invalid/client.html",
+    )
+    .expect("independent issuer");
+    for (claim, token) in claims.iter().zip(&tokens) {
+        assert!(
+            independent_issuer
+                .verify(token, now_unix_ms().unwrap())
+                .is_err(),
+            "a new issuer has no process-local grant"
+        );
+        assert_eq!(
+            independent_issuer
+                .verify_signed_claims(token, now_unix_ms().unwrap())
+                .expect("signed claims survive restart"),
+            *claim
+        );
+        let durable = other_store
+            .conference_join_grant(&claim.scope, &claim.session_id)
+            .expect("canonical grant lookup")
+            .expect("first-party Join must be durable");
+        assert_eq!(durable.call_id, claim.call_id);
+        assert_eq!(durable.participant, claim.participant);
+        assert_eq!(durable.device_id, claim.device_id.clone().unwrap());
+        assert_eq!(
+            durable.integration_id.as_opaque().as_str(),
+            "ucr-first-party-direct-media"
+        );
+        assert!(!durable.revoked);
+    }
+    // Both grants name ONE derived media Group Call, bound to the exact Device.
+    assert_eq!(claims[0].call_id, claims[1].call_id);
+    assert!(claims[0].call_id.as_opaque().as_str().starts_with("fp-m-"));
+    assert_ne!(claims[0].call_id.as_opaque().as_str(), call_id);
+    assert_eq!(
+        claims[0].device_id.as_ref().map(|d| d.as_opaque().as_str()),
+        Some(alice.device.as_str())
+    );
+    assert_eq!(
+        claims[1].device_id.as_ref().map(|d| d.as_opaque().as_str()),
+        Some(bob.device.as_str())
+    );
+
+    // Repeating the Join is idempotent and keeps the media Group exact.
+    join_accepted(&server, &alice, &call_id, revision).expect("idempotent re-prepare");
+    let media = server
+        .store
+        .call(&claims[0].scope, &claims[0].call_id)
+        .unwrap()
+        .expect("media Call");
+    assert_eq!(media.participants.len(), 2);
+    let group_id = first_party_media::media_runtime_ids(
+        &claims[0].scope,
+        &CallId::from_opaque(opaque(&call_id).unwrap()),
+    )
+    .unwrap()
+    .group_id;
+    let members = server
+        .store
+        .group_memberships(&claims[0].scope, &group_id, 16)
+        .unwrap()
+        .into_iter()
+        .filter(|membership| membership.state == GroupMemberState::Active)
+        .map(|membership| membership.member)
+        .collect::<Vec<PrincipalRef>>();
+    assert_eq!(
+        members.len(),
+        2,
+        "only the two accepted endpoint participants: {members:?}"
+    );
+    assert!(members.contains(&claims[0].participant));
+    assert!(members.contains(&claims[1].participant));
+
+    // Realtime uses a SECOND SQLite connection, not the BFF's in-process
+    // store handle. A Hangup committed by BFF must be observed by the
+    // independently instantiated Realtime owner on its next authorization.
+    let realtime_store =
+        Arc::new(SqliteLocalStore::open(&db.0).expect("independent Realtime SQLite"));
+    let realtime_registry = Arc::new(ucr_realtime::RealtimeSessionRegistry::new(16, 4));
+    let (e2ee_ingress_tx, mut e2ee_ingress_rx) =
+        tokio::sync::mpsc::channel(ucr_webrtc::LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
+    let live_provider = Arc::new(
+        LiveWebRtcProvider::with_e2ee_ingress(e2ee_ingress_tx)
+            .expect("live first-party WebRTC provider"),
+    );
+    let provider: Arc<dyn WebRtcProvider> = live_provider.clone();
+    let realtime = GrpcRealtimeService::with_webrtc(
+        Arc::new(ucr_core::SystemServiceQuotaClock),
+        Arc::clone(&realtime_store),
+        Arc::clone(&realtime_store),
+        Arc::clone(&server.issuer),
+        Arc::clone(&realtime_registry),
+        Arc::new(ucr_conference::ConferenceRuntimeState::new()),
+        RealtimeWebRtcDependencies::new(
+            provider,
+            Arc::new(WebRtcSessionConfigFactory::default()),
+        ),
+    )
+    .with_mls_admission_store(Arc::clone(&realtime_store));
+    // The BFF and gRPC surface share the exact provider, registry and close
+    // retry queue. A terminal BFF response must await this owner's close ack.
+    server.realtime_service = Some(realtime.clone());
+    let mut generations = Vec::new();
+    for (claim, token) in claims.iter().zip(&tokens) {
+        let joined = realtime
+            .join_realtime(realtime_join_request(claim, token))
+            .await
+            .unwrap()
+            .into_inner();
+        match joined.result {
+            Some(pb::realtime_join_response::Result::Session(session)) => {
+                assert_eq!(
+                    session.admission_state,
+                    pb::RealtimeAdmissionState::Admitted as i32
+                );
+                generations.push(session.session_sequence);
+            }
+            other => panic!("direct-call participant was not admitted: {other:?}"),
+        }
+    }
+    // Heartbeat keeps the Join generation fence.
+    for ((claim, token), generation) in claims.iter().zip(&tokens).zip(&generations) {
+        let join = realtime_join_request(claim, token).into_inner();
+        // Zero is forbidden for direct-call media, and an obsolete Join
+        // generation cannot refresh the newer session's liveness.
+        for (sequence, ok) in [(*generation, true), (generation + 1, false), (0, false)] {
+            let mut beat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
+                scope: join.scope.clone(),
+                call_id: join.call_id.clone(),
+                session_id: join.session_id.clone(),
+                expected_session_sequence: sequence,
+            });
+            beat.metadata_mut().insert(
+                ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+                format!("Bearer {token}").parse().unwrap(),
+            );
+            let result = realtime
+                .heartbeat_realtime(beat)
+                .await
+                .unwrap()
+                .into_inner()
+                .result;
+            assert_eq!(
+                matches!(
+                    result,
+                    Some(pb::realtime_heartbeat_response::Result::Acknowledgement(_))
+                ),
+                ok,
+                "heartbeat sequence {sequence}: {result:?}"
+            );
+        }
+    }
+
+    // A plain media Group Call has no Universal mute policy: a speaking level
+    // is accepted (regression: every level > 0 was refused with 409).
+    let audio = |claim: &ucr_realtime::RealtimeSessionClaims, token: &str| {
+        let join = realtime_join_request(claim, token).into_inner();
+        let mut request = tonic::Request::new(pb::RealtimeReportAudioLevelRequest {
+            scope: join.scope,
+            call_id: join.call_id,
+            session_id: join.session_id,
+            level: 42,
+        });
+        request.metadata_mut().insert(
+            ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        request
+    };
+    let level = realtime
+        .report_audio_level(audio(&claims[0], &tokens[0]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            level.result,
+            Some(pb::realtime_report_audio_level_response::Result::Acknowledgement(_))
+        ),
+        "{level:?}"
+    );
+
+    // Media authority exists ONLY inside the derived media Call: it authorizes
+    // the SFU/conference per-call checks, but never tenant-wide nor another Call.
+    let other_call = CallId::from_opaque(opaque("fp-m-unrelated-call").unwrap());
+    for subject in &subjects {
+        for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
+            let request = media_request(subject, permission);
+            server
+                .store
+                .authorize_in_call(&request, &derived_media_call_id)
+                .expect("call-scoped media permission inside the media Call");
+            assert!(
+                server.store.authorize(&request).is_err(),
+                "never tenant-wide"
+            );
+            assert!(
+                server
+                    .store
+                    .authorize_in_call(&request, &other_call)
+                    .is_err(),
+                "never another Call"
+            );
+        }
+        assert!(media_permission_free(
+            &server.store.permission_grants_for(subject).unwrap()
+        ));
+    }
+    // A third person cannot borrow the participants' call-scoped grants.
+    let carol_subject = session_of(&server, &carol).subject;
+    assert!(
+        server
+            .store
+            .authorize_in_call(
+                &media_request(&carol_subject, ucr_protocol::AUDIO_SEND_PERMISSION),
+                &derived_media_call_id
+            )
+            .is_err()
+    );
+
+    // An Identity may own several independently trusted active Devices.
+    // Enrollment of a second Alice Device must not replace the exact Alice
+    // Device committed into the endpoint-owned MLS Group or deny the Call.
+    // This exercises real canonical SQLite Device/Trust state across BFF and
+    // Realtime connections, not a fabricated trust map.
+    let (alice_extra, _, _) = recover(
+        &server,
+        &alice,
+        &alice_recovery,
+        "alice-extra-active-device",
+        44,
+    )
+    .expect("independently authenticated second Alice Device");
+    assert_eq!(
+        server
+            .store
+            .active_devices_for_identity(&scope, &identity(&alice).unwrap(), 8)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // The same already-admitted Device can inspect MLS while the Call is live.
+    // This positive control prevents a post-Hangup denial from passing merely
+    // because the RPC was never wired or the bearer was always invalid.
+    let mls_lookup = realtime_join_request(&claims[0], &tokens[0]).into_inner();
+    let mut live_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    live_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let live_mls = realtime
+        .get_mls_admission_context(live_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(pb::realtime_get_mls_admission_context_response::Result::Context(context)) =
+        live_mls.result.as_ref()
+    else {
+        panic!("active accepted Call must admit the Device MLS context: {live_mls:?}");
+    };
+    assert!(context.media_negotiation_ref.is_some());
+    assert!(context.media_negotiation_generation > 0);
+    assert!(context.group_crypto_epoch > 0);
+    assert_eq!(
+        context.trusted_device_keys.len(),
+        2,
+        "first-party media must bind both independently trusted endpoint Devices"
+    );
+    assert_ne!(
+        context.trusted_device_keys[0].device_id, context.trusted_device_keys[1].device_id,
+        "a single Device cannot impersonate both media endpoints"
+    );
+    // The realtime trust roster must match the canonical endpoint MLS Add,
+    // not just any currently active Device of each Identity.
+    let committed = realtime_store
+        .endpoint_mls_direct_call_device_pair(&claims[0].scope, &group_id)
+        .unwrap()
+        .expect("committed endpoint-owned Add Device pair");
+    assert_eq!(committed.0, alice.device);
+    assert_eq!(committed.1, bob.device);
+    assert!(
+        context.trusted_device_keys.iter().all(|key| {
+            key.device_id
+                .as_ref()
+                .is_some_and(|device| device.value.as_slice() != alice_extra.device.as_bytes())
+        }),
+        "an additional trusted Device must not replace or join the committed MLS pair"
+    );
+    for expected in [&committed.0, &committed.1] {
+        assert!(
+            context.trusted_device_keys.iter().any(|key| {
+                key.device_id
+                    .as_ref()
+                    .is_some_and(|device| device.value.as_slice() == expected.as_bytes())
+            }),
+            "the committed endpoint Device must be present in realtime trust"
+        );
+    }
+
+    // Exercise the complete repo-local first-party media path with two independent
+    // LiveWebRtcProvider peers. This is real loopback WebRTC/DataChannel transport,
+    // not a browser mock, but it intentionally does not claim physical devices,
+    // camera/microphone capture, public TURN or production NAT traversal.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install WebRTC TLS crypto provider");
+    let (alice_peer, alice_channel, alice_offer_id) =
+        first_party_browser_webrtc_peer(&realtime, &claims[0], &tokens[0]).await;
+    let (bob_peer, bob_channel, bob_offer_id) =
+        first_party_browser_webrtc_peer(&realtime, &claims[1], &tokens[1]).await;
+    assert_ne!(alice_offer_id, bob_offer_id);
+    assert_eq!(
+        live_provider.session_offer_id(&claims[0].session_id).unwrap(),
+        alice_offer_id
+    );
+    assert_eq!(
+        live_provider.session_offer_id(&claims[1].session_id).unwrap(),
+        bob_offer_id
+    );
+
+    let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::channel(2);
+    let bob_reassembler = Arc::new(tokio::sync::Mutex::new(WebRtcE2eeReassembler::new()));
+    bob_channel.on_message(Box::new(move |message| {
+        let delivered_tx = delivered_tx.clone();
+        let bob_reassembler = Arc::clone(&bob_reassembler);
+        Box::pin(async move {
+            if message.is_string {
+                let _ = delivered_tx
+                    .send(Err("unexpected text on the E2EE DataChannel".to_owned()))
+                    .await;
+                return;
+            }
+            let mut reassembler = bob_reassembler.lock().await;
+            match reassembler.push_chunk(message.data.as_ref()) {
+                Ok(Some(envelope)) => {
+                    let _ = delivered_tx.send(Ok(envelope)).await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = delivered_tx.send(Err(format!("{error:?}"))).await;
+                }
+            }
+        })
+    }));
+
+    // Bind the media frame to the actual derived Call, its durable negotiation
+    // generation and the endpoint-owned MLS epoch, not the parent contact Call.
+    let media_call_record = realtime_store
+        .call(&claims[0].scope, &claims[0].call_id)
+        .unwrap()
+        .expect("canonical derived media Call");
+    let live_negotiation_ref = media_call_record
+        .media_negotiation_ref
+        .clone()
+        .expect("canonical media negotiation reference");
+    assert!(media_call_record.media_negotiation_generation > 0);
+    let live_media_context = GroupMediaE2eeContext {
+        scope: claims[0].scope.clone(),
+        call_id: claims[0].call_id.clone(),
+        group_id: group_id.clone(),
+        negotiation_ref: live_negotiation_ref,
+        negotiation_generation: media_call_record.media_negotiation_generation,
+        crypto_epoch: artifacts.next_crypto_state.epoch,
+        crypto_state_ref: artifacts
+            .next_crypto_state
+            .state_ref
+            .clone()
+            .expect("committed endpoint MLS state reference"),
+        crypto_suite: CryptoSuite::UcrV1,
+    };
+    let canonical_media_signer = SigningKeyMaterial::from_seed([41; 32]);
+    assert_eq!(
+        canonical_media_signer.verifying_key().0,
+        alice_signer.verifying_key().to_bytes(),
+        "media frames must use Alice's canonical trusted Device signing key"
+    );
+    let live_wire = seal_endpoint_group_media_wire(
+        &alice_secret,
+        &live_media_context,
+        GroupMediaFrameHeader {
+            scope: live_media_context.scope.clone(),
+            call_id: live_media_context.call_id.clone(),
+            group_id: live_media_context.group_id.clone(),
+            stream_id: opaque("first-party-live-webrtc-video"),
+            source: alice_session.subject.principal.clone(),
+            source_device_id: alice_id.clone(),
+            negotiation_ref: live_media_context.negotiation_ref.clone(),
+            negotiation_generation: live_media_context.negotiation_generation,
+            crypto_epoch: live_media_context.crypto_epoch,
+            crypto_state_ref: live_media_context.crypto_state_ref.clone(),
+            crypto_suite: live_media_context.crypto_suite,
+            header_version: 2,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 1,
+            media_timestamp: 90_000,
+            keyframe: true,
+        },
+        b"first-party endpoint MLS media over live WebRTC",
+        KeyId::from_opaque(opaque(&alice_session.signer_key_id)),
+        &canonical_media_signer,
+    )
+    .expect("seal canonical endpoint MLS media wire");
+    let live_envelope =
+        decode_sfu_forward_envelope(&live_wire).expect("decode canonical SFU envelope");
+    for chunk in encode_webrtc_e2ee_chunks(&live_envelope, 100).expect("chunk E2EE envelope") {
+        alice_channel
+            .send(&bytes::Bytes::from(chunk))
+            .await
+            .expect("Alice sends encrypted media over live WebRTC");
+    }
+
+    let ingress = tokio::time::timeout(std::time::Duration::from_secs(8), e2ee_ingress_rx.recv())
+        .await
+        .expect("live provider ingress deadline")
+        .expect("live provider must emit Alice's reassembled E2EE envelope");
+    assert_eq!(ingress.session_id, claims[0].session_id);
+    assert_eq!(ingress.envelope, live_envelope);
+    let ingress_claims = realtime_registry
+        .active_claims_for_ingress(
+            &ingress.session_id,
+            &ingress.envelope.frame.header.scope,
+            &ingress.envelope.frame.header.call_id,
+            now_unix_ms().unwrap(),
+        )
+        .expect("bind DataChannel ingress to Alice's active signed Join");
+    assert_eq!(ingress_claims.session_id, claims[0].session_id);
+    assert_eq!(ingress_claims.device_id, claims[0].device_id);
+
+    let sink_accepted = Arc::new(AtomicUsize::new(0));
+    let sink = FirstPartyWebRtcForwardSink {
+        registry: Arc::clone(&realtime_registry),
+        provider: Arc::clone(&live_provider),
+        accepted: Arc::clone(&sink_accepted),
+    };
+    let accepted = tokio::task::block_in_place(|| {
+        realtime.forward_authenticated_e2ee_media(&ingress_claims, &ingress.envelope, &sink)
+    });
+    assert_eq!(accepted, Ok(1), "canonical SFU path must accept one Bob recipient");
+    let received = tokio::time::timeout(std::time::Duration::from_secs(8), delivered_rx.recv())
+        .await
+        .expect("Bob DataChannel receive deadline")
+        .expect("Bob must receive the forwarded E2EE envelope")
+        .expect("Bob DataChannel must receive canonical binary chunks");
+    assert_eq!(received, ingress.envelope);
+    let plaintext = open_endpoint_group_media_payload(
+        &bob_secret,
+        &live_media_context,
+        &received.frame,
+        canonical_media_signer.verifying_key(),
+    )
+    .expect("Bob decrypts with his independently exported endpoint MLS secret");
+    assert_eq!(
+        plaintext,
+        b"first-party endpoint MLS media over live WebRTC"
+    );
+    assert_eq!(sink_accepted.load(Ordering::SeqCst), 1);
+    assert!(
+        delivered_rx.try_recv().is_err(),
+        "one source envelope must not be duplicated to Bob"
+    );
+
+    // A second BFF process can revoke Alice's durable Join while the parent
+    // and derived media Calls are STILL ACTIVE. This is a stronger regression
+    // than a denial after Hangup: the live Call cannot mask a missing grant
+    // recheck, and Bob's independent grant must remain usable.
+    other_store
+        .revoke_conference_join_grant(&claims[0].scope, &claims[0].session_id)
+        .expect("cross-connection active Call revoke");
+    assert!(
+        server
+            .store
+            .conference_join_grant(&claims[0].scope, &claims[0].session_id)
+            .unwrap()
+            .unwrap()
+            .revoked,
+        "revoke must be visible through the original SQLite handle"
+    );
+    let mut revoked_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    revoked_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_mls = realtime
+        .get_mls_admission_context(revoked_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_mls.result,
+            Some(pb::realtime_get_mls_admission_context_response::Result::Error(_))
+        ),
+        "revoked Alice must lose MLS admission before Hangup: {revoked_mls:?}"
+    );
+    let revoked_media_forward = tokio::task::block_in_place(|| {
+        realtime.forward_authenticated_e2ee_media(&ingress_claims, &ingress.envelope, &sink)
+    });
+    assert!(
+        revoked_media_forward.is_err(),
+        "a cross-process Join tombstone must stop the live WebRTC→SFU media path while the Call remains active"
+    );
+    assert_eq!(
+        sink_accepted.load(Ordering::SeqCst),
+        1,
+        "revoked Alice must be denied before another recipient sink acceptance"
+    );
+    // A revoked Join must also lose its active media-operation authority,
+    // not merely access to MLS descriptors. Audio-level reporting is an
+    // authenticated Realtime operation, NOT proof of physical audio transport.
+    let revoked_audio = realtime
+        .report_audio_level(audio(&claims[0], &tokens[0]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_audio.result,
+            Some(pb::realtime_report_audio_level_response::Result::Error(_))
+        ),
+        "revoked Alice must lose active media-operation authority: {revoked_audio:?}"
+    );
+    // The same cross-process tombstone must fence all MLS mutation/read
+    // surfaces and the active lease, not just the admission descriptor. The
+    // direct Call remains ACTIVE throughout these checks, so its eventual
+    // Hangup cannot accidentally explain the denial.
+    let mut revoked_register = tonic::Request::new(pb::RealtimeRegisterMlsKeyPackageRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+        key_package: vec![0xA5],
+    });
+    revoked_register.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_register = realtime
+        .register_mls_key_package(revoked_register)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_register.result,
+            Some(pb::realtime_register_mls_key_package_response::Result::Error(_))
+        ),
+        "cross-process revoke must deny active-Call MLS KeyPackage writes: {revoked_register:?}"
+    );
+    let mut revoked_bootstrap = tonic::Request::new(pb::RealtimeGetMlsBootstrapRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+    });
+    revoked_bootstrap.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_bootstrap = realtime
+        .get_mls_bootstrap(revoked_bootstrap)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_bootstrap.result,
+            Some(pb::realtime_get_mls_bootstrap_response::Result::Error(_))
+        ),
+        "cross-process revoke must deny active-Call MLS bootstrap: {revoked_bootstrap:?}"
+    );
+    let mut revoked_heartbeat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
+        scope: mls_lookup.scope.clone(),
+        call_id: mls_lookup.call_id.clone(),
+        session_id: mls_lookup.session_id.clone(),
+        expected_session_sequence: generations[0],
+    });
+    revoked_heartbeat.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[0]).parse().unwrap(),
+    );
+    let revoked_heartbeat = realtime
+        .heartbeat_realtime(revoked_heartbeat)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            revoked_heartbeat.result,
+            Some(pb::realtime_heartbeat_response::Result::Error(_))
+        ),
+        "cross-process revoke must not refresh the active Join lease: {revoked_heartbeat:?}"
+    );
+
+    let bob_audio = realtime
+        .report_audio_level(audio(&claims[1], &tokens[1]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            bob_audio.result,
+            Some(pb::realtime_report_audio_level_response::Result::Acknowledgement(_))
+        ),
+        "revoking Alice must not deny Bob's independent media operation: {bob_audio:?}"
+    );
+    let bob_lookup = realtime_join_request(&claims[1], &tokens[1]).into_inner();
+    let mut bob_live_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: bob_lookup.scope,
+        call_id: bob_lookup.call_id,
+        session_id: bob_lookup.session_id,
+    });
+    bob_live_mls.metadata_mut().insert(
+        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
+        format!("Bearer {}", tokens[1]).parse().unwrap(),
+    );
+    let bob_live_mls = realtime
+        .get_mls_admission_context(bob_live_mls)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(
+            bob_live_mls.result,
+            Some(pb::realtime_get_mls_admission_context_response::Result::Context(_))
+        ),
+        "revoking Alice must not revoke Bob's independently admitted Device: {bob_live_mls:?}"
+    );
+
     // Exercise a second real endpoint epoch transition (Rekey), then remove
     // Bob. The old recipient exporter and an isolated relay leaf must not
     // derive the current epoch's media key after either transition.
@@ -1488,528 +2391,32 @@ async fn first_party_direct_call_is_admitted_to_realtime_for_both_accepted_parti
         "media ciphertext must remain bound to the admitted MLS epoch"
     );
 
-    // Self-service accounts own NO tenant-wide media permissions. Joining an
-    // accepted direct Call must nevertheless succeed end-to-end (signup -> call
-    // -> join -> media) through durable grants bound to exactly the derived
-    // media Call, and must never mint tenant-wide media grants as a side effect.
-    let subjects = [&alice, &bob].map(|binding| session_of(&server, binding).subject);
-    let media_permission_free = |grants: &[PermissionGrant]| {
-        grants.iter().all(|grant| {
-            !first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS.contains(&grant.permission.as_str())
-        })
-    };
-    for subject in &subjects {
-        assert!(media_permission_free(
-            &server.store.permission_grants_for(subject).unwrap()
-        ));
-    }
-    let derived_media_call_id = first_party_media::media_runtime_ids(
-        &scope,
-        &CallId::from_opaque(opaque(&call_id).unwrap()),
-    )
-    .unwrap()
-    .call_id;
-    // A separate explicit grant must survive the entire Call lifecycle.
-    server
-        .store
-        .grant_permission(&PermissionGrant {
-            grantee: subjects[0].clone(),
-            permission: ucr_protocol::CALL_OBSERVE_PERMISSION.to_owned(),
-            scope: PermissionScope::Exact(scope.clone()),
-        })
-        .unwrap();
-    let grants_before_join = subjects
-        .iter()
-        .map(|subject| server.store.permission_grants_for(subject).unwrap())
-        .collect::<Vec<_>>();
-    let media_request = |subject: &ScopedPrincipal, permission: &str| AuthorizationRequest {
-        subject: subject.clone(),
-        permission: permission.to_owned(),
-        resource_scope: subject.scope.clone(),
-    };
-
-    // A third person never sees nor joins the Call.
-    assert!(join_accepted(&server, &carol, &call_id, revision).is_err());
-
-    let grants = [&alice, &bob].map(|binding| {
-        join_accepted(&server, binding, &call_id, revision).expect("accepted participant Join")
-    });
-    let tokens = grants.clone().map(|grant| {
-        // The SDK contract is unchanged: the response names the direct Call.
-        assert_eq!(grant["callId"], call_id.as_str());
-        grant["joinFragment"]
-            .as_str()
-            .unwrap()
-            .strip_prefix("#ucr_join=")
-            .unwrap()
-            .to_owned()
-    });
-    let claims = tokens.clone().map(|token| {
-        server
-            .issuer
-            .verify_signed_claims(&token, now_unix_ms().unwrap())
-            .expect("first-party grant signed by the realtime issuer")
-    });
-    // A separate BFF/realtime process cannot rely on the issuer's in-memory
-    // grants. Both signed Joins must exist in the SAME canonical SQLite owner,
-    // visible through an independent connection and verifiable after restart.
-    let other_store = SqliteLocalStore::open(&db.0).expect("independent SQLite handle");
-    let independent_issuer = JoinTokenIssuer::new(
-        JoinTokenKey::from_bytes([9; 32]),
-        "https://call.example.invalid/client.html",
-    )
-    .expect("independent issuer");
-    for (claim, token) in claims.iter().zip(&tokens) {
-        assert!(
-            independent_issuer
-                .verify(token, now_unix_ms().unwrap())
-                .is_err(),
-            "a new issuer has no process-local grant"
-        );
-        assert_eq!(
-            independent_issuer
-                .verify_signed_claims(token, now_unix_ms().unwrap())
-                .expect("signed claims survive restart"),
-            *claim
-        );
-        let durable = other_store
-            .conference_join_grant(&claim.scope, &claim.session_id)
-            .expect("canonical grant lookup")
-            .expect("first-party Join must be durable");
-        assert_eq!(durable.call_id, claim.call_id);
-        assert_eq!(durable.participant, claim.participant);
-        assert_eq!(durable.device_id, claim.device_id.clone().unwrap());
-        assert_eq!(
-            durable.integration_id.as_opaque().as_str(),
-            "ucr-first-party-direct-media"
-        );
-        assert!(!durable.revoked);
-    }
-    // Both grants name ONE derived media Group Call, bound to the exact Device.
-    assert_eq!(claims[0].call_id, claims[1].call_id);
-    assert!(claims[0].call_id.as_opaque().as_str().starts_with("fp-m-"));
-    assert_ne!(claims[0].call_id.as_opaque().as_str(), call_id);
-    assert_eq!(
-        claims[0].device_id.as_ref().map(|d| d.as_opaque().as_str()),
-        Some(alice.device.as_str())
-    );
-    assert_eq!(
-        claims[1].device_id.as_ref().map(|d| d.as_opaque().as_str()),
-        Some(bob.device.as_str())
-    );
-
-    // Repeating the Join is idempotent and keeps the media Group exact.
-    join_accepted(&server, &alice, &call_id, revision).expect("idempotent re-prepare");
-    let media = server
-        .store
-        .call(&claims[0].scope, &claims[0].call_id)
-        .unwrap()
-        .expect("media Call");
-    assert_eq!(media.participants.len(), 2);
-    let group_id = first_party_media::media_runtime_ids(
-        &claims[0].scope,
-        &CallId::from_opaque(opaque(&call_id).unwrap()),
-    )
-    .unwrap()
-    .group_id;
-    let members = server
-        .store
-        .group_memberships(&claims[0].scope, &group_id, 16)
-        .unwrap()
-        .into_iter()
-        .filter(|membership| membership.state == GroupMemberState::Active)
-        .map(|membership| membership.member)
-        .collect::<Vec<PrincipalRef>>();
-    assert_eq!(
-        members.len(),
-        2,
-        "only the two accepted endpoint participants: {members:?}"
-    );
-    assert!(members.contains(&claims[0].participant));
-    assert!(members.contains(&claims[1].participant));
-
-    // Realtime uses a SECOND SQLite connection, not the BFF's in-process
-    // store handle. A Hangup committed by BFF must be observed by the
-    // independently instantiated Realtime owner on its next authorization.
-    let realtime_store =
-        Arc::new(SqliteLocalStore::open(&db.0).expect("independent Realtime SQLite"));
-    let realtime_registry = Arc::new(ucr_realtime::RealtimeSessionRegistry::new(16, 4));
-    let realtime = GrpcRealtimeService::new(
-        Arc::new(ucr_core::SystemServiceQuotaClock),
-        Arc::clone(&realtime_store),
-        Arc::clone(&realtime_store),
-        Arc::clone(&server.issuer),
-        Arc::clone(&realtime_registry),
-        Arc::new(ucr_conference::ConferenceRuntimeState::new()),
-    )
-    .with_mls_admission_store(Arc::clone(&realtime_store));
-    // The BFF and gRPC surface share the exact provider, registry and close
-    // retry queue. A terminal BFF response must await this owner's close ack.
-    server.realtime_service = Some(realtime.clone());
-    let mut generations = Vec::new();
-    for (claim, token) in claims.iter().zip(&tokens) {
-        let joined = realtime
-            .join_realtime(realtime_join_request(claim, token))
-            .await
-            .unwrap()
-            .into_inner();
-        match joined.result {
-            Some(pb::realtime_join_response::Result::Session(session)) => {
-                assert_eq!(
-                    session.admission_state,
-                    pb::RealtimeAdmissionState::Admitted as i32
-                );
-                generations.push(session.session_sequence);
-            }
-            other => panic!("direct-call participant was not admitted: {other:?}"),
-        }
-    }
-    // Heartbeat keeps the Join generation fence.
-    for ((claim, token), generation) in claims.iter().zip(&tokens).zip(&generations) {
-        let join = realtime_join_request(claim, token).into_inner();
-        // Zero is forbidden for direct-call media, and an obsolete Join
-        // generation cannot refresh the newer session's liveness.
-        for (sequence, ok) in [(*generation, true), (generation + 1, false), (0, false)] {
-            let mut beat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
-                scope: join.scope.clone(),
-                call_id: join.call_id.clone(),
-                session_id: join.session_id.clone(),
-                expected_session_sequence: sequence,
-            });
-            beat.metadata_mut().insert(
-                ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
-                format!("Bearer {token}").parse().unwrap(),
-            );
-            let result = realtime
-                .heartbeat_realtime(beat)
-                .await
-                .unwrap()
-                .into_inner()
-                .result;
-            assert_eq!(
-                matches!(
-                    result,
-                    Some(pb::realtime_heartbeat_response::Result::Acknowledgement(_))
-                ),
-                ok,
-                "heartbeat sequence {sequence}: {result:?}"
-            );
-        }
-    }
-
-    // A plain media Group Call has no Universal mute policy: a speaking level
-    // is accepted (regression: every level > 0 was refused with 409).
-    let audio = |claim: &ucr_realtime::RealtimeSessionClaims, token: &str| {
-        let join = realtime_join_request(claim, token).into_inner();
-        let mut request = tonic::Request::new(pb::RealtimeReportAudioLevelRequest {
-            scope: join.scope,
-            call_id: join.call_id,
-            session_id: join.session_id,
-            level: 42,
-        });
-        request.metadata_mut().insert(
-            ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
-            format!("Bearer {token}").parse().unwrap(),
-        );
-        request
-    };
-    let level = realtime
-        .report_audio_level(audio(&claims[0], &tokens[0]))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        matches!(
-            level.result,
-            Some(pb::realtime_report_audio_level_response::Result::Acknowledgement(_))
-        ),
-        "{level:?}"
-    );
-
-    // Media authority exists ONLY inside the derived media Call: it authorizes
-    // the SFU/conference per-call checks, but never tenant-wide nor another Call.
-    let other_call = CallId::from_opaque(opaque("fp-m-unrelated-call").unwrap());
-    for subject in &subjects {
-        for permission in first_party_media::FIRST_PARTY_MEDIA_PERMISSIONS {
-            let request = media_request(subject, permission);
-            server
-                .store
-                .authorize_in_call(&request, &derived_media_call_id)
-                .expect("call-scoped media permission inside the media Call");
-            assert!(
-                server.store.authorize(&request).is_err(),
-                "never tenant-wide"
-            );
-            assert!(
-                server
-                    .store
-                    .authorize_in_call(&request, &other_call)
-                    .is_err(),
-                "never another Call"
-            );
-        }
-        assert!(media_permission_free(
-            &server.store.permission_grants_for(subject).unwrap()
-        ));
-    }
-    // A third person cannot borrow the participants' call-scoped grants.
-    let carol_subject = session_of(&server, &carol).subject;
-    assert!(
-        server
-            .store
-            .authorize_in_call(
-                &media_request(&carol_subject, ucr_protocol::AUDIO_SEND_PERMISSION),
-                &derived_media_call_id
-            )
-            .is_err()
-    );
-
-    // An Identity may own several independently trusted active Devices.
-    // Enrollment of a second Alice Device must not replace the exact Alice
-    // Device committed into the endpoint-owned MLS Group or deny the Call.
-    // This exercises real canonical SQLite Device/Trust state across BFF and
-    // Realtime connections, not a fabricated trust map.
-    let (alice_extra, _, _) = recover(
-        &server,
-        &alice,
-        &alice_recovery,
-        "alice-extra-active-device",
-        44,
-    )
-    .expect("independently authenticated second Alice Device");
-    assert_eq!(
-        server
-            .store
-            .active_devices_for_identity(&scope, &identity(&alice).unwrap(), 8)
-            .unwrap()
-            .len(),
-        2
-    );
-
-    // The same already-admitted Device can inspect MLS while the Call is live.
-    // This positive control prevents a post-Hangup denial from passing merely
-    // because the RPC was never wired or the bearer was always invalid.
-    let mls_lookup = realtime_join_request(&claims[0], &tokens[0]).into_inner();
-    let mut live_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
-        scope: mls_lookup.scope.clone(),
-        call_id: mls_lookup.call_id.clone(),
-        session_id: mls_lookup.session_id.clone(),
-    });
-    live_mls.metadata_mut().insert(
-        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
-        format!("Bearer {}", tokens[0]).parse().unwrap(),
-    );
-    let live_mls = realtime
-        .get_mls_admission_context(live_mls)
-        .await
-        .unwrap()
-        .into_inner();
-    let Some(pb::realtime_get_mls_admission_context_response::Result::Context(context)) =
-        live_mls.result.as_ref()
-    else {
-        panic!("active accepted Call must admit the Device MLS context: {live_mls:?}");
-    };
-    assert!(context.media_negotiation_ref.is_some());
-    assert!(context.media_negotiation_generation > 0);
-    assert!(context.group_crypto_epoch > 0);
-    assert_eq!(
-        context.trusted_device_keys.len(),
-        2,
-        "first-party media must bind both independently trusted endpoint Devices"
-    );
-    assert_ne!(
-        context.trusted_device_keys[0].device_id, context.trusted_device_keys[1].device_id,
-        "a single Device cannot impersonate both media endpoints"
-    );
-    // The realtime trust roster must match the canonical endpoint MLS Add,
-    // not just any currently active Device of each Identity.
-    let committed = realtime_store
-        .endpoint_mls_direct_call_device_pair(&claims[0].scope, &group_id)
-        .unwrap()
-        .expect("committed endpoint-owned Add Device pair");
-    assert_eq!(committed.0, alice.device);
-    assert_eq!(committed.1, bob.device);
-    assert!(
-        context.trusted_device_keys.iter().all(|key| {
-            key.device_id
-                .as_ref()
-                .is_some_and(|device| device.value.as_slice() != alice_extra.device.as_bytes())
-        }),
-        "an additional trusted Device must not replace or join the committed MLS pair"
-    );
-    for expected in [&committed.0, &committed.1] {
-        assert!(
-            context.trusted_device_keys.iter().any(|key| {
-                key.device_id
-                    .as_ref()
-                    .is_some_and(|device| device.value.as_slice() == expected.as_bytes())
-            }),
-            "the committed endpoint Device must be present in realtime trust"
-        );
-    }
-
-    // A second BFF process can revoke Alice's durable Join while the parent
-    // and derived media Calls are STILL ACTIVE. This is a stronger regression
-    // than a denial after Hangup: the live Call cannot mask a missing grant
-    // recheck, and Bob's independent grant must remain usable.
-    other_store
-        .revoke_conference_join_grant(&claims[0].scope, &claims[0].session_id)
-        .expect("cross-connection active Call revoke");
-    assert!(
-        server
-            .store
-            .conference_join_grant(&claims[0].scope, &claims[0].session_id)
-            .unwrap()
-            .unwrap()
-            .revoked,
-        "revoke must be visible through the original SQLite handle"
-    );
-    let mut revoked_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
-        scope: mls_lookup.scope.clone(),
-        call_id: mls_lookup.call_id.clone(),
-        session_id: mls_lookup.session_id.clone(),
-    });
-    revoked_mls.metadata_mut().insert(
-        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
-        format!("Bearer {}", tokens[0]).parse().unwrap(),
-    );
-    let revoked_mls = realtime
-        .get_mls_admission_context(revoked_mls)
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        matches!(
-            revoked_mls.result,
-            Some(pb::realtime_get_mls_admission_context_response::Result::Error(_))
-        ),
-        "revoked Alice must lose MLS admission before Hangup: {revoked_mls:?}"
-    );
-    // A revoked Join must also lose its active media-operation authority,
-    // not merely access to MLS descriptors. Audio-level reporting is an
-    // authenticated Realtime operation, NOT proof of physical audio transport.
-    let revoked_audio = realtime
-        .report_audio_level(audio(&claims[0], &tokens[0]))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        matches!(
-            revoked_audio.result,
-            Some(pb::realtime_report_audio_level_response::Result::Error(_))
-        ),
-        "revoked Alice must lose active media-operation authority: {revoked_audio:?}"
-    );
-    // The same cross-process tombstone must fence all MLS mutation/read
-    // surfaces and the active lease, not just the admission descriptor. The
-    // direct Call remains ACTIVE throughout these checks, so its eventual
-    // Hangup cannot accidentally explain the denial.
-    let mut revoked_register = tonic::Request::new(pb::RealtimeRegisterMlsKeyPackageRequest {
-        scope: mls_lookup.scope.clone(),
-        call_id: mls_lookup.call_id.clone(),
-        session_id: mls_lookup.session_id.clone(),
-        key_package: vec![0xA5],
-    });
-    revoked_register.metadata_mut().insert(
-        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
-        format!("Bearer {}", tokens[0]).parse().unwrap(),
-    );
-    let revoked_register = realtime
-        .register_mls_key_package(revoked_register)
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        matches!(
-            revoked_register.result,
-            Some(pb::realtime_register_mls_key_package_response::Result::Error(_))
-        ),
-        "cross-process revoke must deny active-Call MLS KeyPackage writes: {revoked_register:?}"
-    );
-    let mut revoked_bootstrap = tonic::Request::new(pb::RealtimeGetMlsBootstrapRequest {
-        scope: mls_lookup.scope.clone(),
-        call_id: mls_lookup.call_id.clone(),
-        session_id: mls_lookup.session_id.clone(),
-    });
-    revoked_bootstrap.metadata_mut().insert(
-        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
-        format!("Bearer {}", tokens[0]).parse().unwrap(),
-    );
-    let revoked_bootstrap = realtime
-        .get_mls_bootstrap(revoked_bootstrap)
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        matches!(
-            revoked_bootstrap.result,
-            Some(pb::realtime_get_mls_bootstrap_response::Result::Error(_))
-        ),
-        "cross-process revoke must deny active-Call MLS bootstrap: {revoked_bootstrap:?}"
-    );
-    let mut revoked_heartbeat = tonic::Request::new(pb::RealtimeHeartbeatRequest {
-        scope: mls_lookup.scope.clone(),
-        call_id: mls_lookup.call_id.clone(),
-        session_id: mls_lookup.session_id.clone(),
-        expected_session_sequence: generations[0],
-    });
-    revoked_heartbeat.metadata_mut().insert(
-        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
-        format!("Bearer {}", tokens[0]).parse().unwrap(),
-    );
-    let revoked_heartbeat = realtime
-        .heartbeat_realtime(revoked_heartbeat)
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        matches!(
-            revoked_heartbeat.result,
-            Some(pb::realtime_heartbeat_response::Result::Error(_))
-        ),
-        "cross-process revoke must not refresh the active Join lease: {revoked_heartbeat:?}"
-    );
-
-    let bob_audio = realtime
-        .report_audio_level(audio(&claims[1], &tokens[1]))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        matches!(
-            bob_audio.result,
-            Some(pb::realtime_report_audio_level_response::Result::Acknowledgement(_))
-        ),
-        "revoking Alice must not deny Bob's independent media operation: {bob_audio:?}"
-    );
-    let bob_lookup = realtime_join_request(&claims[1], &tokens[1]).into_inner();
-    let mut bob_live_mls = tonic::Request::new(pb::RealtimeGetMlsAdmissionContextRequest {
-        scope: bob_lookup.scope,
-        call_id: bob_lookup.call_id,
-        session_id: bob_lookup.session_id,
-    });
-    bob_live_mls.metadata_mut().insert(
-        ucr_api_grpc::REALTIME_AUTHORIZATION_METADATA_KEY,
-        format!("Bearer {}", tokens[1]).parse().unwrap(),
-    );
-    let bob_live_mls = realtime
-        .get_mls_admission_context(bob_live_mls)
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        matches!(
-            bob_live_mls.result,
-            Some(pb::realtime_get_mls_admission_context_response::Result::Context(_))
-        ),
-        "revoking Alice must not revoke Bob's independently admitted Device: {bob_live_mls:?}"
-    );
-
     // Hang-up ends the media Call too; no new Join grant and no re-admission.
     let hung = signal_with_provider_cleanup(&server, &bob, &call_id, revision, "hangup")
         .await
         .expect("hangup waits for the shared Realtime provider-close boundary");
     assert_eq!(hung["state"], "terminated");
+    assert!(
+        live_provider.session_offer_id(&claims[0].session_id).is_err(),
+        "BFF Hangup must close Alice's actual live WebRTC provider session"
+    );
+    assert!(
+        live_provider.session_offer_id(&claims[1].session_id).is_err(),
+        "BFF Hangup must close Bob's actual live WebRTC provider session"
+    );
+    for channel in [&alice_channel, &bob_channel] {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while channel.ready_state()
+                != webrtc::data_channel::data_channel_state::RTCDataChannelState::Closed
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("Hangup must close both remote E2EE DataChannels");
+    }
+    alice_peer.close().await.expect("close Alice browser peer");
+    bob_peer.close().await.expect("close Bob browser peer");
     assert!(
         realtime_registry
             .pending_webrtc_closes()
