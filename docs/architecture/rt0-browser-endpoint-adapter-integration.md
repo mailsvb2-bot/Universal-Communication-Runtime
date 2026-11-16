@@ -712,3 +712,27 @@ The test consumes the provider's reassembled ingress frame using the same sessio
 The same test revokes A's durable Join grant through a second SQLite connection while the Call remains active and asserts that the next media forward is rejected before another recipient sink acceptance. It then exercises the BFF Hangup path and requires both real provider sessions and both remote DataChannels to close before the terminal response is accepted.
 
 **Evidence boundary:** this is a local loopback WebRTC/DataChannel integration test, not a physical-device call. Both peers run in one test process and use host candidates only; the test payload is an encrypted media-frame fixture, not captured/encoded camera or microphone media. It does not execute the browser `/start.js` click path, browser WebCrypto/OS keystore, camera/microphone permission prompts, audio/video codecs or playback, public STUN/TURN, NAT traversal, mobile browsers, or physical remote capture-stop measurements. Exact-head CI must pass before even the loopback result is considered verified. This closes the repo-local first-party-Join-to-live-DataChannel integration gap but does **not** establish the first real one-click physical A↔B call or production readiness.
+
+
+## PR #359: durable Join-grant revocation is part of the SFU revision fence
+
+Realtime media preflight reads the canonical `conference_join_grants` row on
+every frame. Schema v58's authorization revision trigger set omitted that
+table, so a separate process could revoke one session grant after preflight
+but before the SFU acquired its revision fence without changing the captured
+revision. The sink could then accept ciphertext under a revoked Join even
+though the post-send recheck rejected the response.
+
+Schema v59 adds INSERT/UPDATE/DELETE revision triggers for the existing
+canonical `conference_join_grants` table and verifies all three on reopen.
+The v58-to-v59 migration is transactional; no grant rows, keys or phone data
+are copied into a second store. A regression creates the canonical grant row,
+revokes it through an independent SQLite store connection, and proves that
+the pre-revoke revision cannot invoke the sink callback. The existing writer
+transaction still prevents a revoke from committing while a matching sink
+acceptance is already in progress.
+
+**Scope limit:** this closes the durable Join-row gap in the local SQLite
+authorization revision fence. It does not make a node-local fence global
+across independent SFU databases or prove remote network-buffer discard,
+physical capture stop, public TURN/NAT or two-device A/V.
