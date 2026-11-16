@@ -2667,10 +2667,8 @@ where
         // Snapshot before signed Join/Device/Call preflight. A revocation after this
         // point must invalidate the eventual recipient sink, not become a new baseline
         // when SfuRuntime first reads the revision after those checks.
-        let expected_authorization_revision = self
-            .authorization
-            .authorization_revision()
-            .ok_or_else(|| {
+        let expected_authorization_revision =
+            self.authorization.authorization_revision().ok_or_else(|| {
                 map_conference_error(&ConferenceError::Sfu(
                     ucr_sfu::SfuError::AuthorizationFenceUnavailable,
                 ))
