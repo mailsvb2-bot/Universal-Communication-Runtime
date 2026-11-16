@@ -815,7 +815,7 @@ mod tests {
                 &mut close_rx,
                 "session-a",
                 "offer-a",
-                |result| result.map_err(|_| crate::WebRtcProviderError::Internal),
+                |result| result.map_err(|()| crate::WebRtcProviderError::Internal),
             )
             .await
         });
@@ -851,7 +851,7 @@ mod tests {
                 &mut close_rx,
                 "session-a",
                 "offer-a",
-                |result| result.map_err(|_| crate::WebRtcProviderError::Internal),
+                |result| result.map_err(|()| crate::WebRtcProviderError::Internal),
             )
             .await,
             Ok(())
@@ -876,7 +876,7 @@ mod tests {
                 &mut close_rx,
                 "session-a",
                 "offer-current",
-                |result| result.map_err(|_| crate::WebRtcProviderError::Internal),
+                |result| result.map_err(|()| crate::WebRtcProviderError::Internal),
             )
             .await
         });
