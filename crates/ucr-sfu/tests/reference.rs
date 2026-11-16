@@ -986,11 +986,11 @@ fn prepared_batch_cannot_dispatch_after_source_permission_revocation() {
 
     authorization.revoked.store(true, Ordering::SeqCst);
     let sink = CaptureSink::default();
-    assert!(matches!(
+    assert_eq!(
         dispatch_validated_forward_batch(&runtime, &batch, &sink),
-        Err(SfuError::Authorization(error))
-            if error.code == CanonicalErrorCode::PermissionDenied
-    ));
+        Err(SfuError::AuthorizationFenceUnavailable),
+        "unrevisioned revocable authority must fail closed before sink acceptance"
+    );
     assert!(
         sink.forwarded().is_empty(),
         "no ciphertext after permission revoke"
@@ -1648,7 +1648,7 @@ fn bob_batch<A: AuthorizationEvaluator>(
 }
 
 #[test]
-fn auth_cache_skips_recheck_until_revoke_then_frames_do_not_pass() {
+fn auth_cache_never_skips_revision_fenced_recheck_and_revoke() {
     let fixture = build_fixture();
     let authorization = RevisionedRevocableAuthorization::default();
     let e2ee = PreparedGroupMediaE2eeCapabilities;
@@ -1662,10 +1662,9 @@ fn auth_cache_skips_recheck_until_revoke_then_frames_do_not_pass() {
     let after_first = authorization.checks.load(Ordering::SeqCst);
     dispatch_validated_forward_batch_cached(&runtime, &cache, &batch, &sink).expect("second");
     assert_eq!(cache.hits(), 1, "unchanged revision reuses the proof");
-    assert_eq!(
-        authorization.checks.load(Ordering::SeqCst),
-        after_first,
-        "cache hit performs no authorization call"
+    assert!(
+        authorization.checks.load(Ordering::SeqCst) > after_first,
+        "cache hits must never skip live authorization"
     );
     assert_eq!(sink.forwarded().len(), 2);
 

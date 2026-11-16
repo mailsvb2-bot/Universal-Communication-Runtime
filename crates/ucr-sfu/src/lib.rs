@@ -2080,8 +2080,9 @@ impl SfuAuthorizationCache {
     }
 }
 
-/// Same contract as [`dispatch_validated_forward_batch`], but skips the
-/// per-target authority re-check when `cache` proves nothing relevant changed.
+/// Same fail-closed delivery contract as [`dispatch_validated_forward_batch`].
+/// Cache entries are non-authoritative diagnostics and never skip the live
+/// revision-fenced authorization and recipient checks.
 ///
 /// # Errors
 /// Same as [`dispatch_validated_forward_batch`].
@@ -2114,8 +2115,8 @@ where
 
 /// Same as [`dispatch_validated_forward_batch_cached`] for embedders whose
 /// store type is not statically an [`AuthorizationEvaluator`]: the caller
-/// supplies the store's monotonic authorization revision. `None` bypasses
-/// the cache.
+/// supplies the store's monotonic authorization revision for cache bookkeeping.
+/// `None` disables bookkeeping, but cannot bypass the live authorization fence.
 ///
 /// # Errors
 /// Same as [`dispatch_validated_forward_batch`].
@@ -2136,55 +2137,34 @@ where
     E: GroupMediaE2eeCapabilityProvider,
     C: SfuCapabilityProvider,
 {
-    let header = &batch.envelope.frame.header;
-    let source = ScopedPrincipal {
-        scope: header.scope.clone(),
-        principal: header.source.clone(),
-    };
-    for (accepted, target) in batch.targets.iter().enumerate() {
-        // Read the revision BEFORE checking: a concurrent revoke then makes
-        // the stored revision stale rather than masking the revoke.
-        let revision = runtime
-            .authorization
-            .authorization_revision()
-            .zip(store_revision());
-        let key = SfuAuthorityKey {
-            target: target.clone(),
-            scope: header.scope.clone(),
-            call_id: header.call_id.clone(),
-            group_id: header.group_id.clone(),
-            source: header.source.clone(),
-            source_device_id: header.source_device_id.clone(),
-            negotiation_ref: header.negotiation_ref.clone(),
-            negotiation_generation: header.negotiation_generation,
-            crypto_epoch: header.crypto_epoch,
-            crypto_state_ref: header.crypto_state_ref.clone(),
-        };
-        let cached = revision.is_some_and(|revision| cache.lookup(revision, &key));
-        if !cached {
-            let current = runtime.prepare_forward_selected(
-                &source,
-                &header.source_device_id,
-                &batch.envelope,
-                std::slice::from_ref(&target.recipient),
-            )?;
-            if current.targets.as_slice() != std::slice::from_ref(target)
-                || current.envelope != batch.envelope
-            {
-                return Err(SfuError::SourceMismatch);
-            }
-            if let Some(revision) = revision {
+    // The cache may record a stable authority key, but a cache hit is never
+    // authorization to emit media. Source, recipient and revocation state must
+    // be checked by the same revision-fenced dispatcher used by uncached calls.
+    // An absent store revision disables only cache bookkeeping, not the fence.
+    let revision = runtime
+        .authorization
+        .authorization_revision()
+        .zip(store_revision());
+    let outcome = dispatch_validated_forward_batch(runtime, batch, sink)?;
+    if let Some(revision) = revision {
+        let header = &batch.envelope.frame.header;
+        for target in &batch.targets {
+            let key = SfuAuthorityKey {
+                target: target.clone(),
+                scope: header.scope.clone(),
+                call_id: header.call_id.clone(),
+                group_id: header.group_id.clone(),
+                source: header.source.clone(),
+                source_device_id: header.source_device_id.clone(),
+                negotiation_ref: header.negotiation_ref.clone(),
+                negotiation_generation: header.negotiation_generation,
+                crypto_epoch: header.crypto_epoch,
+                crypto_state_ref: header.crypto_state_ref.clone(),
+            };
+            if !cache.lookup(revision, &key) {
                 cache.remember(revision, key);
             }
         }
-        if let Err(error) = sink.forward_encrypted(target, &batch.envelope) {
-            return Err(SfuError::Sink {
-                accepted_before_failure: accepted,
-                error,
-            });
-        }
     }
-    Ok(SfuForwardOutcome {
-        accepted_recipients: batch.targets.len(),
-    })
+    Ok(outcome)
 }
