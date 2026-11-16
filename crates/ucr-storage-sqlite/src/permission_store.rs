@@ -194,10 +194,12 @@ impl AuthorizationEvaluator for SqliteLocalStore {
         if current != expected_revision {
             return Err(DurableStoreError::Conflict);
         }
+        // This transaction is a read-only writer lock. Roll it back on
+        // drop after the external handoff; a commit error must not turn an
+        // already accepted ciphertext into an ambiguous retry.
         action()?;
-        transaction
-            .commit()
-            .map_err(|error| map_sqlite_error(&error))
+        drop(transaction);
+        Ok(())
     }
 }
 
