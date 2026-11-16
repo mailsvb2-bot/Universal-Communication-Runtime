@@ -15,6 +15,9 @@ let executed = 0;
 const ctx = {
   busy: true,
   navigating: false,
+  accountScope: "tenant-account-a",
+  uiAuthGeneration: 4,
+  SessionSuperseded: class SessionSuperseded extends Error {},
   message: text => notices.push(text),
   handleMlsIntegrityError: () => false,
   Error,
@@ -34,4 +37,19 @@ ctx.navigating=false;
 await vm.runInContext("run",ctx)(op);
 assert.equal(executed,1);
 assert.equal(ctx.busy,false);
-console.log("PASS: blocked actions acknowledged and never executed twice");
+// A delayed request rejected after explicit Logout is no longer allowed to
+// paint the old account's diagnostic error into the new or anonymous UI.
+let rejectOld;
+const pending=vm.runInContext("run",ctx)(()=>new Promise((_resolve,reject)=>{
+  rejectOld=reject;
+}));
+assert.equal(ctx.busy,true);
+const noticesBeforeLogout=notices.length;
+ctx.accountScope=null;
+ctx.uiAuthGeneration++;
+rejectOld(new Error("HTTP 503: previous account"));
+await pending;
+assert.equal(ctx.busy,false);
+assert.equal(notices.length,noticesBeforeLogout,
+  "late old-account failure must not repaint after Logout");
+console.log("PASS: blocked actions acknowledged, no duplicates or stale post-Logout errors");
