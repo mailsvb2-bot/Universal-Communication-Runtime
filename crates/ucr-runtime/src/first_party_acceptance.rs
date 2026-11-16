@@ -1625,7 +1625,7 @@ async fn first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanl
         .into_inner();
     assert!(
         matches!(
-            subscribed.result,
+            subscribed.result.as_ref(),
             Some(pb::realtime_set_subscriptions_response::Result::Acknowledgement(_))
         ),
         "Bob must explicitly authorize the canonical encrypted receive path: {subscribed:?}"
