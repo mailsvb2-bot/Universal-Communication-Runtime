@@ -78,9 +78,7 @@ pub(super) fn create_v58_objects(transaction: &Transaction<'_>) -> Result<(), Du
         .map_err(|error| map_schema_change_error(&error))
 }
 
-pub(super) fn create_v59_objects(
-    transaction: &Transaction<'_>,
-) -> Result<(), DurableStoreError> {
+pub(super) fn create_v59_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     let mut sql = String::new();
     for table in AUTHORIZATION_TABLES_V59 {
         for (suffix, operation) in OPERATIONS {
