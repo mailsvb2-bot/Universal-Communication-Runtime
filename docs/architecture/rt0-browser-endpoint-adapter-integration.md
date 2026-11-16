@@ -701,3 +701,14 @@ precedes post-await shared-state finalization.
 corrupting a newer Join. It does not prove remote SFU closure, remote capture
 stop, remote network-buffer discard, or physical-device stop latency; those
 remain #336/#274 release gates.
+
+
+## PR #359: first-party endpoint MLS through live WebRTC loopback
+
+The acceptance test `first_party_direct_call_reaches_bob_over_live_webrtc_and_revokes_cleanly` now joins the previously separate first-party MLS/Join and live-WebRTC transport proofs in one repo-local scenario. It creates two independent `RTCPeerConnection` peers against the same `LiveWebRtcProvider` owned by `GrpcRealtimeService`; obtains each offer through the authenticated `RealtimeStartWebRtc` RPC; applies offer-bound answers; and sends an endpoint MLS-protected media envelope from A's actual E2EE DataChannel.
+
+The test consumes the provider's reassembled ingress frame using the same session-id/Call-id `active_claims_for_ingress` binding used by the runtime bridge, then calls the existing `GrpcRealtimeService::forward_authenticated_e2ee_media` path. That path rechecks the durable signed Join grant, canonical Device and accepted Call, then runs the canonical SFU validation/authorization-revision fence before the node-local provider sink sends ciphertext to B's DataChannel. B reassembles the received envelope and decrypts it with B's independently exported MLS epoch secret. The frame is bound to the derived media Call's persisted negotiation reference/generation and the canonical Alice Device signing key, not the parent contact Call or an untrusted test key.
+
+The same test revokes A's durable Join grant through a second SQLite connection while the Call remains active and asserts that the next media forward is rejected before another recipient sink acceptance. It then exercises the BFF Hangup path and requires both real provider sessions and both remote DataChannels to close before the terminal response is accepted.
+
+**Evidence boundary:** this is a local loopback WebRTC/DataChannel integration test, not a physical-device call. Both peers run in one test process and use host candidates only; the test payload is an encrypted media-frame fixture, not captured/encoded camera or microphone media. It does not execute the browser `/start.js` click path, browser WebCrypto/OS keystore, camera/microphone permission prompts, audio/video codecs or playback, public STUN/TURN, NAT traversal, mobile browsers, or physical remote capture-stop measurements. Exact-head CI must pass before even the loopback result is considered verified. This closes the repo-local first-party-Join-to-live-DataChannel integration gap but does **not** establish the first real one-click physical A↔B call or production readiness.
