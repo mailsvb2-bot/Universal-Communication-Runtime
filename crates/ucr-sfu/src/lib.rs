@@ -1102,9 +1102,14 @@ where
         let expected_revision =
             expected_revision.ok_or(SfuError::AuthorizationFenceUnavailable)?;
         let mut sink_result = None;
+        let mut sink_invoked = false;
         runtime
             .authorization
             .with_authorization_revision_fence(expected_revision, &mut || {
+                if sink_invoked {
+                    return Err(DurableStoreError::Internal);
+                }
+                sink_invoked = true;
                 sink_result = Some(sink.forward_encrypted(target, &batch.envelope));
                 Ok(())
             })
