@@ -4,7 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -229,6 +229,31 @@ where
     }
 }
 
+async fn wait_for_buffered_amount_zero<F, Fut>(
+    mut buffered_amount: F,
+    deadline: Instant,
+) -> Result<(), crate::WebRtcProviderError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = usize>,
+{
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?;
+        let buffered = tokio::time::timeout(remaining, buffered_amount())
+            .await
+            .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?;
+        if buffered == 0 {
+            return Ok(());
+        }
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(crate::WebRtcProviderError::TemporarilyUnavailable)?;
+        tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+    }
+}
+
 impl LiveWebRtcE2eeChannel {
     pub(crate) async fn send(
         &mut self,
@@ -280,6 +305,23 @@ impl LiveWebRtcE2eeChannel {
                 |result| result.map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable),
             )
             .await?;
+        }
+        Ok(())
+    }
+
+    /// Waits until every ciphertext chunk already accepted by either DataChannel
+    /// has left its local send buffer. Close acknowledgement must not race a
+    /// frame that was accepted before the cancellation signal.
+    ///
+    /// # Errors
+    /// Returns a bounded timeout when an accepted ciphertext remains buffered.
+    pub(crate) async fn drain_before_close(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), crate::WebRtcProviderError> {
+        wait_for_buffered_amount_zero(|| self.channel.buffered_amount(), deadline).await?;
+        if let Some(unordered) = &self.unordered {
+            wait_for_buffered_amount_zero(|| unordered.channel.buffered_amount(), deadline).await?;
         }
         Ok(())
     }
@@ -725,6 +767,35 @@ mod tests {
 
     fn id(value: &str) -> OpaqueId {
         OpaqueId::new(value).expect("id")
+    }
+
+    #[tokio::test]
+    async fn datachannel_drain_waits_for_accepted_ciphertext_before_close_ack() {
+        let buffered = Arc::new(std::sync::atomic::AtomicUsize::new(2));
+        let observed = Arc::clone(&buffered);
+        let task = tokio::spawn(async move {
+            wait_for_buffered_amount_zero(
+                || std::future::ready(observed.load(Ordering::Acquire)),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        buffered.store(0, Ordering::Release);
+        assert_eq!(task.await.expect("drain task"), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn datachannel_drain_fails_closed_when_ciphertext_never_leaves_buffer() {
+        let result = wait_for_buffered_amount_zero(
+            || std::future::ready(1),
+            Instant::now() + Duration::from_millis(15),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(crate::WebRtcProviderError::TemporarilyUnavailable)
+        );
     }
 
     #[tokio::test]
