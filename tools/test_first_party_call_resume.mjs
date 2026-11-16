@@ -688,4 +688,50 @@ assert.match(source,/if \(!active\) await restoreActiveCall\(user\);/);
 assert.match(source,/if \(fresh\.state === "terminated"\) \{\s*forgetActiveCall\(inspectedLocator\);/);
 assert.match(source,/forgetBinding\(\);\s*forgetActiveCall\(\);\s*plClearAuthenticatedView\(\);/);
 assert.doesNotMatch(snippet,/calls\.join\(/,"untrusted locator cannot mint a Join");
-console.log("PASS: canonical Call resume is scope-fenced, inspected, and cleared on terminal/denied state");
+// A stale same-tab Direct Call marker plus a separately signed grant must
+// NEVER trigger automatic camera/microphone capture. Match the exact derived
+// media Call through the canonical authenticated BFF before join().
+const handoffStart=mediaPage.indexOf("async function verifyFirstPartyAutoJoinHandoff(");
+const handoffEnd=mediaPage.indexOf('try{\n  const params=new URLSearchParams(location.hash.slice(1));',handoffStart);
+assert.ok(handoffStart>=0&&handoffEnd>handoffStart,"canonical pre-auto-Join binding gate missing");
+const handoffCode=mediaPage.slice(handoffStart,handoffEnd);
+const grant={call_id:"fp-m-matched",tenant_id:"tenant-a",namespace_id:null,
+  participant_id:"alice",device_id:"device-a",expires:Date.now()+60000};
+let descriptorCalls=0,hostCalls=0;
+const canonicalHandoffHost={
+  async resumeAuthenticatedDevice(){hostCalls++;return user;},
+  async getDirectCall(auth,id){
+    assert.equal(auth.participantId,"alice");assert.equal(id,"fp-v-12345678-1234-1234-1234-1234567890ab");
+    return {state:"active",revision:2};
+  },
+  async describeAcceptedCallMls(auth,request){
+    descriptorCalls++;
+    assert.equal(auth.deviceId,"device-a");
+    assert.equal(request.callId,"fp-v-12345678-1234-1234-1234-1234567890ab");
+    assert.equal(request.expectedRevision,2);
+    return {mediaCallId:"fp-m-matched",deviceId:"device-a"};
+  },
+};
+let hint="fp-v-12345678-1234-1234-1234-1234567890ab";
+const handoffContext={
+  claims:grant,signedGrantRetired:false,
+  sessionStorage:{getItem:()=>hint},
+  firstPartyCanonicalHttpHost:null,
+  installFirstPartyDeviceAuthority:async()=>{
+    handoffContext.firstPartyCanonicalHttpHost=canonicalHandoffHost;
+  },
+  Date,
+};
+runInNewContext(handoffCode+"\nthis.verifyHandoff=verifyFirstPartyAutoJoinHandoff;",handoffContext);
+await handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",grant);
+assert.equal(descriptorCalls,1);
+assert.equal(hostCalls,1);
+await assert.rejects(handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",
+  {...grant,call_id:"fp-m-unrelated"}),/binding mismatch/);
+hint="fp-v-other";
+await assert.rejects(handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",grant),/binding mismatch/);
+hint="fp-v-12345678-1234-1234-1234-1234567890ab";
+handoffContext.signedGrantRetired=true;
+await assert.rejects(handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",grant),/binding mismatch/);
+assert.match(mediaPage,/verifyFirstPartyAutoJoinHandoff\(directCall,handoffClaims\)\.then\(\(\)=>\{/);
+console.log("PASS: canonical Call resume, ambiguous acceptance and exact pre-auto-Join media binding");
