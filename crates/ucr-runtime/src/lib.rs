@@ -2479,6 +2479,9 @@ impl ProductionRuntime {
         };
         let public_and_first_party =
             async move { tokio::try_join!(public_and_operator, first_party_listener).map(|_| ()) };
+        // Keep the composed public/first-party listener future off the stack: the
+        // first-party route tree makes this future large even before SFU is enabled.
+        let public_and_first_party = Box::pin(public_and_first_party);
         let server_result = match (sfu_node_media_config, sfu_node_media_service) {
             (Some(config), Some(service)) => tokio::try_join!(
                 public_and_first_party,
