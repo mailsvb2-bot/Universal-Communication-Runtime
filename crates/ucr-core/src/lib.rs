@@ -252,8 +252,8 @@ pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
     ///
     /// Implementations MUST hold the same transaction/lock used by every writer
     /// that can change an authorization outcome for the entire callback. A
-    /// revision mismatch returns `Conflict` without invoking the callback.
-    /// The callback MUST be bounded and MUST NOT re-enter this authorization
+    /// revision mismatch returns `Conflict` without invoking the callback; a
+    /// matching revision invokes it exactly once. The callback MUST be bounded and MUST NOT re-enter this authorization
     /// store. Implementations without this atomic boundary fail closed.
     ///
     /// # Errors
