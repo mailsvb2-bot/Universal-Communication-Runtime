@@ -61,3 +61,22 @@ far-behind sequence resets; risky feature flags remain default **off**.
 
 No new default-on flags. `ucrSoftNetworkRecovery`, unordered DC v2,
 SFU cache and loss/RTT BWE remain off.
+
+## Reconcile against main `435f1c4` after #361
+
+The four reviewed archive patches were reconciled into existing PR #362.
+`metrics_baseline.json` was not modified; no new feature flags.
+MLS/Device admission, one-time grant retirement, anti-replay, and E2EE
+transport remain canonical and unchanged. These are client recovery,
+polling and diagnostic adjustments only.
+
+| File | Change | Reason |
+|---|---|---|
+| `crates/ucr-realtime-web/static/client.html` | bounded backoff, first-party recovery, Join status and error classification | Avoid up to ~170 MLS admission retries per phone, recover without replaying a consumed grant, distinguish ICE and native browser failures |
+| `tools/test_first_party_peer_join_race.mjs` | simulated 60-second backoff and late peer tests | Verify bounded load and expiry fence |
+| `tools/test_first_party_media_recovery.mjs` | revoked first-party vs conference behavior tests | Verify canonical /start recovery retains retired grant |
+| `tools/test_browser_network_failure_categories.mjs` | native WebRTC error cases | Keep transport and Device/MLS failure categories distinct |
+
+Real two-device E2EE audio/video, TURN and production Room API health
+are not established by these source-level tests; production deployment
+is a separate verification gate.
