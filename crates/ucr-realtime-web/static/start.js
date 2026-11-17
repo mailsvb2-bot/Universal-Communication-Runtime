@@ -1668,14 +1668,32 @@ async function initialize() {
   }
   // The single visibility listener is attached at module scope. Attaching
   // one per initialize() caused duplicate refreshes after reconnect/re-login.
-  let pollTick = 0, pollFailures = 0;
+  let pollTick = 0, pollFailures = 0, activeCallFastPollSince = 0;
+  // Keep ordinary incoming polling at ~2.4 seconds. After canonical ACCEPT,
+  // however, each participant advances the same endpoint-owned MLS handshake
+  // through several sequential inspect/prepare steps. Waiting 2.5 seconds
+  // between steps accounts for much of the observed 30-second call setup.
+  // Briefly inspect the ACTIVE Call at 800 ms while media is not yet open.
+  // This is only a scheduling optimization: it neither creates grants nor
+  // changes signed Join, trusted Device, consent, MLS or E2EE authority.
   timer = setInterval(() => {
     // Poll while the page is hidden, too: a remote peer must be able to ring
     // without the recipient watching the foreground tab. Browser suspension
     // still requires a separate platform push delivery mechanism.
     if (busy || navigating) return;
+    const activePending = active?.call?.state === "active" &&
+      sessionStorage.getItem("ucrConferenceMediaActive") !== "1";
+    if (activePending && !activeCallFastPollSince)
+      activeCallFastPollSince = Date.now();
+    if (!activePending) activeCallFastPollSince = 0;
+    const fast = activePending && pollFailures === 0 &&
+      Date.now() - activeCallFastPollSince < 20000;
     pollTick += 1;
-    const every = Math.min(8, (document.hidden ? 4 : 1) * (1 << Math.min(pollFailures, 3)));
+    // Normal foreground 3*800=2400 ms; hidden 12*800=9600 ms.
+    // An ACTIVE Call gets a bounded short window of fast inspection, even
+    // when its tab is hidden. Errors immediately restore backoff.
+    const every = fast ? 1 :
+      Math.min(24, (document.hidden ? 12 : 3) * (1 << Math.min(pollFailures, 3)));
     if (pollTick % every !== 0) return;
     void refresh().then(() => { pollFailures = 0; }, err => {
       pollFailures += 1;
@@ -1686,7 +1704,7 @@ async function initialize() {
       message("Устройство авторизовано; ошибка проверки вызовов: " +
         (err instanceof Error ? err.message : String(err)));
     });
-  },2500);
+  },800);
   startIncomingCallWake();
 }
 // Item C6: optional incoming-call wake-up (server flag
