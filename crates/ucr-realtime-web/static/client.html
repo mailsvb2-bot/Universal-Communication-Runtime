@@ -1833,8 +1833,8 @@ async function activateE2eeAdapter(){
   if(e2eeAdapterStarted&&e2eeAdapter()){
     requireCompatibleE2eeAdapter(e2eeAdapter());
     e2eeAdapterReady=true;
-    ucrMediaActivationStage="E2EE_ACTIVE";
     cancelMediaStartupWatchdog(sessionGeneration,sessionToken);
+    ucrMediaActivationStage="E2EE_ACTIVE";
     webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
     startAdaptiveMediaMonitoring();
     syncReceiveSubscriptions().catch(e=>{if(sessionActive)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
@@ -1918,9 +1918,9 @@ async function activateE2eeAdapter(){
   const persisted=await persistEndpointState(adapter);
   if(!isCurrent())return;
   e2eeAdapterReady=true;
-  ucrMediaActivationStage="E2EE_ACTIVE";
   e2eeAdapterStarted=true;
   cancelMediaStartupWatchdog(sessionGeneration,sessionToken);
+  ucrMediaActivationStage="E2EE_ACTIVE";
   ucrMediaFailureCount=0;ucrMediaFailureWindowStart=Date.now();ucrMediaFailureStopped=false;
   ucrMarkConferenceMediaActive(true);
   ui.state.textContent="Connected"; // only authenticated E2EE media is a connected call
