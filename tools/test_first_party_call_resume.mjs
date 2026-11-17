@@ -842,10 +842,10 @@ console.log("PASS: manual first-party Join rechecks authenticated Call media con
 
 // Prewarming public WASM must overlap network acceptance and NEVER authorize
 // Device trust, publish an MLS commit or block the Call owner request.
-const dialStart=source.indexOf("async function dial(contact,media) {");
-const dialEnd=source.indexOf("// Incoming alerts reflect",dialStart);
-assert.ok(dialStart>=0&&dialEnd>dialStart);
-const dialSource=source.slice(dialStart,dialEnd);
+const warmDialStart=source.indexOf("async function dial(contact,media) {");
+const warmDialEnd=source.indexOf("// Incoming alerts reflect",warmDialStart);
+assert.ok(warmDialStart>=0&&warmDialEnd>warmDialStart);
+const dialSource=source.slice(warmDialStart,warmDialEnd);
 assert.match(dialSource,/void mlsWasm\(\)\.catch\(\(\)=>\{\}\)/);
 assert.ok(dialSource.indexOf("void mlsWasm().catch")<dialSource.indexOf("await calls.start("));
 const acceptStart=source.indexOf('btn("Принять",async () => {');
