@@ -4635,7 +4635,14 @@ mod tests {
         assert!(CLIENT_HTML.contains("token=params.get(\"ucr_join\")"));
         assert!(CLIENT_HTML.contains("window.history.replaceState("));
         assert!(CLIENT_HTML.contains("location.pathname+location.search"));
-        assert!(CLIENT_HTML.contains("claims=readGrant(token);if(Date.now()>=claims.expires)"));
+        // Grant decoding, camera-consent reset and expiry check are separate
+        // canonical steps. Do not freeze their whitespace or statement order.
+        assert!(CLIENT_HTML.contains("claims=readGrant(token);firstPartyAcceptedMediaKind=null;"));
+        assert!(
+            CLIENT_HTML.contains(
+                "if(Date.now()>=claims.expires)throw new Error(\"Join grant has expired\")"
+            )
+        );
 
         assert!(CLIENT_HTML.contains("Independent privacy relay is not configured"));
         assert!(CLIENT_HTML.contains("adapter===e2eeManagedAdapter"));
