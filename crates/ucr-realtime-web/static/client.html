@@ -574,6 +574,10 @@ const ui={
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false,adaptiveMediaGeneration=0;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
+// The signed media grant alone has no audio/video kind. The authoritative
+// accepted Direct Call provides it after authenticated, revision-fenced
+// inspection. Until then, first-party camera capture fails closed.
+let firstPartyAcceptedMediaKind=null;
 let localMediaPromise=null,earlyLocalCapture=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
@@ -1694,6 +1698,12 @@ function endpointMediaSources(){
   return {stream:localStream,cameraStream:localStream,screenStream};
 }
 function policyAllows(kind){
+  // A Direct Call explicitly accepted as AUDIO never permits camera capture,
+  // even if a generic conference policy would allow video and the saved local
+  // preference says video=true. This is checked before getUserMedia and on
+  // every subsequent camera toggle/source replacement.
+  if(kind==="camera"&&claims?.call_id?.startsWith("fp-m-")&&
+     firstPartyAcceptedMediaKind!=="video")return false;
   if(!mediaPolicy)return true;
   if(kind==="audio")return mediaPolicy.publish_audio_allowed===true;
   if(kind==="camera")return mediaPolicy.publish_camera_allowed===true;
@@ -4524,6 +4534,11 @@ async function verifyFirstPartyAutoJoinHandoff(directCall,grant){
      sessionStorage.getItem("ucrFirstPartyDirectCall")!==directCall||
      claims!==grant||signedGrantRetired||Date.now()>=grant.expires)
     throw new Error("First-party auto-Join media Call binding mismatch");
+  if(!["audio","video"].includes(activeCall.media))
+    throw new Error("Canonical Direct Call media kind unavailable");
+  // Verified against the active canonical Call, same Device, revision and
+  // exactly the signed media Call; NEVER infer video from user preferences.
+  firstPartyAcceptedMediaKind=activeCall.media;
 }
 try{
   const params=new URLSearchParams(location.hash.slice(1));applyBrandingFromFragment(params);token=params.get("ucr_join")||"";
@@ -4532,7 +4547,8 @@ try{
   // click's MediaStream is the call stream. A pasted grant still joins below.
   if(!(!token&&typeof beginLocalRoomLobby==="function"&&beginLocalRoomLobby())){
   if(!token)throw new Error("Missing #ucr_join grant");
-  claims=readGrant(token);if(Date.now()>=claims.expires)throw new Error("Join grant has expired");
+  claims=readGrant(token);firstPartyAcceptedMediaKind=null;
+  if(Date.now()>=claims.expires)throw new Error("Join grant has expired");
   if(window.history&&typeof window.history.replaceState==="function"){
     window.history.replaceState(window.history.state,"",location.pathname+location.search);
   }
