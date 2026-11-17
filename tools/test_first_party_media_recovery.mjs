@@ -79,7 +79,7 @@ const reconnectEnd=html.indexOf("function scheduleWebRtcRetryAfterRestart(){",re
 assert.ok(reconnectStart>=0&&reconnectEnd>reconnectStart);
 const reconnect=html.slice(reconnectStart,reconnectEnd);
 assert.match(reconnect,/claims\?\.call_id\?\.startsWith\("fp-m-"\)&&\[401,403\]\.includes\(e\?\.status\)/);
-assert.match(reconnect,/await endUnverifiedMedia\(generation,"Protected Call media authorization rejected\."\)/);
+assert.match(reconnect,/await retireRejectedFirstPartyMedia\(generation\)/);
 assert.match(reconnect,/return scheduleWebRtcRetryAfterRestart\(\)/,
   "retry must remain for transient non-authorization transport failures");
 const activationStart=html.indexOf("async function activateAdmittedMedia(){");
@@ -87,6 +87,36 @@ const activationEnd=html.indexOf("async function applyAdmissionState(state){",ac
 assert.ok(activationStart>=0&&activationEnd>activationStart);
 const activation=html.slice(activationStart,activationEnd);
 assert.match(activation,/claims\?\.call_id\?\.startsWith\("fp-m-"\)&&\[401,403\]\.includes\(e\?\.status\)/);
-assert.match(activation,/await endUnverifiedMedia\(generation,"Protected Call media authorization rejected\."\)/);
+assert.match(activation,/await retireRejectedFirstPartyMedia\(generation\)/);
 assert.match(html,/localMediaPolicy:\{[\s\S]*?acceptedCallMedia:[\s\S]*?microphoneAllowed:policyAllows\("audio"\),[\s\S]*?cameraAllowed:policyAllows\("camera"\),/);
 console.log("PASS: terminal first-party media 401/403 retires grant, while transient transport retry and canonical video consent stay guarded");
+
+// Regression: a refused media grant must NOT terminate the live parent Call.
+// Explicit user Hangup is the only path that can stop that Direct Call here.
+const rejectedStart=html.indexOf("async function retireRejectedFirstPartyMedia(generation){");
+const rejectedEnd=html.indexOf("async function hangupFirstPartyDirectCall(callId){",rejectedStart);
+assert.ok(rejectedStart>=0&&rejectedEnd>rejectedStart);
+const rejected=html.slice(rejectedStart,rejectedEnd);
+assert.match(rejected,/await leave\(\{retireGrant:false\}\)/);
+assert.doesNotMatch(rejected,/hangupFirstPartyDirectCall\(/);
+let stopCount=0,hangupCount=0,recoveryCount=0;
+const rejectedContext={
+ sessionActive:true,sessionLifecycleGeneration:12,signedGrantRetired:false,
+ leave:async({retireGrant})=>{
+   assert.equal(retireGrant,false,"media rejection must preserve parent Call");
+   rejectedContext.sessionActive=false;
+   rejectedContext.sessionLifecycleGeneration++;
+   stopCount++;
+ },
+ ucrShowFreshFirstPartyAdmission:()=>{recoveryCount++},
+ hangupFirstPartyDirectCall:()=>{hangupCount++},
+};
+vm.runInNewContext(rejected+"\nthis.retire=retireRejectedFirstPartyMedia;",rejectedContext);
+await rejectedContext.retire(12);
+assert.equal(stopCount,1);
+assert.equal(hangupCount,0);
+assert.equal(recoveryCount,1);
+assert.equal(rejectedContext.signedGrantRetired,true);
+await rejectedContext.retire(12);
+assert.equal(stopCount,1,"old generation cannot end a new Call");
+console.log("PASS: rejected WebRTC media retires one-time grant without hanging up parent Call");
