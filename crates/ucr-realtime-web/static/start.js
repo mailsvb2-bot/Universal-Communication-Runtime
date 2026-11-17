@@ -1944,7 +1944,22 @@ document.addEventListener("visibilitychange",()=>{
       message("Не удалось обновить состояние звонков. Повторите проверку входа.");
   });
 });
-window.addEventListener("pagehide", () => {clearInterval(timer);stopIncomingCallWake();});
+// A back/forward-cache restore does not re-execute this module. Reestablish
+// both canonical authenticated polling paths once, with a fresh Device check.
+window.addEventListener("pagehide", () => {
+  clearInterval(timer);
+  timer=null;
+  stopIncomingCallWake();
+});
+window.addEventListener("pageshow", event => {
+  if(!event.persisted || !accountScope || navigating || busy || logoutInFlight || timer)return;
+  busy=true;
+  void initialize().catch(error => {
+    if(error instanceof SessionSuperseded)return;
+    authDiagnostic("bfcache_restore","failed",error);
+    message("После возврата на страницу проверка входящих звонков не удалась. Повторите проверку входа.");
+  }).finally(()=>{busy=false;});
+});
 function explainEntryFailure(error) {
   // A committed signup/recovery can fail to obtain a session under capacity.
   // Hide stale identity data, but retain the one-time recovery credential.
