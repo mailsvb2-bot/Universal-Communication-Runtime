@@ -166,3 +166,64 @@ test("ambiguous recipient acceptance remains untrusted until canonical active in
   assert.equal(hints.has(hintKey),false,
     "an unconfirmed ringing call must not lock the UI indefinitely");
 });
+
+test("logout completion cannot repaint a newer session, and server logout is awaited",async()=>{
+  const code=extract("let logoutInFlight=false;","// Mobile tabs become hidden");
+  let handler=null,finishLogout,rejectLogout;
+  const request=new Promise((resolve,reject)=>{finishLogout=resolve;rejectLogout=reject});
+  const messages=[],who={textContent:""};
+  const scope={
+    accountScope:"old-session",uiAuthGeneration:5,
+    el:id=>id==="logout"?{addEventListener:(name,cb)=>{
+      assert.equal(name,"click");handler=cb;
+    }}:id==="who"?who:assert.fail(id),
+    forgetBinding(){},forgetActiveCall(){},
+    plClearAuthenticatedView(){scope.accountScope=null;scope.uiAuthGeneration++},
+    host:{logout:()=>request},message:x=>messages.push(x),
+  };
+  vm.runInNewContext(code+"\nthis.logoutBusy=()=>logoutInFlight;",scope);
+  handler();
+  assert.equal(scope.logoutBusy(),true);
+  assert.equal(scope.accountScope,null);
+  // A new login in a different tab or another UI generation must win.
+  scope.accountScope="new-session";scope.uiAuthGeneration++;
+  finishLogout();
+  for(let i=0;i<8;i++)await Promise.resolve();
+  assert.equal(scope.logoutBusy(),false);
+  assert.notEqual(who.textContent,"Вы вышли из учётной записи.");
+  assert.equal(messages.length,0,"old logout completion must not repaint new identity");
+});
+
+test("long-poll incoming wake is cancelled on logout, pagehide and a replacement Device",async()=>{
+  const code=extract("let incomingWakeGeneration = 0, incomingWakeController = null;",
+                     'el("device-login").addEventListener');
+  const signals=[],requests=[];
+  const ctx={
+    accountScope:"account-one",uiAuthGeneration:3,busy:false,navigating:false,
+    AbortController,
+    fetch:(_url,options)=>{
+      requests.push(_url);signals.push(options.signal);
+      return new Promise((resolve,reject)=>{
+        options.signal.addEventListener("abort",()=>reject(
+          Object.assign(new Error("aborted"),{name:"AbortError"})),{once:true});
+      });
+    },
+    refresh:async()=>{},
+    authDiagnostic(){},
+    setTimeout:()=>assert.fail("aborted long poll must not start retry timer"),
+  };
+  vm.runInNewContext(code+"\nthis.start=startIncomingCallWake;this.stop=stopIncomingCallWake;",ctx);
+  ctx.start();
+  assert.equal(requests.length,1);
+  assert.equal(signals[0].aborted,false);
+  ctx.start();
+  assert.equal(signals[0].aborted,true,"new Device wake must retire previous fetch");
+  assert.equal(requests.length,2);
+  ctx.accountScope=null;ctx.uiAuthGeneration++;
+  ctx.stop();
+  assert.equal(signals[1].aborted,true,"logout must promptly cancel pending fetch");
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(requests.length,2,"aborted wake cannot restart a prior Device poll");
+  assert.match(source,/function plClearAuthenticatedView\([^)]*\)\{[\s\S]*?stopIncomingCallWake\(\);/);
+  assert.match(source,/window\.addEventListener\("pagehide",[^\n]*stopIncomingCallWake\(\)/);
+});
