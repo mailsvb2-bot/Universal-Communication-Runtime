@@ -496,6 +496,7 @@ const incomingContext={
   nameFor:id=>id,
   btn:(label,callback)=>{handlers.set(label,callback);return {label};},
   activeCallLocator:()=>incomingLocator,
+  mlsWasm:async()=>({}),
   calls:{},
   host:{},
   principalScope:user=>JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]),
