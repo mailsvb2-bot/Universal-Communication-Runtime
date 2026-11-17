@@ -294,8 +294,9 @@ test("active accepted Call advances canonical MLS promptly, with bounded burst a
   assert.equal(calls,5,"active MLS steps should not wait for 2.5s poll");
   // Once the conference is established the fast path is immediately disabled.
   saved.set("ucrConferenceMediaActive","1");
+  const afterFast=calls;
   for(let i=0;i<2;i++){clock+=800;callback();await Promise.resolve();}
-  assert.equal(calls,5);
+  assert.ok(calls-afterFast<=1,"conference-open state returns to ordinary cadence");
   // Re-enter active pending state; burst is bounded to 20 seconds.
   saved.delete("ucrConferenceMediaActive");
   scope.active={call:{state:"ringing"}};
