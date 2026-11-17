@@ -69,10 +69,12 @@ test("consumer CTA label distinguishes no contacts from populated contact list",
  const labels={};
  let populated=false;
  const classes={toggle(){},contains:x=>x==="pl-signed-in"};
- const quickName={placeholder:""},quickAction={textContent:""},quickHint={textContent:""};
+ const quickName={placeholder:"",value:"Мой ноутбук"},quickAction={textContent:""},quickHint={textContent:""};
+ const visibleAlias={textContent:"",dataset:{}};
  const scope={
   knownContacts:[],
   document:{body:{classList:classes},documentElement:{lang:"ru"},querySelectorAll:()=>[],querySelector:()=>populated?{}:null},
+  plUI:id=>id==="pl-friendly-identity"?visibleAlias:null,
   plQuickName:quickName,plQuickAction:quickAction,plQuickHint:quickHint,
   plQuickPanel:{classList:{toggle(){}}},plUiPreferredButtons:()=>{},
   Object
@@ -82,6 +84,11 @@ test("consumer CTA label distinguishes no contacts from populated contact list",
  assert.equal(quickAction.textContent,"Пригласить друга");
  populated=true;scope.knownContacts=[{id:'one'}];scope.sync();
  assert.equal(quickAction.textContent,"Выбрать, кому позвонить");
+ assert.match(visibleAlias.textContent,/Этот браузер: Мой ноутбук/);
+ assert.equal(visibleAlias.dataset.plOriginalText,visibleAlias.textContent);
+ quickName.value="Второе устройство";
+ scope.sync();
+ assert.match(visibleAlias.textContent,/Второе устройство/);
 });
 
 test("pending share result cannot reveal the previous account invitation after logout",async()=>{

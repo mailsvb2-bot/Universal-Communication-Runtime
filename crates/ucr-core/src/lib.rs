@@ -286,6 +286,24 @@ pub trait CallPermissionGrantStore: StorageProvider {
         permissions: &[&str],
     ) -> Result<(), DurableStoreError>;
 
+    /// Atomically replaces the *complete* permission set of this Call.
+    ///
+    /// The canonical first-party media owner uses this when an audio-only
+    /// Direct Call must remove historic `VIDEO_SEND`/`VIDEO_RECEIVE` grants.
+    /// It validates live Call membership before replacing: any failure rolls
+    /// back and cannot erase rights of another Call or mint tenant-wide ones.
+    ///
+    /// # Errors
+    /// Returns `Conflict` unless the Call and all grantees remain live;
+    /// returns a durable storage error if the atomic replacement fails.
+    fn replace_call_permissions(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        grantees: &[PrincipalRef],
+        permissions: &[&str],
+    ) -> Result<(), DurableStoreError>;
+
     /// Removes every grant bound to `call_id`. Idempotent.
     ///
     /// # Errors

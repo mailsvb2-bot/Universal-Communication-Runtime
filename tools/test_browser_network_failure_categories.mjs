@@ -27,5 +27,35 @@ assert.equal(classify("mls_context_rejected"),"MLS_ADMISSION_UNAVAILABLE");
 assert.equal(classify("device authorization failed"),"MEDIA_ACTIVATION_FAILURE");
 assert.equal(classify("peer waiting for MLS welcome"),"MLS_ADMISSION_UNAVAILABLE");
 assert.equal(classify("ICE candidate connection failed"),"WEBRTC_ICE_FAILURE");
+assert.equal(classify("Peer connection is closed"),"WEBRTC_CONNECTION_FAILURE");
+assert.equal(classify("Failed to execute 'addTransceiver' on 'RTCPeerConnection': The RTCPeerConnection's signalingState is 'closed'."),"WEBRTC_CONNECTION_FAILURE");
+assert.equal(classify("iceConnectionState failed"),"WEBRTC_ICE_FAILURE");
+assert.equal(classify("iceGatheringState timeout"),"WEBRTC_ICE_FAILURE");
+assert.equal(classify("Device signer is no longer trusted"),"DEVICE_TRUST_REJECTED");
 assert.equal(classify("microphone notallowed"),"DEVICE_PERMISSION_DENIED");
 console.log("PASS: protocol-stage failures distinguished without inferring relay path");
+
+const server=readFileSync("crates/ucr-realtime-web/src/main.rs","utf8");
+const routesStart=html.indexOf("const ucrDiagnosticAllowedPaths=new Set([");
+const routesEnd=html.indexOf("]);",routesStart);
+assert.ok(routesStart>=0&&routesEnd>routesStart,"diagnostic routes must be declared");
+const routesText=html.slice(routesStart,routesEnd);
+const paths=[...routesText.matchAll(/"(\/v1\/realtime\/[a-z/-]+)"/g)].map(match=>match[1]);
+assert.equal(new Set(paths).size,paths.length,"diagnostic route list must not duplicate endpoints");
+for(const path of paths){
+ assert.ok(server.includes('"'+path+'"'),
+   "HTTP diagnostic route is not implemented by the canonical Rust gateway: "+path);
+}
+for(const required of [
+ "/v1/realtime/mls-context",
+ "/v1/realtime/webrtc/start",
+ "/v1/realtime/webrtc/remote-description",
+ "/v1/realtime/webrtc/ice",
+ "/v1/realtime/webrtc/restart",
+]){
+ assert.ok(paths.includes(required),"actual media setup failures must be observable: "+required);
+}
+for(const obsolete of ["/v1/realtime/webrtc/offer","/v1/realtime/webrtc/answer"]){
+ assert.ok(!paths.includes(obsolete),"obsolete route must never displace canonical diagnostics");
+}
+console.log("PASS: browser diagnostics agree with implemented canonical Rust realtime HTTP routes");

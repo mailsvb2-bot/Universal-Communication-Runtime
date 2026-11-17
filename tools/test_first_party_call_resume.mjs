@@ -699,11 +699,12 @@ const handoffCode=mediaPage.slice(handoffStart,handoffEnd);
 const grant={call_id:"fp-m-matched",tenant_id:"tenant-a",namespace_id:null,
   participant_id:"alice",device_id:"device-a",expires:Date.now()+60000};
 let descriptorCalls=0,hostCalls=0;
+let canonicalMediaMode="video";
 const canonicalHandoffHost={
   async resumeAuthenticatedDevice(){hostCalls++;return user;},
   async getDirectCall(auth,id){
     assert.equal(auth.participantId,"alice");assert.equal(id,"fp-v-12345678-1234-1234-1234-1234567890ab");
-    return {state:"active",revision:2};
+    return {state:"active",revision:2,media:canonicalMediaMode};
   },
   async describeAcceptedCallMls(auth,request){
     descriptorCalls++;
@@ -715,7 +716,7 @@ const canonicalHandoffHost={
 };
 let hint="fp-v-12345678-1234-1234-1234-1234567890ab";
 const handoffContext={
-  claims:grant,signedGrantRetired:false,
+  claims:grant,signedGrantRetired:false,firstPartyAcceptedMediaKind:null,
   sessionStorage:{getItem:()=>hint},
   firstPartyCanonicalHttpHost:null,
   installFirstPartyDeviceAuthority:async()=>{
@@ -727,6 +728,18 @@ runInNewContext(handoffCode+"\nthis.verifyHandoff=verifyFirstPartyAutoJoinHandof
 await handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",grant);
 assert.equal(descriptorCalls,1);
 assert.equal(hostCalls,1);
+assert.equal(handoffContext.firstPartyAcceptedMediaKind,"video");
+canonicalMediaMode="audio";
+handoffContext.firstPartyAcceptedMediaKind=null;
+await handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",grant);
+assert.equal(handoffContext.firstPartyAcceptedMediaKind,"audio",
+  "verified audio Call must not inherit video permission from browser settings");
+canonicalMediaMode="invalid";
+handoffContext.firstPartyAcceptedMediaKind=null;
+await assert.rejects(handoffContext.verifyHandoff(
+  "fp-v-12345678-1234-1234-1234-1234567890ab",grant),/media kind unavailable/);
+assert.equal(handoffContext.firstPartyAcceptedMediaKind,null);
+canonicalMediaMode="video";
 await assert.rejects(handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",
   {...grant,call_id:"fp-m-unrelated"}),/binding mismatch/);
 hint="fp-v-other";
@@ -735,6 +748,26 @@ hint="fp-v-12345678-1234-1234-1234-1234567890ab";
 handoffContext.signedGrantRetired=true;
 await assert.rejects(handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",grant),/binding mismatch/);
 assert.match(mediaPage,/verifyFirstPartyAutoJoinHandoff\(directCall,handoffClaims\)\.then\(\(\)=>\{/);
+const policyStart=mediaPage.indexOf("function policyAllows(kind){");
+const policyEnd=mediaPage.indexOf("function screenShareSupported(){",policyStart);
+assert.ok(policyStart>=0&&policyEnd>policyStart);
+const policyScope={
+  claims:grant,firstPartyAcceptedMediaKind:null,
+  mediaPolicy:{publish_audio_allowed:true,publish_camera_allowed:true,screen_share_allowed:true},
+};
+runInNewContext(mediaPage.slice(policyStart,policyEnd)+"\nthis.isAllowed=policyAllows;",policyScope);
+assert.equal(policyScope.isAllowed("camera"),false,"no verified Call => camera must stay off");
+policyScope.firstPartyAcceptedMediaKind="audio";
+assert.equal(policyScope.isAllowed("camera"),false,"audio Call must never capture camera");
+assert.equal(policyScope.isAllowed("audio"),true,"audio Call still permits canonical microphone");
+policyScope.firstPartyAcceptedMediaKind="video";
+assert.equal(policyScope.isAllowed("camera"),true,"only canonically verified video permits camera");
+policyScope.mediaPolicy.publish_camera_allowed=false;
+assert.equal(policyScope.isAllowed("camera"),false,"canonical media policy still overrides video");
+policyScope.claims={...grant,call_id:"room-grant"};
+assert.equal(policyScope.isAllowed("audio"),true,"non-first-party room policy remains unchanged");
+assert.match(mediaPage,/const requestAudio=audioAllowed&&preferred.mic,requestCamera=cameraAllowed&&preferred.video/);
+assert.match(mediaPage,/ui.cameraToggle.disabled=!sessionActive\|\|!cameraAllowed/);
 // Only an explicitly missing/expired cookie (401) may trigger the existing
 // trusted-Device possession proof. Network/5xx, rate limits and revocation
 // must fail closed without issuing a replacement session.

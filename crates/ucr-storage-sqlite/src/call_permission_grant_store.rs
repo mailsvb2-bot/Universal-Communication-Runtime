@@ -168,13 +168,17 @@ pub(super) fn has_live_call_grant(
         .map_err(|error| map_sqlite_error(&error))
 }
 
-impl CallPermissionGrantStore for SqliteLocalStore {
-    fn grant_call_permissions(
+impl SqliteLocalStore {
+    // One canonical transaction for both additive and exact-set permission
+    // changes. The exact-set mode removes legacy VIDEO grants from audio Calls
+    // without a revocation/reauthorization race across BFF/SFU processes.
+    fn write_call_permissions(
         &self,
         scope: &TenantScope,
         call_id: &CallId,
         grantees: &[PrincipalRef],
         permissions: &[&str],
+        replace: bool,
     ) -> Result<(), DurableStoreError> {
         if grantees.is_empty()
             || permissions.is_empty()
@@ -189,6 +193,52 @@ impl CallPermissionGrantStore for SqliteLocalStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
         let ns = namespace_storage_key(scope);
+        if replace {
+            // Same IMMEDIATE transaction as the insertion below: no other
+            // process may terminate the Call or join/leave a grantee between
+            // liveness validation, deletion and replacement of permissions.
+            for grantee in grantees {
+                let active: bool = tx
+                    .query_row(
+                        "SELECT EXISTS (
+                           SELECT 1 FROM calls c JOIN call_participants p
+                             ON p.tenant_id=c.tenant_id
+                            AND p.namespace_present=c.namespace_present
+                            AND p.namespace_id=c.namespace_id AND p.call_id=c.call_id
+                          WHERE c.tenant_id=?1 AND c.namespace_present=?2
+                            AND c.namespace_id=?3 AND c.call_id=?4
+                            AND c.signalling_state<>'terminated'
+                            AND p.principal_id=?5 AND p.principal_kind=?6
+                            AND p.state IN ('invited','ringing','accepted')
+                            AND p.left_revision IS NULL)",
+                        params![
+                            scope.tenant_id.as_opaque().as_str(),
+                            ns.present,
+                            ns.value,
+                            call_id.as_opaque().as_str(),
+                            grantee.principal_id.as_opaque().as_str(),
+                            principal_kind_text(grantee.kind),
+                        ],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| map_sqlite_error(&error))?;
+                if !active {
+                    return Err(DurableStoreError::Conflict);
+                }
+            }
+            tx.execute(
+                "DELETE FROM call_permission_grants
+                  WHERE tenant_id=?1 AND namespace_present=?2
+                    AND namespace_id=?3 AND call_id=?4",
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    ns.present,
+                    ns.value,
+                    call_id.as_opaque().as_str(),
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        }
         for grantee in grantees {
             for permission in permissions {
                 // Atomic liveness check: insert only while the Call is not
@@ -235,6 +285,28 @@ impl CallPermissionGrantStore for SqliteLocalStore {
             }
         }
         tx.commit().map_err(|error| map_sqlite_error(&error))
+    }
+}
+
+impl CallPermissionGrantStore for SqliteLocalStore {
+    fn grant_call_permissions(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        grantees: &[PrincipalRef],
+        permissions: &[&str],
+    ) -> Result<(), DurableStoreError> {
+        self.write_call_permissions(scope, call_id, grantees, permissions, false)
+    }
+
+    fn replace_call_permissions(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        grantees: &[PrincipalRef],
+        permissions: &[&str],
+    ) -> Result<(), DurableStoreError> {
+        self.write_call_permissions(scope, call_id, grantees, permissions, true)
     }
 
     fn revoke_call_permissions(
@@ -341,6 +413,101 @@ mod tests {
 
     fn call(value: &str) -> CallId {
         CallId::from_opaque(id(value))
+    }
+
+    #[test]
+    fn audio_replacement_removes_legacy_video_rights_atomically_and_preserves_other_calls() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("store");
+        seed_call(
+            &db,
+            "audio",
+            "active",
+            &[("alice", "accepted"), ("bob", "accepted")],
+        );
+        seed_call(&db, "video", "active", &[("alice", "accepted")]);
+        let (alice, bob, outsider) = (person("alice"), person("bob"), person("outsider"));
+        let video = ucr_protocol::VIDEO_SEND_PERMISSION;
+        let audio = ucr_protocol::AUDIO_SEND_PERMISSION;
+        store
+            .grant_call_permissions(
+                &scope(),
+                &call("audio"),
+                &[alice.clone(), bob.clone()],
+                &[video, audio],
+            )
+            .expect("legacy audio call had video grants");
+        store
+            .grant_call_permissions(
+                &scope(),
+                &call("video"),
+                std::slice::from_ref(&alice),
+                &[video],
+            )
+            .expect("separate video Call");
+        store
+            .replace_call_permissions(
+                &scope(),
+                &call("audio"),
+                &[alice.clone(), bob.clone()],
+                &[
+                    ucr_protocol::CONFERENCE_SUBSCRIBE_PERMISSION,
+                    audio,
+                    ucr_protocol::AUDIO_RECEIVE_PERMISSION,
+                ],
+            )
+            .expect("atomic exact set");
+        for participant in [&alice, &bob] {
+            assert!(
+                store
+                    .authorize_in_call(&request(participant, video), &call("audio"))
+                    .is_err()
+            );
+            assert!(
+                store
+                    .authorize_in_call(
+                        &request(participant, ucr_protocol::VIDEO_RECEIVE_PERMISSION),
+                        &call("audio")
+                    )
+                    .is_err()
+            );
+            assert!(
+                store
+                    .authorize_in_call(&request(participant, audio), &call("audio"))
+                    .is_ok()
+            );
+        }
+        assert!(
+            store
+                .authorize_in_call(&request(&alice, video), &call("video"))
+                .is_ok()
+        );
+        assert!(
+            store.authorize(&request(&alice, audio)).is_err(),
+            "no tenant-wide media rights"
+        );
+
+        let failed = store.replace_call_permissions(
+            &scope(),
+            &call("audio"),
+            &[alice.clone(), outsider],
+            &[video],
+        );
+        assert!(
+            failed.is_err(),
+            "foreign participant cannot replace the Call's rights"
+        );
+        // A failed exact-set transaction must roll back its DELETE, too.
+        assert!(
+            store
+                .authorize_in_call(&request(&alice, audio), &call("audio"))
+                .is_ok()
+        );
+        assert!(
+            store
+                .authorize_in_call(&request(&alice, video), &call("audio"))
+                .is_err()
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ let executed = 0;
 const ctx = {
   busy: true,
   navigating: false,
+  logoutInFlight: false,
   accountScope: "tenant-account-a",
   uiAuthGeneration: 4,
   SessionSuperseded: class SessionSuperseded extends Error {},
@@ -34,6 +35,13 @@ await vm.runInContext("run",ctx)(op);
 assert.equal(executed,0);
 assert.match(notices.at(-1),/Открывается защищённая конференция/);
 ctx.navigating=false;
+// Logout owns the current HttpOnly cookie until the canonical server request
+// settles. A new login/signup/call MUST NOT be allowed to race that request.
+ctx.logoutInFlight=true;
+await vm.runInContext("run",ctx)(op);
+assert.equal(executed,0);
+assert.match(notices.at(-1),/Завершается выход/);
+ctx.logoutInFlight=false;
 await vm.runInContext("run",ctx)(op);
 assert.equal(executed,1);
 assert.equal(ctx.busy,false);

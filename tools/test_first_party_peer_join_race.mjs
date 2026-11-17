@@ -12,14 +12,15 @@ assert.match(src,/acceptedFirstPartyHandoff/,"accepted Device-bound calls autojo
 assert.match(src,/claims\.call_id\.startsWith\("fp-m-"\)/,"autojoin is scoped to signed first-party media Calls");
 assert.match(src,/sessionStorage\.getItem\("ucrFirstPartyDirectCall"\)/,"autojoin requires handoff from authenticated /start");
 
-async function runScenario({responses,firstParty=true,aborted=false,advanceMs=0,grantTtlMs=120000}) {
+async function runScenario({responses,firstParty=true,aborted=false,advanceMs=0,grantTtlMs=120000,advanceByDelay=false}) {
  let requests=0,virtualNow=Date.now();
+ const startedAt=virtualNow;
  const context={
   claims:{call_id:firstParty?"fp-m-test-call":"conference-call",expires:virtualNow+grantTtlMs},
   sessionStorage:{getItem:()=>firstParty?"fp-v-test-call":null},
   ui:{status:{textContent:""}},
   Date:{now:()=>virtualNow},Math,DOMException,Error,
-  setTimeout:(fn)=>{virtualNow+=advanceMs;return setTimeout(fn,0);},
+  setTimeout:(fn,ms)=>{virtualNow+=advanceByDelay?ms:advanceMs;return setTimeout(fn,0);},
   body:()=>({call_id:"test"}),
   async api(){
    const entry=responses[Math.min(requests,responses.length-1)];
@@ -31,7 +32,7 @@ async function runScenario({responses,firstParty=true,aborted=false,advanceMs=0,
  runInNewContext(implementation+"\nthis.fetchContext=fetchEndpointMlsContext;",context);
  let value=null,error=null;
  try{value=await context.fetchContext({aborted});}catch(e){error=e;}
- return {value,error,requests};
+ return {value,error,requests,elapsedMs:virtualNow-startedAt};
 }
 const pending=await runScenario({responses:[503,503,503,200]});
 assert.equal(pending.requests,4);
@@ -60,6 +61,14 @@ const boundedWindow=await runScenario({
 });
 assert.equal(boundedWindow.error?.status,503);
 assert.ok(boundedWindow.requests<=61,"rendezvous must stop within 60 seconds");
+// 60-second peer wait must back off instead of hammering canonical admission.
+const backoff=await runScenario({responses:Array(400).fill(503),advanceByDelay:true});
+assert.equal(backoff.error?.status,503);
+assert.ok(backoff.requests<=40,"MLS polling should back off; requests="+backoff.requests);
+assert.ok(backoff.elapsedMs<=60000&&backoff.elapsedMs>=59000,"keep 60s deadline");
+const lateRecipient=await runScenario({responses:[...Array(30).fill(503),200],advanceByDelay:true});
+assert.equal(lateRecipient.error,null,"late recipient must still join");
+assert.ok(lateRecipient.elapsedMs<60000);
 for(const code of [401,403,502]){
  const denied=await runScenario({responses:[code,200]});
  assert.equal(denied.requests,1,"must never retry terminal authorization or integrity denial");

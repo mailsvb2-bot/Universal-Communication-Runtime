@@ -50,7 +50,7 @@ context.renderContacts(people);
 assert.equal(list.children.length,2);
 assert.equal(list.children[0].children[0].children[1].children[0],"Василий");
 assert.equal(list.children[1].children[0].children[1].children[0],"Яна");
-const audio=buttons.find(b=>b.textContent==="Позвонить");
+const audio=buttons.find(b=>b.textContent==="Аудиозвонок");
 const video=buttons.find(b=>b.textContent==="Видеозвонок");
 assert.ok(audio&&video);
 assert.match(audio["aria-label"],/Аудиозвонок: Василий/);

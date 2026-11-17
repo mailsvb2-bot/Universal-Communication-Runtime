@@ -35,11 +35,37 @@ const joinStart=html.indexOf("async function join(){");
 const joinEnd=html.indexOf("function scheduleEntryRetry(){",joinStart);
 assert.ok(joinStart>=0&&joinEnd>joinStart);
 const joinLogic=html.slice(joinStart,joinEnd);
-assert.match(joinLogic,/const needsFreshFirstPartyGrant=firstPartyMediaGrant&&\s*\(sessionActive\|\|\(ucrMediaActivationStage==="REALTIME_JOIN"&&e\?\.status===401\)\)/);
+assert.match(joinLogic,/const needsFreshFirstPartyGrant=firstPartyMediaGrant&&\s*\(sessionActive\|\|\(ucrMediaActivationStage==="REALTIME_JOIN"&&\[401,403,404\]\.includes\(e\?\.status\)\)\)/);
 assert.match(joinLogic,/if\(sessionActive\)\{\s*try\{await leave\(\{retireGrant:false\}\)/);
 assert.match(joinLogic,/if\(needsFreshFirstPartyGrant\)\{\s*[\s\S]*?signedGrantRetired=true;\s*ucrShowFreshFirstPartyAdmission\(\);\s*return;/);
 assert.match(joinLogic,/ui\.join\.disabled=signedGrantRetired\|\|grantExpired/);
 assert.match(html,/mediaActivationStage:ucrMediaActivationStage/);
+// Losing accepted first-party access is terminal for the old grant and
+// must expose the canonical fresh-admission link instead of a disabled dead end.
+const endStart=html.indexOf("async function endUnverifiedMedia(generation,message){");
+const endEnd=html.indexOf("async function hangupFirstPartyDirectCall(",endStart);
+assert.ok(endStart>=0&&endEnd>endStart);
+const endLogic=html.slice(endStart,endEnd);
+assert.match(endLogic,/const cleanup=leave\(\{retireGrant:true\}\)/);
+assert.match(endLogic,/const firstPartyMediaGrant=claims\?\.call_id\?\.startsWith\("fp-m-"\)===true;/);
+assert.match(endLogic,/if\(firstPartyMediaGrant\)\{[\s\S]*?signedGrantRetired=true;\s*ucrShowFreshFirstPartyAdmission\(\);\s*return;/);
+async function runEnd(firstParty){
+ const ui={state:{textContent:""},status:{textContent:"",replaceChildren(...items){this.children=items;}},join:{disabled:false}};
+ const c={ui,claims:{call_id:firstParty?"fp-m-call":"conf-call",expires:Date.now()+60000},
+  sessionActive:true,sessionLifecycleGeneration:7,signedGrantRetired:false,Date,document:dom};
+ c.leave=async({retireGrant})=>{c.sessionActive=false;c.sessionLifecycleGeneration++;if(retireGrant)c.signedGrantRetired=true;};
+ vm.runInNewContext(action+endLogic+"\nthis.end=endUnverifiedMedia;",c);
+ await c.end(7,"Network unavailable");
+ return {ui,c};
+}
+const fpEnd=await runEnd(true);
+assert.equal(fpEnd.ui.join.disabled,true);
+assert.equal(fpEnd.c.signedGrantRetired,true);
+assert.equal(fpEnd.ui.state.textContent,"Требуется новый допуск");
+assert.equal(fpEnd.ui.status.children?.[1]?.href,"/start");
+const confEnd=await runEnd(false);
+assert.equal(confEnd.ui.state.textContent,"Access ended");
+assert.equal(confEnd.ui.join.disabled,true);
 for(const stage of ["PREFLIGHT","REALTIME_JOIN","MLS_RESTORE","WEBRTC_START","WEBRTC_OFFER","SDP_ICE_NEGOTIATION"]){
  assert.ok(html.includes('ucrMediaActivationStage="'+stage+'"'),"missing safe media stage "+stage);
 }

@@ -309,6 +309,7 @@ function plClearAuthenticatedView(preserveRecoveryCode=false){
       ? inviteField.value : null;
   uiAuthGeneration++;
   clearInterval(timer);
+  stopIncomingCallWake();
   accountScope=null;
   active=null;
   knownContacts=[];
@@ -767,6 +768,14 @@ function handleMlsIntegrityError(error) {
   return true;
 }
 async function run(action) {
+  // Logout invalidates local authority synchronously but the HttpOnly cookie
+  // is removed by an asynchronous canonical server request. Do not allow a
+  // new signup/login/Call to race that request and have its fresh cookie
+  // invalidated by the previous logout response.
+  if (logoutInFlight) {
+    message("Завершается выход из профиля. Повторите действие после подтверждения.");
+    return;
+  }
   if (busy || navigating) {
     // The lock remains authoritative; never start a duplicate call or login.
     // But user actions must not vanish without acknowledgement.
@@ -809,7 +818,7 @@ function renderContacts(contacts) {
     heading.append(avatar,title);
     const actions = document.createElement("div");
     actions.className = "actions";
-    const audio=btn("Позвонить", () => dial(contact,"audio").catch(e=>{throw Error(friendlyCallError(e));}));
+    const audio=btn("Аудиозвонок", () => dial(contact,"audio").catch(e=>{throw Error(friendlyCallError(e));}));
     const video=btn("Видеозвонок", () => dial(contact,"video").catch(e=>{throw Error(friendlyCallError(e));}));
     audio.setAttribute("aria-label","Аудиозвонок: "+contact.displayName);
     video.setAttribute("aria-label","Видеозвонок: "+contact.displayName);
@@ -1678,18 +1687,34 @@ async function initialize() {
 // Call data; it only triggers the same authorized refresh() the periodic
 // poller runs. 404 (flag off) or repeated errors stop it and leave the
 // periodic polling above as the only path. No third-party push service.
-let incomingWakeGeneration = 0;
+let incomingWakeGeneration = 0, incomingWakeController = null;
+function stopIncomingCallWake() {
+  // A previous Device's outstanding 15-second wait is actual server work,
+  // even if its delayed result cannot repaint the UI. Cancel it promptly
+  // on logout, account switch, pagehide or new authenticated initialization.
+  ++incomingWakeGeneration;
+  if(incomingWakeController)incomingWakeController.abort();
+  incomingWakeController=null;
+}
 function startIncomingCallWake() {
-  const generation = ++incomingWakeGeneration;
+  stopIncomingCallWake();
+  if(!accountScope)return;
+  const generation = incomingWakeGeneration;
   const authGeneration = uiAuthGeneration;
+  const controller = new AbortController();
+  incomingWakeController=controller;
   void (async () => {
     let since = null, failures = 0;
-    while (generation === incomingWakeGeneration && authGeneration === uiAuthGeneration) {
+    try {
+    while (!controller.signal.aborted && generation === incomingWakeGeneration &&
+           authGeneration === uiAuthGeneration && accountScope) {
       let response;
       try {
         response = await fetch("/v1/first-party/call/wait" + (since === null ? "" : "/" + since),
-          {method:"GET",credentials:"same-origin",cache:"no-store",redirect:"error"});
+          {method:"GET",credentials:"same-origin",cache:"no-store",redirect:"error",
+           signal:controller.signal});
       } catch (error) {
+        if(controller.signal.aborted)return;
         response = null;
       }
       if (generation !== incomingWakeGeneration || authGeneration !== uiAuthGeneration) return;
@@ -1707,8 +1732,15 @@ function startIncomingCallWake() {
       const changed = since !== null && result.changed === true;
       since = result.revision;
       if (changed && !busy && !navigating) {
-        void refresh().catch(err => authDiagnostic("periodic_refresh","failed",err));
+        void refresh().catch(err => {
+          if(generation===incomingWakeGeneration &&
+             authGeneration===uiAuthGeneration && accountScope)
+            authDiagnostic("periodic_refresh","failed",err);
+        });
       }
+    }
+    } finally {
+      if(incomingWakeController===controller)incomingWakeController=null;
     }
   })();
 }
@@ -1878,16 +1910,21 @@ el("logout").addEventListener("click",()=>{
   forgetBinding();
   forgetActiveCall();
   plClearAuthenticatedView();
+  const logoutGeneration=uiAuthGeneration;
   void (async()=>{
     try{
       await host.logout();
-      el("who").textContent="Вы вышли из учётной записи.";
-      message("Серверная сессия закрыта. Приватный ключ остаётся на устройстве для повторного входа.");
+      if(uiAuthGeneration===logoutGeneration&&!accountScope){
+        el("who").textContent="Вы вышли из учётной записи.";
+        message("Серверная сессия закрыта. Приватный ключ остаётся на устройстве для повторного входа.");
+      }
     }catch(error){
       // HttpOnly cookies cannot be cleared by client JavaScript. Never claim
-      // that server Logout succeeded after an ambiguous network failure.
-      message("Локальный доступ закрыт, но выход на сервере не подтверждён: "+
-        (error instanceof Error?error.message:String(error)));
+      // that server Logout succeeded after an ambiguous network failure, or
+      // let an old Logout repaint a newer account/session.
+      if(uiAuthGeneration===logoutGeneration&&!accountScope)
+        message("Локальный доступ закрыт, но выход на сервере не подтверждён: "+
+          (error instanceof Error?error.message:String(error)));
     }finally{logoutInFlight=false;}
   })();
 });
@@ -1907,7 +1944,22 @@ document.addEventListener("visibilitychange",()=>{
       message("Не удалось обновить состояние звонков. Повторите проверку входа.");
   });
 });
-window.addEventListener("pagehide", () => clearInterval(timer));
+// A back/forward-cache restore does not re-execute this module. Reestablish
+// both canonical authenticated polling paths once, with a fresh Device check.
+window.addEventListener("pagehide", () => {
+  clearInterval(timer);
+  timer=null;
+  stopIncomingCallWake();
+});
+window.addEventListener("pageshow", event => {
+  if(!event.persisted || !accountScope || navigating || busy || logoutInFlight || timer)return;
+  busy=true;
+  void initialize().catch(error => {
+    if(error instanceof SessionSuperseded)return;
+    authDiagnostic("bfcache_restore","failed",error);
+    message("После возврата на страницу проверка входящих звонков не удалась. Повторите проверку входа.");
+  }).finally(()=>{busy=false;});
+});
 function explainEntryFailure(error) {
   // A committed signup/recovery can fail to obtain a session under capacity.
   // Hide stale identity data, but retain the one-time recovery credential.
@@ -1969,6 +2021,19 @@ function plUiSync(){
  const hasContacts=knownContacts.length>0;
  plQuickAction.textContent=signed?(hasContacts?words.join:(english?'Invite someone':'Пригласить друга')):words.signup;
  plQuickHint.textContent=signed?words.hintIn:words.hintOut;
+ // This nickname is local presentation only. It cannot become a Call,
+ // Device, tenant or signing identity and is never sent to the BFF.
+ const localDevice=plUI('pl-friendly-identity');
+ if(localDevice&&signed){
+   const alias=plQuickName.value.trim().slice(0,40);
+   const text=alias
+     ?(english?'This browser: ':'Этот браузер: ')+alias+
+       (english?'. Choose a contact below.':'. Выберите контакт ниже.')
+     :(english?'Profile active. Invite a friend or choose a contact.':
+       'Профиль активен. Пригласите знакомого или выберите контакт для звонка.');
+   localDevice.textContent=text;
+   localDevice.dataset.plOriginalText=text;
+ }
  plQuickPanel.classList.toggle('pl-quick-signed-in',signed);
  plUiPreferredButtons();
 }
