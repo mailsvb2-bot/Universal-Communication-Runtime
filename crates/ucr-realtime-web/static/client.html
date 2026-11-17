@@ -181,12 +181,22 @@ function ucrFreezePreLeaveSnapshot(){
     ucrRecordDiagnostic("Pre-disconnect snapshot unavailable","lifecycle");
   }
 }
+// This list is for non-secret HTTP status diagnostics only. Keep it aligned
+// with the canonical route switch in ucr-realtime-web/src/main.rs: obsolete
+// /webrtc/offer and /webrtc/answer never existed in production, while their
+// actual /start, /remote-description, /ice and /restart failures were hidden.
 const ucrDiagnosticAllowedPaths=new Set([
- "/v1/realtime/join","/v1/realtime/heartbeat","/v1/realtime/audio-level",
- "/v1/realtime/active-speaker","/v1/realtime/chat/list",
- "/v1/realtime/reactions/list","/v1/realtime/media/stream",
- "/v1/realtime/webrtc/offer","/v1/realtime/webrtc/answer",
- "/v1/realtime/webrtc/close","/v1/realtime/leave"
+ "/v1/realtime/join","/v1/realtime/heartbeat","/v1/realtime/leave",
+ "/v1/realtime/mls-context","/v1/realtime/mls-key-package",
+ "/v1/realtime/mls-bootstrap","/v1/realtime/media/publish",
+ "/v1/realtime/media/stream","/v1/realtime/receive-roster",
+ "/v1/realtime/subscriptions","/v1/realtime/adaptive-media",
+ "/v1/realtime/audio-level","/v1/realtime/active-speaker",
+ "/v1/realtime/chat/send","/v1/realtime/chat/get","/v1/realtime/chat/list",
+ "/v1/realtime/reactions/publish","/v1/realtime/reactions/list",
+ "/v1/realtime/webrtc/start","/v1/realtime/webrtc/remote-description",
+ "/v1/realtime/webrtc/ice","/v1/realtime/webrtc/restart",
+ "/v1/realtime/webrtc/close"
 ]);
 function ucrRecordDiagnostic(event,category="runtime"){
   const safe=String(event).replace(/[^a-zA-Z0-9_ .:()/-]/g,"?").slice(0,180);
