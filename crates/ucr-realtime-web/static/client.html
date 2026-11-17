@@ -431,6 +431,14 @@ function ucrDiagnosticReport(){
     },
     lastFailure:ucrLastFailure,
     mediaActivationStage:ucrMediaActivationStage,
+    // Safe consent diagnostics: no Device ID, grant, key material or SDP.
+    localMediaPolicy:{
+      acceptedCallMedia:firstPartyAcceptedMediaKind==="video"?"video":firstPartyAcceptedMediaKind==="audio"?"audio":"unverified",
+      microphoneAllowed:policyAllows("audio"),
+      cameraAllowed:policyAllows("camera"),
+      userMicPreference:plConsumerPrefs().mic,
+      userVideoPreference:plConsumerPrefs().video
+    },
     state:document.getElementById("state")?.textContent||"unknown",
     webrtc:document.getElementById("webrtc-state")?.textContent||"unknown",
     encryptedPackets:Number(document.getElementById("packets")?.textContent)||0,
@@ -2607,6 +2615,14 @@ async function restartWebRtc(forceMedia){
     await startWebRtc(forceMedia);
   }catch(e){
     if(generation===sessionLifecycleGeneration&&sessionActive&&mediaActive){
+      // A canonical 401/403 is a rejected signed media grant, not packet loss.
+      // Retrying /webrtc/start with the same one-time session cannot recover;
+      // retire it and return to the independently authenticated Call owner.
+      if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
+        ucrRecordDiagnostic("WebRTC reauthorization required","webrtc");
+        await endUnverifiedMedia(generation,"Protected Call media authorization rejected.");
+        return;
+      }
       ui.webrtcState.textContent="Retrying";
       ui.status.textContent="WebRTC reconnect failed: "+e.message;
       // scheduled in finally after restarting is reset.
@@ -2650,7 +2666,16 @@ async function activateAdmittedMedia(){
   openStream.missing=false;
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive&&!(typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady))ui.status.textContent="Realtime stream closed: "+e.message;});
   ucrMediaActivationStage="WEBRTC_START";
-  try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
+  try{await startWebRtc(false);}catch(e){
+    if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
+      ucrRecordDiagnostic("WebRTC initial authorization rejected","webrtc");
+      await endUnverifiedMedia(generation,"Protected Call media authorization rejected.");
+      return;
+    }
+    ui.webrtcState.textContent="Retrying";
+    ui.status.textContent="WebRTC start failed: "+e.message;
+    scheduleWebRtcRetry();
+  }
   await startActiveSpeakerMonitoring();
 }
 async function applyAdmissionState(state){
