@@ -103,6 +103,8 @@ test("accepted incoming call survives transient Device recheck failure without g
       locator="scoped-canonical-call-locator";
     },
     host:{resumeAuthenticatedDevice:async()=>{throw new Error("transient 503");}},
+    // Public WASM preload may run while canonical Call accept is pending.
+    mlsWasm:async()=>({}),
     calls:{signal:async(id,action)=>{
       assert.equal(id,accepted.callId);assert.equal(action,"accept");return accepted;
     }},

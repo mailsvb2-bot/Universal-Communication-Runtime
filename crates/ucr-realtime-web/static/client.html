@@ -431,6 +431,14 @@ function ucrDiagnosticReport(){
     },
     lastFailure:ucrLastFailure,
     mediaActivationStage:ucrMediaActivationStage,
+    // Safe consent diagnostics: no Device ID, grant, key material or SDP.
+    localMediaPolicy:{
+      acceptedCallMedia:firstPartyAcceptedMediaKind==="video"?"video":firstPartyAcceptedMediaKind==="audio"?"audio":"unverified",
+      microphoneAllowed:policyAllows("audio"),
+      cameraAllowed:policyAllows("camera"),
+      userMicPreference:plConsumerPrefs().mic,
+      userVideoPreference:plConsumerPrefs().video
+    },
     state:document.getElementById("state")?.textContent||"unknown",
     webrtc:document.getElementById("webrtc-state")?.textContent||"unknown",
     encryptedPackets:Number(document.getElementById("packets")?.textContent)||0,
@@ -2607,6 +2615,14 @@ async function restartWebRtc(forceMedia){
     await startWebRtc(forceMedia);
   }catch(e){
     if(generation===sessionLifecycleGeneration&&sessionActive&&mediaActive){
+      // A canonical 401/403 is a rejected signed media grant, not packet loss.
+      // Retrying /webrtc/start with the same one-time session cannot recover;
+      // retire it and return to the independently authenticated Call owner.
+      if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
+        ucrRecordDiagnostic("WebRTC reauthorization required","webrtc");
+        await retireRejectedFirstPartyMedia(generation);
+        return;
+      }
       ui.webrtcState.textContent="Retrying";
       ui.status.textContent="WebRTC reconnect failed: "+e.message;
       // scheduled in finally after restarting is reset.
@@ -2650,7 +2666,16 @@ async function activateAdmittedMedia(){
   openStream.missing=false;
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive&&!(typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady))ui.status.textContent="Realtime stream closed: "+e.message;});
   ucrMediaActivationStage="WEBRTC_START";
-  try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
+  try{await startWebRtc(false);}catch(e){
+    if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
+      ucrRecordDiagnostic("WebRTC initial authorization rejected","webrtc");
+      await retireRejectedFirstPartyMedia(generation);
+      return;
+    }
+    ui.webrtcState.textContent="Retrying";
+    ui.status.textContent="WebRTC start failed: "+e.message;
+    scheduleWebRtcRetry();
+  }
   await startActiveSpeakerMonitoring();
 }
 async function applyAdmissionState(state){
@@ -2837,7 +2862,21 @@ async function join(){
   // Reject before opening a realtime session/heartbeat when the host omitted
   // the canonical Device media authority; the user may retry after setup.
   const preflightGeneration=sessionLifecycleGeneration,preflightToken=token;
-  try{await installFirstPartyDeviceAuthority();requireCanonicalMediaHostReady();prewarmAuthorizedMediaRuntime();}
+  try{
+    await installFirstPartyDeviceAuthority();
+    requireCanonicalMediaHostReady();
+    // Auto-Join verifies the accepted media kind first. If the user instead
+    // presses Join manually with an existing authenticated Direct Call handoff,
+    // recover the SAME canonical consent rather than silently forcing
+    // camera-unavailable from the unverified default. Never infer video from
+    // saved preferences or the signed media fragment alone.
+    if(claims?.call_id?.startsWith("fp-m-")&&firstPartyAcceptedMediaKind===null){
+      const hintedCall=sessionStorage.getItem("ucrFirstPartyDirectCall");
+      if(/^fp-[av]-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(hintedCall||""))
+        await verifyFirstPartyAutoJoinHandoff(hintedCall,claims);
+    }
+    prewarmAuthorizedMediaRuntime();
+  }
   catch(error){
     if(signedGrantRetired||preflightGeneration!==sessionLifecycleGeneration||
        preflightToken!==token)return;
@@ -3002,6 +3041,24 @@ async function endUnverifiedMedia(generation,message){
   }
   if(signedGrantRetired)return;
   ui.status.textContent=status;
+}
+// Only the one-time encrypted media grant is rejected. A canonical Direct
+// Call remains ACTIVE and must not be hung up by a WebRTC 401/403: the BFF
+// owner on /start can then inspect it and issue fresh Device-bound admission.
+async function retireRejectedFirstPartyMedia(generation){
+  if(generation!==sessionLifecycleGeneration||!sessionActive)return;
+  try{
+    // Locally fence capture and remote media before waiting on HTTP cleanup.
+    // retireGrant:false is intentional: leave() otherwise hangs up the parent
+    // Direct Call for both users, preventing any authorized recovery.
+    await leave({retireGrant:false});
+  }catch(_){
+    // The canonical Leave already revokes local capture synchronously.
+    // Failure to acknowledge remote cleanup never authorizes old-grant reuse.
+  }
+  if(generation+1!==sessionLifecycleGeneration||sessionActive)return;
+  signedGrantRetired=true;
+  ucrShowFreshFirstPartyAdmission();
 }
 async function hangupFirstPartyDirectCall(callId){
   const host=firstPartyCanonicalHttpHost||window.ucrCanonicalDeviceAuthority;

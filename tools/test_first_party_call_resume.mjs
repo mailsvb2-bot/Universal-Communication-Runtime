@@ -60,6 +60,8 @@ const context={
   restoreSession:async()=>user,message(){},
   refreshing:false,navigating:false,timer:null,knownContacts:[],
   mlsPreparation:null,
+  // Public WASM prewarm is nonblocking and never owns Call authorization.
+  mlsWasm:async()=>({}),
   // This isolated regression executes Call code without the page diagnostics.
   // Diagnostics are observation-only; they do not own media or grant authority.
   authDiagnostic(){},
@@ -494,6 +496,7 @@ const incomingContext={
   nameFor:id=>id,
   btn:(label,callback)=>{handlers.set(label,callback);return {label};},
   activeCallLocator:()=>incomingLocator,
+  mlsWasm:async()=>({}),
   calls:{},
   host:{},
   principalScope:user=>JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]),
@@ -828,3 +831,31 @@ console.log("PASS: canonical Call resume, pre-auto-Join binding and 401-only med
 // Exercise consumed-grant recovery from this existing required Windows CI entry.
 await import("./test_first_party_media_recovery.mjs");
 await import("./test_first_party_peer_join_race.mjs");
+
+// A manual Join (rather than the verified auto-Join) with a retained Direct
+// Call hint must recheck canonical consent. Missing hints NEVER grant video.
+const joinPreflight=mediaPage.slice(mediaPage.indexOf("async function join(){"),
+  mediaPage.indexOf("// Leave or the retiring grant's watchdog",mediaPage.indexOf("async function join(){")));
+assert.match(joinPreflight,/claims\?\.call_id\?\.startsWith\("fp-m-"\)&&firstPartyAcceptedMediaKind===null/);
+assert.match(joinPreflight,/sessionStorage\.getItem\("ucrFirstPartyDirectCall"\)/);
+assert.match(joinPreflight,/await verifyFirstPartyAutoJoinHandoff\(hintedCall,claims\)/);
+assert.doesNotMatch(joinPreflight,/firstPartyAcceptedMediaKind\s*=\s*["']video["']/,
+  "manual Join must never assert video consent from UI preferences");
+console.log("PASS: manual first-party Join rechecks authenticated Call media consent before capture");
+
+// Prewarming public WASM must overlap network acceptance and NEVER authorize
+// Device trust, publish an MLS commit or block the Call owner request.
+const warmDialStart=source.indexOf("async function dial(contact,media) {");
+const warmDialEnd=source.indexOf("// Incoming alerts reflect",warmDialStart);
+assert.ok(warmDialStart>=0&&warmDialEnd>warmDialStart);
+const dialSource=source.slice(warmDialStart,warmDialEnd);
+assert.match(dialSource,/void mlsWasm\(\)\.catch\(\(\)=>\{\}\)/);
+assert.ok(dialSource.indexOf("void mlsWasm().catch")<dialSource.indexOf("await calls.start("));
+const acceptStart=source.indexOf('btn("Принять",async () => {');
+const acceptEnd=source.indexOf('const result = await calls.signal(call.callId,"accept");',acceptStart);
+assert.ok(acceptStart>=0&&acceptEnd>acceptStart);
+const acceptSource=source.slice(acceptStart,acceptEnd);
+assert.match(acceptSource,/void mlsWasm\(\)\.catch\(\(\)=>\{\}\)/);
+assert.doesNotMatch(dialSource,/await mlsWasm\(\)/,"prewarm cannot hold outgoing Call creation");
+assert.doesNotMatch(acceptSource,/await mlsWasm\(\)/,"prewarm cannot hold incoming Call acceptance");
+console.log("PASS: public MLS WASM loads in parallel with ringing, without signing or media permissions");
