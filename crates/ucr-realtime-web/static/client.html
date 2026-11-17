@@ -2862,7 +2862,21 @@ async function join(){
   // Reject before opening a realtime session/heartbeat when the host omitted
   // the canonical Device media authority; the user may retry after setup.
   const preflightGeneration=sessionLifecycleGeneration,preflightToken=token;
-  try{await installFirstPartyDeviceAuthority();requireCanonicalMediaHostReady();prewarmAuthorizedMediaRuntime();}
+  try{
+    await installFirstPartyDeviceAuthority();
+    requireCanonicalMediaHostReady();
+    // Auto-Join verifies the accepted media kind first. If the user instead
+    // presses Join manually with an existing authenticated Direct Call handoff,
+    // recover the SAME canonical consent rather than silently forcing
+    // camera-unavailable from the unverified default. Never infer video from
+    // saved preferences or the signed media fragment alone.
+    if(claims?.call_id?.startsWith("fp-m-")&&firstPartyAcceptedMediaKind===null){
+      const hintedCall=sessionStorage.getItem("ucrFirstPartyDirectCall");
+      if(/^fp-[av]-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(hintedCall||""))
+        await verifyFirstPartyAutoJoinHandoff(hintedCall,claims);
+    }
+    prewarmAuthorizedMediaRuntime();
+  }
   catch(error){
     if(signedGrantRetired||preflightGeneration!==sessionLifecycleGeneration||
        preflightToken!==token)return;
