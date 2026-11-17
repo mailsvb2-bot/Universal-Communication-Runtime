@@ -791,3 +791,6 @@ assert.equal(expiredAuthority.thrown,null);
 assert.equal(expiredAuthority.retries,1);
 assert.equal(expiredAuthority.inspections,1);
 console.log("PASS: canonical Call resume, pre-auto-Join binding and 401-only media reauthentication");
+
+// Exercise consumed-grant recovery from this existing required Windows CI entry.
+await import("./test_first_party_media_recovery.mjs");
