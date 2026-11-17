@@ -2620,7 +2620,7 @@ async function restartWebRtc(forceMedia){
       // retire it and return to the independently authenticated Call owner.
       if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
         ucrRecordDiagnostic("WebRTC reauthorization required","webrtc");
-        await endUnverifiedMedia(generation,"Protected Call media authorization rejected.");
+        await retireRejectedFirstPartyMedia(generation);
         return;
       }
       ui.webrtcState.textContent="Retrying";
@@ -2669,7 +2669,7 @@ async function activateAdmittedMedia(){
   try{await startWebRtc(false);}catch(e){
     if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
       ucrRecordDiagnostic("WebRTC initial authorization rejected","webrtc");
-      await endUnverifiedMedia(generation,"Protected Call media authorization rejected.");
+      await retireRejectedFirstPartyMedia(generation);
       return;
     }
     ui.webrtcState.textContent="Retrying";
@@ -3041,6 +3041,24 @@ async function endUnverifiedMedia(generation,message){
   }
   if(signedGrantRetired)return;
   ui.status.textContent=status;
+}
+// Only the one-time encrypted media grant is rejected. A canonical Direct
+// Call remains ACTIVE and must not be hung up by a WebRTC 401/403: the BFF
+// owner on /start can then inspect it and issue fresh Device-bound admission.
+async function retireRejectedFirstPartyMedia(generation){
+  if(generation!==sessionLifecycleGeneration||!sessionActive)return;
+  try{
+    // Locally fence capture and remote media before waiting on HTTP cleanup.
+    // retireGrant:false is intentional: leave() otherwise hangs up the parent
+    // Direct Call for both users, preventing any authorized recovery.
+    await leave({retireGrant:false});
+  }catch(_){
+    // The canonical Leave already revokes local capture synchronously.
+    // Failure to acknowledge remote cleanup never authorizes old-grant reuse.
+  }
+  if(generation+1!==sessionLifecycleGeneration||sessionActive)return;
+  signedGrantRetired=true;
+  ucrShowFreshFirstPartyAdmission();
 }
 async function hangupFirstPartyDirectCall(callId){
   const host=firstPartyCanonicalHttpHost||window.ucrCanonicalDeviceAuthority;
