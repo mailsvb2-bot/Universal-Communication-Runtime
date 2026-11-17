@@ -20,5 +20,12 @@ assert.equal(classify("ICE gathering timeout"),"WEBRTC_ICE_FAILURE");
 assert.equal(classify("WebRTC connection failure"),"WEBRTC_CONNECTION_FAILURE");
 assert.notEqual(classify("WebRTC connection failure"),"TURN_AUTHENTICATION_FAILURE");
 assert.equal(classify("MLS epoch mismatch"),"MLS_EPOCH_MISMATCH");
+// A real failed call was incorrectly marked WEBRTC_CONNECTION_FAILURE
+// because the substring "ice" appears in the word "device".
+assert.equal(classify("device-bound MLS admission context rejected"),"MLS_ADMISSION_UNAVAILABLE");
+assert.equal(classify("mls_context_rejected"),"MLS_ADMISSION_UNAVAILABLE");
+assert.equal(classify("device authorization failed"),"MEDIA_ACTIVATION_FAILURE");
+assert.equal(classify("peer waiting for MLS welcome"),"MLS_ADMISSION_UNAVAILABLE");
+assert.equal(classify("ICE candidate connection failed"),"WEBRTC_ICE_FAILURE");
 assert.equal(classify("microphone notallowed"),"DEVICE_PERMISSION_DENIED");
 console.log("PASS: protocol-stage failures distinguished without inferring relay path");

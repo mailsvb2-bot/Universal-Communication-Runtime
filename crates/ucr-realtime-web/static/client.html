@@ -341,9 +341,15 @@ function ucrDiagnosticReason(value){
     return "TURN_TLS_FAILURE";
   if(/sdp.{0,24}(parse|invalid|setlocal|setremote|answer|offer)|invalid session description/.test(message))
     return "WEBRTC_SDP_NEGOTIATION_FAILURE";
-  if(/ice.{0,25}(failed|timeout|disconnected|gather)|no candidate pair/.test(message))
+  // The word "device" contains "ice": a failed Device-bound MLS context
+  // must never be mislabeled as an ICE/WebRTC transport failure. MLS is
+  // inspected before the peer/SDP offer is even allocated.
+  if(/\bmls\b|mls[_ -]context|keypackage|key package|\bwelcome\b/.test(message))
+    return "MLS_ADMISSION_UNAVAILABLE";
+  if(/\bice\b.{0,25}(failed|timeout|disconnected|gather)|no candidate pair/.test(message))
     return "WEBRTC_ICE_FAILURE";
-  if(/ice|webrtc|peer/.test(message))return "WEBRTC_CONNECTION_FAILURE";
+  if(/\b(?:ice|webrtc|peerconnection)\b|datachannel/.test(message))
+    return "WEBRTC_CONNECTION_FAILURE";
   return "MEDIA_ACTIVATION_FAILURE";
 }
 // Receive failures from the actual codec/MLS media owner. Never log raw
