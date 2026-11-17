@@ -356,9 +356,9 @@ function ucrDiagnosticReason(value){
   // inspected before the peer/SDP offer is even allocated.
   if(/\bmls\b|mls[_ -]context|keypackage|key package|\bwelcome\b/.test(message))
     return "MLS_ADMISSION_UNAVAILABLE";
-  if(/\bice\b.{0,25}(failed|timeout|disconnected|gather)|no candidate pair/.test(message))
+  if(/\bice(?:connection|gathering)?(?:state)?\b.{0,25}(failed|timeout|disconnected|gather)|no candidate pair/.test(message))
     return "WEBRTC_ICE_FAILURE";
-  if(/\b(?:ice|webrtc|peerconnection)\b|datachannel/.test(message))
+  if(/\b(?:ice|webrtc)\b|peer ?connection|datachannel/.test(message))
     return "WEBRTC_CONNECTION_FAILURE";
   return "MEDIA_ACTIVATION_FAILURE";
 }
@@ -1081,6 +1081,8 @@ async function fetchEndpointMlsContext(signal){
   // 60-second rendezvous window within the signed grant's own expiry; every
   // 503 retry re-enters the canonical server's session/Device/MLS admission.
   const deadline=Date.now()+Math.min(60000,Math.max(0,claims.expires-Date.now()));
+  // Limit canonical admission checks for a waiting phone; retain the signed deadline.
+  let retryDelayMs=350;
   for(;;){
     if(signal?.aborted)throw new DOMException("MLS admission cancelled","AbortError");
     try{
@@ -1094,10 +1096,12 @@ async function fetchEndpointMlsContext(signal){
     }catch(error){
       // Never retry revoked grants, 401/403, malformed contexts or non-first-
       // party calls. No microphone/camera permission while the peer is pending.
-      if(!firstParty||error?.status!==503||Date.now()+350>=deadline||signal?.aborted)
+      const waitMs=Math.min(retryDelayMs,deadline-Date.now());
+      if(!firstParty||error?.status!==503||waitMs<50||signal?.aborted)
         throw error;
       ui.status.textContent="Собеседник подключается. Проверяем защищённый доступ…";
-      await new Promise(resolve=>setTimeout(resolve,350));
+      await new Promise(resolve=>setTimeout(resolve,waitMs));
+      retryDelayMs=Math.min(2000,Math.round(retryDelayMs*1.6));
     }
   }
 }
@@ -2929,7 +2933,7 @@ async function join(){
     // MLS/ICE activation followed by Leave requires a FRESH grant from /start.
     // A terminal 401 at /join likewise must never suggest replaying its token.
     const needsFreshFirstPartyGrant=firstPartyMediaGrant&&
-      (sessionActive||(ucrMediaActivationStage==="REALTIME_JOIN"&&e?.status===401));
+      (sessionActive||(ucrMediaActivationStage==="REALTIME_JOIN"&&[401,403,404].includes(e?.status)));
     if(sessionActive){
       try{await leave({retireGrant:false});}catch(cleanupError){
         // Local revocation must precede any best-effort remote Leave.
@@ -2979,6 +2983,7 @@ function scheduleEntryRetry(){
 async function endUnverifiedMedia(generation,message){
   if(!sessionActive||generation!==sessionLifecycleGeneration)return;
   const grantExpired=claims&&typeof claims.expires==="number"&&Date.now()>=claims.expires;
+  const firstPartyMediaGrant=claims?.call_id?.startsWith("fp-m-")===true;
   // Loss of verified admission is terminal for this signed grant. A hung
   // heartbeat or Leave must never allow same-token Join to regain media.
   const cleanup=leave({retireGrant:true});
@@ -2988,6 +2993,13 @@ async function endUnverifiedMedia(generation,message){
   if(generation+1!==sessionLifecycleGeneration)return;
   ui.state.textContent="Access ended";
   ui.join.disabled=signedGrantRetired||grantExpired;
+  if(firstPartyMediaGrant){
+    // A retired one-time grant remains retired; /start performs fresh
+    // canonical Call and Device authorization before granting media again.
+    signedGrantRetired=true;
+    ucrShowFreshFirstPartyAdmission();
+    return;
+  }
   if(signedGrantRetired)return;
   ui.status.textContent=status;
 }
