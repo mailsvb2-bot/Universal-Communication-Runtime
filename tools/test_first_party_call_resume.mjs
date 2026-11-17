@@ -839,3 +839,20 @@ assert.match(joinPreflight,/await verifyFirstPartyAutoJoinHandoff\(hintedCall,cl
 assert.doesNotMatch(joinPreflight,/firstPartyAcceptedMediaKind\s*=\s*["']video["']/,
   "manual Join must never assert video consent from UI preferences");
 console.log("PASS: manual first-party Join rechecks authenticated Call media consent before capture");
+
+// Prewarming public WASM must overlap network acceptance and NEVER authorize
+// Device trust, publish an MLS commit or block the Call owner request.
+const dialStart=source.indexOf("async function dial(contact,media) {");
+const dialEnd=source.indexOf("// Incoming alerts reflect",dialStart);
+assert.ok(dialStart>=0&&dialEnd>dialStart);
+const dialSource=source.slice(dialStart,dialEnd);
+assert.match(dialSource,/void mlsWasm\(\)\.catch\(\(\)=>\{\}\)/);
+assert.ok(dialSource.indexOf("void mlsWasm().catch")<dialSource.indexOf("await calls.start("));
+const acceptStart=source.indexOf('btn("Принять",async () => {');
+const acceptEnd=source.indexOf('const result = await calls.signal(call.callId,"accept");',acceptStart);
+assert.ok(acceptStart>=0&&acceptEnd>acceptStart);
+const acceptSource=source.slice(acceptStart,acceptEnd);
+assert.match(acceptSource,/void mlsWasm\(\)\.catch\(\(\)=>\{\}\)/);
+assert.doesNotMatch(dialSource,/await mlsWasm\(\)/,"prewarm cannot hold outgoing Call creation");
+assert.doesNotMatch(acceptSource,/await mlsWasm\(\)/,"prewarm cannot hold incoming Call acceptance");
+console.log("PASS: public MLS WASM loads in parallel with ringing, without signing or media permissions");
