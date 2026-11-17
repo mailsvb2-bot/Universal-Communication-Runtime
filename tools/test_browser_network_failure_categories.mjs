@@ -27,6 +27,11 @@ assert.equal(classify("mls_context_rejected"),"MLS_ADMISSION_UNAVAILABLE");
 assert.equal(classify("device authorization failed"),"MEDIA_ACTIVATION_FAILURE");
 assert.equal(classify("peer waiting for MLS welcome"),"MLS_ADMISSION_UNAVAILABLE");
 assert.equal(classify("ICE candidate connection failed"),"WEBRTC_ICE_FAILURE");
+assert.equal(classify("Peer connection is closed"),"WEBRTC_CONNECTION_FAILURE");
+assert.equal(classify("Failed to execute 'addTransceiver' on 'RTCPeerConnection': The RTCPeerConnection's signalingState is 'closed'."),"WEBRTC_CONNECTION_FAILURE");
+assert.equal(classify("iceConnectionState failed"),"WEBRTC_ICE_FAILURE");
+assert.equal(classify("iceGatheringState timeout"),"WEBRTC_ICE_FAILURE");
+assert.equal(classify("Device signer is no longer trusted"),"DEVICE_TRUST_REJECTED");
 assert.equal(classify("microphone notallowed"),"DEVICE_PERMISSION_DENIED");
 console.log("PASS: protocol-stage failures distinguished without inferring relay path");
 
