@@ -485,24 +485,29 @@ const incomingBegin=source.indexOf("function renderIncoming(items) {");
 const incomingEnd=source.indexOf("async function refresh() {",incomingBegin);
 assert.ok(incomingBegin>=0 && incomingEnd>incomingBegin);
 const handlers=new Map();
+const incomingCall={...call,callerIdentityId:"bob",calleeIdentityId:"alice"};
+let incomingLocator=null,safeAcceptedHints=0;
 const incomingContext={
-  accountScope:scope,uiAuthGeneration:0,active:null,
+  accountScope:scope,uiAuthGeneration:0,active:null,plOwnIdentity:"alice",
   document:{createElement:()=>({append(){},textContent:"",className:""})},
   el:id=>{assert.equal(id,"incoming");return {replaceChildren(){},append(){}};},
   nameFor:id=>id,
   btn:(label,callback)=>{handlers.set(label,callback);return {label};},
-  activeCallLocator:()=>null,
+  activeCallLocator:()=>incomingLocator,
   calls:{},
   host:{},
   principalScope:user=>JSON.stringify([user.tenantId,user.namespaceId,user.participantId,user.deviceId]),
-  rememberActiveCall(){throw Error("stale accept cannot save Call locator");},
+  rememberActiveCall(result,identity){
+    assert.equal(identity,"alice");assert.equal(result.callId,incomingCall.callId);
+    safeAcceptedHints++;incomingLocator="scoped-call-hint";
+  },
   showActive(){throw Error("stale accept cannot paint Call");},
   beginMedia(){throw Error("stale accept cannot join media");},
   refresh(){},
 };
 runInNewContext(source.slice(incomingBegin,incomingEnd)+
   "\nthis.renderIncoming=renderIncoming;",incomingContext);
-incomingContext.renderIncoming([call]);
+incomingContext.renderIncoming([incomingCall]);
 const acceptIncoming=handlers.get("Принять");
 assert.equal(typeof acceptIncoming,"function");
 let finishOldAccept;
@@ -510,33 +515,41 @@ incomingContext.calls.signal=()=>new Promise(resolve=>{finishOldAccept=resolve;}
 incomingContext.host.resumeAuthenticatedDevice=async()=>user;
 const staleAccept=acceptIncoming();
 incomingContext.uiAuthGeneration++;
-finishOldAccept({...call,state:"active"});
+incomingLocator=null; // explicit Logout clears the untrusted pending locator
+finishOldAccept({...incomingCall,state:"active"});
 await staleAccept;
 assert.equal(incomingContext.active,null,"old generation must not paint accepted Call");
 
 let finishOldSession;
-incomingContext.calls.signal=async()=>({...call,state:"active"});
+incomingContext.calls.signal=async()=>({...incomingCall,state:"active"});
 incomingContext.host.resumeAuthenticatedDevice=()=>new Promise(resolve=>{finishOldSession=resolve;});
 const staleSessionAccept=acceptIncoming();
 // Flush the separate VM context's promise jobs before checking the verifier.
 await new Promise(resolve=>setImmediate(resolve));
 assert.equal(typeof finishOldSession,"function","accept must verify canonical Device");
 incomingContext.uiAuthGeneration++;
+// Logout clears only the local recovery locator; old callback cannot restore it.
+incomingLocator=null;
 finishOldSession(user);
 await staleSessionAccept;
 assert.equal(incomingContext.active,null,"late Device verification must not paint Call");
 
 let savedAccepts=0,mediaAccepts=0;
 incomingContext.host.resumeAuthenticatedDevice=async()=>user;
-incomingContext.rememberActiveCall=()=>{savedAccepts++;};
+incomingContext.rememberActiveCall=(result,identity)=>{
+  assert.equal(result.callId,incomingCall.callId);
+  assert.equal(identity,"alice");
+  incomingLocator="scoped-call-hint";savedAccepts++;
+};
 incomingContext.showActive=()=>{};
 incomingContext.beginMedia=async()=>{mediaAccepts++;};
 await acceptIncoming();
 assert.equal(incomingContext.active.call.callId,call.callId);
-assert.equal(savedAccepts,1);
+assert.equal(savedAccepts,3,"pending intent and committed acceptance remain scoped across Device recheck");
 assert.equal(mediaAccepts,1,"fresh accepted Call must still enter canonical media");
 
 incomingContext.active=null;
+incomingLocator=null;
 incomingContext.host.resumeAuthenticatedDevice=async()=>({...user,deviceId:"other-device"});
 await assert.rejects(acceptIncoming(),/Device changed during Call acceptance/);
 assert.equal(incomingContext.active,null,"wrong Device must not adopt accepted Call");
@@ -549,6 +562,9 @@ assert.ok(authBegin>=0 && authEnd>authBegin);
 let reauthCount=0;
 const authContext={
   uiAuthGeneration:0,
+  SessionSuperseded:class SessionSuperseded extends Error{
+    constructor(){super("Device session changed during authentication");}
+  },
   host:{},vault:{},location:{origin:"https://localhost"},
   authTrace:async(_stage,op)=>op(),lastBinding:()=>user,
   authHttpCode:error=>Number(String(error.message).match(/HTTP (\d+)/)?.[1]??0),
@@ -672,4 +688,106 @@ assert.match(source,/if \(!active\) await restoreActiveCall\(user\);/);
 assert.match(source,/if \(fresh\.state === "terminated"\) \{\s*forgetActiveCall\(inspectedLocator\);/);
 assert.match(source,/forgetBinding\(\);\s*forgetActiveCall\(\);\s*plClearAuthenticatedView\(\);/);
 assert.doesNotMatch(snippet,/calls\.join\(/,"untrusted locator cannot mint a Join");
-console.log("PASS: canonical Call resume is scope-fenced, inspected, and cleared on terminal/denied state");
+// A stale same-tab Direct Call marker plus a separately signed grant must
+// NEVER trigger automatic camera/microphone capture. Match the exact derived
+// media Call through the canonical authenticated BFF before join().
+const handoffStart=mediaPage.indexOf("async function verifyFirstPartyAutoJoinHandoff(");
+const handoffBoundary=/\r?\ntry\{\r?\n  const params=new URLSearchParams\(location\.hash\.slice\(1\)\);/.exec(mediaPage.slice(handoffStart));
+const handoffEnd=handoffBoundary?handoffStart+handoffBoundary.index:-1;
+assert.ok(handoffStart>=0&&handoffEnd>handoffStart,"canonical pre-auto-Join binding gate missing");
+const handoffCode=mediaPage.slice(handoffStart,handoffEnd);
+const grant={call_id:"fp-m-matched",tenant_id:"tenant-a",namespace_id:null,
+  participant_id:"alice",device_id:"device-a",expires:Date.now()+60000};
+let descriptorCalls=0,hostCalls=0;
+const canonicalHandoffHost={
+  async resumeAuthenticatedDevice(){hostCalls++;return user;},
+  async getDirectCall(auth,id){
+    assert.equal(auth.participantId,"alice");assert.equal(id,"fp-v-12345678-1234-1234-1234-1234567890ab");
+    return {state:"active",revision:2};
+  },
+  async describeAcceptedCallMls(auth,request){
+    descriptorCalls++;
+    assert.equal(auth.deviceId,"device-a");
+    assert.equal(request.callId,"fp-v-12345678-1234-1234-1234-1234567890ab");
+    assert.equal(request.expectedRevision,2);
+    return {mediaCallId:"fp-m-matched",deviceId:"device-a"};
+  },
+};
+let hint="fp-v-12345678-1234-1234-1234-1234567890ab";
+const handoffContext={
+  claims:grant,signedGrantRetired:false,
+  sessionStorage:{getItem:()=>hint},
+  firstPartyCanonicalHttpHost:null,
+  installFirstPartyDeviceAuthority:async()=>{
+    handoffContext.firstPartyCanonicalHttpHost=canonicalHandoffHost;
+  },
+  Date,
+};
+runInNewContext(handoffCode+"\nthis.verifyHandoff=verifyFirstPartyAutoJoinHandoff;",handoffContext);
+await handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",grant);
+assert.equal(descriptorCalls,1);
+assert.equal(hostCalls,1);
+await assert.rejects(handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",
+  {...grant,call_id:"fp-m-unrelated"}),/binding mismatch/);
+hint="fp-v-other";
+await assert.rejects(handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",grant),/binding mismatch/);
+hint="fp-v-12345678-1234-1234-1234-1234567890ab";
+handoffContext.signedGrantRetired=true;
+await assert.rejects(handoffContext.verifyHandoff("fp-v-12345678-1234-1234-1234-1234567890ab",grant),/binding mismatch/);
+assert.match(mediaPage,/verifyFirstPartyAutoJoinHandoff\(directCall,handoffClaims\)\.then\(\(\)=>\{/);
+// Only an explicitly missing/expired cookie (401) may trigger the existing
+// trusted-Device possession proof. Network/5xx, rate limits and revocation
+// must fail closed without issuing a replacement session.
+const authorityBegin=mediaPage.indexOf("async function installFirstPartyDeviceAuthority(){");
+const authorityFinish=mediaPage.indexOf("function requireCanonicalMediaHostReady(){",authorityBegin);
+assert.ok(authorityBegin>=0&&authorityFinish>authorityBegin);
+const authorityImpl=mediaPage.slice(authorityBegin,authorityFinish)
+  .replace('await import("./endpoint-media/reference_browser_media_installer.js")',
+    "await installerStub");
+async function authorityCase(error){
+  let retries=0,inspections=0;
+  const signer={keyId:"own-key",publicKey:new Uint8Array(32)};
+  const host={
+    resumeAuthenticatedDevice:async()=>{throw error;},
+    inspect:async()=>{inspections++;return {
+      deviceActive:true,deviceRevoked:false,activeKey:signer
+    };},
+  };
+  const context={
+    claims:{call_id:"fp-m-target",tenant_id:user.tenantId,namespace_id:null,
+      participant_id:user.participantId,device_id:user.deviceId},
+    sessionStorage:{getItem:()=>null},
+    location:{origin:"https://app.petrellink.ru"},
+    window:{},Uint8Array,
+    installerStub:{
+      createUcrBrowserProtectedDeviceVault:()=>({load:async()=>signer}),
+      createUcrFirstPartyHttpHost:()=>host,
+      authenticateUcrFirstPartyDevice:async()=>{
+        retries++;return user;
+      },
+    },
+    createEndpointAdmissionResolver:()=>()=>{},
+  };
+  runInNewContext("let firstPartyDeviceAuthorityPromise=null,firstPartyCanonicalHttpHost=null;\n"+
+    authorityImpl+"\nthis.install=installFirstPartyDeviceAuthority;",context);
+  let thrown=null;
+  try{await context.install();}catch(e){thrown=e;}
+  return {retries,inspections,thrown,context};
+}
+for(const failure of [
+  new Error("first-party canonical authority rejected request: HTTP 503"),
+  new Error("first-party canonical authority rejected request: HTTP 403"),
+  new Error("first-party canonical authority rejected request: HTTP 429"),
+  new TypeError("network offline"),
+]){
+  const result=await authorityCase(failure);
+  assert.equal(result.thrown,failure);
+  assert.equal(result.retries,0,"non-401 cannot silently reauthenticate media Device");
+  assert.equal(result.inspections,0);
+}
+const expiredAuthority=await authorityCase(
+  new Error("first-party canonical authority rejected request: HTTP 401"));
+assert.equal(expiredAuthority.thrown,null);
+assert.equal(expiredAuthority.retries,1);
+assert.equal(expiredAuthority.inspections,1);
+console.log("PASS: canonical Call resume, pre-auto-Join binding and 401-only media reauthentication");

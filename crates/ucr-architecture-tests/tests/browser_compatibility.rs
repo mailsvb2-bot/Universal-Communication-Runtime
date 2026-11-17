@@ -16,10 +16,16 @@ fn assert_browser_workflow(workflow: &str) {
             "missing desktop browser matrix row {browser}"
         );
     }
+    // The supported runner must execute authentic iOS Simulator and desktop Safari
+    // evidence. A second Intel runner is not a requirement: its CoreSimulator
+    // previously hung before browser testing and cancelled otherwise valid CI.
+    assert!(
+        workflow.contains("runner: [macos-15]"),
+        "mandatory macOS Safari runner matrix changed",
+    );
     for invariant in [
         "ubuntu-24.04",
         "macos-15",
-        "macos-15-intel",
         "safaridriver --enable",
         "browser_compatibility_probe.py",
         "wasm-bindgen-cli --version 0.2.128 --locked",
@@ -38,7 +44,6 @@ fn assert_browser_workflow(workflow: &str) {
         "Probe real Desktop Safari",
         "Require real Desktop Safari WebDriver evidence",
         "ios-safari-attempts",
-        "macos-15-intel",
         "DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer",
         "Verify pinned Xcode",
         "download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",

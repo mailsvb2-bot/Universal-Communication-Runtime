@@ -17,6 +17,13 @@ on:
       - 'crates/ucr-realtime-web/static/client.html'
       - 'crates/ucr-realtime-web/src/main.rs'
       - 'tests/consumer_room_availability.test.mjs'
+      - 'tests/consumer_phonebook.test.mjs'
+      - 'tests/consumer_phonebook_lock.test.mjs'
+      - 'tests/consumer_user_journey.test.mjs'
+      - 'tests/consumer_session_lifecycle.test.mjs'
+      - 'tests/consumer_simple_ui.test.mjs'
+      - 'crates/ucr-realtime-web/static/phonebook.js'
+      - 'crates/ucr-realtime-web/static/consumer-actions.js'
       - 'sdk/typescript/src/reference_browser_media_installer.ts'
       - 'sdk/typescript/src/canonical_browser_media_factory.ts'
       - 'sdk/typescript/src/contact_call_journey.ts'
@@ -74,6 +81,9 @@ jobs:
       - name: Check canonical media admission boundary
         shell: pwsh
         run: python tools/check_first_party_media_admission_contract.py
+      - name: Lock native phonebook, vCard, invite and first-party contact journey
+        shell: pwsh
+        run: node --test tests/consumer_phonebook.test.mjs tests/consumer_phonebook_lock.test.mjs tests/consumer_user_journey.test.mjs tests/consumer_session_lifecycle.test.mjs tests/consumer_simple_ui.test.mjs
       - name: Verify room readiness and canonical backend gating
         shell: pwsh
         run: node --test tests/consumer_room_availability.test.mjs

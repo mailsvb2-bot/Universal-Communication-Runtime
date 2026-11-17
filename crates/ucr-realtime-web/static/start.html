@@ -263,7 +263,9 @@ main>section[role="status"]>h2{font-size:1rem}
   <p id="pl-invite-help" hidden>Приглашение получено. Укажите, как зовут человека, и нажмите «Добавить». Проверьте его личность через доверенный канал.</p>
   <form id="new-contact">
     <input id="contact-name" aria-label="Имя" maxlength="128" placeholder="Имя" required>
-    <input id="contact-peer" aria-label="Код контакта из приглашения" maxlength="128" placeholder="Код контакта из приглашения" required>
+    <label for="contact-peer">Идентификатор PetrelLink из приглашения</label>
+    <input id="contact-peer" aria-label="Идентификатор PetrelLink из приглашения" maxlength="128" placeholder="Подставится при открытии ссылки приглашения" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    <small>Контакт из телефонной книги содержит имя и номер, но не защищённый идентификатор PetrelLink. Попросите знакомого отправить приглашение из своего PetrelLink: после открытия ссылки код появится автоматически.</small>
     <button type="submit">Добавить</button>
   </form>
   <small>Добавляйте только знакомых людей. Сверьте код контакта лично или через доверенный канал — ссылка сама по себе не подтверждает личность.</small>

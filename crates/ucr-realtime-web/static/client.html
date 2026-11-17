@@ -1439,7 +1439,11 @@ async function installFirstPartyDeviceAuthority(){
     // possession of the already-enrolled, protected Device signing key.
     let user;
     try{user=await host.resumeAuthenticatedDevice();}
-    catch(_){
+    catch(error){
+      // Only an explicitly expired/missing session (401) may trigger fresh
+      // possession proof. A 403/revocation, 429, 5xx or network failure must
+      // never silently mint another cookie or mask unavailable authority.
+      if(!/\bHTTP 401\b/.test(String(error?.message||"")))throw error;
       user=await module.authenticateUcrFirstPartyDevice(
         vault,{origin:location.origin},claimedBinding);
     }
@@ -4429,6 +4433,35 @@ async function submitLocalRoom(event,api,installerReady){
     throw error;
   }
 }
+// An old same-tab Direct Call hint cannot authorize auto-joining an
+// unrelated signed media grant. The canonical Call/Device owner must bind
+// this exact direct Call to this exact derived media Call BEFORE join() can
+// start permission prompts or local capture.
+async function verifyFirstPartyAutoJoinHandoff(directCall,grant){
+  if(!grant||typeof directCall!=="string"||
+     !/^fp-[av]-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(directCall)||
+     typeof grant.call_id!=="string"||!grant.call_id.startsWith("fp-m-"))
+    throw new Error("No verified first-party direct Call handoff");
+  await installFirstPartyDeviceAuthority();
+  const host=firstPartyCanonicalHttpHost;
+  if(!host)throw new Error("Authenticated first-party Call authority unavailable");
+  const user=await host.resumeAuthenticatedDevice();
+  if(user.tenantId!==grant.tenant_id||
+     user.namespaceId!==(grant.namespace_id??null)||
+     user.participantId!==grant.participant_id||
+     user.deviceId!==grant.device_id)
+    throw new Error("First-party media grant Device mismatch");
+  const activeCall=await host.getDirectCall(user,directCall);
+  if(activeCall.state!=="active"||!Number.isSafeInteger(activeCall.revision))
+    throw new Error("First-party direct Call no longer accepted");
+  const binding=await host.describeAcceptedCallMls(user,{
+    callId:directCall,expectedRevision:activeCall.revision
+  });
+  if(binding.mediaCallId!==grant.call_id||binding.deviceId!==grant.device_id||
+     sessionStorage.getItem("ucrFirstPartyDirectCall")!==directCall||
+     claims!==grant||signedGrantRetired||Date.now()>=grant.expires)
+    throw new Error("First-party auto-Join media Call binding mismatch");
+}
 try{
   const params=new URLSearchParams(location.hash.slice(1));applyBrandingFromFragment(params);token=params.get("ucr_join")||"";
   // Signed fragment grants are not shared media secrets.
@@ -4455,9 +4488,21 @@ try{
     const acceptedFirstPartyHandoff=claims.call_id.startsWith("fp-m-")&&
       /^fp-[av]-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(directCall||"");
     if(acceptedFirstPartyHandoff){
-      ui.status.textContent="Принятый вызов: проверяем защищённый допуск и подключаем медиа…";
-      resumeRoomAudio(window.ucrLocalRoomAudioContext);
-      void join().catch(error=>fail(error.message));
+      ui.status.textContent="Принятый вызов: сверяем допуск и точную привязку к медиа…";
+      const handoffClaims=claims,handoffToken=token;
+      void verifyFirstPartyAutoJoinHandoff(directCall,handoffClaims).then(()=>{
+        // A slow verification must not resurrect an expired, replaced or
+        // explicitly retired grant after navigation or Logout.
+        if(claims!==handoffClaims||token!==handoffToken||signedGrantRetired)return;
+        resumeRoomAudio(window.ucrLocalRoomAudioContext);
+        return join();
+      }).catch(error=>{
+        ui.state.textContent="Verification required";
+        ui.status.textContent="Автовход не подтверждён. Откройте действующий вызов через PetrelLink.";
+        if(typeof ucrRecordDiagnostic==="function")
+          ucrRecordDiagnostic("First-party auto-Join refused: "+
+            ucrDiagnosticReason(String(error?.message||error)),"lifecycle");
+      });
     }else{
       ui.status.textContent="Signed grant loaded. Ready to join.";
     }
