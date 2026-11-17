@@ -828,3 +828,14 @@ console.log("PASS: canonical Call resume, pre-auto-Join binding and 401-only med
 // Exercise consumed-grant recovery from this existing required Windows CI entry.
 await import("./test_first_party_media_recovery.mjs");
 await import("./test_first_party_peer_join_race.mjs");
+
+// A manual Join (rather than the verified auto-Join) with a retained Direct
+// Call hint must recheck canonical consent. Missing hints NEVER grant video.
+const joinPreflight=mediaPage.slice(mediaPage.indexOf("async function join(){"),
+  mediaPage.indexOf("// Leave or the retiring grant's watchdog",mediaPage.indexOf("async function join(){")));
+assert.match(joinPreflight,/claims\?\.call_id\?\.startsWith\("fp-m-"\)&&firstPartyAcceptedMediaKind===null/);
+assert.match(joinPreflight,/sessionStorage\.getItem\("ucrFirstPartyDirectCall"\)/);
+assert.match(joinPreflight,/await verifyFirstPartyAutoJoinHandoff\(hintedCall,claims\)/);
+assert.doesNotMatch(joinPreflight,/firstPartyAcceptedMediaKind\s*=\s*["']video["']/,
+  "manual Join must never assert video consent from UI preferences");
+console.log("PASS: manual first-party Join rechecks authenticated Call media consent before capture");
