@@ -60,6 +60,8 @@ const context={
   restoreSession:async()=>user,message(){},
   refreshing:false,navigating:false,timer:null,knownContacts:[],
   mlsPreparation:null,
+  // Public WASM prewarm is nonblocking and never owns Call authorization.
+  mlsWasm:async()=>({}),
   // This isolated regression executes Call code without the page diagnostics.
   // Diagnostics are observation-only; they do not own media or grant authority.
   authDiagnostic(){},
