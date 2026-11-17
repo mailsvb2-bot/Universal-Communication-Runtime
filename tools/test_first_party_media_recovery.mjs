@@ -70,3 +70,23 @@ for(const stage of ["PREFLIGHT","REALTIME_JOIN","MLS_RESTORE","WEBRTC_START","WE
  assert.ok(html.includes('ucrMediaActivationStage="'+stage+'"'),"missing safe media stage "+stage);
 }
 console.log("PASS: accepted first-party Join failure retires only the old media grant, offers canonical /start recovery, and records precise safe stage");
+
+// A rejected first-party /webrtc/start is not recoverable by endlessly
+// reusing the same consumed signed grant. Stop physical capture, then route
+// through /start for a fresh canonical Device-bound media admission.
+const reconnectStart=html.indexOf("async function restartWebRtc(forceMedia){");
+const reconnectEnd=html.indexOf("function scheduleWebRtcRetryAfterRestart(){",reconnectStart);
+assert.ok(reconnectStart>=0&&reconnectEnd>reconnectStart);
+const reconnect=html.slice(reconnectStart,reconnectEnd);
+assert.match(reconnect,/claims\?\.call_id\?\.startsWith\("fp-m-"\)&&\[401,403\]\.includes\(e\?\.status\)/);
+assert.match(reconnect,/await endUnverifiedMedia\(generation,"Protected Call media authorization rejected\."\)/);
+assert.match(reconnect,/return scheduleWebRtcRetryAfterRestart\(\)/,
+  "retry must remain for transient non-authorization transport failures");
+const activationStart=html.indexOf("async function activateAdmittedMedia(){");
+const activationEnd=html.indexOf("async function applyAdmissionState(state){",activationStart);
+assert.ok(activationStart>=0&&activationEnd>activationStart);
+const activation=html.slice(activationStart,activationEnd);
+assert.match(activation,/claims\?\.call_id\?\.startsWith\("fp-m-"\)&&\[401,403\]\.includes\(e\?\.status\)/);
+assert.match(activation,/await endUnverifiedMedia\(generation,"Protected Call media authorization rejected\."\)/);
+assert.match(html,/localMediaPolicy:\{[\s\S]*?acceptedCallMedia:[\s\S]*?microphoneAllowed:policyAllows\("audio"\),[\s\S]*?cameraAllowed:policyAllows\("camera"\),/);
+console.log("PASS: terminal first-party media 401/403 retires grant, while transient transport retry and canonical video consent stay guarded");
