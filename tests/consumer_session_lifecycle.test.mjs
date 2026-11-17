@@ -225,5 +225,39 @@ test("long-poll incoming wake is cancelled on logout, pagehide and a replacement
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(requests.length,2,"aborted wake cannot restart a prior Device poll");
   assert.match(source,/function plClearAuthenticatedView\([^)]*\)\{[\s\S]*?stopIncomingCallWake\(\);/);
-  assert.match(source,/window\.addEventListener\("pagehide",[^\n]*stopIncomingCallWake\(\)/);
+  assert.match(source,/window\.addEventListener\("pagehide", \(\) => \{[\s\S]*?stopIncomingCallWake\(\);/);
+});
+
+test("BFCache restore restarts canonical Device monitoring once, not on fresh pages",async()=>{
+  const code=extract('window.addEventListener("pagehide", () => {','function explainEntryFailure(error) {');
+  const listeners={};
+  let polls=0,initializations=0,aborts=0;
+  const ctx={
+    window:{addEventListener:(name,fn)=>{listeners[name]=fn}},
+    clearInterval:()=>{polls++},stopIncomingCallWake:()=>{aborts++},
+    timer:42,accountScope:"verified-device",navigating:false,busy:false,logoutInFlight:false,
+    initialize:async()=>{initializations++;ctx.timer=99},
+    authDiagnostic:()=>assert.fail("unexpected restore failure"),
+    message:()=>assert.fail("unexpected restore failure"),
+    SessionSuperseded:class extends Error {},
+  };
+  vm.runInNewContext(code,ctx);
+  listeners.pageshow({persisted:false});
+  assert.equal(initializations,0);
+  listeners.pagehide();
+  assert.equal(ctx.timer,null);
+  assert.equal(polls,1);
+  assert.equal(aborts,1);
+  listeners.pageshow({persisted:true});
+  listeners.pageshow({persisted:true});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(initializations,1,"BFCache duplicate pageshow must not launch two monitors");
+  assert.equal(ctx.timer,99);
+  assert.equal(ctx.busy,false);
+  listeners.pageshow({persisted:true});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(initializations,1,"already active timer must not be replaced");
+  ctx.accountScope=null;ctx.timer=null;
+  listeners.pageshow({persisted:true});
+  assert.equal(initializations,1,"logged-out page must not monitor old account");
 });
