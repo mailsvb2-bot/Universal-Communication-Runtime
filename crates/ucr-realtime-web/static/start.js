@@ -1442,6 +1442,10 @@ async function dial(contact,media) {
   const requestId = idempotency.get(key) ?? crypto.randomUUID();
   idempotency.set(key,requestId);
   message("Соединяем с собеседником…");
+  // Public revision-pinned WASM is safe to prepare while the peer is ringing.
+  // Do not await it here: Call creation and Device authorization remain owned
+  // by the canonical BFF, and this preload cannot request keys or media.
+  void mlsWasm().catch(()=>{});
   // Re-establish device authority before making an irreversible canonical Call.
   // A stale cookie must not create a Call which the UI then fails to display.
   const scope=accountScope, generation=uiAuthGeneration;
@@ -1493,6 +1497,9 @@ function renderIncoming(items) {
         if(call.calleeIdentityId!==plOwnIdentity)
           throw Error("Входящий Call не принадлежит текущему получателю");
         rememberActiveCall(call,plOwnIdentity,{acceptPending:true});
+        // Overlap the public OpenMLS/WASM cold load with canonical acceptance.
+        // No microphone, camera, key derivation or MLS roster mutation here.
+        void mlsWasm().catch(()=>{});
         const pendingLocator=activeCallLocator();
         const result = await calls.signal(call.callId,"accept");
         if (!result || result.callId !== call.callId) throw Error("Call acceptance mismatch");
