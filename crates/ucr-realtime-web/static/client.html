@@ -1055,7 +1055,12 @@ async function fetchEndpointMlsContext(signal){
   // attempt rechecks canonical Call, Device, roster and MLS state server-side.
   const firstParty=claims?.call_id?.startsWith("fp-m-") &&
     sessionStorage.getItem("ucrFirstPartyDirectCall");
-  const deadline=Date.now()+Math.min(7000,Math.max(0,claims.expires-Date.now()));
+  // A real recipient may need to wake/unlock a phone and accept an incoming
+  // Call after the initiator's realtime Join. Seven seconds caused an actual
+  // pre-SDP failure before the second device could Join. Keep one bounded
+  // 60-second rendezvous window within the signed grant's own expiry; every
+  // 503 retry re-enters the canonical server's session/Device/MLS admission.
+  const deadline=Date.now()+Math.min(60000,Math.max(0,claims.expires-Date.now()));
   for(;;){
     if(signal?.aborted)throw new DOMException("MLS admission cancelled","AbortError");
     try{

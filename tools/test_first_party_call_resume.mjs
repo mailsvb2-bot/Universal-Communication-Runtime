@@ -794,3 +794,4 @@ console.log("PASS: canonical Call resume, pre-auto-Join binding and 401-only med
 
 // Exercise consumed-grant recovery from this existing required Windows CI entry.
 await import("./test_first_party_media_recovery.mjs");
+await import("./test_first_party_peer_join_race.mjs");
