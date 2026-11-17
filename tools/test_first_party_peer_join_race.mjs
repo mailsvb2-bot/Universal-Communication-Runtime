@@ -12,14 +12,14 @@ assert.match(src,/acceptedFirstPartyHandoff/,"accepted Device-bound calls autojo
 assert.match(src,/claims\.call_id\.startsWith\("fp-m-"\)/,"autojoin is scoped to signed first-party media Calls");
 assert.match(src,/sessionStorage\.getItem\("ucrFirstPartyDirectCall"\)/,"autojoin requires handoff from authenticated /start");
 
-async function runScenario({responses,firstParty=true,aborted=false}) {
- let requests=0;
+async function runScenario({responses,firstParty=true,aborted=false,advanceMs=0,grantTtlMs=120000}) {
+ let requests=0,virtualNow=Date.now();
  const context={
-  claims:{call_id:firstParty?"fp-m-test-call":"conference-call",expires:Date.now()+60000},
+  claims:{call_id:firstParty?"fp-m-test-call":"conference-call",expires:virtualNow+grantTtlMs},
   sessionStorage:{getItem:()=>firstParty?"fp-v-test-call":null},
   ui:{status:{textContent:""}},
-  Date,Math,DOMException,Error,
-  setTimeout:(fn)=>setTimeout(fn,0),
+  Date:{now:()=>virtualNow},Math,DOMException,Error,
+  setTimeout:(fn)=>{virtualNow+=advanceMs;return setTimeout(fn,0);},
   body:()=>({call_id:"test"}),
   async api(){
    const entry=responses[Math.min(requests,responses.length-1)];
@@ -37,6 +37,29 @@ const pending=await runScenario({responses:[503,503,503,200]});
 assert.equal(pending.requests,4);
 assert.equal(pending.value?.endpoint_state_mode,"restore");
 assert.equal(pending.error,null);
+// The real 2026-11-17 call failed after ~8 seconds: the peer began joining
+// only after the old 7-second deadline. Simulate 12 seconds of elapsed time,
+// without sleeping in CI, and verify the first grant stays in its admitted
+// canonical rendezvous instead of being needlessly retired.
+const delayedPeer=await runScenario({
+ responses:[503,503,503,503,503,503,503,503,503,503,503,503,200],
+ advanceMs:1000,
+});
+assert.equal(delayedPeer.error,null,"recipient arrival after 7 seconds must succeed");
+assert.equal(delayedPeer.requests,13);
+assert.equal(delayedPeer.value?.endpoint_state_mode,"restore");
+// Never turn the bounded wait into unbounded 503 polling, or extend an
+// expired signed grant. Other HTTP errors still fail immediately.
+const expiredWindow=await runScenario({
+ responses:Array(80).fill(503),advanceMs:1000,grantTtlMs:30000,
+});
+assert.equal(expiredWindow.error?.status,503);
+assert.ok(expiredWindow.requests<=31,"signed grant expiry must cap waiting");
+const boundedWindow=await runScenario({
+ responses:Array(80).fill(503),advanceMs:1000,grantTtlMs:120000,
+});
+assert.equal(boundedWindow.error?.status,503);
+assert.ok(boundedWindow.requests<=61,"rendezvous must stop within 60 seconds");
 for(const code of [401,403,502]){
  const denied=await runScenario({responses:[code,200]});
  assert.equal(denied.requests,1,"must never retry terminal authorization or integrity denial");
