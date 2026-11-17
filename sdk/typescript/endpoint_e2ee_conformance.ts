@@ -2282,6 +2282,9 @@ const screenCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, localStream: null,
   screenStream: null, screenShareBusy: false,
   e2eeChannel: {readyState: "open"}, mediaPolicy: allowedScreenPolicy,
+  // This unrelated conference scenario has no first-party accepted Direct
+  // Call. Keep its policy separate from the new audio-only camera fence.
+  claims: null, firstPartyAcceptedMediaKind: null,
   navigator: {mediaDevices: {getDisplayMedia: async () => chosenScreen}},
   ui: {
     // The VM evaluates the actual browser control refresh code, including

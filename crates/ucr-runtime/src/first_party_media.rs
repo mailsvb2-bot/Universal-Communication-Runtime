@@ -56,6 +56,26 @@ pub(crate) const FIRST_PARTY_MEDIA_PERMISSIONS: [&str; 5] = [
     ucr_protocol::VIDEO_SEND_PERMISSION,
     ucr_protocol::VIDEO_RECEIVE_PERMISSION,
 ];
+const FIRST_PARTY_AUDIO_ONLY_PERMISSIONS: [&str; 3] = [
+    ucr_protocol::CONFERENCE_SUBSCRIBE_PERMISSION,
+    ucr_protocol::AUDIO_SEND_PERMISSION,
+    ucr_protocol::AUDIO_RECEIVE_PERMISSION,
+];
+
+fn direct_media_permissions(
+    direct: &CallSession,
+) -> Result<(&'static [&'static str], bool), MediaRuntimeError> {
+    // The immutable canonical Call ID encodes the user-selected media kind.
+    // Never infer an audio/video consent change from a derived media Group.
+    let id = direct.call_id.as_opaque().as_str();
+    if id.starts_with("fp-a-") {
+        Ok((&FIRST_PARTY_AUDIO_ONLY_PERMISSIONS, true))
+    } else if id.starts_with("fp-v-") {
+        Ok((&FIRST_PARTY_MEDIA_PERMISSIONS, false))
+    } else {
+        Err(MediaRuntimeError::Conflict)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MediaRuntimeError {
@@ -315,20 +335,23 @@ where
 /// same transaction that terminates it (or records a participant's departure).
 fn grant_call_media_permissions<S>(
     store: &S,
+    direct: &CallSession,
     media: &CallSession,
     participants: &[PrincipalRef; 2],
 ) -> Result<(), MediaRuntimeError>
 where
     S: CallPermissionGrantStore,
 {
-    store
-        .grant_call_permissions(
-            &media.scope,
-            &media.call_id,
-            participants,
-            &FIRST_PARTY_MEDIA_PERMISSIONS,
-        )
-        .map_err(MediaRuntimeError::from)
+    let (permissions, audio_only) = direct_media_permissions(direct)?;
+    // Audio Calls may have historical VIDEO grants from the previous build.
+    // Replace the exact Call-scoped rights in ONE SQLite transaction: do not
+    // try a revoke-then-grant split that could race concurrent Join or Hangup.
+    if audio_only {
+        store.replace_call_permissions(&media.scope, &media.call_id, participants, permissions)
+    } else {
+        store.grant_call_permissions(&media.scope, &media.call_id, participants, permissions)
+    }
+    .map_err(MediaRuntimeError::from)
 }
 
 /// A private first-party media Group is born with the caller and admits only
@@ -420,7 +443,7 @@ where
     }
     // Grant only after the derived Call exists; the grant transaction itself
     // rechecks that it is not terminated, so a concurrent Hangup fails closed.
-    grant_call_media_permissions(store, &media, &participants)?;
+    grant_call_media_permissions(store, direct, &media, &participants)?;
     Ok(media)
 }
 
@@ -539,6 +562,28 @@ mod tests {
             scope: scope("t", None),
             principal: person(id),
         }
+    }
+
+    #[test]
+    fn direct_call_media_kind_never_gives_video_permissions_to_audio_consent() {
+        let mut call = direct(CallSignallingState::Active, CallParticipantState::Accepted);
+        call.call_id = CallId::from_opaque(OpaqueId::new("fp-a-original").unwrap());
+        let (audio, exact_set) = direct_media_permissions(&call).expect("audio permission set");
+        assert!(
+            exact_set,
+            "audio calls must revoke historic video grants atomically"
+        );
+        assert!(audio.contains(&ucr_protocol::AUDIO_SEND_PERMISSION));
+        assert!(audio.contains(&ucr_protocol::AUDIO_RECEIVE_PERMISSION));
+        assert!(!audio.contains(&ucr_protocol::VIDEO_SEND_PERMISSION));
+        assert!(!audio.contains(&ucr_protocol::VIDEO_RECEIVE_PERMISSION));
+        call.call_id = CallId::from_opaque(OpaqueId::new("fp-v-original").unwrap());
+        let (video, exact_set) = direct_media_permissions(&call).expect("video permission set");
+        assert!(!exact_set);
+        assert!(video.contains(&ucr_protocol::VIDEO_SEND_PERMISSION));
+        assert!(video.contains(&ucr_protocol::VIDEO_RECEIVE_PERMISSION));
+        call.call_id = CallId::from_opaque(OpaqueId::new("fp-unrecognized").unwrap());
+        assert!(direct_media_permissions(&call).is_err());
     }
 
     #[test]
