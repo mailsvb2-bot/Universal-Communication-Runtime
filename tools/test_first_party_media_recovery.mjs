@@ -152,7 +152,7 @@ assert.match(localCapture,/void refreshDevices\(\)\.catch\(\(\)=>\{\}\)/);
 assert.doesNotMatch(localCapture,/await refreshDevices\(\)/,
   "enumerating device labels must not delay the first WebRTC SDP");
 const firstFrameRecoveryStart=html.indexOf("function startInitialVideoRecovery(){");
-const firstFrameRecoveryEnd=html.indexOf("async function syncReceiveSubscriptions(){",firstFrameRecoveryStart);
+const firstFrameRecoveryEnd=html.indexOf("async function syncReceiveSubscriptions(",firstFrameRecoveryStart);
 assert.ok(firstFrameRecoveryStart>=0&&firstFrameRecoveryEnd>firstFrameRecoveryStart);
 const firstFrameRecovery=html.slice(firstFrameRecoveryStart,firstFrameRecoveryEnd);
 assert.match(firstFrameRecovery,/deadline=Date\.now\(\)\+12000/);
