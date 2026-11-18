@@ -2512,7 +2512,8 @@ function prefetchFirstPartyWebRtcOffer(){
   });
   const promise=api("/v1/realtime/webrtc/start",owner.claims,
     undefined,false,owner.token).then(response=>response.json()).then(offer=>{
-      if(owner.generation===sessionLifecycleGeneration&&sessionActive)
+      if(owner.generation===sessionLifecycleGeneration&&sessionActive&&
+         typeof ucrRecordDiagnostic==="function")
         ucrRecordDiagnostic("WebRTC server offer received","webrtc");
       return {ok:true,offer};
     },error=>({ok:false,error}));
@@ -2581,7 +2582,8 @@ async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
         undefined,false,startingToken);
       serverPeerOpened=true;
       offer=await response.json();
-      if(generation===mediaCaptureGeneration&&sessionActive)
+      if(generation===mediaCaptureGeneration&&sessionActive&&
+         typeof ucrRecordDiagnostic==="function")
         ucrRecordDiagnostic("WebRTC server offer received","webrtc");
     }
     if(!offer||typeof offer.offer_id!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(offer.offer_id)){
