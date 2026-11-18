@@ -2603,11 +2603,15 @@ try {
     const failedFrame = {mediaKind: "video" as const,
       videoSourceKind: "camera" as const, streamId: "failure-canvas",
       timestamp: 100n, keyframe: true, bytes: new Uint8Array([1, 2])};
-    assert.throws(() => failingRender.play(failedFrame), /video canvas 2D context unavailable/);
+    assert.throws(() => failingRender.play(failedFrame), (error: unknown) =>
+      error instanceof Error && error.message === "UCR_MEDIA_VIDEO_DECODER_FAILURE" &&
+      error.cause instanceof Error && /video canvas 2D context unavailable/.test(error.cause.message));
     assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, simulatedNow);
     simulatedNow += 800;
     assert.throws(() => failingRender.play({...failedFrame, timestamp: 101n}),
-      /video canvas 2D context unavailable/);
+      (error: unknown) => error instanceof Error &&
+        error.message === "UCR_MEDIA_VIDEO_DECODER_FAILURE" &&
+        error.cause instanceof Error && /video canvas 2D context unavailable/.test(error.cause.message));
     assert.equal(videoCounters.lastDecodedAt, simulatedNow);
     assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, simulatedNow - 800,
       "later failed decodes must not erase accumulated render stall duration");
