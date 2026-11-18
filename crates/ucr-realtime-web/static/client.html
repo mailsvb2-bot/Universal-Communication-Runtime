@@ -2098,8 +2098,11 @@ async function activateE2eeAdapter(){
   }
   // Canonical read-only roster may overlap endpoint state restoration and
   // WebCodecs initialization. Subscriptions still require the live E2EE gate.
-  const preparedReceiveRoster=api("/v1/realtime/receive-roster",body())
-    .then(response=>response.json()).catch(()=>null);
+  const rosterAbort=new AbortController();
+  const rosterDeadline=setTimeout(()=>rosterAbort.abort(),1200);
+  const preparedReceiveRoster=api("/v1/realtime/receive-roster",body(),rosterAbort.signal)
+    .then(response=>response.json()).catch(()=>null)
+    .finally(()=>clearTimeout(rosterDeadline));
   const restoreState=await restoreEndpointPersistedState(adapter);
   if(!isCurrent())throw new Error("Encrypted media session changed during restore");
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
