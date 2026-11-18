@@ -180,7 +180,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   #active = false;
   #retired = false;
   #generation = 0;
-  #sender: ((wire: Uint8Array, kind?: "audio" | "video") => void) | null = null;
+  #sender: ((wire: Uint8Array, kind?: "audio" | "video", keyframe?: boolean) => void) | null = null;
 
   constructor(options: UcrEndpointPipelineOptions) {
     if (!options.bridge || typeof options.bridge.revoke !== "function") {
