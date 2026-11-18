@@ -83,5 +83,6 @@ assert.equal(sendCtx.window.__ucrAudioCounters.transportQueued,1);
 // never creates a second key bridge.
 assert.match(receiver,/adapter\.onEnvelope\(wire\)/);
 assert.doesNotMatch(receiver,/seal_wire|open_wire|derive_secret|new .*CryptoBridge/);
-assert.match(html,/if\(channel\.label===E2EE_UNORDERED_CHANNEL_LABEL\)/);
+assert.ok(html.includes("channel.label===E2EE_UNORDERED_CHANNEL_LABEL"),
+  "v2 offered channel must reach the same authenticated media owner");
 console.log("PASS: v2 loss/reorder/replay bounds, keyframe metadata, v1 fallback and one E2EE owner");
