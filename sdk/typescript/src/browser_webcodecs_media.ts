@@ -282,6 +282,20 @@ async function ucrProbeH264Hardware(): Promise<void> {
     } catch { /* try next profile-level-id */ }
   }
 }
+/** An actual rejected encrypted DataChannel send is observable congestion,
+ * even when the browser drains bufferedAmount before the periodic sampling
+ * tick. Counter resets at a new transport generation are not congestion.
+ * This never reads media contents, identities or unverified network hints.
+ */
+export function ucrTransportCongestionDelta(
+  previous: number, current: number | undefined,
+): {pressure: boolean; baseline: number} {
+  if (!Number.isSafeInteger(current) || current! < 0) {
+    return {pressure: false, baseline: previous};
+  }
+  if (current! < previous) return {pressure: false, baseline: current!};
+  return {pressure: current! > previous, baseline: current!};
+}
 /** Source-owned congestion adaptation. Only verified encrypted transport queue
  * depth and local encoder pressure influence publish quality. Never change MLS
  * keys, Device authority, or a different participant's receive policy.
@@ -669,14 +683,9 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         __ucrMediaStageMetrics?: {sendQueueCongested?: number};
       }).__ucrMediaStageMetrics;
       const current = metrics?.sendQueueCongested;
-      if (!Number.isSafeInteger(current) || current! < 0) return false;
-      if (current! < lastTransportCongestion) {
-        lastTransportCongestion = current!;
-        return false;
-      }
-      const pressured = current! > lastTransportCongestion;
-      lastTransportCongestion = current!;
-      return pressured;
+      const sample = ucrTransportCongestionDelta(lastTransportCongestion, current);
+      lastTransportCongestion = sample.baseline;
+      return sample.pressure;
     };
     let lastVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
     let nextVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
