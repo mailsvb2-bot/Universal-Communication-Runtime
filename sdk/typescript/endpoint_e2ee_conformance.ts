@@ -3214,7 +3214,7 @@ const inbound = new UcrPortableEndpointMediaAdapter({
   authorizeFrame: () => true, authorizePublish: () => true,
 });
 const inboundWire = (sequence: bigint, principalId: string,
-  mediaKind: "audio" | "video" = "video") =>
+  mediaKind: "audio" | "video" = "video", keyframe = true) =>
   encodeSfuForwardEnvelopeWire({frame: {
     header: {
       tenantId: "tenant", namespaceId: null, callId: "call", groupId: "group",
@@ -3222,7 +3222,7 @@ const inboundWire = (sequence: bigint, principalId: string,
       streamId: "camera", negotiationRef: "current", negotiationGeneration: 1n,
       cryptoEpoch: 3n, cryptoStateRef: "state", cryptoSuite: "ucr.v1",
       headerVersion: 2, mediaKind, videoSourceKind: mediaKind === "video" ? "camera" : null,
-      sequence, mediaTimestamp: sequence, keyframe: mediaKind === "video",
+      sequence, mediaTimestamp: sequence, keyframe: mediaKind === "video" && keyframe,
     },
     nonce: new Uint8Array(24), ciphertext: Uint8Array.of(1),
     sourceSignature: {keyId: "trusted", algorithmId: "ed25519",
@@ -3278,6 +3278,37 @@ assert.match(ucrNewMediaSessionId(), /^[a-f0-9]{8}$/);
   assert.equal(m.lastRxVideo,100);
   await adapter.onEnvelope(inboundWire(101n,"alice"));
   await adapter.stop();
+}
+
+// Canonical receive path: a signed ciphertext drop must not push dependent
+// VP8 deltas through the decoder until an independently authenticated keyframe.
+{
+  const metrics = (globalThis as unknown as {__ucrMediaStageMetrics: {
+    videoSequenceGaps:number;videoDeltaDiscardedAfterGap:number;videoKeyframeResyncs:number;
+  }}).__ucrMediaStageMetrics;
+  const before={...metrics}, played:bigint[]=[];
+  const receiver=new UcrPortableEndpointMediaAdapter({
+    bridge:{seal_wire(){return Uint8Array.of(1);},open_wire(){return Uint8Array.of(8);},revoke(){}},
+    producer:{start(){},stop(){}},
+    consumer:{play(_frame,header){played.push(header.sequence);},stop(){}},
+    trustedKeys:{resolve(){return new Uint8Array(32).fill(3);}},
+    binding:{tenantId:"tenant",namespaceId:null,callId:"call",groupId:"group",
+      cryptoEpoch:3n,negotiationRef:"current",negotiationGeneration:1n},
+    authorizeFrame:()=>true,authorizePublish:()=>true
+  });
+  await receiver.start({...src,sendEnvelope(){}});
+  await receiver.onEnvelope(inboundWire(1n,"alice","video",true));
+  await receiver.onEnvelope(inboundWire(3n,"alice","video",false));
+  await receiver.onEnvelope(inboundWire(4n,"alice","video",false));
+  assert.deepEqual(played,[1n],"lost delta must not poison real decoder");
+  await receiver.onEnvelope(inboundWire(5n,"alice","video",true));
+  await receiver.onEnvelope(inboundWire(6n,"alice","video",false));
+  assert.deepEqual(played,[1n,5n,6n],"verified keyframe restores video without replay reset");
+  assert.equal(metrics.videoSequenceGaps,before.videoSequenceGaps+1);
+  assert.equal(metrics.videoDeltaDiscardedAfterGap,before.videoDeltaDiscardedAfterGap+2);
+  assert.equal(metrics.videoKeyframeResyncs,before.videoKeyframeResyncs+1);
+  await receiver.onEnvelope(inboundWire(7n,"alice","audio",false));
+  await receiver.stop();
 }
 
 // Closed DataChannel is transient backpressure, not a fatal crypto failure.
