@@ -28,6 +28,14 @@ jobs:
         run: python3 sdk/conformance/validate.py
       - name: Enforce one WebRTC dependency owner without pin-utils
         run: python3 tools/check_webrtc_dependency_ownership.py
+      - name: First-party canonical execution path and release artifact contracts
+        if: matrix.language == 'python'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/check_first_party_execution_path.py
+          python3 -m unittest discover -s tools -p 'test_first_party_execution_path.py'
+          python3 -m unittest discover -s tools -p 'test_first_party_real_call_evidence.py'
       - name: Run language host probe
         shell: bash
         run: |
@@ -53,6 +61,8 @@ jobs:
               node tools/test_first_party_invitation_buttons.mjs
               node tools/test_first_party_action_busy_feedback.mjs
               node tools/test_browser_network_failure_categories.mjs
+              node tools/test_first_party_unordered_transport.mjs
+              node tools/test_first_party_ice_batch.mjs
               node --experimental-strip-types sdk/typescript/first_party_account_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_embed_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_client_conformance.ts

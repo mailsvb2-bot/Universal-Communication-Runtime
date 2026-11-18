@@ -128,3 +128,13 @@ assert.match(html,/ucrRecordDiagnostic\("WebRTC ICE connected","webrtc"\)/);
 assert.equal((html.match(/ucrRecordDiagnostic\("Endpoint E2EE transport active","lifecycle"\)/g)||[]).length,2,
   "initial E2EE activation and authorized reconnection both emit timing marks");
 console.log("PASS: safe timestamped MLS/ICE/E2EE milestones support call-start latency diagnosis");
+
+// Distinguish slow server offer/permission/candidate exchange from ICE itself.
+// A server health 200 and "WebRTC ICE connected" alone cannot locate 10+ s.
+for(const event of [
+  "WebRTC server offer received",
+  "Local capture ready for WebRTC",
+  "WebRTC remote SDP accepted"
+])assert.ok(html.includes('ucrRecordDiagnostic("'+event+'","webrtc")'),
+  "missing per-stage WebRTC timing marker: "+event);
+console.log("PASS: timestamped offer/capture/SDP milestones locate ICE startup delay");

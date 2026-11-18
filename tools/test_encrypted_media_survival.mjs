@@ -14,7 +14,10 @@ assert.match(browser,/ucrConferenceMediaActive/);
 assert.match(start,/Защищённый звонок уже открыт на экране конференции/);
 assert.doesNotMatch(browser,/if\(event\.startsWith\("event: media"\)\)\{packetCount\+\+/);
 const attachSnippet=browser.slice(browser.indexOf("function attachE2eeDataChannel(channel){"),browser.indexOf("function scheduleStreamRetry(){"));
-assert.ok(attachSnippet.includes("detachE2eeChannel();e2eeChannel=channel"));
+assert.ok(attachSnippet.includes("if(typeof e2eeChannel!==\"undefined\"&&e2eeChannel)detachE2eeChannel()"),
+  "only a replacement reliable v1 retires existing canonical adapter and optional v2");
+assert.ok(attachSnippet.includes("e2eeChannel=channel;e2eeChannel.binaryType"),
+  "v1 remains canonical adapter owner even when v2 arrives before it");
 assert.ok(attachSnippet.includes("if(e2eeChannel!==channel)return;"));
 assert.ok(!/recoverTerminalEncryptedChannel[\s\S]*closeE2eeTransport\(\);/.test(attachSnippet),
   "terminal DataChannel recovery must not revoke live epoch signer");
@@ -36,13 +39,17 @@ const ctx={
 };
 runInNewContext(attachSnippet+"\nthis.attach = attachE2eeDataChannel;",ctx);
 ctx.attach(channel);
-assert.equal(detached,1);
+assert.equal(detached,0,"first v1 binding must preserve early optional v2");
 channel.onmessage({data:new Uint8Array([1])});
 channel.onmessage({data:new Uint8Array([9])});
 await Promise.resolve();await Promise.resolve();
 assert.equal(opened,2);
 assert.equal(ctx.ui.status.textContent,"","replay must not overwrite status");
 assert.equal(ctx.packetCount,2);
+const replacement={...channel,label:"ucr.e2ee.media.v1",readyState:"connecting"};
+ctx.attach(replacement);
+assert.equal(detached,1,"replacing an existing v1 still retires old encrypted transport");
+assert.equal(ctx.e2eeChannel,replacement);
 const begin=start.slice(start.indexOf("async function beginMedia(callId) {"),start.indexOf("async function dial("));
 const messages=[];
 const beginCtx={

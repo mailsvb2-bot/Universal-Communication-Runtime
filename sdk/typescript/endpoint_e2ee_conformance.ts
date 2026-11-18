@@ -29,6 +29,7 @@ import {
   ucrAdvanceVideoPacing,
   ucrDetectVideoCodec,
   ucrAdaptiveVideoStep,
+  ucrTransportCongestionDelta,
   ucrNormalizeOpusAudio,
 } from "./src/browser_webcodecs_media.ts";
 import {
@@ -2396,6 +2397,27 @@ assert.deepEqual(ucrAdaptiveVideoStep(1, 0, 0, 4, false), {stage:0, healthySampl
   "quality must recover after five healthy device and transport samples");
 assert.throws(() => ucrAdaptiveVideoStep(0, -1, 0, 0), /invalid video congestion sample/);
 
+assert.deepEqual(ucrTransportCongestionDelta(0, 0), {pressure:false, baseline:0});
+assert.deepEqual(ucrTransportCongestionDelta(0, 39), {pressure:true, baseline:39},
+  "39 observed rejected video sends must lower the canonical video stage even after the buffer drained");
+assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 0, 0,
+  ucrTransportCongestionDelta(0, 39).pressure), {stage:1, healthySamples:0});
+assert.deepEqual(ucrTransportCongestionDelta(39, 39), {pressure:false, baseline:39},
+  "repeated periodic reads of the same count must not degrade indefinitely");
+assert.deepEqual(ucrTransportCongestionDelta(39, 0), {pressure:false, baseline:0},
+  "new transport generation resets the cumulative counter without false pressure");
+assert.deepEqual(ucrTransportCongestionDelta(39, undefined), {pressure:false, baseline:39},
+  "missing telemetry must never fabricate a congestion event");
+const codecProducerSource = readFileSync(
+  "sdk/typescript/src/browser_webcodecs_media.ts", "utf8");
+assert.match(codecProducerSource,
+  /let lastTransportCongestion = Number\.isSafeInteger\(initialCongestion\)/,
+  "reattached camera must start from current transport counter, not zero");
+assert.match(codecProducerSource,
+  /const transportPressure = readTransportCongestion\(\)/,
+  "the actual send rejection counter must feed the source-owned controller");
+
+
 const endpointQualityCalls: string[] = [];
 const crypto = {
   seal_wire() { return new Uint8Array([1, 2]); },
@@ -2988,7 +3010,7 @@ try {
 // on the outbound path. Audio metadata is necessary for protecting Opus queue
 // space; it must never select a different key or skip the secure bridge.
 {
-  const sent: Array<{kind: string | undefined; sealed: number}> = [];
+  const sent: Array<{kind: string | undefined; sealed: number; keyframe: boolean | undefined}> = [];
   const outbound = new UcrPortableEndpointMediaAdapter({
     bridge: {
       seal_wire(_streamId, mediaKind) { return Uint8Array.of(mediaKind); },
@@ -3013,10 +3035,11 @@ try {
   });
   await outbound.start({
     stream: {} as MediaStream, cameraStream: {} as MediaStream,
-    sendEnvelope(wire, kind) {sent.push({kind, sealed: wire[0]});},
+    sendEnvelope(wire, kind, keyframe) {sent.push({kind, sealed: wire[0], keyframe});},
   });
   assert.deepEqual(sent, [
-    {kind: "audio", sealed: 1}, {kind: "video", sealed: 2},
+    {kind: "audio", sealed: 1, keyframe: false},
+    {kind: "video", sealed: 2, keyframe: true},
   ], "sealing and transport must both preserve real audio/video kind");
   await outbound.stop();
 }

@@ -33,6 +33,12 @@ assert.equal(classify("iceConnectionState failed"),"WEBRTC_ICE_FAILURE");
 assert.equal(classify("iceGatheringState timeout"),"WEBRTC_ICE_FAILURE");
 assert.equal(classify("Device signer is no longer trusted"),"DEVICE_TRUST_REJECTED");
 assert.equal(classify("microphone notallowed"),"DEVICE_PERMISSION_DENIED");
+
+assert.equal(classify("UCR_MEDIA_CODEC_PRODUCER_FAILURE"),"MEDIA_CODEC_PRODUCER_FAILURE");
+assert.equal(classify("UCR_MEDIA_CODEC_CONSUMER_FAILURE"),"MEDIA_CODEC_CONSUMER_FAILURE");
+assert.equal(classify("UCR_MEDIA_OUTBOUND_DATACHANNEL_SEND"),"MEDIA_OUTBOUND_DATACHANNEL_SEND",
+  "sender failures must not collapse into ambiguous MEDIA_ACTIVATION_FAILURE");
+
 console.log("PASS: protocol-stage failures distinguished without inferring relay path");
 
 const server=readFileSync("crates/ucr-realtime-web/src/main.rs","utf8");

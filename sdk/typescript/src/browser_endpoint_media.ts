@@ -61,6 +61,15 @@ export function createUcrBrowserEndpointMediaAdapter(
     throw new Error("authenticated MLS endpoint bridge and trusted identity resolver required");
   }
   const onError = options.onError ?? (() => {});
+  // WebCodecs often reports browser-specific errors with no stable public
+  // message. Keep the private Error as cause for a local debugger, while
+  // surfacing only an allowlisted pipeline-stage category to diagnostics.
+  // An encoder/decoder fault is not a failed MLS signer or a rejected Call.
+  const codecError = (stage: "PRODUCER" | "CONSUMER") => (error: unknown) => {
+    const reported = new Error("UCR_MEDIA_CODEC_" + stage + "_FAILURE");
+    (reported as Error & {cause?: unknown}).cause = error;
+    onError(reported);
+  };
   const referenceCanvas = typeof document !== "undefined" ?
     document.getElementById("remote-e2ee-canvas") : null;
   const remoteVideoCanvas = options.remoteVideoCanvas ??
@@ -71,12 +80,12 @@ export function createUcrBrowserEndpointMediaAdapter(
   return createUcrPortableEndpointMediaAdapter({
     bridge: options.bridge,
     producer: new UcrBrowserWebCodecsProducer(
-      onError, options.enableCameraLayerPair === true,
+      codecError("PRODUCER"), options.enableCameraLayerPair === true,
     ),
     consumer: new UcrBrowserWebCodecsConsumer({
       videoCanvas: remoteVideoCanvas,
       audioContext: options.audioContext,
-      onError,
+      onError: codecError("CONSUMER"),
     }),
     trustedKeys: options.trustedKeys,
     binding: options.binding,
