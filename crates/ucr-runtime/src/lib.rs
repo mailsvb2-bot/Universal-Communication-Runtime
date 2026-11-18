@@ -1355,17 +1355,27 @@ fn operator_realtime_health(
         };
     };
 
-    let sfu = if realtime.live_provider.is_available() {
-        operator_component(
-            pb::OperatorComponentStatus::Healthy,
-            "encrypted SFU/WebRTC transport worker is available",
-        )
-    } else {
-        operator_component(
-            pb::OperatorComponentStatus::Unavailable,
-            "encrypted SFU/WebRTC transport worker is unavailable",
-        )
-    };
+    // Expose only cumulative bounded *counts* through the existing private
+    // operator interface. Healthy worker liveness does not imply zero media
+    // loss; operators can distinguish those conditions without new routes.
+    let loss=webrtc_e2ee_routing_counters();
+    let detail=format!(
+        "E2EE worker {}; ingress_audio_full={} ingress_video_full={} ingress_closed={} \
+         lane_audio_full={} lane_video_full={} lane_closed={} \
+         forward_failed={} worker_join_failed={}",
+        if realtime.live_provider.is_available() {"available"} else {"unavailable"},
+        loss.ingress.audio_full,loss.ingress.video_full,loss.ingress.channel_closed,
+        loss.audio_lane_full,loss.video_lane_full,loss.lane_closed,
+        loss.forward_failures,loss.worker_join_failures,
+    );
+    let sfu = operator_component(
+        if realtime.live_provider.is_available() {
+            pb::OperatorComponentStatus::Healthy
+        } else {
+            pb::OperatorComponentStatus::Unavailable
+        },
+        &detail,
+    );
     let turn = if realtime.turn_configured {
         operator_component(
             pb::OperatorComponentStatus::Unverified,
@@ -3502,6 +3512,20 @@ mod webrtc_e2ee_lane_tests {
             receive_prioritized_media(&mut audio, &mut video, true, true, 0).await;
         assert!(is_audio);
         assert_eq!(frame, Some(8));
+    }
+
+    #[test]
+    fn operator_routing_counters_are_aggregate_only() {
+        let result=webrtc_e2ee_routing_counters();
+        assert!(result.audio_lane_full <= u64::MAX);
+        assert!(result.video_lane_full <= u64::MAX);
+        let formatted=format!(
+            "audio_full={} video_full={} forwarding_failed={}",
+            result.audio_lane_full,result.video_lane_full,result.forward_failures,
+        );
+        assert!(!formatted.contains("session_id"));
+        assert!(!formatted.contains("source_device"));
+        assert!(!formatted.contains("ciphertext"));
     }
 
     #[tokio::test]
