@@ -70,7 +70,8 @@ def source_contract(root: Path) -> None:
                 f"{route}: no matching compile-time Rust embed")
         require((root / STATIC / name).is_file(), f"missing {name}")
     for label, text, needle in (
-        ("canonical direct call", start, 'verifyFirstPartyAutoJoinHandoff'),
+        ("canonical direct call", start, 'prepareFirstPartyEndpointMls'),
+        ("verified peer handoff", page, "verifyFirstPartyAutoJoinHandoff"),
         ("MLS admission", page, "ensureEndpointMlsReady"),
         ("WebRTC ownership", page, "startWebRtc.offerOwner"),
         ("E2EE endpoint", page, "e2eeManagedAdapter"),
