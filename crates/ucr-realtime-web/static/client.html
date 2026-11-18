@@ -532,7 +532,10 @@ function ucrDiagnosticReport(){
       // A hidden tab intentionally skips canvas drawing: it is not a media stall.
       renderStallMs:document.hidden?null:window.__ucrVideoCounters.lastRenderedAt?
         Math.max(0,Date.now()-Math.max(window.__ucrVideoCounters.lastRenderedAt,window.__ucrVideoCounters.visibleSince||0)):null,
-      keyframes:window.__ucrVideoCounters.keyframes
+      keyframes:window.__ucrVideoCounters.keyframes,
+      encodedCodec:window.__ucrVideoCounters.encodedCodec||"unknown",
+      receivedCodec:window.__ucrVideoCounters.receivedCodec||"unknown",
+      decoderFailures:window.__ucrVideoCounters.decoderFailures||0
     }:null),
     videoVisibility:{
       hidden:document.hidden,
