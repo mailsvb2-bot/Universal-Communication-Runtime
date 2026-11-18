@@ -2096,6 +2096,10 @@ async function activateE2eeAdapter(){
   if(!adapter||typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"){
     throw new Error("Authorized endpoint E2EE media adapter unavailable; refusing plaintext media");
   }
+  // Canonical read-only roster may overlap endpoint state restoration and
+  // WebCodecs initialization. Subscriptions still require the live E2EE gate.
+  const preparedReceiveRoster=api("/v1/realtime/receive-roster",body())
+    .then(response=>response.json()).catch(()=>null);
   const restoreState=await restoreEndpointPersistedState(adapter);
   if(!isCurrent())throw new Error("Encrypted media session changed during restore");
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
@@ -2119,7 +2123,7 @@ async function activateE2eeAdapter(){
   // have a live, authorized decoder and measured downlink telemetry provider.
   startAdaptiveMediaMonitoring();
   if(typeof startInitialVideoRecovery==="function")startInitialVideoRecovery();
-  syncReceiveSubscriptions().catch(e=>{if(sessionActive)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
+  syncReceiveSubscriptions(preparedReceiveRoster).catch(e=>{if(sessionActive)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
   ui.remoteVideo.classList.add("hidden");
   ui.remoteCanvas.classList.remove("hidden");
   refreshScreenShareControl();
@@ -3593,14 +3597,15 @@ function startInitialVideoRecovery(){
     syncReceiveSubscriptions().catch(()=>{});
   },700);
 }
-async function syncReceiveSubscriptions(){
+async function syncReceiveSubscriptions(preparedRoster=null){
   if(!sessionActive||!mediaActive||!e2eeAdapterReady||receiveRosterInFlight||
       e2eeChannel?.readyState!=="open")return;
   const generation=receiveRosterGeneration,session=claims,channel=e2eeChannel;
   receiveRosterInFlight=true;
   try{
-    const response=await api("/v1/realtime/receive-roster",body());
-    const data=await response.json();
+    const prepared=preparedRoster?await preparedRoster:null;
+    // Failure of an early read falls back to a freshly authorized roster.
+    const data=prepared??await (await api("/v1/realtime/receive-roster",body())).json();
     const sources=validReceiveRoster(data);
     if(!sources)throw new Error("invalid canonical receive roster");
     if(!sessionActive||!mediaActive||!e2eeAdapterReady||
