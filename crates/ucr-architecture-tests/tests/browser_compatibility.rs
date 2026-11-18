@@ -16,13 +16,34 @@ fn assert_browser_workflow(workflow: &str) {
             "missing desktop browser matrix row {browser}"
         );
     }
-    // The supported runner must execute authentic iOS Simulator and desktop Safari
-    // evidence. A second Intel runner is not a requirement: its CoreSimulator
-    // previously hung before browser testing and cancelled otherwise valid CI.
+    // Hosted ARM macOS can be cancelled before runner assignment. Keep an
+    // independent Intel fallback; both must produce authentic Safari evidence.
     assert!(
-        workflow.contains("runner: [macos-15]"),
-        "mandatory macOS Safari runner matrix changed",
+        workflow.contains("runner: [macos-15, macos-15-intel]"),
+        "mandatory independent macOS Safari runner fallback missing",
     );
+    assert!(
+        workflow.contains("fail-fast: false")
+            && workflow.contains("continue-on-error: true")
+            && workflow.contains("needs: ios-safari-attempts")
+            && workflow.contains("if: always()"),
+        "macOS fallback must preserve independent attempts and the final gate",
+    );
+    for proof in [
+        "Require real Desktop Safari WebDriver evidence",
+        "no successful REAL Desktop Safari WebDriver evidence",
+        "real-desktop-browser-webdriver-smoke",
+        "Require at least one valid real iOS Safari evidence artifact",
+        "no successful real iOS Safari simulator evidence",
+        "real-ios-simulator-safari-self-probe",
+        "and data.get(\"passed\") is True",
+        "if payload.get(\"passed\") is not True",
+    ] {
+        assert!(
+            workflow.contains(proof),
+            "missing mandatory fail-closed Safari proof: {proof}",
+        );
+    }
     for invariant in [
         "ubuntu-24.04",
         "macos-15",
