@@ -538,6 +538,11 @@ function ucrDiagnosticReport(){
       received:window.__ucrVideoCounters.received,
       decoded:window.__ucrVideoCounters.decoded,
       rendered:window.__ucrVideoCounters.rendered,
+      // Browser-local wall clock: source and receiver timestamps must NOT be
+      // subtracted across devices without external clock synchronization.
+      firstEncodedAt:window.__ucrVideoCounters.firstEncodedAt||null,
+      firstReceivedAt:window.__ucrVideoCounters.firstReceivedAt||null,
+      firstDecodedAt:window.__ucrVideoCounters.firstDecodedAt||null,
       firstRenderedAt:window.__ucrVideoCounters.firstRenderedAt||null,
       lastRenderedAt:window.__ucrVideoCounters.lastRenderedAt,
       lastDecodedAt:window.__ucrVideoCounters.lastDecodedAt,
