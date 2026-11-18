@@ -129,7 +129,12 @@ assert 'ucrEncryptedTransportBufferedAmount' in client
 assert 'window.ucrEncryptedTransportPathStats=' in client
 assert 'if(window.ucrLossRttBwe!==true' in client, 'path stats polling must stay opt-in'
 assert 'const ceiling=mediaKind==="video"?256*1024:384*1024;' in client
-assert 'e2eeChannel.bufferedAmount:Number.POSITIVE_INFINITY' in client
+assert 'if(!e2eeChannel||e2eeChannel.readyState!=="open")return Number.POSITIVE_INFINITY;' in client
+assert '?e2eeChannelV2.bufferedAmount:e2eeChannel.bufferedAmount;' in client, (
+    'encrypted transport pressure must track whichever canonical E2EE channel is active'
+)
+assert 'E2EE_UNORDERED_CHANNEL_LABEL="ucr.e2ee.media.v2"' in client
+assert 'if(typeof e2eeChannel!=="undefined"&&e2eeChannel)detachE2eeChannel()' in client
 assert 'videoAdaptation:(window.__ucrVideoAdaptation?' in client
 # Windows launch must not silently trust expired certs or reuse gitignored WASM.
 windows_launcher = (root/"scripts/windows/start-local-first-party-https.ps1").read_text(encoding="utf-8")
