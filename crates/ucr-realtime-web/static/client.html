@@ -2641,10 +2641,14 @@ async function startWebRtcOnce(forceMedia=false){
     ucrMediaActivationStage="SDP_ICE_NEGOTIATION";
     await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
     ensureOwnedPeer();
+    if(typeof ucrRecordDiagnostic==="function")
+      ucrRecordDiagnostic("WebRTC remote offer applied","webrtc");
     const answer=await pc.createAnswer();
     ensureOwnedPeer();
     await pc.setLocalDescription(answer);
     ensureOwnedPeer();
+    if(typeof ucrRecordDiagnostic==="function")
+      ucrRecordDiagnostic("WebRTC local answer ready","webrtc");
     await api("/v1/realtime/webrtc/remote-description",
       {...startingClaims,offer_id:offer.offer_id,
        sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp},
