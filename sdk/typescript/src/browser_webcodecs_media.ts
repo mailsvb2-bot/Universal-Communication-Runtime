@@ -160,7 +160,7 @@ export async function ucrSelectTemporalScalableConfig(
 
 const AUDIO_CODEC = "opus";
 const VIDEO_CODEC = "vp8";
-/** Baseline 4.2 — preferred when HW encode/decode both report support. */
+/** Baseline 4.2 — explicit opt-in only when peer decode capability is known. */
 const VIDEO_CODEC_H264_BASELINE_42 = "avc1.42002a";
 /** Baseline 3.1 — broader mobile decoder coverage (≤720p30). */
 const VIDEO_CODEC_H264_BASELINE_31 = "avc1.42001f";
@@ -252,9 +252,16 @@ export function ucrVideoStageTargetFrameRate(sourceFps: number, stage: number, s
     ucrVideoStageProfile(stage).frameRate), software);
 }
 let ucrVideoH264Hardware: boolean | null = null;
+/** A browser's local H.264 support does not prove that the remote Device can
+ * decode that profile. Until the canonical authenticated Call negotiates
+ * receiver capabilities, VP8 is the only interoperable default. H.264 stays
+ * available behind an explicit opt-in for known compatible endpoints.
+ * Never infer remote capabilities from the sender's own GPU probe.
+ */
+export const ucrVideoAllowsH264 = (preference: unknown): boolean => preference === "h264";
 const ucrVideoUsesH264 = (): boolean =>
   !ucrVideoForceSoftware && ucrVideoH264Hardware === true &&
-  (globalThis as {ucrVideoCodecPreference?: unknown}).ucrVideoCodecPreference !== "vp8";
+  ucrVideoAllowsH264((globalThis as {ucrVideoCodecPreference?: unknown}).ucrVideoCodecPreference);
 const ucrVideoHw = (): "no-preference" | "prefer-software" | "prefer-hardware" =>
   ucrVideoForceSoftware ? "prefer-software" :
   ucrVideoUsesH264() ? "prefer-hardware" : "no-preference";
