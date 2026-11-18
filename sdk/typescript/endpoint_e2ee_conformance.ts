@@ -3263,6 +3263,7 @@ assert.match(ucrNewMediaSessionId(), /^[a-f0-9]{8}$/);
 {
   const m = (globalThis as unknown as {__ucrMediaStageMetrics: {
     replayRejected:number;replayDuplicate:number;replayStale:number;lastRxVideo:number;
+    videoLateReorderedDiscarded:number;
   }}).__ucrMediaStageMetrics;
   const played:bigint[]=[];
   const adapter = new UcrPortableEndpointMediaAdapter({
@@ -3274,9 +3275,16 @@ assert.match(ucrNewMediaSessionId(), /^[a-f0-9]{8}$/);
     authorizeFrame:()=>true,authorizePublish:()=>true
   });
   await adapter.start({...src,sendEnvelope(){}});
+  const lateBefore=m.videoLateReorderedDiscarded;
   await adapter.onEnvelope(inboundWire(100n,"alice"));
   await adapter.onEnvelope(inboundWire(99n,"alice"));
-  assert.deepEqual(played,[100n,99n],"authenticated reorder within window");
+  assert.deepEqual(played,[100n],
+    "signed reordered VP8 cannot rewind active decoder reference order");
+  assert.equal(m.videoLateReorderedDiscarded,lateBefore+1);
+  await adapter.onEnvelope(inboundWire(20n,"alice","audio"));
+  await adapter.onEnvelope(inboundWire(19n,"alice","audio"));
+  assert.deepEqual(played,[100n,20n,19n],
+    "audio replay window remains reorder tolerant without video corruption");
   await assert.rejects(adapter.onEnvelope(inboundWire(100n,"alice")), /replayed endpoint media frame/);
   await assert.rejects(adapter.onEnvelope(inboundWire(1n,"alice")), /replayed endpoint media frame/);
   assert.ok(m.replayRejected>=2 && m.replayDuplicate>=1 && m.replayStale>=1);
