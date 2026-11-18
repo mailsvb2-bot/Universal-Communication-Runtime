@@ -3202,6 +3202,67 @@ for (const [name, publish, seal, transport] of [
   else Reflect.deleteProperty(globalThis, "ucrEndpointMediaCongestion");
 }
 
+// A dropped video delta on a congested reliable channel must eventually
+// recover the encoder reference when capacity truly drains, NOT flood large
+// keyframes while bufferedAmount remains high.
+{
+  const g = globalThis as unknown as {
+    ucrEncryptedTransportBufferedAmount?: () => number;
+  };
+  const oldProbe = g.ucrEncryptedTransportBufferedAmount;
+  let buffered = 200_000, blockSend = true;
+  let emitVideo: ((frame: {
+    mediaKind: "video"; videoSourceKind: "camera"; streamId: string;
+    timestamp: bigint; keyframe: boolean; bytes: Uint8Array;
+  }) => void | Promise<void>) | undefined;
+  const requests: string[] = [];
+  const recovery = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire() { return Uint8Array.of(9); },
+      open_wire() { return Uint8Array.of(7); },
+      revoke() {},
+    },
+    producer: {
+      start(_sources, emit) {emitVideo = emit;},
+      requestVideoKeyframe(streamId) {requests.push(streamId);},
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() {return new Uint8Array(32);}},
+    binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+      groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+      negotiationGeneration: 1n},
+    authorizeFrame: () => true,
+    authorizePublish: () => true,
+  });
+  g.ucrEncryptedTransportBufferedAmount = () => buffered;
+  try {
+    await recovery.start({...src,sendEnvelope() {
+      if (blockSend) throw Object.assign(new Error("congested"),
+        {code:"UCR_TRANSPORT_QUEUE_CONGESTED"});
+    }});
+    assert.ok(emitVideo, "producer must have a video emission callback");
+    const frame = (n: bigint) => ({mediaKind:"video" as const,
+      videoSourceKind:"camera" as const,streamId:"camera",timestamp:n,
+      keyframe:false,bytes:Uint8Array.of(5)});
+    await emitVideo!(frame(1n));
+    assert.deepEqual(requests, [], "congested frames must not force keyframes");
+    blockSend = false;
+    await emitVideo!(frame(2n));
+    assert.deepEqual(requests, [], "high bufferedAmount must not trigger keyframe");
+    buffered = 0;
+    await emitVideo!(frame(3n));
+    assert.deepEqual(requests, ["camera"],
+      "next successful send after the transport drains must request one reference frame");
+    await emitVideo!(frame(4n));
+    assert.deepEqual(requests, ["camera"], "resync request must be edge-triggered");
+  } finally {
+    await recovery.stop();
+    if (oldProbe) g.ucrEncryptedTransportBufferedAmount = oldProbe;
+    else Reflect.deleteProperty(g,"ucrEncryptedTransportBufferedAmount");
+  }
+}
+
 // Different frames on one DataChannel may finish async trust lookups out of
 // order. The E2EE receiver must commit them in arrival order PER source/stream,
 // without stalling another participant and without weakening replay rejection.
