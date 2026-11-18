@@ -42,7 +42,7 @@ class RealCallEvidenceTest(TestCase):
             gate.quality_gate(fixture(), fixture(), None, None)
 
     def test_long_initial_connection_is_blocked(self):
-        with self.assertRaisesRegex(gate.EvidenceError, "Join.to.E2EE"):
+        with self.assertRaisesRegex(gate.EvidenceError, "Join→E2EE"):
             gate.quality_gate(fixture(26), fixture(), 90, 120)
 
     def test_audio_without_playback_is_blocked(self):
