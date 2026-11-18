@@ -659,6 +659,25 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     // A transport-pressure probe is installed by the first-party encrypted
     // DataChannel owner; absence is treated as no observed network congestion.
     let qualityStage = 0, healthySamples = 0, lastQualitySample = 0;
+    // Transport publishes aggregate congestion counters from the SAME
+    // authenticated ordered E2EE DataChannel. A short send() pressure spike
+    // can clear before the once-per-second bufferedAmount sample; without
+    // this feedback video stays at full bitrate while audio waits behind it.
+    let lastTransportCongestion = 0;
+    const readTransportCongestion = () => {
+      const metrics = (globalThis as unknown as {
+        __ucrMediaStageMetrics?: {sendQueueCongested?: number};
+      }).__ucrMediaStageMetrics;
+      const current = metrics?.sendQueueCongested;
+      if (!Number.isSafeInteger(current) || current! < 0) return false;
+      if (current! < lastTransportCongestion) {
+        lastTransportCongestion = current!;
+        return false;
+      }
+      const pressured = current! > lastTransportCongestion;
+      lastTransportCongestion = current!;
+      return pressured;
+    };
     let lastVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
     let nextVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
     let videoEncodeCostMs = 0;
@@ -738,9 +757,11 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             // CPU/GPU contention even when the network DataChannel is empty.
             // Recover only after sustained healthy samples.
             const devicePressure = videoPressureSamples >= 3;
+            const transportPressure = readTransportCongestion();
             const bwe = readLossRtt();
             const next = ucrAdaptiveVideoStep(qualityStage, readBuffered(),
-              encoder.encodeQueueSize, healthySamples, devicePressure || bwe.pressure);
+              encoder.encodeQueueSize, healthySamples,
+              devicePressure || transportPressure || bwe.pressure);
             videoPressureSamples = 0;
             healthySamples = bwe.hold ? 0 : next.healthySamples;
             ucrVideoAdaptation.bufferedBytes = readBuffered();
