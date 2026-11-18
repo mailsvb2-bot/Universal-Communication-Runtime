@@ -2439,6 +2439,7 @@ const receive = {
 };
 const publish = {
   start() { endpointQualityCalls.push("sender:start"); },
+  requestAllVideoKeyframes() { endpointQualityCalls.push("sender:keyframe"); },
   stop() { endpointQualityCalls.push("sender:stop"); },
 };
 const endpoint = new UcrPortableEndpointMediaAdapter({
@@ -2455,7 +2456,11 @@ const endpoint = new UcrPortableEndpointMediaAdapter({
 });
 const src = {stream: {}, cameraStream: {}, screenStream: null};
 assert.equal(await endpoint.getReceiveMediaTelemetry(), null);
+endpoint.requestPublishedVideoKeyframes();
+assert.equal(endpointQualityCalls.length, 0,
+  "unstarted endpoint must never trigger video publishing");
 await endpoint.start({...src, sendEnvelope() {}});
+endpoint.requestPublishedVideoKeyframes();
 assert.equal((await endpoint.getReceiveMediaTelemetry() as any).estimated_bandwidth_bps, 8_000_000);
 await endpoint.applyReceiveMediaDecision({
   stage: "video_720p",
@@ -2463,10 +2468,12 @@ await endpoint.applyReceiveMediaDecision({
     width: 1280, height: 720, frame_rate: 30, target_bitrate_bps: 2_000_000},
   opus_target_bitrate_bps: null,
 });
-assert.deepEqual(endpointQualityCalls, ["sender:start", "recv:video_720p"]);
+assert.deepEqual(endpointQualityCalls, ["sender:start", "sender:keyframe", "recv:video_720p"]);
 await endpoint.stop();
+endpoint.requestPublishedVideoKeyframes();
 assert.deepEqual(endpointQualityCalls, [
-  "sender:start", "recv:video_720p", "revoke", "sender:stop", "recv:stop",
+  "sender:start", "sender:keyframe", "recv:video_720p",
+  "revoke", "sender:stop", "recv:stop",
 ]);
 assert.equal(await endpoint.getReceiveMediaTelemetry(), null);
 await assert.rejects(endpoint.applyReceiveMediaDecision({
