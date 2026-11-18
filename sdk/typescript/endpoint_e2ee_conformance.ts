@@ -2597,21 +2597,26 @@ try {
   try {
     Date.now = () => simulatedNow;
     const failingCanvas = {width: 0, height: 0, getContext() {return null;}};
+    const renderErrors: unknown[] = [];
     const failingRender = new UcrBrowserWebCodecsConsumer({
       videoCanvas: failingCanvas as unknown as HTMLCanvasElement,
+      onError: (error) => { renderErrors.push(error); },
     });
     const failedFrame = {mediaKind: "video" as const,
       videoSourceKind: "camera" as const, streamId: "failure-canvas",
       timestamp: 100n, keyframe: true, bytes: new Uint8Array([1, 2])};
-    assert.throws(() => failingRender.play(failedFrame), (error: unknown) =>
-      error instanceof Error && error.message === "UCR_MEDIA_VIDEO_DECODER_FAILURE" &&
-      error.cause instanceof Error && /video canvas 2D context unavailable/.test(error.cause.message));
+    assert.doesNotThrow(() => failingRender.play(failedFrame),
+      "asynchronous WebCodecs output failures must not escape to the browser event loop");
+    assert.equal(renderErrors.length, 1);
+    assert.ok(renderErrors[0] instanceof Error &&
+      renderErrors[0].message === "UCR_MEDIA_VIDEO_RENDER_FAILURE" &&
+      renderErrors[0].cause instanceof Error &&
+      /video canvas 2D context unavailable/.test(renderErrors[0].cause.message));
     assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, simulatedNow);
     simulatedNow += 800;
-    assert.throws(() => failingRender.play({...failedFrame, timestamp: 101n}),
-      (error: unknown) => error instanceof Error &&
-        error.message === "UCR_MEDIA_VIDEO_DECODER_FAILURE" &&
-        error.cause instanceof Error && /video canvas 2D context unavailable/.test(error.cause.message));
+    assert.doesNotThrow(() => failingRender.play({...failedFrame, timestamp: 101n}));
+    assert.equal(renderErrors.length, 2,
+      "repeated rendering failures must reach safe host diagnostics without uncaught exceptions");
     assert.equal(videoCounters.lastDecodedAt, simulatedNow);
     assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, simulatedNow - 800,
       "later failed decodes must not erase accumulated render stall duration");
