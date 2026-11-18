@@ -138,3 +138,29 @@ for(const event of [
 ])assert.ok(html.includes('ucrRecordDiagnostic("'+event+'","webrtc")'),
   "missing per-stage WebRTC timing marker: "+event);
 console.log("PASS: timestamped offer/capture/SDP milestones locate ICE startup delay");
+
+
+// First-pixel latency: once permitted capture has returned, UI device
+// enumeration must not block the server offer/SDP. After E2EE opens, a
+// bounded first-frame recovery retries only canonical authorized subscription
+// reads and stops as soon as a real authenticated frame was drawn.
+const localCaptureStart=html.indexOf("async function captureLocalMedia(force){");
+const localCaptureEnd=html.indexOf("async function ensureLocalTrack(kind){",localCaptureStart);
+assert.ok(localCaptureStart>=0&&localCaptureEnd>localCaptureStart);
+const localCapture=html.slice(localCaptureStart,localCaptureEnd);
+assert.match(localCapture,/void refreshDevices\(\)\.catch\(\(\)=>\{\}\)/);
+assert.doesNotMatch(localCapture,/await refreshDevices\(\)/,
+  "enumerating device labels must not delay the first WebRTC SDP");
+const firstFrameRecoveryStart=html.indexOf("function startInitialVideoRecovery(){");
+const firstFrameRecoveryEnd=html.indexOf("async function syncReceiveSubscriptions(){",firstFrameRecoveryStart);
+assert.ok(firstFrameRecoveryStart>=0&&firstFrameRecoveryEnd>firstFrameRecoveryStart);
+const firstFrameRecovery=html.slice(firstFrameRecoveryStart,firstFrameRecoveryEnd);
+assert.match(firstFrameRecovery,/deadline=Date\.now\(\)\+12000/);
+assert.match(firstFrameRecovery,/window\.__ucrVideoCounters\?\.firstRenderedAt/);
+assert.match(firstFrameRecovery,/syncReceiveSubscriptions\(\)/);
+assert.doesNotMatch(firstFrameRecovery,/\/v1\/realtime\/media\/publish|\.seal_wire\(/);
+assert.match(html,/window\.ucrFirstAuthenticatedVideoRendered=\(\)=>\{[\s\S]*?stopInitialVideoRecovery\(\)/);
+const firstFrameActivations=(html.match(/startInitialVideoRecovery\(\);/g)||[]).length;
+assert.equal(firstFrameActivations,2,
+  "initial and reconnected E2EE must each recover first-video subscriptions");
+console.log("PASS: capture does not wait for device enumeration; first-frame recovery is bounded, authenticated and stops on actual canvas rendering");
