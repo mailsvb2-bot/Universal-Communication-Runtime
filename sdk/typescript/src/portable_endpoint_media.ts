@@ -52,6 +52,7 @@ export interface UcrMediaProducer {
   updateSources?(sources: UcrEndpointMediaSources): void | Promise<void>;
   /** Request a clean reference frame after a pre-encryption video drop. */
   requestVideoKeyframe?(streamId: string): void;
+  requestAllVideoKeyframes?(): void;
   stop(): void | Promise<void>;
 }
 
@@ -240,6 +241,14 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       }
       throw error;
     }
+  }
+
+  requestPublishedVideoKeyframes(): void {
+    if (!this.#active || this.#retired) return;
+    // No new encoder, key authority, or publishing path: reuse the current
+    // authenticated producer. Actual frames still pass canonical authorize,
+    // signing and MLS sealing in #sendFrame.
+    this.#producer.requestAllVideoKeyframes?.();
   }
 
   async updateSources(sources: UcrEndpointMediaSources): Promise<void> {
