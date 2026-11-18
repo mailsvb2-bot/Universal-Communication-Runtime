@@ -47,7 +47,8 @@ fn record_ingress_overflow(error: mpsc::error::TrySendError<WebRtcE2eeIngressFra
             match frame.envelope.frame.header.media_kind {
                 MediaKind::Audio => &E2EE_INGRESS_AUDIO_FULL,
                 MediaKind::Video => &E2EE_INGRESS_VIDEO_FULL,
-            }.fetch_add(1, Ordering::Relaxed);
+            }
+            .fetch_add(1, Ordering::Relaxed);
         }
     }
 }
