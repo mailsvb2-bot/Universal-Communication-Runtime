@@ -326,6 +326,11 @@ function ucrPersistMediaDiagnostics(){
 }
 function ucrDiagnosticReason(value){
   const message=String(value||"").toLowerCase();
+  // The canonical WebCodecs adapter emits bounded, non-sensitive stage codes.
+  // Distinguish capture/encoder failure from decoder/render failure; neither
+  // is evidence that MLS, TURN, or the authenticated peer has failed.
+  if(message==="ucr_media_codec_producer_failure")return "MEDIA_CODEC_PRODUCER_FAILURE";
+  if(message==="ucr_media_codec_consumer_failure")return "MEDIA_CODEC_CONSUMER_FAILURE";
   const stage=message.match(/ucr_media_(outbound|inbound)_(publish_authorization|seal_wire|datachannel_send|receive_authorization|signing_key_resolution|verify_and_decrypt|decode_and_play)/);
   if(stage)return "MEDIA_"+stage[1].toUpperCase()+"_"+stage[2].toUpperCase();
   if(/epoch/.test(message))return "MLS_EPOCH_MISMATCH";
