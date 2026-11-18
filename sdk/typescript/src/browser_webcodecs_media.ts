@@ -19,7 +19,7 @@ const ucrMediaVisibilityRecoveries = new Set<() => void>();
 const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0, playoutQueuedMs: 0, playoutJitterMs: 0, playoutRebases: 0};
 // Count actual encoded and rendered video separately; a connected DataChannel
 // and encrypted packet count are not evidence of remote picture delivery.
-const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
+const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, encodedCodec: "unknown", receivedCodec: "unknown", decoderFailures: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
 // Background rendering is intentionally suppressed. Track that time separately
 // so diagnostics never attribute hidden-tab inactivity to decoder failure.
 if (typeof document !== "undefined") {
@@ -573,6 +573,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         if (kind === "audio") ucrAudioCounters.encoded++;
         else {
           ucrVideoCounters.encoded++;
+          ucrVideoCounters.encodedCodec = ucrDetectVideoCodec(bytes);
           if (chunk.type === "key") ucrVideoCounters.keyframes++;
           const started = encodeStartTimes.get(chunk.timestamp);
           if (started !== undefined) {
@@ -1189,6 +1190,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
             } finally { video.close(); }
           },
           error: (error) => {
+            ucrVideoCounters.decoderFailures++;
             this.#awaitVideoKeyframe.add(key);
             const failed = this.#decoders.get(key);
             if (failed) {
@@ -1218,12 +1220,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
           },
         });
         const codec = ucrDetectVideoCodec(frame.bytes);
+        ucrVideoCounters.receivedCodec = codec;
         decoder.configure({codec});
         this.#decoderCodecs.set(key, codec);
       }
       this.#decoders.set(key, decoder);
     } else if (frame.mediaKind === "video" && frame.keyframe) {
       const codec = ucrDetectVideoCodec(frame.bytes);
+      ucrVideoCounters.receivedCodec = codec;
       if (this.#decoderCodecs.get(key) !== codec) {
         (decoder as {configure(c: unknown): void}).configure({codec});
         this.#decoderCodecs.set(key, codec);
@@ -1243,6 +1247,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         }));
         if (Number.isFinite(timestampUs)) this.#lastVideoTimestampUs.set(key, timestampUs);
       } catch (error) {
+        ucrVideoCounters.decoderFailures++;
         this.#awaitVideoKeyframe.add(key);
         const failed = this.#decoders.get(key);
         if (failed) {
