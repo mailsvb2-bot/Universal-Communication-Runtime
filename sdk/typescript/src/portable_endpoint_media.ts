@@ -139,6 +139,7 @@ const ucrMediaStageMetrics = {
   audioExpired: 0, audioQueueFull: 0, audioAuthorizationRejected: 0,
   audioSealFailure: 0, audioTransportFailure: 0, audioDecodeFailure: 0,
   videoExpired: 0, videoQueueFull: 0, videoKeyframeRequests: 0,
+  videoSequenceGaps: 0, videoDeltaDiscardedAfterGap: 0, videoKeyframeResyncs: 0,
   sendChannelClosed: 0, sendQueueCongested: 0, sendInvalidEnvelope: 0,
   sendUnexpectedFailure: 0, sendUnavailable: 0,
   replayRejected: 0, replayDuplicate: 0, replayStale: 0,
@@ -165,6 +166,9 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   /** Per sender/stream/epoch: highest authenticated sequence and 64-frame bitmap.
    * Only opened, authenticated frames advance the anti-replay cursor. */
   readonly #received = new Map<string, UcrReplayCursor>();
+  /** Verified video stream lost a reference frame: never feed undecodable
+   * deltas to WebCodecs, but still authenticate and advance replay state. */
+  readonly #videoAwaitKeyframe = new Set<string>();
   readonly #reserved = new Set<string>();
   // Auth/key lookups are asynchronous. Preserve ciphertext DataChannel arrival
   // order PER verified stream while allowing distinct speakers to progress in
@@ -349,8 +353,26 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       const latest = this.#received.get(replayKey);
       const opened = ucrReplayDecide(latest, header.sequence);
       if (opened === "duplicate" || opened === "stale") ucrReplayReject(opened);
+      // Video references are not independently decodable. An authenticated
+      // sequence gap is evidence that a signed ciphertext frame was omitted
+      // somewhere AFTER the producer committed its sequence. Replay and MLS
+      // validation must still run; a missing frame is never fabricated.
+      const priorVideo = header.mediaKind === "video" ? latest : undefined;
+      if (header.mediaKind === "video" && priorVideo &&
+          header.sequence > priorVideo.highest + 1n) {
+        ucrMediaStageMetrics.videoSequenceGaps++;
+        this.#videoAwaitKeyframe.add(replayKey);
+      }
       ucrReplayCommit(this.#received, replayKey, header.sequence);
       ucrRecordLastRx(header.mediaKind, header.sequence);
+      if (header.mediaKind === "video" && this.#videoAwaitKeyframe.has(replayKey)) {
+        if (!header.keyframe) {
+          ucrMediaStageMetrics.videoDeltaDiscardedAfterGap++;
+          return;
+        }
+        this.#videoAwaitKeyframe.delete(replayKey);
+        ucrMediaStageMetrics.videoKeyframeResyncs++;
+      }
       inboundStage = "DECODE_AND_PLAY";
       await this.#consumer.play({
         mediaKind: header.mediaKind,
@@ -404,6 +426,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#sender = null;
     this.#sequences.clear();
     this.#received.clear();
+    this.#videoAwaitKeyframe.clear();
     this.#reserved.clear();
     this.#receiveTails.clear();
     this.#verifiedVideoStreams.clear();
