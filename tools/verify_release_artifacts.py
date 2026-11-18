@@ -31,7 +31,7 @@ def hashes(root: Path) -> dict[str, dict[str, int | str]]:
         body = path.read_bytes()
         if not 0 < len(body) <= 16 * 1024 * 1024:
             raise ValueError(f"invalid generated file length: {relative}")
-        if relative.endswith(".wasm") and body[:4] != b"\\x00asm":
+        if relative.endswith(".wasm") and body[:4] != b"\x00asm":
             raise ValueError("invalid WebAssembly magic")
         result[relative] = {
             "size": len(body),
