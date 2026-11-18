@@ -16,18 +16,20 @@ fn assert_browser_workflow(workflow: &str) {
             "missing desktop browser matrix row {browser}"
         );
     }
-    // Hosted ARM macOS can be cancelled before runner assignment. Keep an
-    // independent Intel fallback; both must produce authentic Safari evidence.
+    // GitHub-hosted ARM macOS cancelled twice before runner acquisition.
+    // The verified Intel runner produced authentic real iOS and Desktop Safari
+    // evidence, whereas mixing it with a cancelled ARM job poisons the workflow.
     assert!(
-        workflow.contains("runner: [macos-15, macos-15-intel]"),
-        "mandatory independent macOS Safari runner fallback missing",
+        workflow.contains("runner: [macos-15-intel]")
+            && !workflow.contains("runner: [macos-15, macos-15-intel]")
+            && !workflow.contains("continue-on-error: true"),
+        "mandatory real Safari runner must avoid unallocated ARM matrix jobs",
     );
     assert!(
         workflow.contains("fail-fast: false")
-            && workflow.contains("continue-on-error: true")
             && workflow.contains("needs: ios-safari-attempts")
             && workflow.contains("if: always()"),
-        "macOS fallback must preserve independent attempts and the final gate",
+        "macOS Safari must preserve a mandatory fail-closed evidence gate",
     );
     for proof in [
         "Require real Desktop Safari WebDriver evidence",
