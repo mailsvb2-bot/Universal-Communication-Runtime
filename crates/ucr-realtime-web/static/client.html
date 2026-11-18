@@ -2644,9 +2644,18 @@ async function startWebRtcOnce(forceMedia=false){
     if(typeof ucrRecordDiagnostic==="function")
       ucrRecordDiagnostic("WebRTC remote SDP accepted","webrtc");
     void ucrCaptureIceStats(pc);
-    for(const candidate of pendingCandidates.splice(0)){
+    // ICE candidates are independent once the canonical SDP fence exists.
+    // Serial HTTP posting held readiness behind N network round-trips.
+    // Dispatch a bounded batch concurrently, await ALL completions before
+    // cleanup, and keep exactly the original offer/Device authority fences.
+    const initialCandidates=pendingCandidates.splice(0);
+    for(let offset=0;offset<initialCandidates.length;offset+=4){
       ensureOwnedPeer();
-      await sendCandidate(candidate);
+      const settled=await Promise.allSettled(
+        initialCandidates.slice(offset,offset+4).map(candidate=>sendCandidate(candidate)));
+      ensureOwnedPeer();
+      const rejected=settled.find(result=>result.status==="rejected");
+      if(rejected)throw rejected.reason;
     }
     ensureOwnedPeer();
     // SDP completion must not overwrite a later ICE/DTLS state.
