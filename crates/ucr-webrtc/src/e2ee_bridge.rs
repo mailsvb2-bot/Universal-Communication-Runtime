@@ -38,16 +38,13 @@ pub fn ingress_drop_counters() -> WebRtcE2eeIngressDrops {
     }
 }
 
-fn record_ingress_overflow(
-    envelope: &SfuForwardEnvelope,
-    error: &mpsc::error::TrySendError<WebRtcE2eeIngressFrame>,
-) {
+fn record_ingress_overflow(error: mpsc::error::TrySendError<WebRtcE2eeIngressFrame>) {
     match error {
         mpsc::error::TrySendError::Closed(_) => {
             E2EE_INGRESS_CLOSED.fetch_add(1, Ordering::Relaxed);
         }
-        mpsc::error::TrySendError::Full(_) => {
-            match envelope.frame.header.media_kind {
+        mpsc::error::TrySendError::Full(frame) => {
+            match frame.envelope.frame.header.media_kind {
                 MediaKind::Audio => &E2EE_INGRESS_AUDIO_FULL,
                 MediaKind::Video => &E2EE_INGRESS_VIDEO_FULL,
             }.fetch_add(1, Ordering::Relaxed);
@@ -415,9 +412,9 @@ pub(crate) async fn create_live_e2ee_data_channel(
             if let Ok(Some(envelope)) = decoded {
                 if let Err(error) = ingress_tx.try_send(WebRtcE2eeIngressFrame {
                     session_id,
-                    envelope: envelope.clone(),
+                    envelope,
                 }) {
-                    record_ingress_overflow(&envelope, &error);
+                    record_ingress_overflow(error);
                 }
             }
         })
@@ -490,9 +487,9 @@ async fn create_unordered_channel(
                     peer_speaks_v2.store(true, Ordering::SeqCst);
                     if let Err(error) = ingress_tx.try_send(WebRtcE2eeIngressFrame {
                         session_id,
-                        envelope: envelope.clone(),
+                        envelope,
                     }) {
-                        record_ingress_overflow(&envelope, &error);
+                        record_ingress_overflow(error);
                     }
                 }
                 Ok(None) => peer_speaks_v2.store(true, Ordering::SeqCst),
