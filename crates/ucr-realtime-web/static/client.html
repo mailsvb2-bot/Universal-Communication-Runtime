@@ -2098,7 +2098,11 @@ function attachE2eeDataChannel(channel){
     attachUnorderedE2eeDataChannel(channel);return;
   }
   if(channel.label!==E2EE_CHANNEL_LABEL){channel.close();return;}
-  detachE2eeChannel();e2eeChannel=channel;e2eeChannel.binaryType="arraybuffer";
+  // The server may announce unordered v2 before reliable v1. Do not
+  // destroy the optional transport while binding the canonical v1 owner.
+  // A replacement v1 must still retire the previous full transport pair.
+  if(e2eeChannel)detachE2eeChannel();
+  e2eeChannel=channel;e2eeChannel.binaryType="arraybuffer";
   channel.onopen=()=>{activateE2eeAdapter().catch(e=>{
     if(e2eeChannel!==channel)return;
     closeE2eeTransport();ui.webrtcState.textContent="E2EE unavailable";
