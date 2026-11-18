@@ -1867,6 +1867,7 @@ async function activateE2eeAdapter(){
     e2eeAdapterReady=true;
     cancelMediaStartupWatchdog(sessionGeneration,sessionToken);
     ucrMediaActivationStage="E2EE_ACTIVE";
+    ucrRecordDiagnostic("Endpoint E2EE transport active","lifecycle");
     webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
     startAdaptiveMediaMonitoring();
     syncReceiveSubscriptions().catch(e=>{if(sessionActive)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
@@ -1953,6 +1954,7 @@ async function activateE2eeAdapter(){
   e2eeAdapterStarted=true;
   cancelMediaStartupWatchdog(sessionGeneration,sessionToken);
   ucrMediaActivationStage="E2EE_ACTIVE";
+  ucrRecordDiagnostic("Endpoint E2EE transport active","lifecycle");
   ucrMediaFailureCount=0;ucrMediaFailureWindowStart=Date.now();ucrMediaFailureStopped=false;
   ucrMarkConferenceMediaActive(true);
   ui.state.textContent="Connected"; // only authenticated E2EE media is a connected call
@@ -2465,6 +2467,7 @@ async function startWebRtcOnce(forceMedia=false){
     void ucrCaptureIceStats(pc);
     const state=pc.connectionState;ui.webrtcState.textContent=state||"Connecting";
     if(state==="connected"){
+      ucrRecordDiagnostic("WebRTC ICE connected","webrtc");
       if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
       ui.state.textContent=e2eeAdapterReady?"Connected":"Securing";
        ui.status.textContent=e2eeAdapterReady?"Encrypted media transport connected.":"WebRTC signalling connected; waiting for authorized encrypted media.";
@@ -2648,6 +2651,8 @@ async function activateAdmittedMedia(){
   ui.status.textContent="Загружаем защиту звонка. На компьютере первая загрузка модуля может занять до минуты…";
   ucrMediaActivationStage="MLS_RESTORE";
   await ensureEndpointMlsReady();
+  if(generation===sessionLifecycleGeneration&&sessionActive&&!mediaActive)
+    ucrRecordDiagnostic("MLS admission ready","lifecycle");
   if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive){
     if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=false;
     return;

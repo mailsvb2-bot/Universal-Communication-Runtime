@@ -263,3 +263,48 @@ test("BFCache restore restarts canonical Device monitoring once, not on fresh pa
   listeners.pageshow({persisted:true});
   assert.equal(initializations,1,"logged-out page must not monitor old account");
 });
+
+test("active accepted Call advances canonical MLS promptly, with bounded burst and idle backoff",async()=>{
+  const init=extract("async function initialize() {","// Item C6:");
+  const start=init.indexOf("  let pollTick = 0, pollFailures = 0, activeCallFastPollSince = 0;");
+  const end=init.indexOf("  startIncomingCallWake();",start);
+  assert.ok(start>=0 && end>start,"expected bounded canonical active-Call poll");
+  const ticks=init.slice(start,end);
+  let clock=100000,callback=null,interval=null,calls=0;
+  const saved=new Map();
+  const scope={
+    active:null,busy:false,navigating:false,timer:null,
+    document:{hidden:false},
+    sessionStorage:{getItem:key=>saved.get(key)||null},
+    Date:{now:()=>clock},
+    setInterval:(fn,ms)=>{callback=fn;interval=ms;return 1},
+    refresh:async()=>{calls++},
+    authDiagnostic:()=>{},handleMlsIntegrityError:()=>false,
+    message:()=>{},pollFailures:0,
+  };
+  vm.runInNewContext(ticks,scope);
+  assert.equal(interval,800);
+  // Idle network activity remains approximately the original 2.5 sec rate.
+  callback();callback();assert.equal(calls,0);
+  callback();assert.equal(calls,1);
+  await Promise.resolve();
+  // Only a canonically accepted ACTIVE Call (not ringing) gets rapid turns.
+  scope.active={call:{state:"active"}};
+  for(let i=0;i<4;i++){clock+=800;callback();await Promise.resolve();}
+  assert.equal(calls,5,"active MLS steps should not wait for 2.5s poll");
+  // Once the conference is established the fast path is immediately disabled.
+  saved.set("ucrConferenceMediaActive","1");
+  const afterFast=calls;
+  for(let i=0;i<2;i++){clock+=800;callback();await Promise.resolve();}
+  assert.ok(calls-afterFast<=1,"conference-open state returns to ordinary cadence");
+  // Re-enter active pending state; burst is bounded to 20 seconds.
+  saved.delete("ucrConferenceMediaActive");
+  scope.active={call:{state:"ringing"}};
+  callback();await Promise.resolve();
+  scope.active={call:{state:"active"}};
+  clock+=800;callback();await Promise.resolve();
+  const beforeTimeout=calls;
+  clock+=21000;
+  callback();callback();await Promise.resolve();
+  assert.ok(calls-beforeTimeout<=1,"after bounded burst revert to ordinary cadence");
+});

@@ -1178,6 +1178,9 @@ const lifecycleCtx: Record<string, any> = {
   syncReceiveSubscriptions: async () => {protectedLifecycleEvents.push("roster-synced");},
   resetReceiveRoster: () => {protectedLifecycleEvents.push("roster-reset");},
   cancelMediaStartupWatchdog() {},
+  ucrRecordDiagnostic(message: string, category: string) {
+    protectedLifecycleEvents.push(`diagnostic:${category}:${message}`);
+  },
 };
 runInNewContext(
   closeSnippet + "\n" + activateSnippet +
@@ -1196,8 +1199,10 @@ await activating;
 assert.equal(lifecycleCtx.e2eeAdapterReady, true);
 assert.equal(lifecycleCtx.ui.state.textContent, "Connected",
   "the reference UI becomes connected only after protected endpoint startup");
-assert.deepEqual(protectedLifecycleEvents.slice(0, 3),
-  ["start-begins", "start-completes", "monitor-starts"]);
+assert.deepEqual(protectedLifecycleEvents.slice(0, 4),
+  ["start-begins", "start-completes",
+    "diagnostic:lifecycle:Endpoint E2EE transport active", "monitor-starts"],
+  "protected startup must emit its safe E2EE milestone before monitoring");
 lifecycleCtx.e2eeChannel = lifecycleChannel;
 await lifecycleCtx.activate();
 assert.equal(protectedLifecycleEvents.filter((event: string) => event === "start-begins").length, 1,

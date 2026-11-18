@@ -120,3 +120,11 @@ assert.equal(rejectedContext.signedGrantRetired,true);
 await rejectedContext.retire(12);
 assert.equal(stopCount,1,"old generation cannot end a new Call");
 console.log("PASS: rejected WebRTC media retires one-time grant without hanging up parent Call");
+
+// Production latency diagnosis: the per-device export must expose timestamped
+// MLS completion, ICE connection and E2EE activation. No key or SDP is logged.
+assert.match(html,/ucrRecordDiagnostic\("MLS admission ready","lifecycle"\)/);
+assert.match(html,/ucrRecordDiagnostic\("WebRTC ICE connected","webrtc"\)/);
+assert.equal((html.match(/ucrRecordDiagnostic\("Endpoint E2EE transport active","lifecycle"\)/g)||[]).length,2,
+  "initial E2EE activation and authorized reconnection both emit timing marks");
+console.log("PASS: safe timestamped MLS/ICE/E2EE milestones support call-start latency diagnosis");
