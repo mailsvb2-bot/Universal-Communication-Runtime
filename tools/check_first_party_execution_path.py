@@ -62,6 +62,7 @@ def source_contract(root: Path) -> None:
     start = (root / STATIC / "start.js").read_text()
     codec = (root / "sdk/typescript/src/browser_webcodecs_media.ts").read_text()
     transport = (root / "sdk/typescript/src/portable_endpoint_media.ts").read_text()
+    webrtc = (root / "crates/ucr-webrtc/src/e2ee_bridge.rs").read_text()
     builder = (root / "scripts/linux/build-browser-media.sh").read_text()
     release = (root / "tools/verify_release_artifacts.py").read_text()
 
@@ -78,6 +79,12 @@ def source_contract(root: Path) -> None:
         ("transport pressure", codec, "readTransportCongestion()"),
         ("actual E2EE send counter", transport, "sendQueueCongested++"),
         ("transport to video adaptation", codec, "devicePressure || transportPressure || bwe.pressure"),
+        ("bounded v2 Rust channel", webrtc, 'WEBRTC_E2EE_UNORDERED_DATA_CHANNEL_LABEL'),
+        ("v2 server explicit opt-in", webrtc, 'UCR_WEBRTC_E2EE_UNORDERED'),
+        ("one canonical v1 E2EE owner", page, 'E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1"'),
+        ("optional v2 is same E2EE owner", page, "adapter.onEnvelope(wire)"),
+        ("v2 reassembly bound", page, "E2EE_V2_PENDING_LIMIT=4"),
+        ("v2 fallback", page, 'const v2=typeof e2eeChannelV2!=="undefined"'),
         ("bounded audio age", transport, 'frame.mediaKind === "audio" ? 150 : 250'),
         ("encrypted media, no RTP fallback", page, "Unexpected RTP track rejected"),
         ("MLS timing", page, 'ucrRecordDiagnostic("MLS admission ready","lifecycle")'),
