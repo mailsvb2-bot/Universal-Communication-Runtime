@@ -2498,18 +2498,47 @@ function rtcNetworkConfiguration(iceServers,mode){
     // Continuously gather so mobile network switches can surface new candidates.
     iceCandidatePoolSize:0};
 }
+// First-party accepted Direct Call may overlap the *server-only* ICE offer
+// preparation with endpoint MLS bootstrap. Neither capture nor E2EE data
+// transport is authorized by a prefetched offer. One immutable Join owner
+// scopes the offer, and any abandoned offer is closed with that original owner.
+function prefetchFirstPartyWebRtcOffer(){
+  if(!sessionActive||mediaActive||!claims?.call_id?.startsWith("fp-m-"))return null;
+  requireCanonicalMediaHostReady();
+  const owner=Object.freeze({
+    generation:sessionLifecycleGeneration,
+    claims:Object.freeze({...body()}),
+    token
+  });
+  const promise=api("/v1/realtime/webrtc/start",owner.claims,
+    undefined,false,owner.token).then(response=>response.json()).then(offer=>{
+      if(owner.generation===sessionLifecycleGeneration&&sessionActive)
+        ucrRecordDiagnostic("WebRTC server offer received","webrtc");
+      return {ok:true,offer};
+    },error=>({ok:false,error}));
+  return Object.freeze({owner,promise});
+}
+async function retirePrefetchedWebRtcOffer(prefetched){
+  if(!prefetched)return;
+  const result=await prefetched.promise;
+  if(result.ok&&typeof result.offer?.offer_id==="string"&&
+     /^[A-Za-z0-9_-]{43}$/.test(result.offer.offer_id)){
+    await closeServerPeer(false,result.offer.offer_id,
+      prefetched.owner.claims,prefetched.owner.token);
+  }
+}
 // Serialize complete offer ownership, including asynchronous orphan cleanup.
 // A close RPC is session-scoped and must finish before another start creates
 // a replacement offer for that same participant.
-async function startWebRtc(forceMedia=false){
+async function startWebRtc(forceMedia=false,prefetchedOffer=null){
   const preceding=startWebRtc.pending||Promise.resolve();
   let release;
   startWebRtc.pending=new Promise(resolve=>{release=resolve;});
   await preceding;
-  try{return await startWebRtcOnce(forceMedia);}
+  try{return await startWebRtcOnce(forceMedia,prefetchedOffer);}
   finally{release();}
 }
-async function startWebRtcOnce(forceMedia=false){
+async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
   if(startWebRtc.retireEndpointMls){
     startWebRtc.retireEndpointMls=false;
@@ -2532,11 +2561,29 @@ async function startWebRtcOnce(forceMedia=false){
   let offer,rtcConfig,serverPeerOpened=false,startingOwner=null;
   try{
     ucrMediaActivationStage="WEBRTC_OFFER";
-    const response=await api("/v1/realtime/webrtc/start",startingClaims,undefined,false,startingToken);
-    serverPeerOpened=true;
-    offer=await response.json();
-    if(generation===mediaCaptureGeneration&&sessionActive&&typeof ucrRecordDiagnostic==="function")
-      ucrRecordDiagnostic("WebRTC server offer received","webrtc");
+    if(prefetchedOffer){
+      const result=await prefetchedOffer.promise;
+      const original=prefetchedOffer.owner;
+      const matches=original.generation===sessionLifecycleGeneration&&
+        original.token===startingToken&&
+        JSON.stringify(original.claims)===JSON.stringify(startingClaims);
+      if(result.ok&&matches){
+        serverPeerOpened=true;
+        offer=result.offer;
+      }else if(result.ok){
+        // Never let a stale prefetch allocate an unowned peer. Close it using
+        // its own original signed claims, not the replacement session.
+        await retirePrefetchedWebRtcOffer(prefetchedOffer);
+      }
+    }
+    if(!serverPeerOpened){
+      const response=await api("/v1/realtime/webrtc/start",startingClaims,
+        undefined,false,startingToken);
+      serverPeerOpened=true;
+      offer=await response.json();
+      if(generation===mediaCaptureGeneration&&sessionActive)
+        ucrRecordDiagnostic("WebRTC server offer received","webrtc");
+    }
     if(!offer||typeof offer.offer_id!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(offer.offer_id)){
       throw new Error("Canonical WebRTC offer is missing its transport attempt identity");
     }
@@ -2815,10 +2862,18 @@ async function activateAdmittedMedia(){
   if(typeof ensureLocalMedia==="function")ensureLocalMedia(false).catch(()=>{});
   ui.status.textContent="Загружаем защиту звонка. На компьютере первая загрузка модуля может занять до минуты…";
   ucrMediaActivationStage="MLS_RESTORE";
-  await ensureEndpointMlsReady();
+  // Overlap only canonical server offer generation; keep authenticated
+  // capture/MLS activation and the complete peer ownership fence unchanged.
+  const prefetchedOffer=prefetchFirstPartyWebRtcOffer();
+  try{await ensureEndpointMlsReady();}
+  catch(error){
+    if(prefetchedOffer)await retirePrefetchedWebRtcOffer(prefetchedOffer);
+    throw error;
+  }
   if(generation===sessionLifecycleGeneration&&sessionActive&&!mediaActive)
     ucrRecordDiagnostic("MLS admission ready","lifecycle");
   if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive){
+    if(prefetchedOffer)await retirePrefetchedWebRtcOffer(prefetchedOffer);
     if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=false;
     return;
   }
@@ -2836,7 +2891,7 @@ async function activateAdmittedMedia(){
   openStream.missing=false;
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive&&!(typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady))ui.status.textContent="Realtime stream closed: "+e.message;});
   ucrMediaActivationStage="WEBRTC_START";
-  try{await startWebRtc(false);}catch(e){
+  try{await startWebRtc(false,prefetchedOffer);}catch(e){
     if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
       ucrRecordDiagnostic("WebRTC initial authorization rejected","webrtc");
       await retireRejectedFirstPartyMedia(generation);
