@@ -160,6 +160,10 @@ assert.match(firstFrameRecovery,/previousRenderAt=Number\(window\.__ucrVideoCoun
 assert.match(firstFrameRecovery,/currentRenderAt>previousRenderAt/,
   "reconnected call needs a newly rendered frame, not historic firstRenderedAt");
 assert.match(firstFrameRecovery,/syncReceiveSubscriptions\(\)/);
+assert.match(firstFrameRecovery,/firstPartyAcceptedMediaKind!=="video"/,
+  "explicit audio-only Direct Call must not poll video");
+assert.doesNotMatch(firstFrameRecovery,/!policyAllows\("camera"\)/,
+  "receive-only spectators must recover video without publisher camera permission");
 assert.doesNotMatch(firstFrameRecovery,/\/v1\/realtime\/media\/publish|\.seal_wire\(/);
 assert.match(html,/window\.ucrFirstAuthenticatedVideoRendered=\(\)=>\{[\s\S]*?stopInitialVideoRecovery\(\)/);
 const firstFrameActivations=(html.match(/startInitialVideoRecovery\(\);/g)||[]).length;
