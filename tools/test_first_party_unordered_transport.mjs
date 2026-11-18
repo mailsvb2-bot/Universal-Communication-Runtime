@@ -98,7 +98,7 @@ const bindCtx={
   attachUnorderedE2eeDataChannel(){throw new Error("not a v2 event");},
   ui:{},console,
 };
-vm.runInNewContext(html.slice(bindStart,bindEnd)+"\\nthis.bind=attachE2eeDataChannel;",bindCtx);
+vm.runInNewContext(html.slice(bindStart,bindEnd)+"\nthis.bind=attachE2eeDataChannel;",bindCtx);
 const reliable={label:"ucr.e2ee.media.v1",readyState:"connecting"};
 bindCtx.bind(reliable);
 assert.equal(bindCtx.e2eeChannel,reliable);
