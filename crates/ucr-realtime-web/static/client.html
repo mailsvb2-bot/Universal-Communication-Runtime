@@ -3573,11 +3573,16 @@ function startInitialVideoRecovery(){
   if(!sessionActive||!mediaActive||!e2eeAdapterReady||!policyAllows("camera"))return;
   const session=claims,channel=e2eeChannel,generation=sessionLifecycleGeneration;
   const deadline=Date.now()+12000;
+  // A prior rendered frame is not proof that the current restored transport
+  // has fresh video. Require progress since THIS activation, including after
+  // an ICE/DTLS reconnect which reuses the protected decoder instance.
+  const previousRenderAt=Number(window.__ucrVideoCounters?.lastRenderedAt)||0;
   initialVideoRecoveryTimer=setInterval(()=>{
+    const currentRenderAt=Number(window.__ucrVideoCounters?.lastRenderedAt)||0;
     if(generation!==sessionLifecycleGeneration||claims!==session||
         !sessionActive||!mediaActive||!e2eeAdapterReady||
         e2eeChannel!==channel||channel?.readyState!=="open"||
-        Date.now()>=deadline||window.__ucrVideoCounters?.firstRenderedAt){
+        Date.now()>=deadline||currentRenderAt>previousRenderAt){
       stopInitialVideoRecovery();return;
     }
     // The existing receiveRosterInFlight fence prevents overlapping reads.
