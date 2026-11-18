@@ -2101,7 +2101,7 @@ function attachE2eeDataChannel(channel){
   // The server may announce unordered v2 before reliable v1. Do not
   // destroy the optional transport while binding the canonical v1 owner.
   // A replacement v1 must still retire the previous full transport pair.
-  if(e2eeChannel)detachE2eeChannel();
+  if(typeof e2eeChannel!=="undefined"&&e2eeChannel)detachE2eeChannel();
   e2eeChannel=channel;e2eeChannel.binaryType="arraybuffer";
   channel.onopen=()=>{activateE2eeAdapter().catch(e=>{
     if(e2eeChannel!==channel)return;
