@@ -283,16 +283,18 @@ jobs:
         run: adb emu kill >/dev/null 2>&1 || true
 
   ios-safari-attempts:
-    # One real iOS Safari + Desktop Safari run is release-critical. The older
-    # Intel runner repeatedly stalls in Apple's CoreSimulator before testing
-    # the application and is not an independent browser compatibility signal.
-    # Keep the ARM macOS probe mandatory and require its real evidence below;
-    # do not claim unsupported Intel-specific coverage.
+    # macos-15 ARM was repeatedly cancelled by GitHub *before acquiring a
+    # runner* (empty runner name, zero steps, ~15 minutes). Even a separate
+    # successful Intel evidence attempt leaves the matrix workflow failed
+    # because GitHub marks the unallocated ARM job cancelled. Use the verified
+    # Intel runner for real iOS Simulator + Desktop Safari WebDriver instead.
+    # Never convert a missing/failed Safari result to a green release: both
+    # this probe and the downstream artifact evidence gate remain mandatory.
     name: mobile-ios-safari-attempt-${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15]
+        runner: [macos-15-intel]
     runs-on: ${{ matrix.runner }}
     # iOS Safari is release-critical; do not hide failures as successes.
     timeout-minutes: 45
