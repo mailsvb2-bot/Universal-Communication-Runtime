@@ -19,7 +19,7 @@ const ucrMediaVisibilityRecoveries = new Set<() => void>();
 const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0, playoutQueuedMs: 0, playoutJitterMs: 0, playoutRebases: 0};
 // Count actual encoded and rendered video separately; a connected DataChannel
 // and encrypted packet count are not evidence of remote picture delivery.
-const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, encodedCodec: "unknown", receivedCodec: "unknown", decoderFailures: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
+const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, encodedCodec: "unknown", receivedCodec: "unknown", decoderFailures: 0, decoderAsyncFailures: 0, decoderDecodeFailures: 0, decoderConfigFailures: 0, videoRenderFailures: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
 // Background rendering is intentionally suppressed. Track that time separately
 // so diagnostics never attribute hidden-tab inactivity to decoder failure.
 if (typeof document !== "undefined") {
@@ -1022,6 +1022,26 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     ]);
   }
 
+  /** Idempotent decoder retirement shared by asynchronous WebCodecs failures,
+   * synchronous decode rejection and failed rendering. A new authenticated
+   * keyframe is required; never feed deltas to a broken codec instance. */
+  #retireFailedVideoDecoder(key: string, sourceKey: string | null, streamId: string): void {
+    this.#awaitVideoKeyframe.add(key);
+    const failed = this.#decoders.get(key);
+    this.#decoders.delete(key);
+    this.#decoderCodecs.delete(key);
+    if (failed) {
+      try { failed.close(); } catch { /* already closed */ }
+    }
+    if (this.#visibleVideoDecoderKey === key) this.#visibleVideoDecoderKey = null;
+    if (this.#pendingVisibleVideoDecoderKey === key) this.#pendingVisibleVideoDecoderKey = null;
+    if (sourceKey !== null) {
+      const pending = this.#pendingVideoStreams.get(sourceKey);
+      if (pending?.streamId === streamId && pending.decoderKey === key)
+        this.#pendingVideoStreams.delete(sourceKey);
+    }
+  }
+
   play(
     frame: UcrEncodedMediaFrame,
     source?: SfuForwardEnvelopeWire["frame"]["header"],
@@ -1187,41 +1207,33 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
                 }
                 this.#pendingVideoStreams.clear();
               }
+            } catch (error) {
+              // Browser WebCodecs calls output asynchronously. Throwing out of
+              // it becomes an uncaught browser exception; report and recover.
+              ucrVideoCounters.decoderFailures++;
+              ucrVideoCounters.videoRenderFailures++;
+              this.#retireFailedVideoDecoder(key, selectedSourceKey, selectedStreamId);
+              this.#onError(new Error("UCR_MEDIA_VIDEO_RENDER_FAILURE", {cause: error}));
             } finally { video.close(); }
           },
           error: (error) => {
             ucrVideoCounters.decoderFailures++;
-            this.#awaitVideoKeyframe.add(key);
-            const failed = this.#decoders.get(key);
-            if (failed) {
-              this.#decoders.delete(key);
-              try { failed.close(); } catch { /* codec already closed */ }
-            }
-            if (this.#visibleVideoDecoderKey === key) this.#visibleVideoDecoderKey = null;
-            if (this.#pendingVisibleVideoDecoderKey === key) this.#pendingVisibleVideoDecoderKey = null;
-            if (selectedSourceKey !== null) {
-              const pending = this.#pendingVideoStreams.get(selectedSourceKey);
-              if (pending?.streamId === selectedStreamId && pending.decoderKey === key) {
-                this.#pendingVideoStreams.delete(selectedSourceKey);
-                // An asynchronous VideoDecoder error permanently invalidates
-                // this pending decoder. Close it before allowing the next
-                // authenticated keyframe to construct a clean decoder.
-                const failedDecoder = this.#decoders.get(key);
-                if (failedDecoder) {
-                  this.#decoders.delete(key);
-                  try { failedDecoder.close(); } catch { /* codec already closed */ }
-                }
-                if (this.#pendingVisibleVideoDecoderKey === key) {
-                  this.#pendingVisibleVideoDecoderKey = null;
-                }
-              }
-            }
+            ucrVideoCounters.decoderAsyncFailures++;
+            this.#retireFailedVideoDecoder(key, selectedSourceKey, selectedStreamId);
             this.#onError(new Error("UCR_MEDIA_VIDEO_DECODER_FAILURE", {cause: error}));
           },
         });
         const codec = ucrDetectVideoCodec(frame.bytes);
         ucrVideoCounters.receivedCodec = codec;
-        decoder.configure({codec});
+        try {
+          decoder.configure({codec});
+        } catch (error) {
+          ucrVideoCounters.decoderFailures++;
+          ucrVideoCounters.decoderConfigFailures++;
+          try { decoder.close(); } catch { /* unusable decoder */ }
+          this.#retireFailedVideoDecoder(key, selectedSourceKey, selectedStreamId);
+          throw new Error("UCR_MEDIA_VIDEO_DECODER_CONFIG_FAILURE", {cause: error});
+        }
         this.#decoderCodecs.set(key, codec);
       }
       this.#decoders.set(key, decoder);
@@ -1229,7 +1241,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       const codec = ucrDetectVideoCodec(frame.bytes);
       ucrVideoCounters.receivedCodec = codec;
       if (this.#decoderCodecs.get(key) !== codec) {
-        (decoder as {configure(c: unknown): void}).configure({codec});
+        try {
+          (decoder as {configure(c: unknown): void}).configure({codec});
+        } catch (error) {
+          ucrVideoCounters.decoderFailures++;
+          ucrVideoCounters.decoderConfigFailures++;
+          this.#retireFailedVideoDecoder(key, videoSourceKey, frame.streamId);
+          throw new Error("UCR_MEDIA_VIDEO_DECODER_CONFIG_FAILURE", {cause: error});
+        }
         this.#decoderCodecs.set(key, codec);
       }
     }
@@ -1248,25 +1267,8 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         if (Number.isFinite(timestampUs)) this.#lastVideoTimestampUs.set(key, timestampUs);
       } catch (error) {
         ucrVideoCounters.decoderFailures++;
-        this.#awaitVideoKeyframe.add(key);
-        const failed = this.#decoders.get(key);
-        if (failed) {
-          this.#decoders.delete(key);
-          try { failed.close(); } catch { /* codec already closed */ }
-        }
-        if (this.#visibleVideoDecoderKey === key) this.#visibleVideoDecoderKey = null;
-        if (this.#pendingVisibleVideoDecoderKey === key) this.#pendingVisibleVideoDecoderKey = null;
-        if (videoSourceKey !== null) {
-          const pending = this.#pendingVideoStreams.get(videoSourceKey);
-          if (pending?.streamId === frame.streamId && pending.decoderKey === key) {
-            this.#pendingVideoStreams.delete(videoSourceKey);
-            const brokenDecoder = this.#decoders.get(key);
-            if (brokenDecoder) {
-              brokenDecoder.close();
-              this.#decoders.delete(key);
-            }
-          }
-        }
+        ucrVideoCounters.decoderDecodeFailures++;
+        this.#retireFailedVideoDecoder(key, videoSourceKey, frame.streamId);
         throw new Error("UCR_MEDIA_VIDEO_DECODER_FAILURE", {cause: error});
       }
     }
