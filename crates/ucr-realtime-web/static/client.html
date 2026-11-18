@@ -1792,7 +1792,7 @@ function sendE2eeEnvelope(wire,mediaKind,keyframe=false){
   if(!e2eeChannel||e2eeChannel.readyState!=="open")throw ucrTransportError("UCR_TRANSPORT_CHANNEL_CLOSED","Encrypted media channel is not open");
   const bytes=wire instanceof Uint8Array?wire:new Uint8Array(wire);
   if(bytes.length===0||bytes.length>E2EE_MAX_WIRE_BYTES)throw ucrTransportError("UCR_TRANSPORT_INVALID_ENVELOPE","Encrypted media envelope exceeds transport bounds");
-  const v2=e2eeChannelV2?.readyState==="open";
+  const v2=typeof e2eeChannelV2!=="undefined"&&e2eeChannelV2?.readyState==="open";
   const channel=v2?e2eeChannelV2:e2eeChannel;
   const header=v2?E2EE_V2_HEADER_BYTES:E2EE_CHUNK_HEADER_BYTES;
   const payloadSize=v2?E2EE_V2_PAYLOAD_BYTES:E2EE_CHUNK_PAYLOAD_BYTES;
@@ -1808,6 +1808,7 @@ function sendE2eeEnvelope(wire,mediaKind,keyframe=false){
   const count=Math.ceil(bytes.length/payloadSize);
   if(count>65535)throw ucrTransportError("UCR_TRANSPORT_INVALID_ENVELOPE","Encrypted media envelope requires too many chunks");
   const messageId=BigInt(e2eeMessageId++);
+  if(v2)e2eeV2Selected=true; // Server may see even the first valid fragment.
   for(let index=0;index<count;index++){
     const start=index*payloadSize,end=Math.min(bytes.length,start+payloadSize);
     const chunk=new Uint8Array(header+(end-start));
@@ -1818,7 +1819,6 @@ function sendE2eeEnvelope(wire,mediaKind,keyframe=false){
     chunk.set(bytes.subarray(start,end),header);
     channel.send(chunk);
   }
-  if(v2)e2eeV2Selected=true;
   if(typeof packetCount==="number"){
     packetCount++;
     if(typeof ui!=="undefined"&&ui.packets)ui.packets.textContent=String(packetCount);
@@ -2093,7 +2093,8 @@ async function activateE2eeAdapter(){
       :"Endpoint E2EE media transport active. Media keys remain on this endpoint.";
 }
 function attachE2eeDataChannel(channel){
-  if(channel.label===E2EE_UNORDERED_CHANNEL_LABEL){
+  if(typeof E2EE_UNORDERED_CHANNEL_LABEL!=="undefined"&&
+     channel.label===E2EE_UNORDERED_CHANNEL_LABEL){
     attachUnorderedE2eeDataChannel(channel);return;
   }
   if(channel.label!==E2EE_CHANNEL_LABEL){channel.close();return;}
