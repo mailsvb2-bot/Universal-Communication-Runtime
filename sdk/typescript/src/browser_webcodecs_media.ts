@@ -677,7 +677,13 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     // authenticated ordered E2EE DataChannel. A short send() pressure spike
     // can clear before the once-per-second bufferedAmount sample; without
     // this feedback video stays at full bitrate while audio waits behind it.
-    let lastTransportCongestion = 0;
+    const initialCongestion = (globalThis as unknown as {
+      __ucrMediaStageMetrics?: {sendQueueCongested?: number};
+    }).__ucrMediaStageMetrics?.sendQueueCongested;
+    // The counter is module-lifetime telemetry. Reattaching a track must
+    // never interpret earlier capture sessions' rejections as fresh pressure.
+    let lastTransportCongestion = Number.isSafeInteger(initialCongestion) &&
+      initialCongestion! >= 0 ? initialCongestion! : 0;
     const readTransportCongestion = () => {
       const metrics = (globalThis as unknown as {
         __ucrMediaStageMetrics?: {sendQueueCongested?: number};
