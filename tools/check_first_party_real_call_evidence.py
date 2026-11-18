@@ -107,14 +107,14 @@ def inspect(report: dict, label: str) -> dict[str, object]:
     elapsed = (end - start).total_seconds()
     first_video_elapsed = (first_video - start).total_seconds()
     e2ee_to_video_elapsed = (first_video - end).total_seconds()
+    require(0 <= elapsed <= MAX_JOIN_TO_E2EE_SECONDS,
+            f"{label}: Join→E2EE {elapsed:.2f}s exceeds {MAX_JOIN_TO_E2EE_SECONDS:.1f}s")
     require(0 <= first_video_elapsed <= MAX_JOIN_TO_FIRST_VIDEO_SECONDS,
             f"{label}: Join→first video {first_video_elapsed:.2f}s exceeds "
             f"{MAX_JOIN_TO_FIRST_VIDEO_SECONDS:.1f}s")
     require(0 <= e2ee_to_video_elapsed <= MAX_E2EE_TO_FIRST_VIDEO_SECONDS,
             f"{label}: E2EE→first video {e2ee_to_video_elapsed:.2f}s exceeds "
             f"{MAX_E2EE_TO_FIRST_VIDEO_SECONDS:.1f}s")
-    require(0 <= elapsed <= MAX_JOIN_TO_E2EE_SECONDS,
-            f"{label}: Join→E2EE {elapsed:.2f}s exceeds {MAX_JOIN_TO_E2EE_SECONDS:.1f}s")
     # All reached phases are causally after Join. Timestamping order is
     # diagnostic only: ICE can finish before E2EE adapter is fully activated.
     for stage, stamp in events.items():
