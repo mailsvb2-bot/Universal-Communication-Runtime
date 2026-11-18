@@ -179,16 +179,16 @@ const rosterStart=html.indexOf("async function syncReceiveSubscriptions(){");
 const rosterEnd=html.indexOf("function updateReceiveActiveSpeaker(",rosterStart);
 assert.ok(rosterStart>=0&&rosterEnd>rosterStart,"canonical roster handler missing");
 const rosterCode=html.slice(rosterStart,rosterEnd);
-let refreshes=0,subscriptions=0;
+let refreshes=0,subscriptions=0,rosterFetches=0;
 const mediaSession={};
 const channel={readyState:"open"};
 const rosterCtx={
   sessionActive:true,mediaActive:true,e2eeAdapterReady:true,receiveRosterInFlight:false,
   receiveRosterGeneration:7,claims:mediaSession,e2eeChannel:channel,
   receiveRosterSources:[],receiveSpeakerId:null,
-  body:()=>({}),api:async()=>({json:async()=>({ok:true,sources:[
+  body:()=>({}),api:async()=>{rosterFetches++;return {json:async()=>({ok:true,sources:[
     {source_id:"authenticated-peer",source_kind:1},
-  ]})}),
+  ]})};},
   validReceiveRoster:result=>result.sources,
   applyReceiveSubscriptions:async()=>{subscriptions++},
   e2eeAdapter:()=>({requestPublishedVideoKeyframes:()=>{refreshes++}}),
@@ -200,6 +200,15 @@ assert.equal(subscriptions,1);
 await rosterCtx.sync();
 assert.equal(refreshes,1,"identical roster must not regenerate reference frames");
 assert.equal(subscriptions,2);
+assert.equal(rosterFetches,2);
+await rosterCtx.sync(Promise.resolve({ok:true,sources:[
+  {source_id:"authenticated-peer",source_kind:1},
+]}));
+assert.equal(rosterFetches,2,
+  "a valid early canonical roster must avoid an extra critical-path HTTP request");
+await rosterCtx.sync(Promise.resolve(null));
+assert.equal(rosterFetches,3,
+  "failed early prefetch must re-read canonical authorization before subscribing");
 rosterCtx.e2eeChannel={readyState:"closed"};
 await rosterCtx.sync();
 assert.equal(refreshes,1,"retired channel cannot request new frames");
