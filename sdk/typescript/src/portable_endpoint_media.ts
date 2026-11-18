@@ -181,6 +181,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   // Serialize emission for each stream: concurrent async authorization must never
   // reuse a media sequence/nonce or reorder authenticated frames.
   readonly #sendTails = new Map<string, Promise<void>>();
+  // A dropped video delta requires a replacement keyframe, but requesting a
+  // large intra frame WHILE the channel is congested makes latency worse.
+  // Defer the request until a later successful send with a drained buffer.
+  readonly #videoBackpressureNeedsKeyframe = new Set<string>();
   #pending = 0;
   #pendingOutbound = 0;
   #active = false;
@@ -448,6 +452,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#receiveTails.clear();
     this.#verifiedVideoStreams.clear();
     this.#sendTails.clear();
+    this.#videoBackpressureNeedsKeyframe.clear();
     // Retire crypto BEFORE asynchronous media cleanup. A revocation failure
     // cannot skip microphone/camera/decoder teardown or keep this adapter active.
     let stopError: unknown;
@@ -565,6 +570,21 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         throw new Error("media sender unavailable");
       }
       this.#sender(wire, ownedFrame.mediaKind, ownedFrame.keyframe === true);
+      if (frame.mediaKind === "video" &&
+          this.#videoBackpressureNeedsKeyframe.has(frame.streamId)) {
+        const probe = (globalThis as unknown as {
+          ucrEncryptedTransportBufferedAmount?: () => number;
+        }).ucrEncryptedTransportBufferedAmount;
+        // Without a valid measured channel backlog, no assumption is made
+        // that large keyframes are safe. A drop alone is not a green signal.
+        let buffered = Number.POSITIVE_INFINITY;
+        try { if (typeof probe === "function") buffered = probe(); } catch { /* no proof */ }
+        if (Number.isFinite(buffered) && buffered >= 0 && buffered <= 64 * 1024) {
+          this.#videoBackpressureNeedsKeyframe.delete(frame.streamId);
+          this.#producer.requestVideoKeyframe?.(frame.streamId);
+          ucrMediaStageMetrics.videoKeyframeRequests++;
+        }
+      }
       if (metrics) {
         metrics.outboundFrames++;
         metrics.sealAndSendMs = Math.round(performance.now() - queuedAt);
@@ -587,6 +607,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
           (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED" ||
            transportCode === "UCR_TRANSPORT_CHANNEL_CLOSED")) {
         if (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED") {
+          if (frame.mediaKind === "video") this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
           const notice = (globalThis as unknown as {
             ucrEndpointMediaCongestion?: (kind: string) => void;
           }).ucrEndpointMediaCongestion;
