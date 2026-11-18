@@ -332,6 +332,8 @@ function ucrDiagnosticReason(value){
   if(message==="ucr_media_codec_producer_failure")return "MEDIA_CODEC_PRODUCER_FAILURE";
   if(message==="ucr_media_codec_consumer_failure")return "MEDIA_CODEC_CONSUMER_FAILURE";
   if(message==="ucr_media_video_decoder_failure")return "MEDIA_VIDEO_DECODER_FAILURE";
+  if(message==="ucr_media_video_render_failure")return "MEDIA_VIDEO_RENDER_FAILURE";
+  if(message==="ucr_media_video_decoder_config_failure")return "MEDIA_VIDEO_DECODER_CONFIG_FAILURE";
   if(message==="ucr_media_audio_decoder_failure")return "MEDIA_AUDIO_DECODER_FAILURE";
   if(message==="ucr_media_audio_playback_failure")return "MEDIA_AUDIO_PLAYBACK_FAILURE";
   const stage=message.match(/ucr_media_(outbound|inbound)_(publish_authorization|seal_wire|datachannel_send|receive_authorization|signing_key_resolution|verify_and_decrypt|decode_and_play)/);
@@ -538,7 +540,11 @@ function ucrDiagnosticReport(){
       keyframes:window.__ucrVideoCounters.keyframes,
       encodedCodec:window.__ucrVideoCounters.encodedCodec||"unknown",
       receivedCodec:window.__ucrVideoCounters.receivedCodec||"unknown",
-      decoderFailures:window.__ucrVideoCounters.decoderFailures||0
+      decoderFailures:window.__ucrVideoCounters.decoderFailures||0,
+      decoderAsyncFailures:window.__ucrVideoCounters.decoderAsyncFailures||0,
+      decoderDecodeFailures:window.__ucrVideoCounters.decoderDecodeFailures||0,
+      decoderConfigFailures:window.__ucrVideoCounters.decoderConfigFailures||0,
+      videoRenderFailures:window.__ucrVideoCounters.videoRenderFailures||0
     }:null),
     videoVisibility:{
       hidden:document.hidden,
