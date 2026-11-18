@@ -156,7 +156,9 @@ const firstFrameRecoveryEnd=html.indexOf("async function syncReceiveSubscription
 assert.ok(firstFrameRecoveryStart>=0&&firstFrameRecoveryEnd>firstFrameRecoveryStart);
 const firstFrameRecovery=html.slice(firstFrameRecoveryStart,firstFrameRecoveryEnd);
 assert.match(firstFrameRecovery,/deadline=Date\.now\(\)\+12000/);
-assert.match(firstFrameRecovery,/window\.__ucrVideoCounters\?\.firstRenderedAt/);
+assert.match(firstFrameRecovery,/previousRenderAt=Number\(window\.__ucrVideoCounters\?\.lastRenderedAt\)/);
+assert.match(firstFrameRecovery,/currentRenderAt>previousRenderAt/,
+  "reconnected call needs a newly rendered frame, not historic firstRenderedAt");
 assert.match(firstFrameRecovery,/syncReceiveSubscriptions\(\)/);
 assert.doesNotMatch(firstFrameRecovery,/\/v1\/realtime\/media\/publish|\.seal_wire\(/);
 assert.match(html,/window\.ucrFirstAuthenticatedVideoRendered=\(\)=>\{[\s\S]*?stopInitialVideoRecovery\(\)/);
