@@ -66,8 +66,14 @@ export function createUcrBrowserEndpointMediaAdapter(
   // surfacing only an allowlisted pipeline-stage category to diagnostics.
   // An encoder/decoder fault is not a failed MLS signer or a rejected Call.
   const codecError = (stage: "PRODUCER" | "CONSUMER") => (error: unknown) => {
-    const reported = new Error("UCR_MEDIA_CODEC_" + stage + "_FAILURE");
-    (reported as Error & {cause?: unknown}).cause = error;
+    // Preserve only fixed, public pipeline categories. Raw decoder errors
+    // can contain device/vendor details, and must never enter diagnostics.
+    const safe = stage === "CONSUMER" && error instanceof Error &&
+      ["UCR_MEDIA_VIDEO_DECODER_FAILURE",
+       "UCR_MEDIA_AUDIO_DECODER_FAILURE",
+       "UCR_MEDIA_AUDIO_PLAYBACK_FAILURE"].includes(error.message)
+        ? error.message : "UCR_MEDIA_CODEC_" + stage + "_FAILURE";
+    const reported = new Error(safe, {cause: error});
     onError(reported);
   };
   const referenceCanvas = typeof document !== "undefined" ?
