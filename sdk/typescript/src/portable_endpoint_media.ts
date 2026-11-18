@@ -524,7 +524,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         ucrMediaStageMetrics.sendUnavailable++;
         throw new Error("media sender unavailable");
       }
-      this.#sender(wire, ownedFrame.mediaKind);
+      this.#sender(wire, ownedFrame.mediaKind, ownedFrame.keyframe === true);
       if (metrics) {
         metrics.outboundFrames++;
         metrics.sealAndSendMs = Math.round(performance.now() - queuedAt);
