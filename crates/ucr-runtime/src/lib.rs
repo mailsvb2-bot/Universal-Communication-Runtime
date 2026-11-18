@@ -7,7 +7,10 @@ use std::{
     net::SocketAddr,
     path::Path,
     pin::Pin,
-    sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -1355,27 +1358,17 @@ fn operator_realtime_health(
         };
     };
 
-    // Expose only cumulative bounded *counts* through the existing private
-    // operator interface. Healthy worker liveness does not imply zero media
-    // loss; operators can distinguish those conditions without new routes.
-    let loss=webrtc_e2ee_routing_counters();
-    let detail=format!(
-        "E2EE worker {}; ingress_audio_full={} ingress_video_full={} ingress_closed={} \
-         lane_audio_full={} lane_video_full={} lane_closed={} \
-         forward_failed={} worker_join_failed={}",
-        if realtime.live_provider.is_available() {"available"} else {"unavailable"},
-        loss.ingress.audio_full,loss.ingress.video_full,loss.ingress.channel_closed,
-        loss.audio_lane_full,loss.video_lane_full,loss.lane_closed,
-        loss.forward_failures,loss.worker_join_failures,
-    );
-    let sfu = operator_component(
-        if realtime.live_provider.is_available() {
-            pb::OperatorComponentStatus::Healthy
-        } else {
-            pb::OperatorComponentStatus::Unavailable
-        },
-        &detail,
-    );
+    let sfu = if realtime.live_provider.is_available() {
+        operator_component(
+            pb::OperatorComponentStatus::Healthy,
+            "encrypted SFU/WebRTC transport worker is available",
+        )
+    } else {
+        operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "encrypted SFU/WebRTC transport worker is unavailable",
+        )
+    };
     let turn = if realtime.turn_configured {
         operator_component(
             pb::OperatorComponentStatus::Unverified,
@@ -3368,7 +3361,8 @@ async fn run_webrtc_e2ee_bridge(
         let session_id = frame.session_id.clone();
         if !lanes.contains_key(&session_id) && lanes.len() >= LIVE_WEBRTC_MAX_SESSIONS {
             // Cap per-session workers and reclaim the least recently used one.
-            if let Some(oldest) = lanes.iter()
+            if let Some(oldest) = lanes
+                .iter()
                 .min_by_key(|(_, (_, _, last))| *last)
                 .map(|(id, _)| id.clone())
             {
@@ -3379,14 +3373,13 @@ async fn run_webrtc_e2ee_bridge(
         let (audio_tx, video_tx, last_activity) = lanes.entry(session_id).or_insert_with(|| {
             // Preserve the former 128-frame per-peer total budget, but prevent
             // a video burst from exhausting the audio admission lane.
-            let (audio_tx, audio_rx) = tokio::sync::mpsc::channel(
-                LIVE_WEBRTC_E2EE_INGRESS_CAPACITY / 2,
-            );
-            let (video_tx, video_rx) = tokio::sync::mpsc::channel(
-                LIVE_WEBRTC_E2EE_INGRESS_CAPACITY / 2,
-            );
+            let (audio_tx, audio_rx) =
+                tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY / 2);
+            let (video_tx, video_rx) =
+                tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY / 2);
             tokio::spawn(run_webrtc_e2ee_session_lane(
-                audio_rx, video_rx,
+                audio_rx,
+                video_rx,
                 Arc::clone(&provider),
                 Arc::clone(&registry),
                 service.clone(),
@@ -3448,25 +3441,37 @@ async fn run_webrtc_e2ee_session_lane(
     let mut video_open = true;
     let mut audio_streak = 0_u8;
     loop {
-        if !audio_open && !video_open { break; }
+        if !audio_open && !video_open {
+            break;
+        }
         // Opus has higher latency sensitivity. After at most 8 consecutive
         // audio frames, give pending video a chance to avoid starvation.
         let Ok((candidate, from_audio)) = tokio::time::timeout(
             Duration::from_mins(2),
-            receive_prioritized_media(&mut audio, &mut video,
-                audio_open, video_open, audio_streak),
-        ).await
-        else { break };
+            receive_prioritized_media(&mut audio, &mut video, audio_open, video_open, audio_streak),
+        )
+        .await
+        else {
+            break;
+        };
         let Some(frame) = candidate else {
-            if from_audio { audio_open = false; } else { video_open = false; }
+            if from_audio {
+                audio_open = false;
+            } else {
+                video_open = false;
+            }
             continue;
         };
-        if from_audio { audio_streak = audio_streak.saturating_add(1); }
-        else { audio_streak = 0; }
+        if from_audio {
+            audio_streak = audio_streak.saturating_add(1);
+        } else {
+            audio_streak = 0;
+        }
         if service.has_sfu_media_router() {
-            if route_webrtc_e2ee_frame_via_configured_route(
-                &service, &registry, &provider, &frame,
-            ).await.is_err() {
+            if route_webrtc_e2ee_frame_via_configured_route(&service, &registry, &provider, &frame)
+                .await
+                .is_err()
+            {
                 WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
             }
         } else {
@@ -3475,7 +3480,9 @@ async fn run_webrtc_e2ee_session_lane(
             let service = service.clone();
             match tokio::task::spawn_blocking(move || {
                 route_webrtc_e2ee_frame(&service, &registry, &provider, &frame)
-            }).await {
+            })
+            .await
+            {
                 Ok(Ok(_)) => {}
                 Ok(Err(())) => {
                     WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
@@ -3496,7 +3503,9 @@ mod webrtc_e2ee_lane_tests {
     async fn audio_priority_is_bounded_and_video_is_not_starved() {
         let (atx, mut audio) = tokio::sync::mpsc::channel(16);
         let (vtx, mut video) = tokio::sync::mpsc::channel(16);
-        for n in 0..12 { atx.try_send(n).unwrap(); }
+        for n in 0..12 {
+            atx.try_send(n).unwrap();
+        }
         vtx.try_send(999).unwrap();
         for streak in 0..8 {
             let (frame, is_audio) =
@@ -3514,29 +3523,14 @@ mod webrtc_e2ee_lane_tests {
         assert_eq!(frame, Some(8));
     }
 
-    #[test]
-    fn operator_routing_counters_are_aggregate_only() {
-        let result=webrtc_e2ee_routing_counters();
-        assert!(result.audio_lane_full <= u64::MAX);
-        assert!(result.video_lane_full <= u64::MAX);
-        let formatted=format!(
-            "audio_full={} video_full={} forwarding_failed={}",
-            result.audio_lane_full,result.video_lane_full,result.forward_failures,
-        );
-        assert!(!formatted.contains("session_id"));
-        assert!(!formatted.contains("source_device"));
-        assert!(!formatted.contains("ciphertext"));
-    }
-
     #[tokio::test]
     async fn closed_audio_lane_does_not_block_video() {
         let (atx, mut audio) = tokio::sync::mpsc::channel::<i32>(1);
         let (vtx, mut video) = tokio::sync::mpsc::channel(1);
         drop(atx);
         vtx.try_send(37).unwrap();
-        let (frame, is_audio) = receive_prioritized_media(
-            &mut audio, &mut video, false, true, 0,
-        ).await;
+        let (frame, is_audio) =
+            receive_prioritized_media(&mut audio, &mut video, false, true, 0).await;
         assert_eq!(frame, Some(37));
         assert!(!is_audio);
     }
