@@ -579,9 +579,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         // that large keyframes are safe. A drop alone is not a green signal.
         let buffered = Number.POSITIVE_INFINITY;
         try { if (typeof probe === "function") buffered = probe(); } catch { /* no proof */ }
-        if (Number.isFinite(buffered) && buffered >= 0 && buffered <= 64 * 1024) {
+        if (Number.isFinite(buffered) && buffered >= 0 && buffered <= 64 * 1024 &&
+            typeof this.#producer.requestVideoKeyframe === "function") {
           this.#videoBackpressureNeedsKeyframe.delete(frame.streamId);
-          this.#producer.requestVideoKeyframe?.(frame.streamId);
+          this.#producer.requestVideoKeyframe(frame.streamId);
           ucrMediaStageMetrics.videoKeyframeRequests++;
         }
       }
