@@ -29,6 +29,7 @@ import {
   ucrAdvanceVideoPacing,
   ucrDetectVideoCodec,
   ucrAdaptiveVideoStep,
+  ucrTransportCongestionDelta,
   ucrNormalizeOpusAudio,
 } from "./src/browser_webcodecs_media.ts";
 import {
@@ -2395,6 +2396,19 @@ assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 0, 0, true), {stage:1, healthySample
 assert.deepEqual(ucrAdaptiveVideoStep(1, 0, 0, 4, false), {stage:0, healthySamples:0},
   "quality must recover after five healthy device and transport samples");
 assert.throws(() => ucrAdaptiveVideoStep(0, -1, 0, 0), /invalid video congestion sample/);
+
+assert.deepEqual(ucrTransportCongestionDelta(0, 0), {pressure:false, baseline:0});
+assert.deepEqual(ucrTransportCongestionDelta(0, 39), {pressure:true, baseline:39},
+  "39 observed rejected video sends must lower the canonical video stage even after the buffer drained");
+assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 0, 0,
+  ucrTransportCongestionDelta(0, 39).pressure), {stage:1, healthySamples:0});
+assert.deepEqual(ucrTransportCongestionDelta(39, 39), {pressure:false, baseline:39},
+  "repeated periodic reads of the same count must not degrade indefinitely");
+assert.deepEqual(ucrTransportCongestionDelta(39, 0), {pressure:false, baseline:0},
+  "new transport generation resets the cumulative counter without false pressure");
+assert.deepEqual(ucrTransportCongestionDelta(39, undefined), {pressure:false, baseline:39},
+  "missing telemetry must never fabricate a congestion event");
+
 
 const endpointQualityCalls: string[] = [];
 const crypto = {
