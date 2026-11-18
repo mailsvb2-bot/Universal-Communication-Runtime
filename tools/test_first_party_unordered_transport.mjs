@@ -85,4 +85,23 @@ assert.match(receiver,/adapter\.onEnvelope\(wire\)/);
 assert.doesNotMatch(receiver,/seal_wire|open_wire|derive_secret|new .*CryptoBridge/);
 assert.ok(html.includes("channel.label===E2EE_UNORDERED_CHANNEL_LABEL"),
   "v2 offered channel must reach the same authenticated media owner");
+
+const bindStart=html.indexOf("function attachE2eeDataChannel(channel){");
+const bindEnd=html.indexOf("function scheduleStreamRetry(){",bindStart);
+assert.ok(bindStart>=0&&bindEnd>bindStart);
+const earlyV2={label:"ucr.e2ee.media.v2",readyState:"open"};
+const bindCtx={
+  E2EE_CHANNEL_LABEL:"ucr.e2ee.media.v1",
+  E2EE_UNORDERED_CHANNEL_LABEL:"ucr.e2ee.media.v2",
+  e2eeChannel:null,e2eeChannelV2:earlyV2,
+  detachE2eeChannel(){throw new Error("initial v1 must not erase early v2 offer");},
+  attachUnorderedE2eeDataChannel(){throw new Error("not a v2 event");},
+  ui:{},console,
+};
+vm.runInNewContext(html.slice(bindStart,bindEnd)+"\\nthis.bind=attachE2eeDataChannel;",bindCtx);
+const reliable={label:"ucr.e2ee.media.v1",readyState:"connecting"};
+bindCtx.bind(reliable);
+assert.equal(bindCtx.e2eeChannel,reliable);
+assert.equal(bindCtx.e2eeChannelV2,earlyV2,
+  "server may announce v2 before v1; order must not discard optional channel");
 console.log("PASS: v2 loss/reorder/replay bounds, keyframe metadata, v1 fallback and one E2EE owner");
