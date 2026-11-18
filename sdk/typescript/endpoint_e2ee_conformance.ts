@@ -2685,7 +2685,9 @@ try {
   brokenSwitch.setReceiveQuality(lowTarget);
   rejectNextVideoDecode = true;
   assert.throws(() => brokenSwitch.play(videoFrame("failure-camera-low", true)),
-    /corrupt candidate video keyframe/);
+    (error: unknown) => error instanceof Error &&
+      error.message === "UCR_MEDIA_VIDEO_DECODER_FAILURE" &&
+      error.cause instanceof Error && /corrupt candidate video keyframe/.test(error.cause.message));
   const afterFailedSwitch = visualCalls.length;
   brokenSwitch.play(videoFrame("failure-camera", false));
   assert.equal(visualCalls.length, afterFailedSwitch + 1,
