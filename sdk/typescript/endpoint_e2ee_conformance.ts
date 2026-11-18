@@ -2408,6 +2408,14 @@ assert.deepEqual(ucrTransportCongestionDelta(39, 0), {pressure:false, baseline:0
   "new transport generation resets the cumulative counter without false pressure");
 assert.deepEqual(ucrTransportCongestionDelta(39, undefined), {pressure:false, baseline:39},
   "missing telemetry must never fabricate a congestion event");
+const codecProducerSource = readFileSync(
+  "sdk/typescript/src/browser_webcodecs_media.ts", "utf8");
+assert.match(codecProducerSource,
+  /let lastTransportCongestion = Number\.isSafeInteger\(initialCongestion\)/,
+  "reattached camera must start from current transport counter, not zero");
+assert.match(codecProducerSource,
+  /const transportPressure = readTransportCongestion\(\)/,
+  "the actual send rejection counter must feed the source-owned controller");
 
 
 const endpointQualityCalls: string[] = [];
