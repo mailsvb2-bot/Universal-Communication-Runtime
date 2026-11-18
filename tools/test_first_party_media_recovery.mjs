@@ -175,7 +175,7 @@ console.log("PASS: capture does not wait for device enumeration; first-frame rec
 // Exercise the actual canonical receive-roster handler: one new admitted peer
 // may ask the *local* encoder for a fresh reference frame; ordinary polling
 // of an unchanged roster must not create a keyframe storm.
-const rosterStart=html.indexOf("async function syncReceiveSubscriptions(){");
+const rosterStart=html.indexOf("async function syncReceiveSubscriptions(");
 const rosterEnd=html.indexOf("function updateReceiveActiveSpeaker(",rosterStart);
 assert.ok(rosterStart>=0&&rosterEnd>rosterStart,"canonical roster handler missing");
 const rosterCode=html.slice(rosterStart,rosterEnd);
