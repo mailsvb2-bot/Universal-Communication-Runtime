@@ -2866,7 +2866,8 @@ async function activateAdmittedMedia(){
   ucrMediaActivationStage="MLS_RESTORE";
   // Overlap only canonical server offer generation; keep authenticated
   // capture/MLS activation and the complete peer ownership fence unchanged.
-  const prefetchedOffer=prefetchFirstPartyWebRtcOffer();
+  const prefetchedOffer=typeof prefetchFirstPartyWebRtcOffer==="function"
+    ?prefetchFirstPartyWebRtcOffer():null;
   try{await ensureEndpointMlsReady();}
   catch(error){
     if(prefetchedOffer)await retirePrefetchedWebRtcOffer(prefetchedOffer);
