@@ -63,6 +63,7 @@ jobs:
               node tools/test_browser_network_failure_categories.mjs
               node tools/test_first_party_unordered_transport.mjs
               node tools/test_first_party_ice_batch.mjs
+              node tools/test_first_party_offer_prefetch.mjs
               node --experimental-strip-types sdk/typescript/first_party_account_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_embed_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_client_conformance.ts
