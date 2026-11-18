@@ -16,6 +16,9 @@ import sys
 
 SCHEMA = "ucr-local-diagnostics-v1"
 MAX_JOIN_TO_E2EE_SECONDS = 10.0
+# This is a real measured user-visible boundary, not merely a transport signal.
+MAX_JOIN_TO_FIRST_VIDEO_SECONDS = 8.0
+MAX_E2EE_TO_FIRST_VIDEO_SECONDS = 2.0
 MAX_VIDEO_STALL_MS = 500
 MAX_ONE_WAY_AUDIO_MS = 300
 MAX_GLASS_TO_GLASS_VIDEO_MS = 500
@@ -52,7 +55,8 @@ def _events(report: dict) -> dict[str, datetime]:
                         "Local capture ready for WebRTC",
                         "WebRTC remote SDP accepted",
                         "WebRTC ICE connected",
-                        "Endpoint E2EE transport active"):
+                        "Endpoint E2EE transport active",
+                        "First authenticated video rendered"):
                 stamp = _timestamp(item.get("time"))
                 if safe == "Join requested":
                     # Use last Join to avoid accidental conflation of an earlier call.
@@ -97,15 +101,32 @@ def inspect(report: dict, label: str) -> dict[str, object]:
             f"{label}: Join→E2EE timing evidence missing")
     start = events["Join requested"]
     end = events["Endpoint E2EE transport active"]
+    first_video = events.get("First authenticated video rendered")
+    require(first_video is not None,
+            f"{label}: first authenticated video render timing evidence missing")
     elapsed = (end - start).total_seconds()
+    first_video_elapsed = (first_video - start).total_seconds()
+    e2ee_to_video_elapsed = (first_video - end).total_seconds()
     require(0 <= elapsed <= MAX_JOIN_TO_E2EE_SECONDS,
             f"{label}: Join→E2EE {elapsed:.2f}s exceeds {MAX_JOIN_TO_E2EE_SECONDS:.1f}s")
+    require(0 <= first_video_elapsed <= MAX_JOIN_TO_FIRST_VIDEO_SECONDS,
+            f"{label}: Join→first video {first_video_elapsed:.2f}s exceeds "
+            f"{MAX_JOIN_TO_FIRST_VIDEO_SECONDS:.1f}s")
+    # On a fast path the authorized adapter may render a frame while its
+    # asynchronous persisted-state/diagnostic E2EE_ACTIVE marker is still
+    # completing. A negative E2EE→video gap is not a slow-first-video failure;
+    # Join→video remains mandatory and monotonic.
+    require(e2ee_to_video_elapsed <= MAX_E2EE_TO_FIRST_VIDEO_SECONDS,
+            f"{label}: E2EE→first video {e2ee_to_video_elapsed:.2f}s exceeds "
+            f"{MAX_E2EE_TO_FIRST_VIDEO_SECONDS:.1f}s")
     # All reached phases are causally after Join. Timestamping order is
     # diagnostic only: ICE can finish before E2EE adapter is fully activated.
     for stage, stamp in events.items():
         if stage != "Join requested":
             require(stamp >= start, f"{label}: event order reversed at {stage}")
     return {"join_to_e2ee_seconds": round(elapsed, 3),
+            "join_to_first_video_seconds": round(first_video_elapsed, 3),
+            "e2ee_to_first_video_seconds": round(e2ee_to_video_elapsed, 3),
             "video_render_stall_ms": stall,
             "rendered_frames": video["rendered"],
             "received_audio_frames": audio["received"],

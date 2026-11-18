@@ -205,8 +205,11 @@ function ucrRecordDiagnostic(event,category="runtime"){
 }
 // Rendering is the real user-visible success boundary, not DataChannel open.
 window.ucrFirstAuthenticatedVideoRendered=()=>{
-  if(sessionActive&&mediaActive)
+  if(sessionActive&&mediaActive){
     ucrRecordDiagnostic("First authenticated video rendered","media");
+    // A proven rendered remote frame ends the bounded startup roster probe.
+    if(typeof stopInitialVideoRecovery==="function")stopInitialVideoRecovery();
+  }
 };
 function ucrIceServerKinds(servers){
   const list=Array.isArray(servers)?servers:[];
@@ -535,6 +538,11 @@ function ucrDiagnosticReport(){
       received:window.__ucrVideoCounters.received,
       decoded:window.__ucrVideoCounters.decoded,
       rendered:window.__ucrVideoCounters.rendered,
+      // Browser-local wall clock: source and receiver timestamps must NOT be
+      // subtracted across devices without external clock synchronization.
+      firstEncodedAt:window.__ucrVideoCounters.firstEncodedAt||null,
+      firstReceivedAt:window.__ucrVideoCounters.firstReceivedAt||null,
+      firstDecodedAt:window.__ucrVideoCounters.firstDecodedAt||null,
       firstRenderedAt:window.__ucrVideoCounters.firstRenderedAt||null,
       lastRenderedAt:window.__ucrVideoCounters.lastRenderedAt,
       lastDecodedAt:window.__ucrVideoCounters.lastDecodedAt,
@@ -1608,6 +1616,7 @@ function ucrMarkConferenceMediaActive(active){
   }catch(_){}
 }
 function detachE2eeChannel(){
+  stopInitialVideoRecovery();
   ++e2eeActivationGeneration;
   if(e2eeChannel){
     e2eeChannel.onopen=null;e2eeChannel.onmessage=null;e2eeChannel.onclose=null;e2eeChannel.onerror=null;
@@ -2015,6 +2024,7 @@ async function activateE2eeAdapter(){
     ucrRecordDiagnostic("Endpoint E2EE transport active","lifecycle");
     webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
     startAdaptiveMediaMonitoring();
+    if(typeof startInitialVideoRecovery==="function")startInitialVideoRecovery();
     syncReceiveSubscriptions().catch(e=>{if(sessionActive)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
     ui.remoteVideo.classList.add("hidden");
     ui.remoteCanvas.classList.remove("hidden");
@@ -2086,6 +2096,18 @@ async function activateE2eeAdapter(){
   if(!adapter||typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"){
     throw new Error("Authorized endpoint E2EE media adapter unavailable; refusing plaintext media");
   }
+  // Canonical read-only roster may overlap endpoint state restoration and
+  // WebCodecs initialization. Subscriptions still require the live E2EE gate.
+  const preparedReceiveRoster=
+    typeof AbortController==="function"&&typeof setTimeout==="function"
+      ?(()=>{
+        const controller=new AbortController();
+        const deadline=setTimeout(()=>controller.abort(),1200);
+        return api("/v1/realtime/receive-roster",body(),controller.signal)
+          .then(response=>response.json()).catch(()=>null)
+          .finally(()=>clearTimeout(deadline));
+      })()
+      :Promise.resolve(null);
   const restoreState=await restoreEndpointPersistedState(adapter);
   if(!isCurrent())throw new Error("Encrypted media session changed during restore");
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
@@ -2108,7 +2130,8 @@ async function activateE2eeAdapter(){
   // Admission happens before the protected DataChannel opens. Only now do we
   // have a live, authorized decoder and measured downlink telemetry provider.
   startAdaptiveMediaMonitoring();
-  syncReceiveSubscriptions().catch(e=>{if(sessionActive)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
+  if(typeof startInitialVideoRecovery==="function")startInitialVideoRecovery();
+  syncReceiveSubscriptions(preparedReceiveRoster).catch(e=>{if(sessionActive)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
   ui.remoteVideo.classList.add("hidden");
   ui.remoteCanvas.classList.remove("hidden");
   refreshScreenShareControl();
@@ -2353,7 +2376,9 @@ async function captureLocalMedia(force){
     ui.status.textContent="Camera unavailable; continuing the protected audio call automatically.";
   }
   refreshLocalMediaControls();
-  await refreshDevices();
+  // enumerateDevices is UI housekeeping, not a prerequisite for already
+  // authorized getUserMedia. Awaiting it holds the first SDP/ICE handshake.
+  void refreshDevices().catch(()=>{});
   return localStream;
 }
 async function ensureLocalTrack(kind){
@@ -3544,21 +3569,70 @@ async function applyReceiveSubscriptions(sources,preferredId,generation,session,
     }
   }
 }
-async function syncReceiveSubscriptions(){
+// The canonical SFU roster is sometimes projected after E2EE activation.
+// One initial HTTP response cannot prove that the other endpoint is ready.
+// Retry only the existing authenticated roster/subscription operation while
+// first video is missing; never invent a source, signature, or media grant.
+let initialVideoRecoveryTimer=null;
+function stopInitialVideoRecovery(){
+  if(initialVideoRecoveryTimer!==null){
+    clearInterval(initialVideoRecoveryTimer);
+    initialVideoRecoveryTimer=null;
+  }
+}
+function startInitialVideoRecovery(){
+  stopInitialVideoRecovery();
+  // Receiving video is independent of local permission to PUBLISH a camera.
+  // Spectators and camera-disabled recipients must still recover their first
+  // subscribed frame. Do not poll video for an explicitly audio-only Direct Call.
+  if(!sessionActive||!mediaActive||!e2eeAdapterReady||
+      (claims?.call_id?.startsWith("fp-m-")&&firstPartyAcceptedMediaKind!=="video"))return;
+  const session=claims,channel=e2eeChannel,generation=sessionLifecycleGeneration;
+  const deadline=Date.now()+12000;
+  // A prior rendered frame is not proof that the current restored transport
+  // has fresh video. Require progress since THIS activation, including after
+  // an ICE/DTLS reconnect which reuses the protected decoder instance.
+  const previousRenderAt=Number(window.__ucrVideoCounters?.lastRenderedAt)||0;
+  initialVideoRecoveryTimer=setInterval(()=>{
+    const currentRenderAt=Number(window.__ucrVideoCounters?.lastRenderedAt)||0;
+    if(generation!==sessionLifecycleGeneration||claims!==session||
+        !sessionActive||!mediaActive||!e2eeAdapterReady||
+        e2eeChannel!==channel||channel?.readyState!=="open"||
+        Date.now()>=deadline||currentRenderAt>previousRenderAt){
+      stopInitialVideoRecovery();return;
+    }
+    // The existing receiveRosterInFlight fence prevents overlapping reads.
+    syncReceiveSubscriptions().catch(()=>{});
+  },700);
+}
+async function syncReceiveSubscriptions(preparedRoster=null){
   if(!sessionActive||!mediaActive||!e2eeAdapterReady||receiveRosterInFlight||
       e2eeChannel?.readyState!=="open")return;
   const generation=receiveRosterGeneration,session=claims,channel=e2eeChannel;
   receiveRosterInFlight=true;
   try{
-    const response=await api("/v1/realtime/receive-roster",body());
-    const data=await response.json();
+    const prepared=preparedRoster?await preparedRoster:null;
+    // Failure of an early read falls back to a freshly authorized roster.
+    const data=prepared??await (await api("/v1/realtime/receive-roster",body())).json();
     const sources=validReceiveRoster(data);
     if(!sources)throw new Error("invalid canonical receive roster");
     if(!sessionActive||!mediaActive||!e2eeAdapterReady||
         generation!==receiveRosterGeneration||claims!==session||
         e2eeChannel!==channel||channel?.readyState!=="open")return;
+    // One already-authorized endpoint may have started its camera before
+    // the new recipient completed MLS/subscribe. Do not leave the recipient
+    // waiting for the source's next 3-second periodic reference frame.
+    // A new canonical roster member can request ONE local producer refresh;
+    // frames still pass the existing E2EE signing and publication authority.
+    const peerArrived=sources.some(source=>!receiveRosterSources.some(old=>
+      old.source_id===source.source_id&&old.source_kind===source.source_kind));
     receiveRosterSources=sources;
     await applyReceiveSubscriptions(sources,receiveSpeakerId,generation,session,channel);
+    if(peerArrived&&sessionActive&&mediaActive&&e2eeAdapterReady&&
+        generation===receiveRosterGeneration&&claims===session&&
+        e2eeChannel===channel&&channel?.readyState==="open"){
+      e2eeAdapter()?.requestPublishedVideoKeyframes?.();
+    }
   }finally{
     if(generation===receiveRosterGeneration)receiveRosterInFlight=false;
   }

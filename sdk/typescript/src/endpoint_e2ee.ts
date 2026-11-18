@@ -53,6 +53,9 @@ export interface UcrEndpointE2eeAdapterV1 {
   getReceiveMediaTelemetry?(): unknown | Promise<unknown>;
   getVerifiedReceiveVideoStreams?(): readonly UcrVerifiedReceiveVideoStream[];
   getActiveReceiveVideoStreams?(): readonly UcrVerifiedReceiveVideoStream[];
+  /** Endpoint-local keyframe request when a canonically admitted peer joins.
+   * No authority, key material or media control is delegated to the caller. */
+  requestPublishedVideoKeyframes?(): void;
   readonly persistence?: UcrEndpointE2eePersistenceV1;
 }
 
@@ -101,7 +104,8 @@ export function resolveUcrEndpointE2eeAdapter(
       typeof value.getReceiveMediaTelemetry !== "function") {
       throw new Error("ucr.endpoint-e2ee.v1 receive telemetry must be a function");
     }
-    for (const method of ["getVerifiedReceiveVideoStreams", "getActiveReceiveVideoStreams"]) {
+    for (const method of ["getVerifiedReceiveVideoStreams", "getActiveReceiveVideoStreams",
+                          "requestPublishedVideoKeyframes"]) {
       if (value[method] !== undefined && typeof value[method] !== "function") {
         throw new Error("ucr.endpoint-e2ee.v1 authenticated stream inspection must be a function");
       }
