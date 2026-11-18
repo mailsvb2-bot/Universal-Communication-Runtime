@@ -14,7 +14,10 @@ assert.match(browser,/ucrConferenceMediaActive/);
 assert.match(start,/Защищённый звонок уже открыт на экране конференции/);
 assert.doesNotMatch(browser,/if\(event\.startsWith\("event: media"\)\)\{packetCount\+\+/);
 const attachSnippet=browser.slice(browser.indexOf("function attachE2eeDataChannel(channel){"),browser.indexOf("function scheduleStreamRetry(){"));
-assert.ok(attachSnippet.includes("detachE2eeChannel();e2eeChannel=channel"));
+assert.ok(attachSnippet.includes("if(typeof e2eeChannel!==\"undefined\"&&e2eeChannel)detachE2eeChannel()"),
+  "only a replacement reliable v1 retires existing canonical adapter and optional v2");
+assert.ok(attachSnippet.includes("e2eeChannel=channel;e2eeChannel.binaryType"),
+  "v1 remains canonical adapter owner even when v2 arrives before it");
 assert.ok(attachSnippet.includes("if(e2eeChannel!==channel)return;"));
 assert.ok(!/recoverTerminalEncryptedChannel[\s\S]*closeE2eeTransport\(\);/.test(attachSnippet),
   "terminal DataChannel recovery must not revoke live epoch signer");
