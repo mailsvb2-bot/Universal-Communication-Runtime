@@ -1090,10 +1090,15 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
        active.terminating||active.call.callId!==callId||
        active.call.state!=="active"||activeCallLocator()!==locator)
       throw Error("MLS preparation cancelled by Call withdrawal");
-    const user=await host.resumeAuthenticatedDevice();
+    // Both are independent, read-only inspections against the canonical
+    // Device and Call owners. They must BOTH succeed and match the selected
+    // scope/revision before any MLS mutation or signed Join is authorized.
+    // Sequential HTTP round-trips here multiply across several MLS phases.
+    const [user,call]=await Promise.all([
+      host.resumeAuthenticatedDevice(),calls.inspect(callId)
+    ]);
     if(principalScope(user)!==selectedScope)
       throw Error("MLS preparation cancelled by Device change");
-    const call=await calls.inspect(callId);
     if(call.state!=="active"||call.callId!==callId)
       throw Error("MLS preparation cancelled by canonical Call");
     return {user,call};
