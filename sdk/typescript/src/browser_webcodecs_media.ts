@@ -19,7 +19,7 @@ const ucrMediaVisibilityRecoveries = new Set<() => void>();
 const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0, playoutQueuedMs: 0, playoutJitterMs: 0, playoutRebases: 0};
 // Count actual encoded and rendered video separately; a connected DataChannel
 // and encrypted packet count are not evidence of remote picture delivery.
-const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
+const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, encodedCodec: "unknown", receivedCodec: "unknown", decoderFailures: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
 // Background rendering is intentionally suppressed. Track that time separately
 // so diagnostics never attribute hidden-tab inactivity to decoder failure.
 if (typeof document !== "undefined") {
@@ -160,7 +160,7 @@ export async function ucrSelectTemporalScalableConfig(
 
 const AUDIO_CODEC = "opus";
 const VIDEO_CODEC = "vp8";
-/** Baseline 4.2 — preferred when HW encode/decode both report support. */
+/** Baseline 4.2 — explicit opt-in only when peer decode capability is known. */
 const VIDEO_CODEC_H264_BASELINE_42 = "avc1.42002a";
 /** Baseline 3.1 — broader mobile decoder coverage (≤720p30). */
 const VIDEO_CODEC_H264_BASELINE_31 = "avc1.42001f";
@@ -252,9 +252,16 @@ export function ucrVideoStageTargetFrameRate(sourceFps: number, stage: number, s
     ucrVideoStageProfile(stage).frameRate), software);
 }
 let ucrVideoH264Hardware: boolean | null = null;
+/** A browser's local H.264 support does not prove that the remote Device can
+ * decode that profile. Until the canonical authenticated Call negotiates
+ * receiver capabilities, VP8 is the only interoperable default. H.264 stays
+ * available behind an explicit opt-in for known compatible endpoints.
+ * Never infer remote capabilities from the sender's own GPU probe.
+ */
+export const ucrVideoAllowsH264 = (preference: unknown): boolean => preference === "h264";
 const ucrVideoUsesH264 = (): boolean =>
   !ucrVideoForceSoftware && ucrVideoH264Hardware === true &&
-  (globalThis as {ucrVideoCodecPreference?: unknown}).ucrVideoCodecPreference !== "vp8";
+  ucrVideoAllowsH264((globalThis as {ucrVideoCodecPreference?: unknown}).ucrVideoCodecPreference);
 const ucrVideoHw = (): "no-preference" | "prefer-software" | "prefer-hardware" =>
   ucrVideoForceSoftware ? "prefer-software" :
   ucrVideoUsesH264() ? "prefer-hardware" : "no-preference";
@@ -566,6 +573,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         if (kind === "audio") ucrAudioCounters.encoded++;
         else {
           ucrVideoCounters.encoded++;
+          ucrVideoCounters.encodedCodec = ucrDetectVideoCodec(bytes);
           if (chunk.type === "key") ucrVideoCounters.keyframes++;
           const started = encodeStartTimes.get(chunk.timestamp);
           if (started !== undefined) {
@@ -1104,7 +1112,8 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         if (!this.#audioContext) throw new Error("audio playback context not provided");
         decoder = new b.AudioDecoder!({
           output: (data) => this.#playAudio(data, key),
-          error: this.#onError,
+          error: (error) => this.#onError(new Error(
+            "UCR_MEDIA_AUDIO_DECODER_FAILURE", {cause: error})),
         });
         decoder.configure({codec: AUDIO_CODEC, sampleRate: AUDIO_RATE, numberOfChannels: AUDIO_CHANNELS});
       } else {
@@ -1181,6 +1190,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
             } finally { video.close(); }
           },
           error: (error) => {
+            ucrVideoCounters.decoderFailures++;
             this.#awaitVideoKeyframe.add(key);
             const failed = this.#decoders.get(key);
             if (failed) {
@@ -1206,16 +1216,18 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
                 }
               }
             }
-            this.#onError(error);
+            this.#onError(new Error("UCR_MEDIA_VIDEO_DECODER_FAILURE", {cause: error}));
           },
         });
         const codec = ucrDetectVideoCodec(frame.bytes);
+        ucrVideoCounters.receivedCodec = codec;
         decoder.configure({codec});
         this.#decoderCodecs.set(key, codec);
       }
       this.#decoders.set(key, decoder);
     } else if (frame.mediaKind === "video" && frame.keyframe) {
       const codec = ucrDetectVideoCodec(frame.bytes);
+      ucrVideoCounters.receivedCodec = codec;
       if (this.#decoderCodecs.get(key) !== codec) {
         (decoder as {configure(c: unknown): void}).configure({codec});
         this.#decoderCodecs.set(key, codec);
@@ -1235,6 +1247,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         }));
         if (Number.isFinite(timestampUs)) this.#lastVideoTimestampUs.set(key, timestampUs);
       } catch (error) {
+        ucrVideoCounters.decoderFailures++;
         this.#awaitVideoKeyframe.add(key);
         const failed = this.#decoders.get(key);
         if (failed) {
@@ -1254,7 +1267,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
             }
           }
         }
-        throw error;
+        throw new Error("UCR_MEDIA_VIDEO_DECODER_FAILURE", {cause: error});
       }
     }
   }
@@ -1339,7 +1352,9 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       node.start(start);
       ucrAudioCounters.scheduled++;
       state.next = start + buffer.duration;
-    } catch (error) { this.#onError(error); }
+    } catch (error) {
+      this.#onError(new Error("UCR_MEDIA_AUDIO_PLAYBACK_FAILURE", {cause: error}));
+    }
     finally { data.close(); }
   }
 

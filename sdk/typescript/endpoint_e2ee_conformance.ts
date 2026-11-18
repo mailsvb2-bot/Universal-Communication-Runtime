@@ -28,6 +28,7 @@ import {
   ucrVideoStageProfile,
   ucrAdvanceVideoPacing,
   ucrDetectVideoCodec,
+  ucrVideoAllowsH264,
   ucrAdaptiveVideoStep,
   ucrTransportCongestionDelta,
   ucrNormalizeOpusAudio,
@@ -2383,6 +2384,13 @@ assert.equal(ucrOptionalStunUrls({turnHost: "turn.example.org", stunHost: "stun.
 assert.throws(() => ucrRecommendedTurnCascade({turnHost: "127.0.0.1"}), /DNS hostname/);
 assert.throws(() => ucrRecommendedTurnCascade({turnHost: "localhost"}), /localhost/);
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0x10, 0x00, 0x00, 0x9d, 0x01])), "vp8");
+assert.equal(ucrVideoAllowsH264(undefined),false,
+  "a locally hardware-supported H264 encoder does not establish remote Android decode support");
+assert.equal(ucrVideoAllowsH264("vp8"),false);
+assert.equal(ucrVideoAllowsH264("h264"),true,
+  "retain explicit, compatibility-verified H264 opt-in");
+assert.equal(ucrVideoAllowsH264({codec:"h264"}),false,
+  "reject implicit H264 preferences in an untrusted browser object");
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
 assert.deepEqual(ucrAdaptiveVideoStep(0, 1_500_000, 0, 0), {stage:1, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(1, 1_500_000, 0, 0), {stage:2, healthySamples:0});
@@ -2595,11 +2603,15 @@ try {
     const failedFrame = {mediaKind: "video" as const,
       videoSourceKind: "camera" as const, streamId: "failure-canvas",
       timestamp: 100n, keyframe: true, bytes: new Uint8Array([1, 2])};
-    assert.throws(() => failingRender.play(failedFrame), /video canvas 2D context unavailable/);
+    assert.throws(() => failingRender.play(failedFrame), (error: unknown) =>
+      error instanceof Error && error.message === "UCR_MEDIA_VIDEO_DECODER_FAILURE" &&
+      error.cause instanceof Error && /video canvas 2D context unavailable/.test(error.cause.message));
     assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, simulatedNow);
     simulatedNow += 800;
     assert.throws(() => failingRender.play({...failedFrame, timestamp: 101n}),
-      /video canvas 2D context unavailable/);
+      (error: unknown) => error instanceof Error &&
+        error.message === "UCR_MEDIA_VIDEO_DECODER_FAILURE" &&
+        error.cause instanceof Error && /video canvas 2D context unavailable/.test(error.cause.message));
     assert.equal(videoCounters.lastDecodedAt, simulatedNow);
     assert.equal(videoCounters.firstVisibleUnrenderedDecodeAt, simulatedNow - 800,
       "later failed decodes must not erase accumulated render stall duration");
@@ -2673,7 +2685,9 @@ try {
   brokenSwitch.setReceiveQuality(lowTarget);
   rejectNextVideoDecode = true;
   assert.throws(() => brokenSwitch.play(videoFrame("failure-camera-low", true)),
-    /corrupt candidate video keyframe/);
+    (error: unknown) => error instanceof Error &&
+      error.message === "UCR_MEDIA_VIDEO_DECODER_FAILURE" &&
+      error.cause instanceof Error && /corrupt candidate video keyframe/.test(error.cause.message));
   const afterFailedSwitch = visualCalls.length;
   brokenSwitch.play(videoFrame("failure-camera", false));
   assert.equal(visualCalls.length, afterFailedSwitch + 1,

@@ -331,6 +331,9 @@ function ucrDiagnosticReason(value){
   // is evidence that MLS, TURN, or the authenticated peer has failed.
   if(message==="ucr_media_codec_producer_failure")return "MEDIA_CODEC_PRODUCER_FAILURE";
   if(message==="ucr_media_codec_consumer_failure")return "MEDIA_CODEC_CONSUMER_FAILURE";
+  if(message==="ucr_media_video_decoder_failure")return "MEDIA_VIDEO_DECODER_FAILURE";
+  if(message==="ucr_media_audio_decoder_failure")return "MEDIA_AUDIO_DECODER_FAILURE";
+  if(message==="ucr_media_audio_playback_failure")return "MEDIA_AUDIO_PLAYBACK_FAILURE";
   const stage=message.match(/ucr_media_(outbound|inbound)_(publish_authorization|seal_wire|datachannel_send|receive_authorization|signing_key_resolution|verify_and_decrypt|decode_and_play)/);
   if(stage)return "MEDIA_"+stage[1].toUpperCase()+"_"+stage[2].toUpperCase();
   if(/epoch/.test(message))return "MLS_EPOCH_MISMATCH";
@@ -529,7 +532,10 @@ function ucrDiagnosticReport(){
       // A hidden tab intentionally skips canvas drawing: it is not a media stall.
       renderStallMs:document.hidden?null:window.__ucrVideoCounters.lastRenderedAt?
         Math.max(0,Date.now()-Math.max(window.__ucrVideoCounters.lastRenderedAt,window.__ucrVideoCounters.visibleSince||0)):null,
-      keyframes:window.__ucrVideoCounters.keyframes
+      keyframes:window.__ucrVideoCounters.keyframes,
+      encodedCodec:window.__ucrVideoCounters.encodedCodec||"unknown",
+      receivedCodec:window.__ucrVideoCounters.receivedCodec||"unknown",
+      decoderFailures:window.__ucrVideoCounters.decoderFailures||0
     }:null),
     videoVisibility:{
       hidden:document.hidden,
@@ -2635,10 +2641,14 @@ async function startWebRtcOnce(forceMedia=false){
     ucrMediaActivationStage="SDP_ICE_NEGOTIATION";
     await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
     ensureOwnedPeer();
+    if(typeof ucrRecordDiagnostic==="function")
+      ucrRecordDiagnostic("WebRTC remote offer applied","webrtc");
     const answer=await pc.createAnswer();
     ensureOwnedPeer();
     await pc.setLocalDescription(answer);
     ensureOwnedPeer();
+    if(typeof ucrRecordDiagnostic==="function")
+      ucrRecordDiagnostic("WebRTC local answer ready","webrtc");
     await api("/v1/realtime/webrtc/remote-description",
       {...startingClaims,offer_id:offer.offer_id,
        sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp},
