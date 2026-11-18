@@ -39,13 +39,17 @@ const ctx={
 };
 runInNewContext(attachSnippet+"\nthis.attach = attachE2eeDataChannel;",ctx);
 ctx.attach(channel);
-assert.equal(detached,1);
+assert.equal(detached,0,"first v1 binding must preserve early optional v2");
 channel.onmessage({data:new Uint8Array([1])});
 channel.onmessage({data:new Uint8Array([9])});
 await Promise.resolve();await Promise.resolve();
 assert.equal(opened,2);
 assert.equal(ctx.ui.status.textContent,"","replay must not overwrite status");
 assert.equal(ctx.packetCount,2);
+const replacement={...channel,label:"ucr.e2ee.media.v1",readyState:"connecting"};
+ctx.attach(replacement);
+assert.equal(detached,1,"replacing an existing v1 still retires old encrypted transport");
+assert.equal(ctx.e2eeChannel,replacement);
 const begin=start.slice(start.indexOf("async function beginMedia(callId) {"),start.indexOf("async function dial("));
 const messages=[];
 const beginCtx={
