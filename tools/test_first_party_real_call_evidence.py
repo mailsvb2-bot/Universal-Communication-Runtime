@@ -54,6 +54,11 @@ class RealCallEvidenceTest(TestCase):
         with self.assertRaisesRegex(gate.EvidenceError, "Join→first video"):
             gate.quality_gate(fixture(elapsed=8), fixture(), 90, 120)
 
+    def test_authorized_video_before_async_e2ee_status_marker_is_valid(self):
+        a = fixture(elapsed=6, first_video_delay=-1)
+        r = gate.quality_gate(a, fixture(), 90, 120)
+        self.assertEqual(r["device_a"]["e2ee_to_first_video_seconds"], -1.0)
+
     def test_missing_real_audio_video_lag_is_blocked(self):
         with self.assertRaisesRegex(gate.EvidenceError, "independent synchronized"):
             gate.quality_gate(fixture(), fixture(), None, None)
