@@ -7,7 +7,10 @@ use std::{
     net::SocketAddr,
     path::Path,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -3294,6 +3297,35 @@ async fn run_sfu_placement_expiry_sweeper(
     }
 }
 
+/// Counters are process-global and contain no peer IDs or ciphertext.
+static WEBRTC_E2EE_LANE_AUDIO_FULL: AtomicU64 = AtomicU64::new(0);
+static WEBRTC_E2EE_LANE_VIDEO_FULL: AtomicU64 = AtomicU64::new(0);
+static WEBRTC_E2EE_LANE_CLOSED: AtomicU64 = AtomicU64::new(0);
+static WEBRTC_E2EE_FORWARD_FAILURE: AtomicU64 = AtomicU64::new(0);
+static WEBRTC_E2EE_BLOCKING_JOIN_FAILURE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebRtcE2eeRoutingCounters {
+    pub ingress: ucr_webrtc::WebRtcE2eeIngressDrops,
+    pub audio_lane_full: u64,
+    pub video_lane_full: u64,
+    pub lane_closed: u64,
+    pub forward_failures: u64,
+    pub worker_join_failures: u64,
+}
+
+#[must_use]
+pub fn webrtc_e2ee_routing_counters() -> WebRtcE2eeRoutingCounters {
+    WebRtcE2eeRoutingCounters {
+        ingress: ucr_webrtc::ingress_drop_counters(),
+        audio_lane_full: WEBRTC_E2EE_LANE_AUDIO_FULL.load(Ordering::Relaxed),
+        video_lane_full: WEBRTC_E2EE_LANE_VIDEO_FULL.load(Ordering::Relaxed),
+        lane_closed: WEBRTC_E2EE_LANE_CLOSED.load(Ordering::Relaxed),
+        forward_failures: WEBRTC_E2EE_FORWARD_FAILURE.load(Ordering::Relaxed),
+        worker_join_failures: WEBRTC_E2EE_BLOCKING_JOIN_FAILURE.load(Ordering::Relaxed),
+    }
+}
+
 fn spawn_webrtc_e2ee_bridge(
     ingress: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
     provider: &Arc<LiveWebRtcProvider>,
@@ -3308,75 +3340,199 @@ fn spawn_webrtc_e2ee_bridge(
     ))
 }
 
+/// One canonical session router; the independent bounded queues only protect
+/// low-latency Opus from large encrypted video. They never decrypt or authorize.
 async fn run_webrtc_e2ee_bridge(
     mut ingress: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
     provider: Arc<LiveWebRtcProvider>,
     registry: Arc<RealtimeSessionRegistry>,
     service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
 ) {
-    // Independent ordered ingress lanes prevent one sender from blocking
-    // every other sender's encrypted media forwarding.
-    let mut lanes: std::collections::HashMap<
-        ucr_model::SessionId,
-        (tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>, u64),
-    > = std::collections::HashMap::new();
+    type Lane = (
+        tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>,
+        tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>,
+        u64,
+    );
+    let mut lanes: std::collections::HashMap<ucr_model::SessionId, Lane> =
+        std::collections::HashMap::new();
     let mut activity = 0_u64;
     while let Some(frame) = ingress.recv().await {
-        lanes.retain(|_, (lane, _)| !lane.is_closed());
+        lanes.retain(|_, (audio, video, _)| !audio.is_closed() && !video.is_closed());
         let session_id = frame.session_id.clone();
         if !lanes.contains_key(&session_id) && lanes.len() >= LIVE_WEBRTC_MAX_SESSIONS {
-            // A disconnected sender may leave an idle lane until its timeout.
-            // Reclaim least-recently-used capacity rather than silently muting
-            // a newly admitted publisher for two minutes.
+            // Cap per-session workers and reclaim the least recently used one.
             if let Some(oldest) = lanes
                 .iter()
-                .min_by_key(|(_, (_, last_activity))| *last_activity)
+                .min_by_key(|(_, (_, _, last))| *last)
                 .map(|(id, _)| id.clone())
             {
                 lanes.remove(&oldest);
             }
         }
         activity = activity.wrapping_add(1);
-        let (lane, last_activity) = lanes.entry(session_id).or_insert_with(|| {
-            let (lane_tx, lane_rx) = tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
+        let (audio_tx, video_tx, last_activity) = lanes.entry(session_id).or_insert_with(|| {
+            // Preserve the former 128-frame per-peer total budget, but prevent
+            // a video burst from exhausting the audio admission lane.
+            let (audio_tx, audio_rx) =
+                tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY / 2);
+            let (video_tx, video_rx) =
+                tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY / 2);
             tokio::spawn(run_webrtc_e2ee_session_lane(
-                lane_rx,
+                audio_rx,
+                video_rx,
                 Arc::clone(&provider),
                 Arc::clone(&registry),
                 service.clone(),
             ));
-            (lane_tx, activity)
+            (audio_tx, video_tx, activity)
         });
         *last_activity = activity;
-        let _ = lane.try_send(frame);
+        let is_audio = frame.envelope.frame.header.media_kind == ucr_model::MediaKind::Audio;
+        let lane = if is_audio { audio_tx } else { video_tx };
+        if let Err(error) = lane.try_send(frame) {
+            match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    if is_audio {
+                        WEBRTC_E2EE_LANE_AUDIO_FULL.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        WEBRTC_E2EE_LANE_VIDEO_FULL.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    WEBRTC_E2EE_LANE_CLOSED.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+}
+
+/// Deterministic, bounded priority: favor speech except at the eighth
+/// consecutive Opus frame, when an already pending video frame is admitted.
+async fn receive_prioritized_media<T>(
+    audio: &mut tokio::sync::mpsc::Receiver<T>,
+    video: &mut tokio::sync::mpsc::Receiver<T>,
+    audio_open: bool,
+    video_open: bool,
+    audio_streak: u8,
+) -> (Option<T>, bool) {
+    if audio_streak >= 8 {
+        tokio::select! {
+            biased;
+            candidate = video.recv(), if video_open => (candidate, false),
+            candidate = audio.recv(), if audio_open => (candidate, true),
+        }
+    } else {
+        tokio::select! {
+            biased;
+            candidate = audio.recv(), if audio_open => (candidate, true),
+            candidate = video.recv(), if video_open => (candidate, false),
+        }
     }
 }
 
 async fn run_webrtc_e2ee_session_lane(
-    mut lane: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
+    mut audio: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
+    mut video: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
     provider: Arc<LiveWebRtcProvider>,
     registry: Arc<RealtimeSessionRegistry>,
     service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
 ) {
+    let mut audio_open = true;
+    let mut video_open = true;
+    let mut audio_streak = 0_u8;
     loop {
-        let Ok(Some(frame)) = tokio::time::timeout(Duration::from_mins(2), lane.recv()).await
+        if !audio_open && !video_open {
+            break;
+        }
+        // Opus has higher latency sensitivity. After at most 8 consecutive
+        // audio frames, give pending video a chance to avoid starvation.
+        let Ok((candidate, from_audio)) = tokio::time::timeout(
+            Duration::from_mins(2),
+            receive_prioritized_media(&mut audio, &mut video, audio_open, video_open, audio_streak),
+        )
+        .await
         else {
             break;
         };
-        if service.has_sfu_media_router() {
-            let _ = route_webrtc_e2ee_frame_via_configured_route(
-                &service, &registry, &provider, &frame,
-            )
-            .await;
+        let Some(frame) = candidate else {
+            if from_audio {
+                audio_open = false;
+            } else {
+                video_open = false;
+            }
             continue;
+        };
+        if from_audio {
+            audio_streak = audio_streak.saturating_add(1);
+        } else {
+            audio_streak = 0;
         }
-        let provider = Arc::clone(&provider);
-        let registry = Arc::clone(&registry);
-        let service = service.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            route_webrtc_e2ee_frame(&service, &registry, &provider, &frame)
-        })
-        .await;
+        if service.has_sfu_media_router() {
+            if route_webrtc_e2ee_frame_via_configured_route(&service, &registry, &provider, &frame)
+                .await
+                .is_err()
+            {
+                WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            let provider = Arc::clone(&provider);
+            let registry = Arc::clone(&registry);
+            let service = service.clone();
+            match tokio::task::spawn_blocking(move || {
+                route_webrtc_e2ee_frame(&service, &registry, &provider, &frame)
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(())) => {
+                    WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    WEBRTC_E2EE_BLOCKING_JOIN_FAILURE.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod webrtc_e2ee_lane_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn audio_priority_is_bounded_and_video_is_not_starved() {
+        let (atx, mut audio) = tokio::sync::mpsc::channel(16);
+        let (vtx, mut video) = tokio::sync::mpsc::channel(16);
+        for n in 0..12 {
+            atx.try_send(n).unwrap();
+        }
+        vtx.try_send(999).unwrap();
+        for streak in 0..8 {
+            let (frame, is_audio) =
+                receive_prioritized_media(&mut audio, &mut video, true, true, streak).await;
+            assert!(is_audio);
+            assert_eq!(frame, Some(i32::from(streak)));
+        }
+        let (frame, is_audio) =
+            receive_prioritized_media(&mut audio, &mut video, true, true, 8).await;
+        assert!(!is_audio, "video must progress after eight Opus frames");
+        assert_eq!(frame, Some(999));
+        let (frame, is_audio) =
+            receive_prioritized_media(&mut audio, &mut video, true, true, 0).await;
+        assert!(is_audio);
+        assert_eq!(frame, Some(8));
+    }
+
+    #[tokio::test]
+    async fn closed_audio_lane_does_not_block_video() {
+        let (atx, mut audio) = tokio::sync::mpsc::channel::<i32>(1);
+        let (vtx, mut video) = tokio::sync::mpsc::channel(1);
+        drop(atx);
+        vtx.try_send(37).unwrap();
+        let (frame, is_audio) =
+            receive_prioritized_media(&mut audio, &mut video, false, true, 0).await;
+        assert_eq!(frame, Some(37));
+        assert!(!is_audio);
     }
 }
 

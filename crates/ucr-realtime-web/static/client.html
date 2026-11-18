@@ -203,6 +203,11 @@ function ucrRecordDiagnostic(event,category="runtime"){
   ucrDiagnosticsEvents.push({time:new Date().toISOString(),category,safe});
   if(ucrDiagnosticsEvents.length>80)ucrDiagnosticsEvents.shift();
 }
+// Rendering is the real user-visible success boundary, not DataChannel open.
+window.ucrFirstAuthenticatedVideoRendered=()=>{
+  if(sessionActive&&mediaActive)
+    ucrRecordDiagnostic("First authenticated video rendered","media");
+};
 function ucrIceServerKinds(servers){
   const list=Array.isArray(servers)?servers:[];
   let stun=false,turn=false;
@@ -332,6 +337,8 @@ function ucrDiagnosticReason(value){
   if(message==="ucr_media_codec_producer_failure")return "MEDIA_CODEC_PRODUCER_FAILURE";
   if(message==="ucr_media_codec_consumer_failure")return "MEDIA_CODEC_CONSUMER_FAILURE";
   if(message==="ucr_media_video_decoder_failure")return "MEDIA_VIDEO_DECODER_FAILURE";
+  if(message==="ucr_media_video_render_failure")return "MEDIA_VIDEO_RENDER_FAILURE";
+  if(message==="ucr_media_video_decoder_config_failure")return "MEDIA_VIDEO_DECODER_CONFIG_FAILURE";
   if(message==="ucr_media_audio_decoder_failure")return "MEDIA_AUDIO_DECODER_FAILURE";
   if(message==="ucr_media_audio_playback_failure")return "MEDIA_AUDIO_PLAYBACK_FAILURE";
   const stage=message.match(/ucr_media_(outbound|inbound)_(publish_authorization|seal_wire|datachannel_send|receive_authorization|signing_key_resolution|verify_and_decrypt|decode_and_play)/);
@@ -478,6 +485,10 @@ function ucrDiagnosticReport(){
       videoExpired:window.__ucrMediaStageMetrics.videoExpired,
       videoQueueFull:window.__ucrMediaStageMetrics.videoQueueFull,
       videoKeyframeRequests:window.__ucrMediaStageMetrics.videoKeyframeRequests,
+      videoSequenceGaps:window.__ucrMediaStageMetrics.videoSequenceGaps,
+      videoDeltaDiscardedAfterGap:window.__ucrMediaStageMetrics.videoDeltaDiscardedAfterGap,
+      videoKeyframeResyncs:window.__ucrMediaStageMetrics.videoKeyframeResyncs,
+      videoLateReorderedDiscarded:window.__ucrMediaStageMetrics.videoLateReorderedDiscarded,
       sendChannelClosed:window.__ucrMediaStageMetrics.sendChannelClosed,
       sendQueueCongested:window.__ucrMediaStageMetrics.sendQueueCongested,
       sendInvalidEnvelope:window.__ucrMediaStageMetrics.sendInvalidEnvelope,
@@ -524,6 +535,7 @@ function ucrDiagnosticReport(){
       received:window.__ucrVideoCounters.received,
       decoded:window.__ucrVideoCounters.decoded,
       rendered:window.__ucrVideoCounters.rendered,
+      firstRenderedAt:window.__ucrVideoCounters.firstRenderedAt||null,
       lastRenderedAt:window.__ucrVideoCounters.lastRenderedAt,
       lastDecodedAt:window.__ucrVideoCounters.lastDecodedAt,
       firstVisibleUnrenderedDecodeAt:window.__ucrVideoCounters.firstVisibleUnrenderedDecodeAt,
@@ -535,7 +547,11 @@ function ucrDiagnosticReport(){
       keyframes:window.__ucrVideoCounters.keyframes,
       encodedCodec:window.__ucrVideoCounters.encodedCodec||"unknown",
       receivedCodec:window.__ucrVideoCounters.receivedCodec||"unknown",
-      decoderFailures:window.__ucrVideoCounters.decoderFailures||0
+      decoderFailures:window.__ucrVideoCounters.decoderFailures||0,
+      decoderAsyncFailures:window.__ucrVideoCounters.decoderAsyncFailures||0,
+      decoderDecodeFailures:window.__ucrVideoCounters.decoderDecodeFailures||0,
+      decoderConfigFailures:window.__ucrVideoCounters.decoderConfigFailures||0,
+      videoRenderFailures:window.__ucrVideoCounters.videoRenderFailures||0
     }:null),
     videoVisibility:{
       hidden:document.hidden,
@@ -2489,18 +2505,48 @@ function rtcNetworkConfiguration(iceServers,mode){
     // Continuously gather so mobile network switches can surface new candidates.
     iceCandidatePoolSize:0};
 }
+// First-party accepted Direct Call may overlap the *server-only* ICE offer
+// preparation with endpoint MLS bootstrap. Neither capture nor E2EE data
+// transport is authorized by a prefetched offer. One immutable Join owner
+// scopes the offer, and any abandoned offer is closed with that original owner.
+function prefetchFirstPartyWebRtcOffer(){
+  if(!sessionActive||mediaActive||!claims?.call_id?.startsWith("fp-m-"))return null;
+  requireCanonicalMediaHostReady();
+  const owner=Object.freeze({
+    generation:sessionLifecycleGeneration,
+    claims:Object.freeze({...body()}),
+    token
+  });
+  const promise=api("/v1/realtime/webrtc/start",owner.claims,
+    undefined,false,owner.token).then(response=>response.json()).then(offer=>{
+      if(owner.generation===sessionLifecycleGeneration&&sessionActive&&
+         typeof ucrRecordDiagnostic==="function")
+        ucrRecordDiagnostic("WebRTC server offer received","webrtc");
+      return {ok:true,offer};
+    },error=>({ok:false,error}));
+  return Object.freeze({owner,promise});
+}
+async function retirePrefetchedWebRtcOffer(prefetched){
+  if(!prefetched)return;
+  const result=await prefetched.promise;
+  if(result.ok&&typeof result.offer?.offer_id==="string"&&
+     /^[A-Za-z0-9_-]{43}$/.test(result.offer.offer_id)){
+    await closeServerPeer(false,result.offer.offer_id,
+      prefetched.owner.claims,prefetched.owner.token);
+  }
+}
 // Serialize complete offer ownership, including asynchronous orphan cleanup.
 // A close RPC is session-scoped and must finish before another start creates
 // a replacement offer for that same participant.
-async function startWebRtc(forceMedia=false){
+async function startWebRtc(forceMedia=false,prefetchedOffer=null){
   const preceding=startWebRtc.pending||Promise.resolve();
   let release;
   startWebRtc.pending=new Promise(resolve=>{release=resolve;});
   await preceding;
-  try{return await startWebRtcOnce(forceMedia);}
+  try{return await startWebRtcOnce(forceMedia,prefetchedOffer);}
   finally{release();}
 }
-async function startWebRtcOnce(forceMedia=false){
+async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
   if(startWebRtc.retireEndpointMls){
     startWebRtc.retireEndpointMls=false;
@@ -2523,11 +2569,30 @@ async function startWebRtcOnce(forceMedia=false){
   let offer,rtcConfig,serverPeerOpened=false,startingOwner=null;
   try{
     ucrMediaActivationStage="WEBRTC_OFFER";
-    const response=await api("/v1/realtime/webrtc/start",startingClaims,undefined,false,startingToken);
-    serverPeerOpened=true;
-    offer=await response.json();
-    if(generation===mediaCaptureGeneration&&sessionActive&&typeof ucrRecordDiagnostic==="function")
-      ucrRecordDiagnostic("WebRTC server offer received","webrtc");
+    if(prefetchedOffer){
+      const result=await prefetchedOffer.promise;
+      const original=prefetchedOffer.owner;
+      const matches=original.generation===sessionLifecycleGeneration&&
+        original.token===startingToken&&
+        JSON.stringify(original.claims)===JSON.stringify(startingClaims);
+      if(result.ok&&matches){
+        serverPeerOpened=true;
+        offer=result.offer;
+      }else if(result.ok){
+        // Never let a stale prefetch allocate an unowned peer. Close it using
+        // its own original signed claims, not the replacement session.
+        await retirePrefetchedWebRtcOffer(prefetchedOffer);
+      }
+    }
+    if(!serverPeerOpened){
+      const response=await api("/v1/realtime/webrtc/start",startingClaims,
+        undefined,false,startingToken);
+      serverPeerOpened=true;
+      offer=await response.json();
+      if(generation===mediaCaptureGeneration&&sessionActive&&
+         typeof ucrRecordDiagnostic==="function")
+        ucrRecordDiagnostic("WebRTC server offer received","webrtc");
+    }
     if(!offer||typeof offer.offer_id!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(offer.offer_id)){
       throw new Error("Canonical WebRTC offer is missing its transport attempt identity");
     }
@@ -2806,10 +2871,19 @@ async function activateAdmittedMedia(){
   if(typeof ensureLocalMedia==="function")ensureLocalMedia(false).catch(()=>{});
   ui.status.textContent="Загружаем защиту звонка. На компьютере первая загрузка модуля может занять до минуты…";
   ucrMediaActivationStage="MLS_RESTORE";
-  await ensureEndpointMlsReady();
+  // Overlap only canonical server offer generation; keep authenticated
+  // capture/MLS activation and the complete peer ownership fence unchanged.
+  const prefetchedOffer=typeof prefetchFirstPartyWebRtcOffer==="function"
+    ?prefetchFirstPartyWebRtcOffer():null;
+  try{await ensureEndpointMlsReady();}
+  catch(error){
+    if(prefetchedOffer)await retirePrefetchedWebRtcOffer(prefetchedOffer);
+    throw error;
+  }
   if(generation===sessionLifecycleGeneration&&sessionActive&&!mediaActive)
     ucrRecordDiagnostic("MLS admission ready","lifecycle");
   if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive){
+    if(prefetchedOffer)await retirePrefetchedWebRtcOffer(prefetchedOffer);
     if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=false;
     return;
   }
@@ -2827,7 +2901,7 @@ async function activateAdmittedMedia(){
   openStream.missing=false;
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive&&!(typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady))ui.status.textContent="Realtime stream closed: "+e.message;});
   ucrMediaActivationStage="WEBRTC_START";
-  try{await startWebRtc(false);}catch(e){
+  try{await startWebRtc(false,prefetchedOffer);}catch(e){
     if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
       ucrRecordDiagnostic("WebRTC initial authorization rejected","webrtc");
       await retireRejectedFirstPartyMedia(generation);
@@ -3612,6 +3686,7 @@ function stopActiveSpeakerMonitoring(){
 async function reportLocalAudioLevel(){
   if(!sessionActive||!mediaActive||audioLevelReportInFlight)return;
   audioLevelReportInFlight=true;
+  const generation=sessionLifecycleGeneration;
   try{
     const track=localStream&&localStream.getAudioTracks()[0];
     let level=0;
@@ -3623,26 +3698,39 @@ async function reportLocalAudioLevel(){
       level=Math.max(0,Math.min(100,Math.round(rms*200)));
     }
     await api("/v1/realtime/audio-level",{...body(),level});
+  }catch(error){
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive)return;
+    throw error;
   }finally{
-    audioLevelReportInFlight=false;
+    if(generation===sessionLifecycleGeneration)audioLevelReportInFlight=false;
   }
 }
 async function pollActiveSpeaker(){
   if(document.hidden)return;
   if(!sessionActive||!mediaActive||activeSpeakerPollInFlight)return;
   activeSpeakerPollInFlight=true;
+  const generation=sessionLifecycleGeneration,ownedClaims=claims;
+  const current=()=>generation===sessionLifecycleGeneration&&sessionActive&&
+    mediaActive&&claims===ownedClaims;
   try{
     const r=await api("/v1/realtime/active-speaker",body());
+    if(!current())return;
     const data=await r.json();
+    if(!current())return;
     const value=data.participant_id_b64;
     ui.activeSpeaker.textContent=value?tr("activeSpeakerPrefix")+value.slice(0,12)+(value.length>12?"…":""):tr("activeSpeakerNone");
     let speakerId=null;
     if(typeof value==="string"&&value.length<=256){
       try{speakerId=new TextDecoder("utf-8",{fatal:true}).decode(Uint8Array.from(atob(value),c=>c.charCodeAt(0)));}catch(_){}
     }
-    updateReceiveActiveSpeaker(speakerId);
+    if(current())updateReceiveActiveSpeaker(speakerId);
+  }catch(error){
+    // HTTP 401/409 after a confirmed Leave must not be misreported as an
+    // active call error or overwrite a replacement session's UI.
+    if(!current())return;
+    throw error;
   }finally{
-    activeSpeakerPollInFlight=false;
+    if(generation===sessionLifecycleGeneration)activeSpeakerPollInFlight=false;
   }
 }
 async function startActiveSpeakerMonitoring(){

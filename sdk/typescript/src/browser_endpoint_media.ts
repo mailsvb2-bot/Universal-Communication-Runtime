@@ -70,6 +70,8 @@ export function createUcrBrowserEndpointMediaAdapter(
     // can contain device/vendor details, and must never enter diagnostics.
     const safe = stage === "CONSUMER" && error instanceof Error &&
       ["UCR_MEDIA_VIDEO_DECODER_FAILURE",
+       "UCR_MEDIA_VIDEO_RENDER_FAILURE",
+       "UCR_MEDIA_VIDEO_DECODER_CONFIG_FAILURE",
        "UCR_MEDIA_AUDIO_DECODER_FAILURE",
        "UCR_MEDIA_AUDIO_PLAYBACK_FAILURE"].includes(error.message)
         ? error.message : "UCR_MEDIA_CODEC_" + stage + "_FAILURE";

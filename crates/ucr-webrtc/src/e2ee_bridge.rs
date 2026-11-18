@@ -2,7 +2,7 @@ use std::{
     future::Future,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -11,11 +11,47 @@ use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc};
 use webrtc::{data_channel::RTCDataChannel, peer_connection::RTCPeerConnection};
 
-use ucr_model::{SessionId, SfuForwardEnvelope};
+use ucr_model::{MediaKind, SessionId, SfuForwardEnvelope};
 use ucr_protocol::{
     MAX_SFU_FORWARD_WIRE_BYTES, SfuForwardWireError, SfuProtocolError, decode_sfu_forward_envelope,
     encode_sfu_forward_envelope,
 };
+
+/// Saturating counters: no content, keys, identifiers or payload lengths.
+static E2EE_INGRESS_AUDIO_FULL: AtomicU64 = AtomicU64::new(0);
+static E2EE_INGRESS_VIDEO_FULL: AtomicU64 = AtomicU64::new(0);
+static E2EE_INGRESS_CLOSED: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebRtcE2eeIngressDrops {
+    pub audio_full: u64,
+    pub video_full: u64,
+    pub channel_closed: u64,
+}
+
+#[must_use]
+pub fn ingress_drop_counters() -> WebRtcE2eeIngressDrops {
+    WebRtcE2eeIngressDrops {
+        audio_full: E2EE_INGRESS_AUDIO_FULL.load(Ordering::Relaxed),
+        video_full: E2EE_INGRESS_VIDEO_FULL.load(Ordering::Relaxed),
+        channel_closed: E2EE_INGRESS_CLOSED.load(Ordering::Relaxed),
+    }
+}
+
+fn record_ingress_overflow(error: mpsc::error::TrySendError<WebRtcE2eeIngressFrame>) {
+    match error {
+        mpsc::error::TrySendError::Closed(_) => {
+            E2EE_INGRESS_CLOSED.fetch_add(1, Ordering::Relaxed);
+        }
+        mpsc::error::TrySendError::Full(frame) => {
+            match frame.envelope.frame.header.media_kind {
+                MediaKind::Audio => &E2EE_INGRESS_AUDIO_FULL,
+                MediaKind::Video => &E2EE_INGRESS_VIDEO_FULL,
+            }
+            .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
 
 pub const WEBRTC_E2EE_DATA_CHANNEL_LABEL: &str = "ucr.e2ee.media.v1";
 pub const LIVE_WEBRTC_E2EE_INGRESS_CAPACITY: usize = 128;
@@ -374,11 +410,13 @@ pub(crate) async fn create_live_e2ee_data_channel(
                 let mut reassembler = reassembler.lock().await;
                 reassembler.push_chunk(&message.data)
             };
-            if let Ok(Some(envelope)) = decoded {
-                let _ = ingress_tx.try_send(WebRtcE2eeIngressFrame {
+            if let Ok(Some(envelope)) = decoded
+                && let Err(error) = ingress_tx.try_send(WebRtcE2eeIngressFrame {
                     session_id,
                     envelope,
-                });
+                })
+            {
+                record_ingress_overflow(error);
             }
         })
     }));
@@ -448,10 +486,12 @@ async fn create_unordered_channel(
             match decoded {
                 Ok(Some(envelope)) => {
                     peer_speaks_v2.store(true, Ordering::SeqCst);
-                    let _ = ingress_tx.try_send(WebRtcE2eeIngressFrame {
+                    if let Err(error) = ingress_tx.try_send(WebRtcE2eeIngressFrame {
                         session_id,
                         envelope,
-                    });
+                    }) {
+                        record_ingress_overflow(error);
+                    }
                 }
                 Ok(None) => peer_speaks_v2.store(true, Ordering::SeqCst),
                 Err(_) => {}
