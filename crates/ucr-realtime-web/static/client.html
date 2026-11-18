@@ -3679,6 +3679,7 @@ function stopActiveSpeakerMonitoring(){
 async function reportLocalAudioLevel(){
   if(!sessionActive||!mediaActive||audioLevelReportInFlight)return;
   audioLevelReportInFlight=true;
+  const generation=sessionLifecycleGeneration;
   try{
     const track=localStream&&localStream.getAudioTracks()[0];
     let level=0;
@@ -3690,26 +3691,39 @@ async function reportLocalAudioLevel(){
       level=Math.max(0,Math.min(100,Math.round(rms*200)));
     }
     await api("/v1/realtime/audio-level",{...body(),level});
+  }catch(error){
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive)return;
+    throw error;
   }finally{
-    audioLevelReportInFlight=false;
+    if(generation===sessionLifecycleGeneration)audioLevelReportInFlight=false;
   }
 }
 async function pollActiveSpeaker(){
   if(document.hidden)return;
   if(!sessionActive||!mediaActive||activeSpeakerPollInFlight)return;
   activeSpeakerPollInFlight=true;
+  const generation=sessionLifecycleGeneration,ownedClaims=claims;
+  const current=()=>generation===sessionLifecycleGeneration&&sessionActive&&
+    mediaActive&&claims===ownedClaims;
   try{
     const r=await api("/v1/realtime/active-speaker",body());
+    if(!current())return;
     const data=await r.json();
+    if(!current())return;
     const value=data.participant_id_b64;
     ui.activeSpeaker.textContent=value?tr("activeSpeakerPrefix")+value.slice(0,12)+(value.length>12?"…":""):tr("activeSpeakerNone");
     let speakerId=null;
     if(typeof value==="string"&&value.length<=256){
       try{speakerId=new TextDecoder("utf-8",{fatal:true}).decode(Uint8Array.from(atob(value),c=>c.charCodeAt(0)));}catch(_){}
     }
-    updateReceiveActiveSpeaker(speakerId);
+    if(current())updateReceiveActiveSpeaker(speakerId);
+  }catch(error){
+    // HTTP 401/409 after a confirmed Leave must not be misreported as an
+    // active call error or overwrite a replacement session's UI.
+    if(!current())return;
+    throw error;
   }finally{
-    activeSpeakerPollInFlight=false;
+    if(generation===sessionLifecycleGeneration)activeSpeakerPollInFlight=false;
   }
 }
 async function startActiveSpeakerMonitoring(){
