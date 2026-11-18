@@ -49,9 +49,9 @@ Initial acceptance targets (not current achievements): Join→E2EE ≤10s, visib
 
 ## Explicitly open architectural gaps
 
-- P0: reliable ordered DataChannel multiplexes encrypted audio and fragmented video; head-of-line blocking can stall audio. Evaluate independent prioritized transport without creating a second E2EE owner, weakening identity verification, or relaxing anti-replay.
+- P0: reliable ordered v1 DataChannel multiplexes encrypted audio and fragmented video; head-of-line blocking can stall audio. The existing Rust optional unordered v2 transport is now wired through client.html and the SAME signed E2EE adapter, with bounded reassembly, keyframe metadata, and v1 fallback. The Rust UCR_WEBRTC_E2EE_UNORDERED switch remains OFF by default. Do NOT enable it in production without live two-device v2 negotiation, loss/reorder, audio-delay and reconnection measurements; code conformance alone is not proof.
 - P0: Android MEDIA_ACTIVATION_FAILURE is too generic in old snapshots. Use separated producer/consumer/transport stage error categories in future real diagnostics.
-- P0: setup delay comprises remote acceptance, MLS, offer, local capture, SDP and ICE. Optimize measured critical path, not guessed timers.
+- P0: setup delay comprises remote acceptance, MLS, offer, local capture, SDP and ICE. The source now uses bounded parallel posting of pre-collected ICE candidates instead of serialized HTTP requests. Its impact and behavior with real networks still need two-device confirmation.
 - P1: background ringing, forced TURN, VPN routing, simultaneous hangup, Device revocation, network switch, camera toggles, BFCache and fail-closed media recovery require real-device exercising.
 - P1: code CI green is not production quality; add multi-run p95 A/V timing and loss/stall evidence across network/device types.
 - P1: enforce production-manifest opt-in at actual web release and compare exact published assets; do not claim safety solely from a green build.
