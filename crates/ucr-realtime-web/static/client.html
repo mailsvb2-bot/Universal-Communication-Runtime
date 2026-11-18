@@ -2394,6 +2394,8 @@ async function startWebRtcOnce(forceMedia=false){
     const response=await api("/v1/realtime/webrtc/start",startingClaims,undefined,false,startingToken);
     serverPeerOpened=true;
     offer=await response.json();
+    if(generation===mediaCaptureGeneration&&sessionActive)
+      ucrRecordDiagnostic("WebRTC server offer received","webrtc");
     if(!offer||typeof offer.offer_id!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(offer.offer_id)){
       throw new Error("Canonical WebRTC offer is missing its transport attempt identity");
     }
@@ -2414,6 +2416,7 @@ async function startWebRtcOnce(forceMedia=false){
     rtcConfig=rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value);
     await ensureLocalMedia(forceMedia);
     ensureCurrent();
+    ucrRecordDiagnostic("Local capture ready for WebRTC","webrtc");
   }catch(error){
     // Admission withdrawal invalidates physical capture, not the authenticated
     // realtime session. Close the server peer even if mediaActive was revoked.
@@ -2515,6 +2518,7 @@ async function startWebRtcOnce(forceMedia=false){
       undefined,false,startingToken);
     ensureOwnedPeer();
     remoteDescriptionAccepted=true;
+    ucrRecordDiagnostic("WebRTC remote SDP accepted","webrtc");
     void ucrCaptureIceStats(pc);
     for(const candidate of pendingCandidates.splice(0)){
       ensureOwnedPeer();
