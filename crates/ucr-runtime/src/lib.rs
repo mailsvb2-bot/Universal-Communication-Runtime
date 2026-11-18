@@ -3418,16 +3418,17 @@ async fn run_webrtc_e2ee_session_lane(
         // Opus has higher latency sensitivity. After at most 8 consecutive
         // audio frames, give pending video a chance to avoid starvation.
         let receive = async {
-            tokio::select! {
-                biased;
-                candidate = video.recv(), if video_open && audio_streak >= 8 => {
-                    (candidate, false)
+            if audio_streak >= 8 {
+                tokio::select! {
+                    biased;
+                    candidate = video.recv(), if video_open => (candidate, false),
+                    candidate = audio.recv(), if audio_open => (candidate, true),
                 }
-                candidate = audio.recv(), if audio_open => {
-                    (candidate, true)
-                }
-                candidate = video.recv(), if video_open => {
-                    (candidate, false)
+            } else {
+                tokio::select! {
+                    biased;
+                    candidate = audio.recv(), if audio_open => (candidate, true),
+                    candidate = video.recv(), if video_open => (candidate, false),
                 }
             }
         };
