@@ -203,6 +203,11 @@ function ucrRecordDiagnostic(event,category="runtime"){
   ucrDiagnosticsEvents.push({time:new Date().toISOString(),category,safe});
   if(ucrDiagnosticsEvents.length>80)ucrDiagnosticsEvents.shift();
 }
+// Rendering is the real user-visible success boundary, not DataChannel open.
+window.ucrFirstAuthenticatedVideoRendered=()=>{
+  if(sessionActive&&mediaActive)
+    ucrRecordDiagnostic("First authenticated video rendered","media");
+};
 function ucrIceServerKinds(servers){
   const list=Array.isArray(servers)?servers:[];
   let stun=false,turn=false;
@@ -530,6 +535,7 @@ function ucrDiagnosticReport(){
       received:window.__ucrVideoCounters.received,
       decoded:window.__ucrVideoCounters.decoded,
       rendered:window.__ucrVideoCounters.rendered,
+      firstRenderedAt:window.__ucrVideoCounters.firstRenderedAt||null,
       lastRenderedAt:window.__ucrVideoCounters.lastRenderedAt,
       lastDecodedAt:window.__ucrVideoCounters.lastDecodedAt,
       firstVisibleUnrenderedDecodeAt:window.__ucrVideoCounters.firstVisibleUnrenderedDecodeAt,
