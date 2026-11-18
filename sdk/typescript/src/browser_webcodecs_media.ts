@@ -19,7 +19,7 @@ const ucrMediaVisibilityRecoveries = new Set<() => void>();
 const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0, playoutQueuedMs: 0, playoutJitterMs: 0, playoutRebases: 0};
 // Count actual encoded and rendered video separately; a connected DataChannel
 // and encrypted packet count are not evidence of remote picture delivery.
-const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, encodedCodec: "unknown", receivedCodec: "unknown", decoderFailures: 0, decoderAsyncFailures: 0, decoderDecodeFailures: 0, decoderConfigFailures: 0, videoRenderFailures: 0, firstRenderedAt: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
+const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, firstEncodedAt: 0, firstReceivedAt: 0, firstDecodedAt: 0, encodedCodec: "unknown", receivedCodec: "unknown", decoderFailures: 0, decoderAsyncFailures: 0, decoderDecodeFailures: 0, decoderConfigFailures: 0, videoRenderFailures: 0, firstRenderedAt: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
 // Background rendering is intentionally suppressed. Track that time separately
 // so diagnostics never attribute hidden-tab inactivity to decoder failure.
 if (typeof document !== "undefined") {
@@ -573,6 +573,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         if (kind === "audio") ucrAudioCounters.encoded++;
         else {
           ucrVideoCounters.encoded++;
+          if (!ucrVideoCounters.firstEncodedAt) ucrVideoCounters.firstEncodedAt = Date.now();
           ucrVideoCounters.encodedCodec = ucrDetectVideoCodec(bytes);
           if (chunk.type === "key") ucrVideoCounters.keyframes++;
           const started = encodeStartTimes.get(chunk.timestamp);
@@ -1159,6 +1160,9 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
               const doc = (globalThis as {document?: {hidden?: boolean}}).document;
               ucrVideoCounters.decoded++;
               ucrVideoCounters.lastDecodedAt = Date.now();
+              if (!ucrVideoCounters.firstDecodedAt) {
+                ucrVideoCounters.firstDecodedAt = ucrVideoCounters.lastDecodedAt;
+              }
               // Latch the FIRST decoded frame awaiting a visible render.
               // Advancing lastDecodedAt must not conceal a persistent draw failure.
               if (!doc?.hidden && !ucrVideoCounters.firstVisibleUnrenderedDecodeAt) {
@@ -1269,6 +1273,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       decoder.decode(new b.EncodedAudioChunk!({type: "key", timestamp, data}));
     } else {
       ucrVideoCounters.received++;
+      if (!ucrVideoCounters.firstReceivedAt) ucrVideoCounters.firstReceivedAt = Date.now();
       try {
         decoder.decode(new b.EncodedVideoChunk!({
           type: frame.keyframe ? "key" : "delta", timestamp, data,
@@ -1377,6 +1382,8 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     this.#lastVideoTimestampUs.clear();
     ucrVideoCounters.firstVisibleUnrenderedDecodeAt = 0;
     ucrVideoCounters.firstRenderedAt = 0;
+    ucrVideoCounters.firstReceivedAt = 0;
+    ucrVideoCounters.firstDecodedAt = 0;
     ++this.#renderGeneration;
     for (const decoder of this.#decoders.values()) decoder.close();
     this.#decoders.clear();
