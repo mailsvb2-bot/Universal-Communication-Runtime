@@ -35,6 +35,7 @@ jobs:
           set -euo pipefail
           python3 tools/check_first_party_execution_path.py
           python3 -m unittest discover -s tools -p 'test_first_party_execution_path.py'
+          python3 -m unittest discover -s tools -p 'test_first_party_real_call_evidence.py'
       - name: Run language host probe
         shell: bash
         run: |
