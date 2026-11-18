@@ -1111,7 +1111,8 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
         if (!this.#audioContext) throw new Error("audio playback context not provided");
         decoder = new b.AudioDecoder!({
           output: (data) => this.#playAudio(data, key),
-          error: this.#onError,
+          error: (error) => this.#onError(new Error(
+            "UCR_MEDIA_AUDIO_DECODER_FAILURE", {cause: error})),
         });
         decoder.configure({codec: AUDIO_CODEC, sampleRate: AUDIO_RATE, numberOfChannels: AUDIO_CHANNELS});
       } else {
@@ -1213,7 +1214,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
                 }
               }
             }
-            this.#onError(error);
+            this.#onError(new Error("UCR_MEDIA_VIDEO_DECODER_FAILURE", {cause: error}));
           },
         });
         const codec = ucrDetectVideoCodec(frame.bytes);
@@ -1261,7 +1262,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
             }
           }
         }
-        throw error;
+        throw new Error("UCR_MEDIA_VIDEO_DECODER_FAILURE", {cause: error});
       }
     }
   }
@@ -1346,7 +1347,9 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       node.start(start);
       ucrAudioCounters.scheduled++;
       state.next = start + buffer.duration;
-    } catch (error) { this.#onError(error); }
+    } catch (error) {
+      this.#onError(new Error("UCR_MEDIA_AUDIO_PLAYBACK_FAILURE", {cause: error}));
+    }
     finally { data.close(); }
   }
 
