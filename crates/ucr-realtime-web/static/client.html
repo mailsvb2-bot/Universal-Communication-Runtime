@@ -3570,7 +3570,11 @@ function stopInitialVideoRecovery(){
 }
 function startInitialVideoRecovery(){
   stopInitialVideoRecovery();
-  if(!sessionActive||!mediaActive||!e2eeAdapterReady||!policyAllows("camera"))return;
+  // Receiving video is independent of local permission to PUBLISH a camera.
+  // Spectators and camera-disabled recipients must still recover their first
+  // subscribed frame. Do not poll video for an explicitly audio-only Direct Call.
+  if(!sessionActive||!mediaActive||!e2eeAdapterReady||
+      (claims?.call_id?.startsWith("fp-m-")&&firstPartyAcceptedMediaKind!=="video"))return;
   const session=claims,channel=e2eeChannel,generation=sessionLifecycleGeneration;
   const deadline=Date.now()+12000;
   // A prior rendered frame is not proof that the current restored transport
