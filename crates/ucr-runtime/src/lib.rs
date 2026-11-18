@@ -3403,6 +3403,30 @@ async fn run_webrtc_e2ee_bridge(
     }
 }
 
+/// Deterministic, bounded priority: favor speech except at the eighth
+/// consecutive Opus frame, when an already pending video frame is admitted.
+async fn receive_prioritized_media<T>(
+    audio: &mut tokio::sync::mpsc::Receiver<T>,
+    video: &mut tokio::sync::mpsc::Receiver<T>,
+    audio_open: bool,
+    video_open: bool,
+    audio_streak: u8,
+) -> (Option<T>, bool) {
+    if audio_streak >= 8 {
+        tokio::select! {
+            biased;
+            candidate = video.recv(), if video_open => (candidate, false),
+            candidate = audio.recv(), if audio_open => (candidate, true),
+        }
+    } else {
+        tokio::select! {
+            biased;
+            candidate = audio.recv(), if audio_open => (candidate, true),
+            candidate = video.recv(), if video_open => (candidate, false),
+        }
+    }
+}
+
 async fn run_webrtc_e2ee_session_lane(
     mut audio: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
     mut video: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
@@ -3417,23 +3441,11 @@ async fn run_webrtc_e2ee_session_lane(
         if !audio_open && !video_open { break; }
         // Opus has higher latency sensitivity. After at most 8 consecutive
         // audio frames, give pending video a chance to avoid starvation.
-        let receive = async {
-            if audio_streak >= 8 {
-                tokio::select! {
-                    biased;
-                    candidate = video.recv(), if video_open => (candidate, false),
-                    candidate = audio.recv(), if audio_open => (candidate, true),
-                }
-            } else {
-                tokio::select! {
-                    biased;
-                    candidate = audio.recv(), if audio_open => (candidate, true),
-                    candidate = video.recv(), if video_open => (candidate, false),
-                }
-            }
-        };
-        let Ok((candidate, from_audio)) =
-            tokio::time::timeout(Duration::from_mins(2), receive).await
+        let Ok((candidate, from_audio)) = tokio::time::timeout(
+            Duration::from_mins(2),
+            receive_prioritized_media(&mut audio, &mut video,
+                audio_open, video_open, audio_streak),
+        ).await
         else { break };
         let Some(frame) = candidate else {
             if from_audio { audio_open = false; } else { video_open = false; }
@@ -3463,6 +3475,46 @@ async fn run_webrtc_e2ee_session_lane(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod webrtc_e2ee_lane_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn audio_priority_is_bounded_and_video_is_not_starved() {
+        let (atx, mut audio) = tokio::sync::mpsc::channel(16);
+        let (vtx, mut video) = tokio::sync::mpsc::channel(16);
+        for n in 0..12 { atx.try_send(n).unwrap(); }
+        vtx.try_send(999).unwrap();
+        for streak in 0..8 {
+            let (frame, is_audio) =
+                receive_prioritized_media(&mut audio, &mut video, true, true, streak).await;
+            assert!(is_audio);
+            assert_eq!(frame, Some(i32::from(streak)));
+        }
+        let (frame, is_audio) =
+            receive_prioritized_media(&mut audio, &mut video, true, true, 8).await;
+        assert!(!is_audio, "video must progress after eight Opus frames");
+        assert_eq!(frame, Some(999));
+        let (frame, is_audio) =
+            receive_prioritized_media(&mut audio, &mut video, true, true, 0).await;
+        assert!(is_audio);
+        assert_eq!(frame, Some(8));
+    }
+
+    #[tokio::test]
+    async fn closed_audio_lane_does_not_block_video() {
+        let (atx, mut audio) = tokio::sync::mpsc::channel::<i32>(1);
+        let (vtx, mut video) = tokio::sync::mpsc::channel(1);
+        drop(atx);
+        vtx.try_send(37).unwrap();
+        let (frame, is_audio) = receive_prioritized_media(
+            &mut audio, &mut video, false, true, 0,
+        ).await;
+        assert_eq!(frame, Some(37));
+        assert!(!is_audio);
     }
 }
 
