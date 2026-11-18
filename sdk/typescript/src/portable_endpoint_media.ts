@@ -140,6 +140,7 @@ const ucrMediaStageMetrics = {
   audioSealFailure: 0, audioTransportFailure: 0, audioDecodeFailure: 0,
   videoExpired: 0, videoQueueFull: 0, videoKeyframeRequests: 0,
   videoSequenceGaps: 0, videoDeltaDiscardedAfterGap: 0, videoKeyframeResyncs: 0,
+  videoLateReorderedDiscarded: 0,
   sendChannelClosed: 0, sendQueueCongested: 0, sendInvalidEnvelope: 0,
   sendUnexpectedFailure: 0, sendUnavailable: 0,
   replayRejected: 0, replayDuplicate: 0, replayStale: 0,
@@ -365,6 +366,13 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       }
       ucrReplayCommit(this.#received, replayKey, header.sequence);
       ucrRecordLastRx(header.mediaKind, header.sequence);
+      // Authenticated late video is still valid for anti-replay bookkeeping,
+      // but feeding it to a decoder after newer frames were committed would
+      // rewind interframe reference order. Audio remains re-order tolerant.
+      if (header.mediaKind === "video" && opened === "accept-reorder") {
+        ucrMediaStageMetrics.videoLateReorderedDiscarded++;
+        return;
+      }
       if (header.mediaKind === "video" && this.#videoAwaitKeyframe.has(replayKey)) {
         if (!header.keyframe) {
           ucrMediaStageMetrics.videoDeltaDiscardedAfterGap++;
