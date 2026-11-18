@@ -164,3 +164,37 @@ const firstFrameActivations=(html.match(/startInitialVideoRecovery\(\);/g)||[]).
 assert.equal(firstFrameActivations,2,
   "initial and reconnected E2EE must each recover first-video subscriptions");
 console.log("PASS: capture does not wait for device enumeration; first-frame recovery is bounded, authenticated and stops on actual canvas rendering");
+
+
+// Exercise the actual canonical receive-roster handler: one new admitted peer
+// may ask the *local* encoder for a fresh reference frame; ordinary polling
+// of an unchanged roster must not create a keyframe storm.
+const rosterStart=html.indexOf("async function syncReceiveSubscriptions(){");
+const rosterEnd=html.indexOf("function updateReceiveActiveSpeaker(",rosterStart);
+assert.ok(rosterStart>=0&&rosterEnd>rosterStart,"canonical roster handler missing");
+const rosterCode=html.slice(rosterStart,rosterEnd);
+let refreshes=0,subscriptions=0;
+const mediaSession={};
+const channel={readyState:"open"};
+const rosterCtx={
+  sessionActive:true,mediaActive:true,e2eeAdapterReady:true,receiveRosterInFlight:false,
+  receiveRosterGeneration:7,claims:mediaSession,e2eeChannel:channel,
+  receiveRosterSources:[],receiveSpeakerId:null,
+  body:()=>({}),api:async()=>({json:async()=>({ok:true,sources:[
+    {source_id:"authenticated-peer",source_kind:1},
+  ]})}),
+  validReceiveRoster:result=>result.sources,
+  applyReceiveSubscriptions:async()=>{subscriptions++},
+  e2eeAdapter:()=>({requestPublishedVideoKeyframes:()=>{refreshes++}}),
+};
+vm.runInNewContext(rosterCode+"\nthis.sync=syncReceiveSubscriptions;",rosterCtx);
+await rosterCtx.sync();
+assert.equal(refreshes,1,"first admitted peer must request a local encoder keyframe");
+assert.equal(subscriptions,1);
+await rosterCtx.sync();
+assert.equal(refreshes,1,"identical roster must not regenerate reference frames");
+assert.equal(subscriptions,2);
+rosterCtx.e2eeChannel={readyState:"closed"};
+await rosterCtx.sync();
+assert.equal(refreshes,1,"retired channel cannot request new frames");
+console.log("PASS: only a newly admitted canonical peer requests one local encoder keyframe; stale channels and repeated polls do not");
