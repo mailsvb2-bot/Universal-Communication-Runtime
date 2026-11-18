@@ -452,7 +452,11 @@ function ucrDiagnosticReport(){
       expiresInSeconds:grant?.expires?Math.round((grant.expires-Date.now())/1000):null,
       sessionSequenceValid:typeof activeSessionSequence!=="undefined"&&activeSessionSequence>0},
     crypto:{adapterReady:typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady,
-      transportOpen:typeof e2eeChannel!=="undefined"&&e2eeChannel?.readyState==="open"},
+      transportOpen:typeof e2eeChannel!=="undefined"&&e2eeChannel?.readyState==="open",
+      // Transport mode is public protocol metadata, not an MLS secret.
+      transportMode:typeof e2eeV2Selected!=="undefined"&&e2eeV2Selected?
+        "unordered-v2":"ordered-v1",
+      v2Offered:typeof e2eeChannelV2!=="undefined"&&!!e2eeChannelV2},
     microphone:ucrDiagnosticTrack(audio),
     camera:ucrDiagnosticTrack(video),
     audioPlayback:context?context.state:"unavailable",
