@@ -28,6 +28,7 @@ import {
   ucrVideoStageProfile,
   ucrAdvanceVideoPacing,
   ucrDetectVideoCodec,
+  ucrVideoAllowsH264,
   ucrAdaptiveVideoStep,
   ucrTransportCongestionDelta,
   ucrNormalizeOpusAudio,
@@ -2383,6 +2384,13 @@ assert.equal(ucrOptionalStunUrls({turnHost: "turn.example.org", stunHost: "stun.
 assert.throws(() => ucrRecommendedTurnCascade({turnHost: "127.0.0.1"}), /DNS hostname/);
 assert.throws(() => ucrRecommendedTurnCascade({turnHost: "localhost"}), /localhost/);
 assert.equal(ucrDetectVideoCodec(new Uint8Array([0x10, 0x00, 0x00, 0x9d, 0x01])), "vp8");
+assert.equal(ucrVideoAllowsH264(undefined),false,
+  "a locally hardware-supported H264 encoder does not establish remote Android decode support");
+assert.equal(ucrVideoAllowsH264("vp8"),false);
+assert.equal(ucrVideoAllowsH264("h264"),true,
+  "retain explicit, compatibility-verified H264 opt-in");
+assert.equal(ucrVideoAllowsH264({codec:"h264"}),false,
+  "reject implicit H264 preferences in an untrusted browser object");
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
 assert.deepEqual(ucrAdaptiveVideoStep(0, 1_500_000, 0, 0), {stage:1, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(1, 1_500_000, 0, 0), {stage:2, healthySamples:0});
