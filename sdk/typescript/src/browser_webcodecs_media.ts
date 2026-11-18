@@ -19,7 +19,7 @@ const ucrMediaVisibilityRecoveries = new Set<() => void>();
 const ucrAudioCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, scheduled: 0, dropped: 0, transportQueued: 0, inputPeak: 0, outputPeak: 0, playoutQueuedMs: 0, playoutJitterMs: 0, playoutRebases: 0};
 // Count actual encoded and rendered video separately; a connected DataChannel
 // and encrypted packet count are not evidence of remote picture delivery.
-const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, encodedCodec: "unknown", receivedCodec: "unknown", decoderFailures: 0, decoderAsyncFailures: 0, decoderDecodeFailures: 0, decoderConfigFailures: 0, videoRenderFailures: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
+const ucrVideoCounters = {captured: 0, encoded: 0, received: 0, decoded: 0, rendered: 0, keyframes: 0, encodedCodec: "unknown", receivedCodec: "unknown", decoderFailures: 0, decoderAsyncFailures: 0, decoderDecodeFailures: 0, decoderConfigFailures: 0, videoRenderFailures: 0, firstRenderedAt: 0, lastRenderedAt: 0, lastDecodedAt: 0, firstVisibleUnrenderedDecodeAt: 0, hiddenRenderSkips: 0, droppedStale: 0, hiddenSince: 0, hiddenTotalMs: 0, visibleSince: Date.now()};
 // Background rendering is intentionally suppressed. Track that time separately
 // so diagnostics never attribute hidden-tab inactivity to decoder failure.
 if (typeof document !== "undefined") {
@@ -1180,6 +1180,15 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
                 (context as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
                 ucrVideoCounters.rendered++;
                 ucrVideoCounters.lastRenderedAt = Date.now();
+                if (!ucrVideoCounters.firstRenderedAt) {
+                  ucrVideoCounters.firstRenderedAt = ucrVideoCounters.lastRenderedAt;
+                  const callback = (globalThis as {
+                    ucrFirstAuthenticatedVideoRendered?: () => void;
+                  }).ucrFirstAuthenticatedVideoRendered;
+                  if (typeof callback === "function") {
+                    try { callback(); } catch { /* diagnostics never block video */ }
+                  }
+                }
                 ucrVideoCounters.firstVisibleUnrenderedDecodeAt = 0;
               } else {
                 ucrVideoCounters.hiddenRenderSkips++;
@@ -1367,6 +1376,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     }
     this.#lastVideoTimestampUs.clear();
     ucrVideoCounters.firstVisibleUnrenderedDecodeAt = 0;
+    ucrVideoCounters.firstRenderedAt = 0;
     ++this.#renderGeneration;
     for (const decoder of this.#decoders.values()) decoder.close();
     this.#decoders.clear();
