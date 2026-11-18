@@ -477,6 +477,15 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
     this.#keyframeRequests.get(streamId)?.();
   }
 
+  /** A verified new subscriber should see a fresh decoder reference frame,
+   * even when this producer began before that subscriber was admitted.
+   * This only flips the existing encoder's force-keyframe bit: it cannot
+   * publish anything outside the active signed MLS/media pipeline. */
+  requestAllVideoKeyframes(): void {
+    if (!this.#emit) return;
+    for (const request of this.#keyframeRequests.values()) request();
+  }
+
   async updateSources(sources: UcrEndpointMediaSources): Promise<void> {
     if (!this.#emit) throw new Error("WebCodecs producer not running");
     this.#currentSources = sources;
