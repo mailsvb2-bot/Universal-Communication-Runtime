@@ -180,9 +180,6 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   // Serialize emission for each stream: concurrent async authorization must never
   // reuse a media sequence/nonce or reorder authenticated frames.
   readonly #sendTails = new Map<string, Promise<void>>();
-  // A congested transport may reject many successive video deltas. Request
-  // at most one replacement keyframe per stream per short recovery window.
-  readonly #lastCongestionKeyframeRequest = new Map<string, number>();
   #pending = 0;
   #pendingOutbound = 0;
   #active = false;
@@ -442,7 +439,6 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#receiveTails.clear();
     this.#verifiedVideoStreams.clear();
     this.#sendTails.clear();
-    this.#lastCongestionKeyframeRequest.clear();
     // Retire crypto BEFORE asynchronous media cleanup. A revocation failure
     // cannot skip microphone/camera/decoder teardown or keep this adapter active.
     let stopError: unknown;
@@ -582,16 +578,6 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
           (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED" ||
            transportCode === "UCR_TRANSPORT_CHANNEL_CLOSED")) {
         if (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED") {
-          if (frame.mediaKind === "video" && this.#active &&
-              generation === this.#generation) {
-            const now = performance.now();
-            const last = this.#lastCongestionKeyframeRequest.get(frame.streamId);
-            if (last === undefined || now - last >= 750) {
-              this.#lastCongestionKeyframeRequest.set(frame.streamId, now);
-              this.#producer.requestVideoKeyframe?.(frame.streamId);
-              ucrMediaStageMetrics.videoKeyframeRequests++;
-            }
-          }
           const notice = (globalThis as unknown as {
             ucrEndpointMediaCongestion?: (kind: string) => void;
           }).ucrEndpointMediaCongestion;
