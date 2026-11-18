@@ -3597,8 +3597,20 @@ async function syncReceiveSubscriptions(){
     if(!sessionActive||!mediaActive||!e2eeAdapterReady||
         generation!==receiveRosterGeneration||claims!==session||
         e2eeChannel!==channel||channel?.readyState!=="open")return;
+    // One already-authorized endpoint may have started its camera before
+    // the new recipient completed MLS/subscribe. Do not leave the recipient
+    // waiting for the source's next 3-second periodic reference frame.
+    // A new canonical roster member can request ONE local producer refresh;
+    // frames still pass the existing E2EE signing and publication authority.
+    const peerArrived=sources.some(source=>!receiveRosterSources.some(old=>
+      old.source_id===source.source_id&&old.source_kind===source.source_kind));
     receiveRosterSources=sources;
     await applyReceiveSubscriptions(sources,receiveSpeakerId,generation,session,channel);
+    if(peerArrived&&sessionActive&&mediaActive&&e2eeAdapterReady&&
+        generation===receiveRosterGeneration&&claims===session&&
+        e2eeChannel===channel&&channel?.readyState==="open"){
+      e2eeAdapter()?.requestPublishedVideoKeyframes?.();
+    }
   }finally{
     if(generation===receiveRosterGeneration)receiveRosterInFlight=false;
   }
