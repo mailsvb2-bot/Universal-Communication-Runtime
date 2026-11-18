@@ -11,12 +11,14 @@ gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
 
-def fixture(elapsed=6, stall=75, audio=True):
+def fixture(elapsed=6, stall=75, audio=True, first_video_delay=1):
     events = [
         {"time": "2026-11-18T09:00:00.000Z", "safe": "Join requested"},
         {"time": "2026-11-18T09:00:02.000Z", "safe": "MLS admission ready"},
         {"time": f"2026-11-18T09:00:{elapsed:02d}.000Z",
          "safe": "Endpoint E2EE transport active"},
+        {"time": f"2026-11-18T09:00:{elapsed + first_video_delay:02d}.000Z",
+         "safe": "First authenticated video rendered"},
     ]
     return {
         "schema": "ucr-local-diagnostics-v1", "page": "conference",
@@ -36,6 +38,21 @@ class RealCallEvidenceTest(TestCase):
     def test_proven_call_with_measured_end_to_end_latency(self):
         r = gate.quality_gate(fixture(), fixture(), 130, 220)
         self.assertEqual(r["quality_gate"], "pass")
+
+    def test_missing_first_render_evidence_is_blocked(self):
+        a = fixture()
+        a["recentEvents"] = [e for e in a["recentEvents"]
+                             if e["safe"] != "First authenticated video rendered"]
+        with self.assertRaisesRegex(gate.EvidenceError, "first authenticated video render"):
+            gate.quality_gate(a, fixture(), 90, 120)
+
+    def test_slow_first_video_is_blocked_even_if_e2ee_is_fast(self):
+        with self.assertRaisesRegex(gate.EvidenceError, "first video"):
+            gate.quality_gate(fixture(first_video_delay=4), fixture(), 90, 120)
+
+    def test_slow_join_to_first_frame_is_blocked(self):
+        with self.assertRaisesRegex(gate.EvidenceError, "Join→first video"):
+            gate.quality_gate(fixture(elapsed=8), fixture(), 90, 120)
 
     def test_missing_real_audio_video_lag_is_blocked(self):
         with self.assertRaisesRegex(gate.EvidenceError, "independent synchronized"):
