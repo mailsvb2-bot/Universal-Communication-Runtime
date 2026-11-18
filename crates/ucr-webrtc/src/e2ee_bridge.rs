@@ -410,13 +410,13 @@ pub(crate) async fn create_live_e2ee_data_channel(
                 let mut reassembler = reassembler.lock().await;
                 reassembler.push_chunk(&message.data)
             };
-            if let Ok(Some(envelope)) = decoded {
-                if let Err(error) = ingress_tx.try_send(WebRtcE2eeIngressFrame {
+            if let Ok(Some(envelope)) = decoded
+                && let Err(error) = ingress_tx.try_send(WebRtcE2eeIngressFrame {
                     session_id,
                     envelope,
-                }) {
-                    record_ingress_overflow(error);
-                }
+                })
+            {
+                record_ingress_overflow(error);
             }
         })
     }));
