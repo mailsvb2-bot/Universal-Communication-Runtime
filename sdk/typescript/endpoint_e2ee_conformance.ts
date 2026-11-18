@@ -3010,7 +3010,7 @@ try {
 // on the outbound path. Audio metadata is necessary for protecting Opus queue
 // space; it must never select a different key or skip the secure bridge.
 {
-  const sent: Array<{kind: string | undefined; sealed: number}> = [];
+  const sent: Array<{kind: string | undefined; sealed: number; keyframe: boolean | undefined}> = [];
   const outbound = new UcrPortableEndpointMediaAdapter({
     bridge: {
       seal_wire(_streamId, mediaKind) { return Uint8Array.of(mediaKind); },
@@ -3035,10 +3035,11 @@ try {
   });
   await outbound.start({
     stream: {} as MediaStream, cameraStream: {} as MediaStream,
-    sendEnvelope(wire, kind) {sent.push({kind, sealed: wire[0]});},
+    sendEnvelope(wire, kind, keyframe) {sent.push({kind, sealed: wire[0], keyframe});},
   });
   assert.deepEqual(sent, [
-    {kind: "audio", sealed: 1}, {kind: "video", sealed: 2},
+    {kind: "audio", sealed: 1, keyframe: false},
+    {kind: "video", sealed: 2, keyframe: true},
   ], "sealing and transport must both preserve real audio/video kind");
   await outbound.stop();
 }
