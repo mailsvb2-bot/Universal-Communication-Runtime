@@ -3371,12 +3371,14 @@ async fn run_webrtc_e2ee_bridge(
         }
         activity = activity.wrapping_add(1);
         let (audio_tx, video_tx, last_activity) = lanes.entry(session_id).or_insert_with(|| {
-            // Preserve the former 128-frame per-peer total budget, but prevent
-            // a video burst from exhausting the audio admission lane.
+            // The audio lane remains deep enough for short bursts, but video
+            // must NOT accumulate two seconds of obsolete reference frames.
+            // Keep the original shared ingress bound and a separate, shallow
+            // per-session video lane. Overflow is counted and never delays Opus.
             let (audio_tx, audio_rx) =
                 tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY / 2);
             let (video_tx, video_rx) =
-                tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY / 2);
+                tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_VIDEO_LANE_CAPACITY);
             tokio::spawn(run_webrtc_e2ee_session_lane(
                 audio_rx,
                 video_rx,
@@ -3406,8 +3408,14 @@ async fn run_webrtc_e2ee_bridge(
     }
 }
 
-/// Deterministic, bounded priority: favor speech except at the eighth
-/// consecutive Opus frame, when an already pending video frame is admitted.
+// A 50 Hz Opus sender alongside a 30 fps camera needs substantially more
+// than one video service opportunity per eight audio frames. With a busy
+// single worker that ratio limits video to ~6 fps even before congestion.
+const LIVE_WEBRTC_E2EE_AUDIO_BURST: u8 = 2;
+const LIVE_WEBRTC_E2EE_VIDEO_LANE_CAPACITY: usize = 8;
+
+/// Deterministic bounded priority: grant the first two waiting audio frames,
+/// then service a waiting video frame, without delaying audio when video is idle.
 async fn receive_prioritized_media<T>(
     audio: &mut tokio::sync::mpsc::Receiver<T>,
     video: &mut tokio::sync::mpsc::Receiver<T>,
@@ -3415,7 +3423,7 @@ async fn receive_prioritized_media<T>(
     video_open: bool,
     audio_streak: u8,
 ) -> (Option<T>, bool) {
-    if audio_streak >= 8 {
+    if audio_streak >= LIVE_WEBRTC_E2EE_AUDIO_BURST {
         tokio::select! {
             biased;
             candidate = video.recv(), if video_open => (candidate, false),
@@ -3444,8 +3452,8 @@ async fn run_webrtc_e2ee_session_lane(
         if !audio_open && !video_open {
             break;
         }
-        // Opus has higher latency sensitivity. After at most 8 consecutive
-        // audio frames, give pending video a chance to avoid starvation.
+        // Serve up to two Opus frames before an already queued video frame.
+        // This preserves speech priority without starving a 30 fps camera.
         let Ok((candidate, from_audio)) = tokio::time::timeout(
             Duration::from_mins(2),
             receive_prioritized_media(&mut audio, &mut video, audio_open, video_open, audio_streak),
@@ -3507,20 +3515,56 @@ mod webrtc_e2ee_lane_tests {
             atx.try_send(n).unwrap();
         }
         vtx.try_send(999).unwrap();
-        for streak in 0..8 {
+        for streak in 0..LIVE_WEBRTC_E2EE_AUDIO_BURST {
             let (frame, is_audio) =
                 receive_prioritized_media(&mut audio, &mut video, true, true, streak).await;
             assert!(is_audio);
             assert_eq!(frame, Some(i32::from(streak)));
         }
-        let (frame, is_audio) =
-            receive_prioritized_media(&mut audio, &mut video, true, true, 8).await;
-        assert!(!is_audio, "video must progress after eight Opus frames");
+        let (frame, is_audio) = receive_prioritized_media(
+            &mut audio,
+            &mut video,
+            true,
+            true,
+            LIVE_WEBRTC_E2EE_AUDIO_BURST,
+        )
+        .await;
+        assert!(!is_audio, "video must progress after two Opus frames");
         assert_eq!(frame, Some(999));
         let (frame, is_audio) =
             receive_prioritized_media(&mut audio, &mut video, true, true, 0).await;
         assert!(is_audio);
-        assert_eq!(frame, Some(8));
+        assert_eq!(frame, Some(2));
+    }
+
+    #[tokio::test]
+    async fn continuously_backlogged_audio_does_not_throttle_video_to_six_fps() {
+        let (atx, mut audio) = tokio::sync::mpsc::channel(128);
+        let (vtx, mut video) = tokio::sync::mpsc::channel(64);
+        for n in 0..90 {
+            atx.try_send(n).unwrap();
+        }
+        for n in 0..30 {
+            vtx.try_send(n).unwrap();
+        }
+        let mut streak = 0_u8;
+        let mut delivered_audio = 0;
+        let mut delivered_video = 0;
+        for _ in 0..60 {
+            let (frame, is_audio) =
+                receive_prioritized_media(&mut audio, &mut video, true, true, streak).await;
+            assert!(frame.is_some());
+            if is_audio {
+                delivered_audio += 1;
+                streak = streak.saturating_add(1);
+            } else {
+                delivered_video += 1;
+                streak = 0;
+            }
+        }
+        assert_eq!(delivered_audio, 40);
+        assert_eq!(delivered_video, 20);
+        assert_eq!(LIVE_WEBRTC_E2EE_VIDEO_LANE_CAPACITY, 8);
     }
 
     #[tokio::test]

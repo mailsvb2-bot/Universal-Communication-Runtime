@@ -19,7 +19,12 @@ assert.match(engine,/async fn bounded_peer_close\(/);
 assert.match(engine,/session\.shutdown_pending = true;[\s\S]*?bounded_peer_close\(&session\.peer_connection\)\.await/);
 assert.match(engine,/close_rx: tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>/);
 assert.match(engine,/SendE2ee \{\s*session_id: SessionId,\s*offer_id: String/);
-assert.match(engine,/let offer_id = self\.session_offer_id\(session_id\)\?;[\s\S]*?self\.request_media/);
+assert.match(engine,/fn media_offer_id\([\s\S]*?cached_media_offer\(&self\.media_offer_cache,[\s\S]*?self\.session_offer_id\(session_id\)/,
+  "media offer caching must read the original worker-owned offer fence");
+assert.match(engine,/let offer_id = self\.media_offer_id\(session_id\)\?;[\s\S]*?self\.send_e2ee_envelope_if_offer_matches/,
+  "encrypted send must always use the worker-verified offer fence");
+assert.match(engine,/self\.invalidate_media_offer\(session_id, Some\(&offer_id\)\)/,
+  "stale transport offers must be evicted on send rejection");
 assert.match(engine,/Some\(session\) if !session\.shutdown_pending && session\.offer_id == offer_id/);
 assert.match(engine,/fn request_close\([\s\S]*?try_send\(LiveWebRtcCommand::Close[\s\S]*?close_tx\.send/);
 assert.match(e2ee,/async fn wait_for_matching_close\(/);
