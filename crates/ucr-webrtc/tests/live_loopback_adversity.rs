@@ -115,7 +115,9 @@ fn live_loopback_connects_and_renegotiates_fresh_ice_generation_on_same_session(
         .expect("install deterministic rustls crypto provider for loopback DTLS");
 
     runtime.block_on(async {
-        let provider = LiveWebRtcProvider::new().expect("live UCR WebRTC provider");
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(128);
+        let provider = LiveWebRtcProvider::with_e2ee_ingress(ingress_tx)
+            .expect("live UCR WebRTC provider with actual encrypted DataChannels");
         let session_id = SessionId::from_opaque(id("live-loopback-ice-session"));
         let config = WebRtcSessionConfig {
             session_id: session_id.clone(),
