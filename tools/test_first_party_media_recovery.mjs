@@ -227,3 +227,39 @@ rosterCtx.e2eeChannel={readyState:"closed"};
 await rosterCtx.sync();
 assert.equal(refreshes,1,"retired channel cannot request new frames");
 console.log("PASS: only a newly admitted canonical peer requests one local encoder keyframe; stale channels and repeated polls do not");
+
+
+/* The real call showed an active "Enable sound" button while the audio
+ * playback context was already running. Preserve fast non-blocking media
+ * startup, but accurately reflect the actual context state in both locales. */
+const soundStart=html.indexOf("function resumeRoomAudio(audioContext){");
+const soundEnd=html.indexOf("function holdRoomPresence(){",soundStart);
+assert.ok(soundStart>=0&&soundEnd>soundStart,"canonical audio unlock owner is missing");
+const soundButton={disabled:false,textContent:"Enable sound"};
+const soundContext={state:"running",resume(){throw Error("running audio must not be resumed");},
+  addEventListener(){}};
+const soundWindow={ucrLocalRoomAudioContext:soundContext,
+  addEventListener(){},removeEventListener(){}};
+const soundCtx={
+  ui:{soundUnlock:soundButton,status:{textContent:""}},window:soundWindow,
+  tr:key=>({enableSound:"Включить звук",soundEnabled:"Звук включён"})[key]||key,
+  sessionActive:true,setTimeout(){return 1;},
+};
+vm.runInNewContext(html.slice(soundStart,soundEnd)+
+  "\nthis.activateSound=resumeRoomAudio;",soundCtx);
+soundCtx.activateSound(soundContext);
+assert.equal(soundButton.disabled,true,"running playback must not prompt for sound");
+assert.equal(soundButton.textContent,"Звук включён");
+let resolveResume;
+const suspended={state:"suspended",resume(){return new Promise(resolve=>{resolveResume=resolve;});},
+  addEventListener(){}};
+soundWindow.ucrLocalRoomAudioContext=suspended;
+soundCtx.activateSound(suspended);
+assert.equal(soundButton.disabled,false,"suspended playback must offer user gesture");
+assert.equal(soundButton.textContent,"Включить звук");
+suspended.state="running";
+resolveResume();
+await Promise.resolve();
+assert.equal(soundButton.disabled,true,"successful asynchronous resume updates the button");
+assert.equal(soundButton.textContent,"Звук включён");
+console.log("PASS: sound control reflects real running/suspended AudioContext without awaiting playback for video");
