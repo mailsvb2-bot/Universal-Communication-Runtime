@@ -81,7 +81,7 @@ fn enqueue_ingress_with_audio_reserve(
     // Audio always remains subject to the actual bounded channel capacity.
     let capacity = sender.max_capacity();
     let reserve = if capacity > 1 {
-        (capacity / 4).max(1).min(MAX_E2EE_INGRESS_AUDIO_RESERVE)
+        (capacity / 4).clamp(1, MAX_E2EE_INGRESS_AUDIO_RESERVE)
     } else {
         0
     };
