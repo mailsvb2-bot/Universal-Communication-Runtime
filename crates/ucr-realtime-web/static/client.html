@@ -716,6 +716,7 @@ const COPY={
     shareScreen:"Share screen",raiseHand:"Raise hand",lowerHand:"Lower hand",reaction:"Reaction",react:"React",
     activeSpeakerNone:"Active speaker: none",activeSpeakerPrefix:"Active speaker: ",chat:"Conference chat",message:"Message",send:"Send",
     join:"Join conference",leave:"Leave",readingGrant:"Reading signed join grant…",
+    enableSound:"Enable sound",soundEnabled:"Sound enabled",
     footer:"Media permission is requested only after joining. Recording is a отдельная возможность PetrelLink with consent and retention policy.",
     waitingRoom:"You are in the waiting room. Media will start automatically when the host starts the conference.",
     waitingEntry:"Waiting for the host to open conference entry…",
@@ -731,6 +732,7 @@ const COPY={
     shareScreen:"Показать экран",raiseHand:"Поднять руку",lowerHand:"Опустить руку",reaction:"Реакция",react:"Отправить реакцию",
     activeSpeakerNone:"Активный спикер: нет",activeSpeakerPrefix:"Активный спикер: ",chat:"Чат конференции",message:"Сообщение",send:"Отправить",
     join:"Войти в конференцию",leave:"Выйти",readingGrant:"Проверка ссылки для входа…",
+    enableSound:"Включить звук",soundEnabled:"Звук включён",
     footer:"Доступ к камере и микрофону запрашивается только после входа. Запись — отдельная возможность PetrelLink с согласием участников и политикой хранения.",
     waitingRoom:"Вы в комнате ожидания. Медиа включится автоматически, когда ведущий начнёт конференцию.",
     waitingEntry:"Ожидание открытия входа ведущим…",
@@ -777,6 +779,8 @@ function applyLocale(language){
   ui.screenToggle.textContent=tr("shareScreen");ui.handToggle.textContent=tr("raiseHand");ui.reactionSend.textContent=tr("react");
   ui.activeSpeaker.textContent=tr("activeSpeakerNone");ui.chatCard.setAttribute("aria-label",tr("chat"));ui.chatInput.placeholder=tr("message");ui.chatSend.textContent=tr("send");
   ui.join.textContent=tr("join");ui.leave.textContent=tr("leave");ui.footerNote.textContent=tr("footer");ui.status.textContent=tr("readingGrant");
+  ui.soundUnlock.textContent=window.ucrLocalRoomAudioContext?.state==="running"?
+    tr("soundEnabled"):tr("enableSound");
   if(ui.state.textContent==="Ready")ui.state.textContent=tr("ready");
   if(ui.webrtcState.textContent==="Idle")ui.webrtcState.textContent=tr("idle");
   applyToggleLabels();
@@ -3936,7 +3940,7 @@ ui.soundUnlock.addEventListener("click",()=>{
   if(pending&&typeof pending.then==="function"){
     pending.then(()=>{
       if(!sessionActive)return;
-      ui.soundUnlock.textContent="Sound enabled";
+      ui.soundUnlock.textContent=tr("soundEnabled");
       ui.soundUnlock.disabled=true;
       ui.status.textContent="Audio playback context is running.";
     }).catch(e=>{if(sessionActive)ui.status.textContent="Audio playback failed: "+e.message;});
@@ -4005,20 +4009,31 @@ async function refreshLocalRoomEndpointAuthority(){
 }
 function resumeRoomAudio(audioContext){
   if(!audioContext||audioContext.state==="closed")return;
-  // resume() stays pending forever when this document has no user gesture.
-  // Waiting here blocks the encrypted camera and microphone.
-  ui.soundUnlock.disabled=false;
+  // A resumed AudioContext already produces sound. Never display an active
+  // "Enable sound" button when playback is running (as observed in the real
+  // 2026-11-19 two-device call). Never await a gesture-gated resume promise:
+  // it can stay pending and must not block the E2EE video pipeline.
+  const updateSound=()=>{
+    if(window.ucrLocalRoomAudioContext!==audioContext)return;
+    const running=audioContext.state==="running";
+    ui.soundUnlock.textContent=tr(running?"soundEnabled":"enableSound");
+    ui.soundUnlock.disabled=running;
+  };
+  updateSound();
   const attempt=()=>{
+    if(audioContext.state==="running"){updateSound();return;}
     const pending=audioContext.resume();
-    if(pending&&typeof pending.catch==="function")pending.catch(()=>{});
+    if(pending&&typeof pending.then==="function")
+      pending.then(updateSound,()=>{});
   };
   attempt();
   if(resumeRoomAudio.bound===audioContext)return;
   resumeRoomAudio.bound=audioContext;
+  audioContext.addEventListener?.("statechange",updateSound);
   const unlock=()=>{
     attempt();
     if(audioContext.state==="running"){
-      ui.soundUnlock.textContent="Sound enabled";ui.soundUnlock.disabled=true;
+      updateSound();
       window.removeEventListener("pointerdown",unlock,true);
       window.removeEventListener("keydown",unlock,true);
     }
@@ -4027,7 +4042,7 @@ function resumeRoomAudio(audioContext){
   window.addEventListener("keydown",unlock,true);
   setTimeout(()=>{
     if(audioContext.state==="suspended"&&sessionActive){
-      ui.status.textContent="Encrypted video is connected, but audio playback is suspended. Click Enable sound.";
+      ui.status.textContent="Encrypted video is connected, but audio playback is suspended. Click "+tr("enableSound")+".";
     }
   },800);
 }
