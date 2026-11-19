@@ -79,10 +79,12 @@ fn enqueue_ingress_with_audio_reserve(
     // Sender capacity is the *available* free space. Preserve at least one
     // slot at small capacities and at most 16 for the normal 128-frame queue.
     // Audio always remains subject to the actual bounded channel capacity.
-    let reserve = sender
-        .max_capacity()
-        .saturating_sub(1)
-        .min(MAX_E2EE_INGRESS_AUDIO_RESERVE);
+    let capacity = sender.max_capacity();
+    let reserve = if capacity > 1 {
+        (capacity / 4).max(1).min(MAX_E2EE_INGRESS_AUDIO_RESERVE)
+    } else {
+        0
+    };
     if frame.envelope.frame.header.media_kind == MediaKind::Video && sender.capacity() <= reserve {
         E2EE_INGRESS_VIDEO_FULL.fetch_add(1, Ordering::Relaxed);
         return;
