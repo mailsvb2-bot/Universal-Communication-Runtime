@@ -13,7 +13,7 @@ use core::fmt;
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc as std_mpsc,
     },
@@ -453,6 +453,9 @@ pub struct LiveWebRtcProvider {
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<tokio::sync::Notify>,
     request_timeout: Duration,
+    // Cache only the immutable attempt fence; the worker rechecks it on each
+    // encrypted send. No canonical authorization or key authority is cached.
+    media_offer_cache: Mutex<HashMap<String, String>>,
 }
 
 impl fmt::Debug for LiveWebRtcProvider {
@@ -466,6 +469,34 @@ impl fmt::Debug for LiveWebRtcProvider {
             .field("max_sessions", &LIVE_WEBRTC_MAX_SESSIONS)
             .finish_non_exhaustive()
     }
+}
+
+// Reusing an SDP fence avoids one synchronous worker command per packet.
+// Concurrency may race the first lookup, but cannot bypass the worker's
+// immutable per-offer check. Never hold a mutex during worker I/O.
+fn cached_media_offer(
+    cache: &Mutex<HashMap<String, String>>,
+    session_key: &str,
+    lookup: impl FnOnce() -> Result<String, WebRtcProviderError>,
+) -> Result<String, WebRtcProviderError> {
+    if let Some(value) = cache
+        .lock()
+        .map_err(|_| WebRtcProviderError::Internal)?
+        .get(session_key)
+        .cloned()
+    {
+        return Ok(value);
+    }
+    let fetched = lookup()?;
+    if fetched.is_empty() || fetched.len() > 64 {
+        return Err(WebRtcProviderError::SessionUnavailable);
+    }
+    let mut entries = cache.lock().map_err(|_| WebRtcProviderError::Internal)?;
+    if entries.len() >= LIVE_WEBRTC_MAX_SESSIONS && !entries.contains_key(session_key) {
+        entries.clear();
+    }
+    entries.insert(session_key.to_owned(), fetched.clone());
+    Ok(fetched)
 }
 
 impl LiveWebRtcProvider {
@@ -543,6 +574,7 @@ impl LiveWebRtcProvider {
                 shutdown,
                 shutdown_notify,
                 request_timeout: Duration::from_secs(LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS),
+                media_offer_cache: Mutex::new(HashMap::new()),
             }),
             Ok(Err(error)) => {
                 let _ = worker.join();
@@ -553,6 +585,20 @@ impl LiveWebRtcProvider {
                 drop(media_tx);
                 let _ = worker.join();
                 Err(WebRtcProviderError::TemporarilyUnavailable)
+            }
+        }
+    }
+
+    fn media_offer_id(&self, session_id: &SessionId) -> Result<String, WebRtcProviderError> {
+        let key = session_key(session_id);
+        cached_media_offer(&self.media_offer_cache, &key, || self.session_offer_id(session_id))
+    }
+
+    fn invalidate_media_offer(&self, session_id: &SessionId, expected: Option<&str>) {
+        if let Ok(mut cache) = self.media_offer_cache.lock() {
+            let key = session_key(session_id);
+            if expected.is_none_or(|offer| cache.get(&key).is_some_and(|id| id == offer)) {
+                cache.remove(&key);
             }
         }
     }
@@ -689,8 +735,15 @@ impl LiveWebRtcProvider {
         session_id: &SessionId,
         envelope: &SfuForwardEnvelope,
     ) -> Result<(), WebRtcProviderError> {
-        let offer_id = self.session_offer_id(session_id)?;
-        self.send_e2ee_envelope_if_offer_matches(session_id, &offer_id, envelope)
+        let offer_id = self.media_offer_id(session_id)?;
+        // A transport rebuild changes the worker-owned SDP fence. Refuse the
+        // stale frame and evict that exact cached ID; the NEXT fresh frame
+        // reacquires the new fence. Never resend the old frame across restart.
+        let result = self.send_e2ee_envelope_if_offer_matches(session_id, &offer_id, envelope);
+        if matches!(result, Err(WebRtcProviderError::SessionUnavailable | WebRtcProviderError::Conflict)) {
+            self.invalidate_media_offer(session_id, Some(&offer_id));
+        }
+        result
     }
 
     /// Sends ciphertext only when it still belongs to the caller's captured peer offer.
@@ -747,6 +800,7 @@ impl WebRtcProvider for LiveWebRtcProvider {
         config: &WebRtcSessionConfig,
     ) -> Result<WebRtcSessionDescription, WebRtcProviderError> {
         validate_live_config(config)?;
+        self.invalidate_media_offer(&config.session_id, None);
         self.request(|reply, deadline| LiveWebRtcCommand::Create {
             config: config.clone(),
             deadline,
@@ -759,6 +813,7 @@ impl WebRtcProvider for LiveWebRtcProvider {
         config: &WebRtcSessionConfig,
     ) -> Result<WebRtcSessionDescription, WebRtcProviderError> {
         validate_live_config(config)?;
+        self.invalidate_media_offer(&config.session_id, None);
         self.request(|reply, deadline| LiveWebRtcCommand::Restart {
             config: config.clone(),
             deadline,
@@ -829,6 +884,7 @@ impl WebRtcProvider for LiveWebRtcProvider {
     }
 
     fn close_session(&self, session_id: &SessionId) -> Result<(), WebRtcProviderError> {
+        self.invalidate_media_offer(session_id, None);
         self.request_close(session_id, None)
     }
 
@@ -840,6 +896,7 @@ impl WebRtcProvider for LiveWebRtcProvider {
         if offer_id.is_empty() || offer_id.len() > 64 {
             return Err(WebRtcProviderError::SessionUnavailable);
         }
+        self.invalidate_media_offer(session_id, Some(offer_id));
         self.request_close(session_id, Some(offer_id.to_owned()))
     }
 }
@@ -1797,6 +1854,45 @@ mod tests {
         InMemorySecretProvider, SecretHandle, SecretMaterial, SecretProvider, SecretPurpose,
         SecretVersion,
     };
+
+    #[test]
+    fn media_offer_lookup_is_reused_but_worker_fence_remains_required() {
+        let cache = Mutex::new(HashMap::new());
+        let lookups = std::sync::atomic::AtomicUsize::new(0);
+        let get = || {
+            cached_media_offer(&cache, "session-a", || {
+                lookups.fetch_add(1, Ordering::Relaxed);
+                Ok("offer-a".to_owned())
+            })
+        };
+        assert_eq!(get(), Ok("offer-a".to_owned()));
+        assert_eq!(get(), Ok("offer-a".to_owned()));
+        assert_eq!(lookups.load(Ordering::Relaxed), 1);
+
+        // An ICE restart invalidates the old attempt: the caller must never
+        // reuse a cached offer ID after an explicit lifecycle transition.
+        cache.lock().unwrap().remove("session-a");
+        let refreshed = cached_media_offer(&cache, "session-a", || {
+            lookups.fetch_add(1, Ordering::Relaxed);
+            Ok("offer-b".to_owned())
+        });
+        assert_eq!(refreshed, Ok("offer-b".to_owned()));
+        assert_eq!(lookups.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn media_offer_cache_never_accepts_empty_or_oversized_offer() {
+        let cache = Mutex::new(HashMap::new());
+        assert_eq!(
+            cached_media_offer(&cache, "session-a", || Ok(String::new())),
+            Err(WebRtcProviderError::SessionUnavailable)
+        );
+        assert_eq!(
+            cached_media_offer(&cache, "session-a", || Ok("x".repeat(65))),
+            Err(WebRtcProviderError::SessionUnavailable)
+        );
+        assert!(cache.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn failed_or_abandoned_ice_restart_must_retire_mutated_peer() {
