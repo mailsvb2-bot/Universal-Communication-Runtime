@@ -2393,6 +2393,11 @@ assert.equal(ucrVideoAllowsH264({codec:"h264"}),false,
   "reject implicit H264 preferences in an untrusted browser object");
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
 assert.deepEqual(ucrAdaptiveVideoStep(0, 1_500_000, 0, 0), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(0, 192 * 1024, 0, 0), {stage:1, healthySamples:0},
+  "real video ceiling is 256 KiB; source must adapt before crossing it");
+assert.deepEqual(ucrAdaptiveVideoStep(1, 64 * 1024, 0, 4), {stage:1, healthySamples:0},
+  "moderate reliable-channel backlog must prevent premature upshift");
+assert.deepEqual(ucrAdaptiveVideoStep(0, 128 * 1024, 0, 0), {stage:0, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(1, 1_500_000, 0, 0), {stage:2, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(2, 1_500_000, 0, 0), {stage:2, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(2, 0, 0, 4), {stage:1, healthySamples:0});
@@ -2424,6 +2429,16 @@ assert.match(codecProducerSource,
 assert.match(codecProducerSource,
   /const transportPressure = readTransportCongestion\(\)/,
   "the actual send rejection counter must feed the source-owned controller");
+assert.match(codecProducerSource, /VIDEO_KEYFRAME_INTERVAL_US = 2_000_000/,
+  "steady-state lost-reference recovery must not wait the prior three seconds");
+const endpointPipelineSource = readFileSync("sdk/typescript/src/portable_endpoint_media.ts", "utf8");
+assert.match(endpointPipelineSource, /this\.#videoBackpressureNeedsKeyframe\.add\(frame\.streamId\)/,
+  "closed and congested channels must both schedule a replacement publisher keyframe");
+const conferenceSource = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
+assert.match(conferenceSource, /const freshSince=Math\.max\(activatedAt,lastRenderedAt\)/,
+  "receiver must continue monitoring real rendered video across the whole call");
+assert.match(conferenceSource, /if\(document\.hidden\)return;/,
+  "background tab intentionally skipped rendering cannot be mistaken for packet loss");
 
 
 const endpointQualityCalls: string[] = [];

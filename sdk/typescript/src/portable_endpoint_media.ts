@@ -607,8 +607,12 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       if (outboundStage === "DATACHANNEL_SEND" &&
           (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED" ||
            transportCode === "UCR_TRANSPORT_CHANNEL_CLOSED")) {
+        if (frame.mediaKind === "video") {
+          // A closed channel can lose the reference frame just like congestion.
+          // Keep the recovery request pending across the new transport epoch.
+          this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
+        }
         if (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED") {
-          if (frame.mediaKind === "video") this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
           const notice = (globalThis as unknown as {
             ucrEndpointMediaCongestion?: (kind: string) => void;
           }).ucrEndpointMediaCongestion;
