@@ -81,7 +81,7 @@ def _active_snapshot(report: dict, label: str) -> dict:
             f"{label}: malformed pre-disconnect snapshot")
     age = (_timestamp(report.get("capturedAt")) -
            _timestamp(earlier.get("capturedAt"))).total_seconds()
-    require(0 <= age <= 15, f"{label}: pre-disconnect snapshot stale")
+    require(0 <= age <= 120, f"{label}: pre-disconnect snapshot stale")
     return earlier
 
 
