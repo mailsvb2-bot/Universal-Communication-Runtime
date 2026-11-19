@@ -3614,10 +3614,10 @@ function startInitialVideoRecovery(){
     lastRecoveryAt=now;
     // Reuse canonical authenticated subscriptions; never invent a peer,
     // bypass MLS, or pretend a roster retry is remote-keyframe feedback.
-    syncReceiveSubscriptions().catch(()=>{});
+    syncReceiveSubscriptions(null,true).catch(()=>{});
   },750);
 }
-async function syncReceiveSubscriptions(preparedRoster=null){
+async function syncReceiveSubscriptions(preparedRoster=null,recoverStalledVideo=false){
   if(!sessionActive||!mediaActive||!e2eeAdapterReady||receiveRosterInFlight||
       e2eeChannel?.readyState!=="open")return;
   const generation=receiveRosterGeneration,session=claims,channel=e2eeChannel;
@@ -3639,6 +3639,11 @@ async function syncReceiveSubscriptions(preparedRoster=null){
     const peerArrived=sources.some(source=>!receiveRosterSources.some(old=>
       old.source_id===source.source_id&&old.source_kind===source.source_kind));
     receiveRosterSources=sources;
+    // A stalled call with an unchanged roster must still resend its canonical
+    // SFU subscription. The ordinary fingerprint fast-path otherwise turns
+    // every liveness retry into a no-op while the receiver stays black.
+    // The existing generation/channel fences and 8s cooldown remain intact.
+    if(recoverStalledVideo)receiveSubscriptionFingerprint=null;
     await applyReceiveSubscriptions(sources,receiveSpeakerId,generation,session,channel);
     if(peerArrived&&sessionActive&&mediaActive&&e2eeAdapterReady&&
         generation===receiveRosterGeneration&&claims===session&&
