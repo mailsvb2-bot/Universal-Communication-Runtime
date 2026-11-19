@@ -83,9 +83,7 @@ fn enqueue_ingress_with_audio_reserve(
         .max_capacity()
         .saturating_sub(1)
         .min(MAX_E2EE_INGRESS_AUDIO_RESERVE);
-    if frame.envelope.frame.header.media_kind == MediaKind::Video
-        && sender.capacity() <= reserve
-    {
+    if frame.envelope.frame.header.media_kind == MediaKind::Video && sender.capacity() <= reserve {
         E2EE_INGRESS_VIDEO_FULL.fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -1004,7 +1002,10 @@ mod tests {
         for _ in 0..4 {
             enqueue_ingress_with_audio_reserve(
                 &sender,
-                WebRtcE2eeIngressFrame { session_id: session_id.clone(), envelope: envelope() },
+                WebRtcE2eeIngressFrame {
+                    session_id: session_id.clone(),
+                    envelope: envelope(),
+                },
             );
         }
         // The fourth video is shed; a following audio packet still enters.
@@ -1013,17 +1014,32 @@ mod tests {
         audio.frame.header.media_kind = MediaKind::Audio;
         enqueue_ingress_with_audio_reserve(
             &sender,
-            WebRtcE2eeIngressFrame { session_id, envelope: audio },
+            WebRtcE2eeIngressFrame {
+                session_id,
+                envelope: audio,
+            },
         );
         assert_eq!(sender.capacity(), 0);
         for _ in 0..3 {
             assert_eq!(
-                receiver.try_recv().unwrap().envelope.frame.header.media_kind,
+                receiver
+                    .try_recv()
+                    .unwrap()
+                    .envelope
+                    .frame
+                    .header
+                    .media_kind,
                 MediaKind::Video,
             );
         }
         assert_eq!(
-            receiver.try_recv().unwrap().envelope.frame.header.media_kind,
+            receiver
+                .try_recv()
+                .unwrap()
+                .envelope
+                .frame
+                .header
+                .media_kind,
             MediaKind::Audio,
         );
     }
