@@ -161,10 +161,12 @@ fn live_loopback_connects_and_renegotiates_fresh_ice_generation_on_same_session(
             .set_remote_description(&initial_answer)
             .expect("apply initial remote answer");
         wait_connected(&remote).await;
-        let v2_enabled = std::env::var("UCR_WEBRTC_E2EE_UNORDERED").map_or(
-            true,
-            |value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"),
-        );
+        let v2_enabled = std::env::var("UCR_WEBRTC_E2EE_UNORDERED").map_or(true, |value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on"
+            )
+        });
         let mut seen = BTreeSet::new();
         let expected = if v2_enabled { 2 } else { 1 };
         tokio::time::timeout(Duration::from_secs(5), async {
