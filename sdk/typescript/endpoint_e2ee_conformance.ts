@@ -3305,7 +3305,7 @@ for (const [name, publish, seal, transport] of [
   g.ucrEncryptedTransportBufferedAmount = () => 0;
   const requests: string[] = [];
   let emit: ((frame: {mediaKind:"video";videoSourceKind:"camera";streamId:string;
-    timestamp:bigint;keyframe:boolean;bytes:Uint8Array}) => Promise<void>) | undefined;
+    timestamp:bigint;keyframe:boolean;bytes:Uint8Array}) => void | Promise<void>) | undefined;
   let releaseAuthorization: (() => void) | undefined;
   const blocked = new Promise<void>(resolve => {releaseAuthorization = resolve;});
   const backpressure = new UcrPortableEndpointMediaAdapter({
