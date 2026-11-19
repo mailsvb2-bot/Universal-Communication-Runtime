@@ -1046,6 +1046,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn video_ingress_reserve_scales_at_production_capacity() {
+        let (sender, mut receiver) = mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
+        let session_id = SessionId::from_opaque(id("test-session"));
+        let video_budget = LIVE_WEBRTC_E2EE_INGRESS_CAPACITY
+            - MAX_E2EE_INGRESS_AUDIO_RESERVE;
+        for _ in 0..LIVE_WEBRTC_E2EE_INGRESS_CAPACITY {
+            enqueue_ingress_with_audio_reserve(
+                &sender,
+                WebRtcE2eeIngressFrame {
+                    session_id: session_id.clone(),
+                    envelope: envelope(),
+                },
+            );
+        }
+        assert_eq!(sender.capacity(), MAX_E2EE_INGRESS_AUDIO_RESERVE);
+        for _ in 0..video_budget {
+            assert_eq!(
+                receiver.try_recv().unwrap().envelope.frame.header.media_kind,
+                MediaKind::Video,
+            );
+        }
+        assert!(receiver.try_recv().is_err());
+        let mut audio = envelope();
+        audio.frame.header.media_kind = MediaKind::Audio;
+        enqueue_ingress_with_audio_reserve(
+            &sender,
+            WebRtcE2eeIngressFrame {
+                session_id,
+                envelope: audio,
+            },
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap().envelope.frame.header.media_kind,
+            MediaKind::Audio,
+        );
+    }
+
+    #[tokio::test]
+    async fn single_slot_ingress_does_not_starve_all_video() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        enqueue_ingress_with_audio_reserve(
+            &sender,
+            WebRtcE2eeIngressFrame {
+                session_id: SessionId::from_opaque(id("test-session")),
+                envelope: envelope(),
+            },
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap().envelope.frame.header.media_kind,
+            MediaKind::Video,
+        );
+    }
+
     fn envelope() -> SfuForwardEnvelope {
         SfuForwardEnvelope {
             frame: EncryptedGroupMediaFrame {
