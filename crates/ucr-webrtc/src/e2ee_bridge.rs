@@ -70,7 +70,9 @@ fn outbound_buffer_budget(kind: MediaKind, already_buffered: usize, new_bytes: u
     } else {
         MAX_WEBRTC_E2EE_BUFFERED_BYTES
     };
-    already_buffered.checked_add(new_bytes).is_some_and(|total| total <= limit)
+    already_buffered
+        .checked_add(new_bytes)
+        .is_some_and(|total| total <= limit)
 }
 
 pub const MAX_WEBRTC_E2EE_WIRE_BYTES: usize = MAX_SFU_FORWARD_WIRE_BYTES;
@@ -377,9 +379,10 @@ impl LiveWebRtcE2eeChannel {
         // envelope, not just the bytes already queued before we start.
         // Reject it atomically before the first SCTP send; an incomplete key
         // frame would otherwise poison the decoder until its next refresh.
-        let new_bytes = chunks.iter().try_fold(0_usize, |total, chunk| {
-            total.checked_add(chunk.len())
-        }).ok_or(crate::WebRtcProviderError::CapacityExceeded)?;
+        let new_bytes = chunks
+            .iter()
+            .try_fold(0_usize, |total, chunk| total.checked_add(chunk.len()))
+            .ok_or(crate::WebRtcProviderError::CapacityExceeded)?;
         if !outbound_buffer_budget(envelope.frame.header.media_kind, buffered, new_bytes) {
             return Err(crate::WebRtcProviderError::CapacityExceeded);
         }
@@ -1274,15 +1277,21 @@ mod tests {
     fn media_buffer_budget_rejects_whole_video_frame_before_sctp_send() {
         assert!(outbound_buffer_budget(MediaKind::Video, 0, 16_000));
         assert!(outbound_buffer_budget(
-            MediaKind::Video, 128 * 1024, 128 * 1024
+            MediaKind::Video,
+            128 * 1024,
+            128 * 1024
         ));
         assert!(!outbound_buffer_budget(
-            MediaKind::Video, 128 * 1024, 128 * 1024 + 1
+            MediaKind::Video,
+            128 * 1024,
+            128 * 1024 + 1
         ));
-        assert!(!outbound_buffer_budget(
-            MediaKind::Video, 0, 256 * 1024 + 1
+        assert!(!outbound_buffer_budget(MediaKind::Video, 0, 256 * 1024 + 1));
+        assert!(outbound_buffer_budget(
+            MediaKind::Audio,
+            256 * 1024,
+            128 * 1024
         ));
-        assert!(outbound_buffer_budget(MediaKind::Audio, 256 * 1024, 128 * 1024));
         assert!(!outbound_buffer_budget(MediaKind::Audio, 384 * 1024, 1));
         assert!(!outbound_buffer_budget(MediaKind::Video, usize::MAX, 1));
     }
