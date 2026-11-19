@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  ucrOutboundQueueAllows, readFileSync } from "node:fs";
 import { generateKeyPairSync, sign, webcrypto } from "node:crypto";
 import { runInNewContext } from "node:vm";
 
@@ -2432,7 +2433,22 @@ assert.match(codecProducerSource,
   "the actual send rejection counter must feed the source-owned controller");
 assert.match(codecProducerSource, /VIDEO_KEYFRAME_INTERVAL_US = 2_000_000/,
   "steady-state lost-reference recovery must not wait the prior three seconds");
+assert.equal(ucrOutboundQueueAllows("video", 0, 64), true);
+assert.equal(ucrOutboundQueueAllows("video", 47, 64), true);
+assert.equal(ucrOutboundQueueAllows("video", 48, 64), false,
+  "video must yield final sixteen async send slots to Opus");
+assert.equal(ucrOutboundQueueAllows("audio", 48, 64), true);
+assert.equal(ucrOutboundQueueAllows("audio", 63, 64), true);
+assert.equal(ucrOutboundQueueAllows("audio", 64, 64), false);
+assert.equal(ucrOutboundQueueAllows("video", 0, 2), true);
+assert.equal(ucrOutboundQueueAllows("video", 1, 2), false);
+assert.equal(ucrOutboundQueueAllows("audio", 1, 2), true);
+assert.equal(ucrOutboundQueueAllows("video", 0, 1), true);
+assert.throws(() => ucrOutboundQueueAllows("audio", -1, 64), /invalid media queue/);
 const endpointPipelineSource = readFileSync("sdk/typescript/src/portable_endpoint_media.ts", "utf8");
+assert.match(endpointPipelineSource,
+  /!ucrOutboundQueueAllows\(frame\.mediaKind, this\.#pendingOutbound, this\.#maxPendingFrames\)/,
+  "the real endpoint send path must reserve fresh-audio capacity during video bursts");
 assert.match(endpointPipelineSource, /this\.#videoBackpressureNeedsKeyframe\.add\(frame\.streamId\)/,
   "closed and congested channels must both schedule a replacement publisher keyframe");
 const conferenceSource = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
