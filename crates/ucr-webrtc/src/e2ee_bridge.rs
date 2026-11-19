@@ -1050,8 +1050,7 @@ mod tests {
     async fn video_ingress_reserve_scales_at_production_capacity() {
         let (sender, mut receiver) = mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
         let session_id = SessionId::from_opaque(id("test-session"));
-        let video_budget = LIVE_WEBRTC_E2EE_INGRESS_CAPACITY
-            - MAX_E2EE_INGRESS_AUDIO_RESERVE;
+        let video_budget = LIVE_WEBRTC_E2EE_INGRESS_CAPACITY - MAX_E2EE_INGRESS_AUDIO_RESERVE;
         for _ in 0..LIVE_WEBRTC_E2EE_INGRESS_CAPACITY {
             enqueue_ingress_with_audio_reserve(
                 &sender,
