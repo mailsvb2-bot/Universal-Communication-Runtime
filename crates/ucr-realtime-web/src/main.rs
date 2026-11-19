@@ -4308,9 +4308,14 @@ mod tests {
         assert!(client.contains("await join();"));
         assert!(client.contains("id=\"sound-unlock\""));
         assert!(client.contains("ui.soundUnlock.addEventListener(\"click\""));
+        // The sound prompt now uses the current locale and reflects the
+        // actual AudioContext. A running context must not advertise a button
+        // requiring another click.
         assert!(client.contains(
-            "Encrypted video is connected, but audio playback is suspended. Click Enable sound."
+            "Encrypted video is connected, but audio playback is suspended. Click "
         ));
+        assert!(client.contains(r#"tr("enableSound")"#));
+        assert!(client.contains(r#"tr(running?"soundEnabled":"enableSound")"#));
     }
 
     #[test]
