@@ -486,7 +486,7 @@ pub(crate) async fn create_live_e2ee_data_channel(
 /// default. A v1-only browser continues on v1: outbound v2 only activates
 /// after a peer sends a structurally valid v2 ciphertext fragment.
 ///
-/// Set UCR_WEBRTC_E2EE_UNORDERED=0 to disable the offer without altering
+/// Set `UCR_WEBRTC_E2EE_UNORDERED=0` to disable the offer without altering
 /// MLS, endpoint signer or canonical SFU authorization.
 #[must_use]
 pub fn unordered_e2ee_enabled_from_env() -> bool {
@@ -496,7 +496,6 @@ pub fn unordered_e2ee_enabled_from_env() -> bool {
 fn unordered_e2ee_enabled(value: Option<&str>) -> bool {
     match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         None | Some("1" | "true" | "on") => true,
-        Some("0" | "false" | "off") => false,
         // Unknown operator values never silently enable an experimental path.
         Some(_) => false,
     }
@@ -541,21 +540,18 @@ async fn create_unordered_channel(
             if wants_keyframe {
                 keyframe_wanted.store(true, Ordering::SeqCst);
             }
-            match decoded {
-                Ok(Some(envelope)) => {
-                    peer_speaks_v2.store(true, Ordering::SeqCst);
-                    enqueue_ingress_with_audio_reserve(
-                        &ingress_tx,
-                        WebRtcE2eeIngressFrame {
-                            session_id,
-                            envelope,
-                        },
-                    );
-                }
-                // An incomplete first fragment is NOT evidence that the peer
-                // can receive an entire v2 envelope. Until a structurally
-                // complete message arrives keep the outbound v1 fallback.
-                Ok(None) | Err(_) => {}
+            // An incomplete first fragment is NOT evidence that the peer
+            // can receive an entire v2 envelope. Until a structurally
+            // complete message arrives keep the outbound v1 fallback.
+            if let Ok(Some(envelope)) = decoded {
+                peer_speaks_v2.store(true, Ordering::SeqCst);
+                enqueue_ingress_with_audio_reserve(
+                    &ingress_tx,
+                    WebRtcE2eeIngressFrame {
+                        session_id,
+                        envelope,
+                    },
+                );
             }
         })
     }));
