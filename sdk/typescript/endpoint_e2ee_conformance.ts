@@ -2402,7 +2402,8 @@ assert.deepEqual(ucrAdaptiveVideoStep(1, 1_500_000, 0, 0), {stage:2, healthySamp
 assert.deepEqual(ucrAdaptiveVideoStep(2, 1_500_000, 0, 0), {stage:2, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(2, 0, 0, 4), {stage:1, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(1, 0, 0, 4), {stage:0, healthySamples:0});
-assert.deepEqual(ucrAdaptiveVideoStep(1, 300_000, 0, 4), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(1, 300_000, 0, 4), {stage:2, healthySamples:0},
+  "congested 300 KiB buffer must escalate quality reduction under the new 192 KiB threshold");
 assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 2, 0), {stage:1, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 0, 0, true), {stage:1, healthySamples:0},
   "local encode pressure must reduce quality without transport congestion");
