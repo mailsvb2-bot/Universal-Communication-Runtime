@@ -3295,6 +3295,65 @@ for (const [name, publish, seal, transport] of [
   }
 }
 
+// A full outbound authorization queue must not demand a large reference frame
+// while the queue is blocked. Request one reference only after sending recovers.
+{
+  const g = globalThis as unknown as {
+    ucrEncryptedTransportBufferedAmount?: () => number;
+  };
+  const oldProbe = g.ucrEncryptedTransportBufferedAmount;
+  g.ucrEncryptedTransportBufferedAmount = () => 0;
+  const requests: string[] = [];
+  let emit: ((frame: {mediaKind:"video";videoSourceKind:"camera";streamId:string;
+    timestamp:bigint;keyframe:boolean;bytes:Uint8Array}) => Promise<void>) | undefined;
+  let releaseAuthorization: (() => void) | undefined;
+  const blocked = new Promise<void>(resolve => {releaseAuthorization = resolve;});
+  const backpressure = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire() {return Uint8Array.of(7);},
+      open_wire() {return Uint8Array.of(8);},
+      revoke() {},
+    },
+    producer: {
+      start(_sources, callback) {emit = callback;},
+      requestVideoKeyframe(streamId) {requests.push(streamId);},
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() {return new Uint8Array(32);}},
+    binding: {tenantId:"tenant",namespaceId:null,callId:"call",
+      groupId:"group",cryptoEpoch:3n,negotiationRef:"current",
+      negotiationGeneration:1n},
+    authorizeFrame: () => true,
+    authorizePublish: async () => {await blocked;return true;},
+    maxPendingFrames: 2,
+  });
+  const frame = (n: bigint) => ({mediaKind:"video" as const,
+    videoSourceKind:"camera" as const,streamId:"camera",timestamp:n,
+    keyframe:false,bytes:Uint8Array.of(1)});
+  try {
+    await backpressure.start({...src,sendEnvelope() {}});
+    assert.ok(emit);
+    const first = emit!(frame(1n));
+    await emit!(frame(2n));
+    await emit!(frame(3n));
+    assert.deepEqual(requests,[],
+      "queue exhaustion must not trigger a keyframe storm during stalled authorization");
+    releaseAuthorization?.();
+    await first;
+    await emit!(frame(4n));
+    assert.deepEqual(requests,["camera"],
+      "protected send after queue recovery must request one keyframe");
+    await emit!(frame(5n));
+    assert.deepEqual(requests,["camera"],"recovery keyframe request is edge-triggered");
+  } finally {
+    releaseAuthorization?.();
+    await backpressure.stop();
+    if (oldProbe) g.ucrEncryptedTransportBufferedAmount=oldProbe;
+    else Reflect.deleteProperty(g,"ucrEncryptedTransportBufferedAmount");
+  }
+}
+
 // Different frames on one DataChannel may finish async trust lookups out of
 // order. The E2EE receiver must commit them in arrival order PER source/stream,
 // without stalling another participant and without weakening replay rejection.

@@ -510,8 +510,9 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     if (!ucrOutboundQueueAllows(frame.mediaKind, this.#pendingOutbound, this.#maxPendingFrames)) {
       if (frame.mediaKind === "video") {
         ucrMediaStageMetrics.videoQueueFull++;
-        this.#producer.requestVideoKeyframe?.(frame.streamId);
-        ucrMediaStageMetrics.videoKeyframeRequests++;
+        // A reference-frame request while authorization is saturated
+        // produces even larger frames. Defer until successful delivery.
+        this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
       } else ucrMediaStageMetrics.audioQueueFull++;
       this.#onError(new Error("outbound endpoint media queue capacity exceeded"));
       return;
@@ -542,8 +543,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         if (metrics) metrics.expiredBeforeSeal++;
         if (frame.mediaKind === "video") {
           ucrMediaStageMetrics.videoExpired++;
-          this.#producer.requestVideoKeyframe?.(frame.streamId);
-          ucrMediaStageMetrics.videoKeyframeRequests++;
+          this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
         } else ucrMediaStageMetrics.audioExpired++;
         return;
       }
@@ -562,8 +562,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         if (metrics) metrics.expiredBeforeSeal++;
         if (frame.mediaKind === "video") {
           ucrMediaStageMetrics.videoExpired++;
-          this.#producer.requestVideoKeyframe?.(frame.streamId);
-          ucrMediaStageMetrics.videoKeyframeRequests++;
+          this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
         } else ucrMediaStageMetrics.audioExpired++;
         return;
       }
