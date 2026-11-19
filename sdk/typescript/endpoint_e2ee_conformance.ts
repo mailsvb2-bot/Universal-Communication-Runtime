@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  ucrOutboundQueueAllows, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { generateKeyPairSync, sign, webcrypto } from "node:crypto";
 import { runInNewContext } from "node:vm";
 
@@ -13,6 +12,7 @@ import {
 import { createUcrEndpointWasmPersistence } from "./src/endpoint_wasm_persistence.ts";
 import {
   UcrPortableEndpointMediaAdapter,
+  ucrOutboundQueueAllows,
   UCR_MEDIA_REPLAY_WINDOW,
 } from "./src/portable_endpoint_media.ts";
 import {
