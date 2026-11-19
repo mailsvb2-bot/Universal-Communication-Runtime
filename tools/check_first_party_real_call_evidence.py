@@ -22,6 +22,8 @@ MAX_E2EE_TO_FIRST_VIDEO_SECONDS = 2.0
 MAX_VIDEO_STALL_MS = 500
 MIN_SUSTAINED_VIDEO_MS = 5000
 MIN_SUSTAINED_VIDEO_FPS = 8
+MIN_SUSTAINED_AUDIO_FPS = 20
+MAX_AUDIO_DROP_FRACTION = 0.05
 MAX_ONE_WAY_AUDIO_MS = 300
 MAX_GLASS_TO_GLASS_VIDEO_MS = 500
 
@@ -129,6 +131,23 @@ def inspect(report: dict, label: str) -> dict[str, object]:
             f"{label}: no remote audio received")
     require(isinstance(audio.get("scheduled"), int) and audio["scheduled"] > 0,
             f"{label}: no remote audio scheduled for playback")
+    require(report.get("audioPlayback") == "running",
+            f"{label}: audio playback not running")
+    # Enough decoded samples must reach the playback scheduler for the full
+    # E2EE-active observation, not merely a single nonzero counter.
+    e2ee_at = _events(report).get("Endpoint E2EE transport active")
+    require(e2ee_at is not None, f"{label}: E2EE timing evidence missing")
+    audio_seconds = (_timestamp(report.get("capturedAt")) - e2ee_at).total_seconds()
+    require(audio_seconds >= 5, f"{label}: insufficient sustained audio observation")
+    audio_fps = audio["scheduled"] / audio_seconds
+    require(audio_fps >= MIN_SUSTAINED_AUDIO_FPS,
+            f"{label}: scheduled audio {audio_fps:.1f}fps below {MIN_SUSTAINED_AUDIO_FPS}fps")
+    dropped_audio = audio.get("dropped")
+    require(isinstance(dropped_audio, int) and dropped_audio >= 0,
+            f"{label}: audio drop evidence missing")
+    drop_fraction = dropped_audio / (dropped_audio + audio["scheduled"])
+    require(drop_fraction <= MAX_AUDIO_DROP_FRACTION,
+            f"{label}: audio drop fraction {drop_fraction:.1%} exceeds {MAX_AUDIO_DROP_FRACTION:.0%}")
     stall = video.get("renderStallMs")
     require(isinstance(stall, (float, int)) and 0 <= stall <= MAX_VIDEO_STALL_MS,
             f"{label}: video stall {stall!r} ms exceeds {MAX_VIDEO_STALL_MS}")
@@ -173,6 +192,8 @@ def inspect(report: dict, label: str) -> dict[str, object]:
             "sustained_video_fps": round(fps, 2),
             "sustained_observation_ms": observed_ms,
             "received_audio_frames": audio["received"],
+            "scheduled_audio_fps": round(audio_fps, 2),
+            "audio_drop_fraction": round(drop_fraction, 4),
             "observed_phases": sorted(events)}
 
 

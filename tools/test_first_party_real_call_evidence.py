@@ -38,8 +38,9 @@ def fixture(elapsed=6, stall=75, audio=True, first_video_delay=1):
         "videoFrames": {"rendered": 120, "renderStallMs": stall,
                         "firstRenderedAt": first_ms, "lastRenderedAt": last_ms},
         "videoVisibility": {"hiddenTotalMs": 0},
-        "audioFrames": {"received": 10 if audio else 0,
-                        "scheduled": 9 if audio else 0},
+        "audioFrames": {"received": 350 if audio else 0,
+                        "scheduled": 345 if audio else 0, "dropped": 1},
+        "audioPlayback": "running",
         "mediaFailure": {"category": None, "stopped": False},
         "recentEvents": events,
     }
@@ -121,6 +122,24 @@ class RealCallEvidenceTest(TestCase):
     def test_audio_without_playback_is_blocked(self):
         with self.assertRaisesRegex(gate.EvidenceError, "remote audio"):
             gate.quality_gate(fixture(audio=False), fixture(), 90, 120)
+
+    def test_audio_that_only_schedules_a_few_packets_is_not_continuous(self):
+        a = fixture()
+        a["audioFrames"]["scheduled"] = 9
+        with self.assertRaisesRegex(gate.EvidenceError, "scheduled audio"):
+            gate.quality_gate(a, fixture(), 90, 120)
+
+    def test_audio_high_dropout_is_blocked(self):
+        a = fixture()
+        a["audioFrames"]["dropped"] = 50
+        with self.assertRaisesRegex(gate.EvidenceError, "audio drop fraction"):
+            gate.quality_gate(a, fixture(), 90, 120)
+
+    def test_inactive_audio_context_cannot_pass(self):
+        a = fixture()
+        a["audioPlayback"] = "suspended"
+        with self.assertRaisesRegex(gate.EvidenceError, "audio playback"):
+            gate.quality_gate(a, fixture(), 90, 120)
 
     def test_visible_video_stall_is_blocked(self):
         with self.assertRaisesRegex(gate.EvidenceError, "video stall"):
