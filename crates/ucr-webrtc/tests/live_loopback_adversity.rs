@@ -123,6 +123,16 @@ fn live_loopback_connects_and_renegotiates_fresh_ice_generation_on_same_session(
             ice_transport_policy: IceTransportPolicy::All,
         };
         let remote = independent_remote_peer().await;
+        // Exercise the REAL independent WebRTC peer rather than just parsing
+        // server source: both DataChannels must be offered on a fresh v2
+        // enabled connection while retaining the v1 compatibility channel.
+        let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        remote.on_data_channel(Box::new(move |channel| {
+            let observed_tx = observed_tx.clone();
+            Box::pin(async move {
+                let _ = observed_tx.send(channel.label().to_owned());
+            })
+        }));
         let unknown_config = WebRtcSessionConfig {
             session_id: SessionId::from_opaque(id("unknown-loopback-session")),
             ..config.clone()
@@ -149,6 +159,29 @@ fn live_loopback_connects_and_renegotiates_fresh_ice_generation_on_same_session(
             .set_remote_description(&initial_answer)
             .expect("apply initial remote answer");
         wait_connected(&remote).await;
+        let v2_enabled = std::env::var("UCR_WEBRTC_E2EE_UNORDERED").map_or(
+            true,
+            |value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"),
+        );
+        let mut seen = BTreeSet::new();
+        let expected = if v2_enabled { 2 } else { 1 };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while seen.len() < expected {
+                if let Some(label) = observed_rx.recv().await {
+                    seen.insert(label);
+                } else {
+                    panic!("remote DataChannel callback closed unexpectedly");
+                }
+            }
+        })
+        .await
+        .expect("live loopback must offer negotiated media DataChannels");
+        assert!(seen.contains("ucr.e2ee.media.v1"));
+        assert_eq!(
+            seen.contains("ucr.e2ee.media.v2"),
+            v2_enabled,
+            "the optional v2 offer must honor the operator's exact toggle"
+        );
 
         let restarted_offer = provider
             .restart_session(&config)
