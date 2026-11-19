@@ -549,8 +549,10 @@ async fn create_unordered_channel(
                         },
                     );
                 }
-                Ok(None) => peer_speaks_v2.store(true, Ordering::SeqCst),
-                Err(_) => {}
+                // An incomplete first fragment is NOT evidence that the peer
+                // can receive an entire v2 envelope. Until a structurally
+                // complete message arrives keep the outbound v1 fallback.
+                Ok(None) | Err(_) => {}
             }
         })
     }));
