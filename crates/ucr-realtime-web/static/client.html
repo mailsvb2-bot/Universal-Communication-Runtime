@@ -207,8 +207,8 @@ function ucrRecordDiagnostic(event,category="runtime"){
 window.ucrFirstAuthenticatedVideoRendered=()=>{
   if(sessionActive&&mediaActive){
     ucrRecordDiagnostic("First authenticated video rendered","media");
-    // A proven rendered remote frame ends the bounded startup roster probe.
-    if(typeof stopInitialVideoRecovery==="function")stopInitialVideoRecovery();
+    // A first frame ends startup latency, but MUST NOT disable the ongoing
+    // bounded liveness monitor; video may stall again after transport loss.
   }
 };
 function ucrIceServerKinds(servers){
