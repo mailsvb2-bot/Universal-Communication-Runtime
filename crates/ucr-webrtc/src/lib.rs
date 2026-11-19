@@ -591,7 +591,9 @@ impl LiveWebRtcProvider {
 
     fn media_offer_id(&self, session_id: &SessionId) -> Result<String, WebRtcProviderError> {
         let key = session_key(session_id);
-        cached_media_offer(&self.media_offer_cache, &key, || self.session_offer_id(session_id))
+        cached_media_offer(&self.media_offer_cache, &key, || {
+            self.session_offer_id(session_id)
+        })
     }
 
     fn invalidate_media_offer(&self, session_id: &SessionId, expected: Option<&str>) {
@@ -740,7 +742,10 @@ impl LiveWebRtcProvider {
         // stale frame and evict that exact cached ID; the NEXT fresh frame
         // reacquires the new fence. Never resend the old frame across restart.
         let result = self.send_e2ee_envelope_if_offer_matches(session_id, &offer_id, envelope);
-        if matches!(result, Err(WebRtcProviderError::SessionUnavailable | WebRtcProviderError::Conflict)) {
+        if matches!(
+            result,
+            Err(WebRtcProviderError::SessionUnavailable | WebRtcProviderError::Conflict)
+        ) {
             self.invalidate_media_offer(session_id, Some(&offer_id));
         }
         result
