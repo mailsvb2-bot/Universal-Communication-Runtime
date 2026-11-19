@@ -101,6 +101,36 @@ async fn wait_connected(remote: &RTCPeerConnection) {
     .expect("loopback peer must establish ICE/DTLS connectivity");
 }
 
+async fn assert_negotiated_e2ee_channels(
+    observed_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
+    let v2_enabled = std::env::var("UCR_WEBRTC_E2EE_UNORDERED").map_or(true, |value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on"
+        )
+    });
+    let mut seen = BTreeSet::new();
+    let expected = if v2_enabled { 2 } else { 1 };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while seen.len() < expected {
+            if let Some(label) = observed_rx.recv().await {
+                seen.insert(label);
+            } else {
+                panic!("remote DataChannel callback closed unexpectedly");
+            }
+        }
+    })
+    .await
+    .expect("live loopback must offer negotiated media DataChannels");
+    assert!(seen.contains("ucr.e2ee.media.v1"));
+    assert_eq!(
+        seen.contains("ucr.e2ee.media.v2"),
+        v2_enabled,
+        "the optional v2 offer must honor the operator's exact toggle"
+    );
+}
+
 #[test]
 fn live_loopback_connects_and_renegotiates_fresh_ice_generation_on_same_session() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -161,31 +191,7 @@ fn live_loopback_connects_and_renegotiates_fresh_ice_generation_on_same_session(
             .set_remote_description(&initial_answer)
             .expect("apply initial remote answer");
         wait_connected(&remote).await;
-        let v2_enabled = std::env::var("UCR_WEBRTC_E2EE_UNORDERED").map_or(true, |value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "on"
-            )
-        });
-        let mut seen = BTreeSet::new();
-        let expected = if v2_enabled { 2 } else { 1 };
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while seen.len() < expected {
-                if let Some(label) = observed_rx.recv().await {
-                    seen.insert(label);
-                } else {
-                    panic!("remote DataChannel callback closed unexpectedly");
-                }
-            }
-        })
-        .await
-        .expect("live loopback must offer negotiated media DataChannels");
-        assert!(seen.contains("ucr.e2ee.media.v1"));
-        assert_eq!(
-            seen.contains("ucr.e2ee.media.v2"),
-            v2_enabled,
-            "the optional v2 offer must honor the operator's exact toggle"
-        );
+        assert_negotiated_e2ee_channels(&mut observed_rx).await;
 
         let restarted_offer = provider
             .restart_session(&config)
