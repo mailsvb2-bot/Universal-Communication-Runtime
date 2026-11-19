@@ -86,7 +86,7 @@ class RealCallEvidenceTest(TestCase):
                 "preDisconnect": deepcopy(original)}
         self.assertEqual(gate.quality_gate(post, fixture(), 90, 120)["quality_gate"], "pass")
         post["capturedAt"] = (datetime.fromisoformat(original["capturedAt"]) +
-                              timedelta(seconds=30)).isoformat()
+                              timedelta(seconds=180)).isoformat()
         with self.assertRaisesRegex(gate.EvidenceError, "snapshot stale"):
             gate.quality_gate(post, fixture(), 90, 120)
 
