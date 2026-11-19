@@ -1064,7 +1064,13 @@ mod tests {
         assert_eq!(sender.capacity(), MAX_E2EE_INGRESS_AUDIO_RESERVE);
         for _ in 0..video_budget {
             assert_eq!(
-                receiver.try_recv().unwrap().envelope.frame.header.media_kind,
+                receiver
+                    .try_recv()
+                    .unwrap()
+                    .envelope
+                    .frame
+                    .header
+                    .media_kind,
                 MediaKind::Video,
             );
         }
@@ -1079,7 +1085,13 @@ mod tests {
             },
         );
         assert_eq!(
-            receiver.try_recv().unwrap().envelope.frame.header.media_kind,
+            receiver
+                .try_recv()
+                .unwrap()
+                .envelope
+                .frame
+                .header
+                .media_kind,
             MediaKind::Audio,
         );
     }
@@ -1095,7 +1107,13 @@ mod tests {
             },
         );
         assert_eq!(
-            receiver.try_recv().unwrap().envelope.frame.header.media_kind,
+            receiver
+                .try_recv()
+                .unwrap()
+                .envelope
+                .frame
+                .header
+                .media_kind,
             MediaKind::Video,
         );
     }
