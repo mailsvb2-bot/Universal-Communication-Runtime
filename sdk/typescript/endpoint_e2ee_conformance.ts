@@ -12,6 +12,7 @@ import {
 import { createUcrEndpointWasmPersistence } from "./src/endpoint_wasm_persistence.ts";
 import {
   UcrPortableEndpointMediaAdapter,
+  ucrOutboundQueueAllows,
   UCR_MEDIA_REPLAY_WINDOW,
 } from "./src/portable_endpoint_media.ts";
 import {
@@ -2393,11 +2394,17 @@ assert.equal(ucrVideoAllowsH264({codec:"h264"}),false,
   "reject implicit H264 preferences in an untrusted browser object");
 assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
 assert.deepEqual(ucrAdaptiveVideoStep(0, 1_500_000, 0, 0), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(0, 192 * 1024, 0, 0), {stage:1, healthySamples:0},
+  "real video ceiling is 256 KiB; source must adapt before crossing it");
+assert.deepEqual(ucrAdaptiveVideoStep(1, 64 * 1024, 0, 4), {stage:1, healthySamples:0},
+  "moderate reliable-channel backlog must prevent premature upshift");
+assert.deepEqual(ucrAdaptiveVideoStep(0, 128 * 1024, 0, 0), {stage:0, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(1, 1_500_000, 0, 0), {stage:2, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(2, 1_500_000, 0, 0), {stage:2, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(2, 0, 0, 4), {stage:1, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(1, 0, 0, 4), {stage:0, healthySamples:0});
-assert.deepEqual(ucrAdaptiveVideoStep(1, 300_000, 0, 4), {stage:1, healthySamples:0});
+assert.deepEqual(ucrAdaptiveVideoStep(1, 300_000, 0, 4), {stage:2, healthySamples:0},
+  "congested 300 KiB buffer must escalate quality reduction under the new 192 KiB threshold");
 assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 2, 0), {stage:1, healthySamples:0});
 assert.deepEqual(ucrAdaptiveVideoStep(0, 0, 0, 0, true), {stage:1, healthySamples:0},
   "local encode pressure must reduce quality without transport congestion");
@@ -2424,6 +2431,31 @@ assert.match(codecProducerSource,
 assert.match(codecProducerSource,
   /const transportPressure = readTransportCongestion\(\)/,
   "the actual send rejection counter must feed the source-owned controller");
+assert.match(codecProducerSource, /VIDEO_KEYFRAME_INTERVAL_US = 2_000_000/,
+  "steady-state lost-reference recovery must not wait the prior three seconds");
+assert.equal(ucrOutboundQueueAllows("video", 0, 64), true);
+assert.equal(ucrOutboundQueueAllows("video", 47, 64), true);
+assert.equal(ucrOutboundQueueAllows("video", 48, 64), false,
+  "video must yield final sixteen async send slots to Opus");
+assert.equal(ucrOutboundQueueAllows("audio", 48, 64), true);
+assert.equal(ucrOutboundQueueAllows("audio", 63, 64), true);
+assert.equal(ucrOutboundQueueAllows("audio", 64, 64), false);
+assert.equal(ucrOutboundQueueAllows("video", 0, 2), true);
+assert.equal(ucrOutboundQueueAllows("video", 1, 2), false);
+assert.equal(ucrOutboundQueueAllows("audio", 1, 2), true);
+assert.equal(ucrOutboundQueueAllows("video", 0, 1), true);
+assert.throws(() => ucrOutboundQueueAllows("audio", -1, 64), /invalid media queue/);
+const endpointPipelineSource = readFileSync("sdk/typescript/src/portable_endpoint_media.ts", "utf8");
+assert.match(endpointPipelineSource,
+  /!ucrOutboundQueueAllows\(frame\.mediaKind, this\.#pendingOutbound, this\.#maxPendingFrames\)/,
+  "the real endpoint send path must reserve fresh-audio capacity during video bursts");
+assert.match(endpointPipelineSource, /this\.#videoBackpressureNeedsKeyframe\.add\(frame\.streamId\)/,
+  "closed and congested channels must both schedule a replacement publisher keyframe");
+const conferenceSource = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
+assert.match(conferenceSource, /const freshSince=Math\.max\(activatedAt,lastRenderedAt\)/,
+  "receiver must continue monitoring real rendered video across the whole call");
+assert.match(conferenceSource, /if\(document\.hidden\)return;/,
+  "background tab intentionally skipped rendering cannot be mistaken for packet loss");
 
 
 const endpointQualityCalls: string[] = [];
@@ -3259,6 +3291,65 @@ for (const [name, publish, seal, transport] of [
   } finally {
     await recovery.stop();
     if (oldProbe) g.ucrEncryptedTransportBufferedAmount = oldProbe;
+    else Reflect.deleteProperty(g,"ucrEncryptedTransportBufferedAmount");
+  }
+}
+
+// A full outbound authorization queue must not demand a large reference frame
+// while the queue is blocked. Request one reference only after sending recovers.
+{
+  const g = globalThis as unknown as {
+    ucrEncryptedTransportBufferedAmount?: () => number;
+  };
+  const oldProbe = g.ucrEncryptedTransportBufferedAmount;
+  g.ucrEncryptedTransportBufferedAmount = () => 0;
+  const requests: string[] = [];
+  let emit: ((frame: {mediaKind:"video";videoSourceKind:"camera";streamId:string;
+    timestamp:bigint;keyframe:boolean;bytes:Uint8Array}) => void | Promise<void>) | undefined;
+  let releaseAuthorization: (() => void) | undefined;
+  const blocked = new Promise<void>(resolve => {releaseAuthorization = resolve;});
+  const backpressure = new UcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire() {return Uint8Array.of(7);},
+      open_wire() {return Uint8Array.of(8);},
+      revoke() {},
+    },
+    producer: {
+      start(_sources, callback) {emit = callback;},
+      requestVideoKeyframe(streamId) {requests.push(streamId);},
+      stop() {},
+    },
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() {return new Uint8Array(32);}},
+    binding: {tenantId:"tenant",namespaceId:null,callId:"call",
+      groupId:"group",cryptoEpoch:3n,negotiationRef:"current",
+      negotiationGeneration:1n},
+    authorizeFrame: () => true,
+    authorizePublish: async () => {await blocked;return true;},
+    maxPendingFrames: 2,
+  });
+  const frame = (n: bigint) => ({mediaKind:"video" as const,
+    videoSourceKind:"camera" as const,streamId:"camera",timestamp:n,
+    keyframe:false,bytes:Uint8Array.of(1)});
+  try {
+    await backpressure.start({...src,sendEnvelope() {}});
+    assert.ok(emit);
+    const first = emit!(frame(1n));
+    await emit!(frame(2n));
+    await emit!(frame(3n));
+    assert.deepEqual(requests,[],
+      "queue exhaustion must not trigger a keyframe storm during stalled authorization");
+    releaseAuthorization?.();
+    await first;
+    await emit!(frame(4n));
+    assert.deepEqual(requests,["camera"],
+      "protected send after queue recovery must request one keyframe");
+    await emit!(frame(5n));
+    assert.deepEqual(requests,["camera"],"recovery keyframe request is edge-triggered");
+  } finally {
+    releaseAuthorization?.();
+    await backpressure.stop();
+    if (oldProbe) g.ucrEncryptedTransportBufferedAmount=oldProbe;
     else Reflect.deleteProperty(g,"ucrEncryptedTransportBufferedAmount");
   }
 }

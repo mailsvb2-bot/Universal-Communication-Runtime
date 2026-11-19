@@ -303,8 +303,9 @@ export function ucrTransportCongestionDelta(
   if (current! < previous) return {pressure: false, baseline: current!};
   return {pressure: current! > previous, baseline: current!};
 }
-/** Source-owned congestion adaptation. Only verified encrypted transport queue
- * depth and local encoder pressure influence publish quality. Never change MLS
+/** Source-owned congestion adaptation. Use thresholds below the canonical
+ * 256 KiB video send ceiling so adaptation can react BEFORE hard rejection.
+ * Only verified encrypted transport queue depth and local encoder pressure influence publish quality. Never change MLS
  * keys, Device authority, or a different participant's receive policy.
  */
 export function ucrAdaptiveVideoStep(
@@ -315,9 +316,9 @@ export function ucrAdaptiveVideoStep(
       stage < 0 || stage > 2 || bufferedBytes < 0 || encoderQueued < 0) {
     throw new Error("invalid video congestion sample");
   }
-  if (devicePressure || bufferedBytes > 1_048_576 || encoderQueued >= 2)
+  if (devicePressure || bufferedBytes >= 192 * 1024 || encoderQueued >= 2)
     return {stage: Math.min(2, stage + 1), healthySamples: 0};
-  if (bufferedBytes > 256_000 || encoderQueued >= 1)
+  if (bufferedBytes >= 64 * 1024 || encoderQueued >= 1)
     return {stage, healthySamples: 0};
   const next = healthySamples + 1;
   return next >= 5 && stage > 0 ?
@@ -391,8 +392,8 @@ export function ucrAdvanceVideoPacing(
 // for many seconds after someone joins.
 // No confirmed receiver-to-sender keyframe request for joining/rekeying peers.
 // Bound decoder recovery at startup, then reduce steady-state refresh overhead.
-const VIDEO_KEYFRAME_INTERVAL_US = 3_000_000;
-const VIDEO_STARTUP_KEYFRAME_INTERVAL_US = 1_000_000;
+const VIDEO_KEYFRAME_INTERVAL_US = 2_000_000;
+const VIDEO_STARTUP_KEYFRAME_INTERVAL_US = 750_000;
 const VIDEO_STARTUP_WINDOW_US = 5_000_000;
 
 /** Stable, bounded stream identity for one actual encrypted camera quality layer.

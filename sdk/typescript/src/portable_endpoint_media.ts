@@ -150,6 +150,28 @@ const ucrMediaStageMetrics = {
 (globalThis as unknown as {__ucrMediaStageMetrics?: typeof ucrMediaStageMetrics})
   .__ucrMediaStageMetrics = ucrMediaStageMetrics;
 
+/** Shared crypto/authorization queue admission. Reserve bounded slots for
+ * fresh Opus frames: a video burst must not monopolize the async sealing
+ * pipeline before a microphone frame reaches the same ordered transport.
+ * Only capacity policy; all frames still use the one canonical E2EE path.
+ */
+export function ucrOutboundQueueAllows(
+  kind: "audio" | "video", pending: number, capacity: number,
+): boolean {
+  if (!Number.isSafeInteger(pending) || pending < 0 ||
+      !Number.isSafeInteger(capacity) || capacity < 1 ||
+      (kind !== "audio" && kind !== "video")) {
+    throw new Error("invalid media queue admission sample");
+  }
+  if (pending >= capacity) return false;
+  if (kind === "audio") return true;
+  // Preserve at least one audio slot in small queues, up to sixteen in
+  // production's default 64-frame budget.
+  const audioReserve = capacity > 1
+    ? Math.min(16, Math.max(1, Math.floor(capacity / 4))) : 0;
+  return pending < capacity - audioReserve;
+}
+
 export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1 {
   readonly contractVersion = UCR_ENDPOINT_E2EE_CONTRACT_VERSION;
   readonly #bridge: UcrGroupMediaCryptoBridge;
@@ -485,11 +507,12 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       this.#onError(new Error("invalid encoded media metadata"));
       return;
     }
-    if (this.#pendingOutbound >= this.#maxPendingFrames) {
+    if (!ucrOutboundQueueAllows(frame.mediaKind, this.#pendingOutbound, this.#maxPendingFrames)) {
       if (frame.mediaKind === "video") {
         ucrMediaStageMetrics.videoQueueFull++;
-        this.#producer.requestVideoKeyframe?.(frame.streamId);
-        ucrMediaStageMetrics.videoKeyframeRequests++;
+        // A reference-frame request while authorization is saturated
+        // produces even larger frames. Defer until successful delivery.
+        this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
       } else ucrMediaStageMetrics.audioQueueFull++;
       this.#onError(new Error("outbound endpoint media queue capacity exceeded"));
       return;
@@ -520,8 +543,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         if (metrics) metrics.expiredBeforeSeal++;
         if (frame.mediaKind === "video") {
           ucrMediaStageMetrics.videoExpired++;
-          this.#producer.requestVideoKeyframe?.(frame.streamId);
-          ucrMediaStageMetrics.videoKeyframeRequests++;
+          this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
         } else ucrMediaStageMetrics.audioExpired++;
         return;
       }
@@ -540,8 +562,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         if (metrics) metrics.expiredBeforeSeal++;
         if (frame.mediaKind === "video") {
           ucrMediaStageMetrics.videoExpired++;
-          this.#producer.requestVideoKeyframe?.(frame.streamId);
-          ucrMediaStageMetrics.videoKeyframeRequests++;
+          this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
         } else ucrMediaStageMetrics.audioExpired++;
         return;
       }
@@ -607,8 +628,12 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       if (outboundStage === "DATACHANNEL_SEND" &&
           (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED" ||
            transportCode === "UCR_TRANSPORT_CHANNEL_CLOSED")) {
+        if (frame.mediaKind === "video") {
+          // A closed channel can lose the reference frame just like congestion.
+          // Keep the recovery request pending across the new transport epoch.
+          this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
+        }
         if (transportCode === "UCR_TRANSPORT_QUEUE_CONGESTED") {
-          if (frame.mediaKind === "video") this.#videoBackpressureNeedsKeyframe.add(frame.streamId);
           const notice = (globalThis as unknown as {
             ucrEndpointMediaCongestion?: (kind: string) => void;
           }).ucrEndpointMediaCongestion;

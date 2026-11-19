@@ -207,8 +207,8 @@ function ucrRecordDiagnostic(event,category="runtime"){
 window.ucrFirstAuthenticatedVideoRendered=()=>{
   if(sessionActive&&mediaActive){
     ucrRecordDiagnostic("First authenticated video rendered","media");
-    // A proven rendered remote frame ends the bounded startup roster probe.
-    if(typeof stopInitialVideoRecovery==="function")stopInitialVideoRecovery();
+    // A first frame ends startup latency, but MUST NOT disable the ongoing
+    // bounded liveness monitor; video may stall again after transport loss.
   }
 };
 function ucrIceServerKinds(servers){
@@ -3588,24 +3588,36 @@ function startInitialVideoRecovery(){
   if(!sessionActive||!mediaActive||!e2eeAdapterReady||
       (claims?.call_id?.startsWith("fp-m-")&&firstPartyAcceptedMediaKind!=="video"))return;
   const session=claims,channel=e2eeChannel,generation=sessionLifecycleGeneration;
-  const deadline=Date.now()+12000;
-  // A prior rendered frame is not proof that the current restored transport
-  // has fresh video. Require progress since THIS activation, including after
-  // an ICE/DTLS reconnect which reuses the protected decoder instance.
-  const previousRenderAt=Number(window.__ucrVideoCounters?.lastRenderedAt)||0;
+  const activatedAt=Date.now();
+  // A frame from the previous transport is not recovery proof. Keep checking
+  // actual rendering throughout the live call, not just for the first 12s.
+  // Periodic authenticated roster synchronization is bounded and does NOT
+  // request a different sender's keyframe without its authorization.
+  let lastRenderedAt=Number(window.__ucrVideoCounters?.lastRenderedAt)||0;
+  let lastRecoveryAt=0;
   initialVideoRecoveryTimer=setInterval(()=>{
-    const currentRenderAt=Number(window.__ucrVideoCounters?.lastRenderedAt)||0;
     if(generation!==sessionLifecycleGeneration||claims!==session||
         !sessionActive||!mediaActive||!e2eeAdapterReady||
-        e2eeChannel!==channel||channel?.readyState!=="open"||
-        Date.now()>=deadline||currentRenderAt>previousRenderAt){
+        e2eeChannel!==channel||channel?.readyState!=="open"){
       stopInitialVideoRecovery();return;
     }
-    // The existing receiveRosterInFlight fence prevents overlapping reads.
-    syncReceiveSubscriptions().catch(()=>{});
-  },700);
+    // Hidden-tab painting is deliberately suppressed by WebCodecs.
+    if(document.hidden)return;
+    const now=Date.now();
+    const currentRenderAt=Number(window.__ucrVideoCounters?.lastRenderedAt)||0;
+    if(currentRenderAt>lastRenderedAt)lastRenderedAt=currentRenderAt;
+    const freshSince=Math.max(activatedAt,lastRenderedAt);
+    if(now-freshSince<3000)return;
+    const initial=lastRenderedAt<activatedAt&&now-activatedAt<12000;
+    const cooldown=initial?1500:8000;
+    if(now-lastRecoveryAt<cooldown)return;
+    lastRecoveryAt=now;
+    // Reuse canonical authenticated subscriptions; never invent a peer,
+    // bypass MLS, or pretend a roster retry is remote-keyframe feedback.
+    syncReceiveSubscriptions(null,true).catch(()=>{});
+  },750);
 }
-async function syncReceiveSubscriptions(preparedRoster=null){
+async function syncReceiveSubscriptions(preparedRoster=null,recoverStalledVideo=false){
   if(!sessionActive||!mediaActive||!e2eeAdapterReady||receiveRosterInFlight||
       e2eeChannel?.readyState!=="open")return;
   const generation=receiveRosterGeneration,session=claims,channel=e2eeChannel;
@@ -3627,6 +3639,11 @@ async function syncReceiveSubscriptions(preparedRoster=null){
     const peerArrived=sources.some(source=>!receiveRosterSources.some(old=>
       old.source_id===source.source_id&&old.source_kind===source.source_kind));
     receiveRosterSources=sources;
+    // A stalled call with an unchanged roster must still resend its canonical
+    // SFU subscription. The ordinary fingerprint fast-path otherwise turns
+    // every liveness retry into a no-op while the receiver stays black.
+    // The existing generation/channel fences and 8s cooldown remain intact.
+    if(recoverStalledVideo)receiveSubscriptionFingerprint=null;
     await applyReceiveSubscriptions(sources,receiveSpeakerId,generation,session,channel);
     if(peerArrived&&sessionActive&&mediaActive&&e2eeAdapterReady&&
         generation===receiveRosterGeneration&&claims===session&&

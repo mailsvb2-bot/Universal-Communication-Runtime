@@ -288,17 +288,26 @@ fn ci_runner_bootstrap_prefers_preinstalled_tools_and_bounds_apt_network_calls()
         "CI workflows must not depend on an unbounded apt update/install chain"
     );
 
+    // APT must remain bounded AND recover from the hosted runner's
+    // transient mirror+file 503 without disabling Ubuntu archive signatures.
     for invariant in [
-        "Acquire::Retries=3",
-        "Acquire::http::Timeout=20",
-        "Acquire::https::Timeout=20",
-        "timeout 120s",
-        "timeout 180s",
-        "apt install attempt",
+        "Acquire::Retries=1",
+        "Acquire::http::Timeout=15",
+        "Acquire::https::Timeout=15",
+        "timeout 75s",
+        "timeout 110s",
+        "official Ubuntu APT fallback attempt",
+        "Dir::Etc::sourcelist=",
+        "Dir::Etc::sourceparts=-",
+        "signed-by=$keyring",
+        "ubuntu-archive-keyring.gpg",
+        "https://archive.ubuntu.com/ubuntu",
+        "https://security.ubuntu.com/ubuntu",
+        "apt install failed on runner and official signed Ubuntu sources",
     ] {
         assert!(
             apt_installer.contains(invariant),
-            "missing bounded apt installer invariant {invariant}"
+            "missing bounded and signed APT fallback invariant {invariant}"
         );
     }
 }

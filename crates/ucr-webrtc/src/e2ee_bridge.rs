@@ -55,6 +55,9 @@ fn record_ingress_overflow(error: mpsc::error::TrySendError<WebRtcE2eeIngressFra
 
 pub const WEBRTC_E2EE_DATA_CHANNEL_LABEL: &str = "ucr.e2ee.media.v1";
 pub const LIVE_WEBRTC_E2EE_INGRESS_CAPACITY: usize = 128;
+// Video admission must leave queue room for time-sensitive audio. This is
+// a bounded transport preference, never a substitute for MLS authorization.
+const MAX_E2EE_INGRESS_AUDIO_RESERVE: usize = 16;
 pub const MAX_WEBRTC_E2EE_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_WEBRTC_E2EE_WIRE_BYTES: usize = MAX_SFU_FORWARD_WIRE_BYTES;
 pub const MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES: usize = 16_000;
@@ -67,6 +70,28 @@ const WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES: usize =
 pub struct WebRtcE2eeIngressFrame {
     pub session_id: SessionId,
     pub envelope: SfuForwardEnvelope,
+}
+
+fn enqueue_ingress_with_audio_reserve(
+    sender: &mpsc::Sender<WebRtcE2eeIngressFrame>,
+    frame: WebRtcE2eeIngressFrame,
+) {
+    // Sender capacity is the *available* free space. Preserve at least one
+    // slot at small capacities and at most 16 for the normal 128-frame queue.
+    // Audio always remains subject to the actual bounded channel capacity.
+    let capacity = sender.max_capacity();
+    let reserve = if capacity > 1 {
+        (capacity / 4).clamp(1, MAX_E2EE_INGRESS_AUDIO_RESERVE)
+    } else {
+        0
+    };
+    if frame.envelope.frame.header.media_kind == MediaKind::Video && sender.capacity() <= reserve {
+        E2EE_INGRESS_VIDEO_FULL.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if let Err(error) = sender.try_send(frame) {
+        record_ingress_overflow(error);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,13 +435,14 @@ pub(crate) async fn create_live_e2ee_data_channel(
                 let mut reassembler = reassembler.lock().await;
                 reassembler.push_chunk(&message.data)
             };
-            if let Ok(Some(envelope)) = decoded
-                && let Err(error) = ingress_tx.try_send(WebRtcE2eeIngressFrame {
-                    session_id,
-                    envelope,
-                })
-            {
-                record_ingress_overflow(error);
+            if let Ok(Some(envelope)) = decoded {
+                enqueue_ingress_with_audio_reserve(
+                    &ingress_tx,
+                    WebRtcE2eeIngressFrame {
+                        session_id,
+                        envelope,
+                    },
+                );
             }
         })
     }));
@@ -486,12 +512,13 @@ async fn create_unordered_channel(
             match decoded {
                 Ok(Some(envelope)) => {
                     peer_speaks_v2.store(true, Ordering::SeqCst);
-                    if let Err(error) = ingress_tx.try_send(WebRtcE2eeIngressFrame {
-                        session_id,
-                        envelope,
-                    }) {
-                        record_ingress_overflow(error);
-                    }
+                    enqueue_ingress_with_audio_reserve(
+                        &ingress_tx,
+                        WebRtcE2eeIngressFrame {
+                            session_id,
+                            envelope,
+                        },
+                    );
                 }
                 Ok(None) => peer_speaks_v2.store(true, Ordering::SeqCst),
                 Err(_) => {}
@@ -968,6 +995,126 @@ mod tests {
             .expect("stale close must not cancel current send");
 
         assert_eq!(task.await.expect("send task"), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn video_ingress_burst_preserves_audio_queue_slot() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        let session_id = SessionId::from_opaque(id("test-session"));
+        for _ in 0..4 {
+            enqueue_ingress_with_audio_reserve(
+                &sender,
+                WebRtcE2eeIngressFrame {
+                    session_id: session_id.clone(),
+                    envelope: envelope(),
+                },
+            );
+        }
+        // The fourth video is shed; a following audio packet still enters.
+        assert_eq!(sender.capacity(), 1);
+        let mut audio = envelope();
+        audio.frame.header.media_kind = MediaKind::Audio;
+        enqueue_ingress_with_audio_reserve(
+            &sender,
+            WebRtcE2eeIngressFrame {
+                session_id,
+                envelope: audio,
+            },
+        );
+        assert_eq!(sender.capacity(), 0);
+        for _ in 0..3 {
+            assert_eq!(
+                receiver
+                    .try_recv()
+                    .unwrap()
+                    .envelope
+                    .frame
+                    .header
+                    .media_kind,
+                MediaKind::Video,
+            );
+        }
+        assert_eq!(
+            receiver
+                .try_recv()
+                .unwrap()
+                .envelope
+                .frame
+                .header
+                .media_kind,
+            MediaKind::Audio,
+        );
+    }
+
+    #[tokio::test]
+    async fn video_ingress_reserve_scales_at_production_capacity() {
+        let (sender, mut receiver) = mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
+        let session_id = SessionId::from_opaque(id("test-session"));
+        let video_budget = LIVE_WEBRTC_E2EE_INGRESS_CAPACITY - MAX_E2EE_INGRESS_AUDIO_RESERVE;
+        for _ in 0..LIVE_WEBRTC_E2EE_INGRESS_CAPACITY {
+            enqueue_ingress_with_audio_reserve(
+                &sender,
+                WebRtcE2eeIngressFrame {
+                    session_id: session_id.clone(),
+                    envelope: envelope(),
+                },
+            );
+        }
+        assert_eq!(sender.capacity(), MAX_E2EE_INGRESS_AUDIO_RESERVE);
+        for _ in 0..video_budget {
+            assert_eq!(
+                receiver
+                    .try_recv()
+                    .unwrap()
+                    .envelope
+                    .frame
+                    .header
+                    .media_kind,
+                MediaKind::Video,
+            );
+        }
+        assert!(receiver.try_recv().is_err());
+        let mut audio = envelope();
+        audio.frame.header.media_kind = MediaKind::Audio;
+        enqueue_ingress_with_audio_reserve(
+            &sender,
+            WebRtcE2eeIngressFrame {
+                session_id,
+                envelope: audio,
+            },
+        );
+        assert_eq!(
+            receiver
+                .try_recv()
+                .unwrap()
+                .envelope
+                .frame
+                .header
+                .media_kind,
+            MediaKind::Audio,
+        );
+    }
+
+    #[tokio::test]
+    async fn single_slot_ingress_does_not_starve_all_video() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        enqueue_ingress_with_audio_reserve(
+            &sender,
+            WebRtcE2eeIngressFrame {
+                session_id: SessionId::from_opaque(id("test-session")),
+                envelope: envelope(),
+            },
+        );
+        assert_eq!(
+            receiver
+                .try_recv()
+                .unwrap()
+                .envelope
+                .frame
+                .header
+                .media_kind,
+            MediaKind::Video,
+        );
     }
 
     fn envelope() -> SfuForwardEnvelope {

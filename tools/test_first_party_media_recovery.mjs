@@ -142,8 +142,8 @@ console.log("PASS: timestamped offer/capture/SDP milestones locate ICE startup d
 
 // First-pixel latency: once permitted capture has returned, UI device
 // enumeration must not block the server offer/SDP. After E2EE opens, a
-// bounded first-frame recovery retries only canonical authorized subscription
-// reads and stops as soon as a real authenticated frame was drawn.
+// bounded receive-side liveness recovery retries only canonical authorized
+// subscriptions. First paint is not proof that later video cannot stall.
 const localCaptureStart=html.indexOf("async function captureLocalMedia(force){");
 const localCaptureEnd=html.indexOf("async function ensureLocalTrack(kind){",localCaptureStart);
 assert.ok(localCaptureStart>=0&&localCaptureEnd>localCaptureStart);
@@ -155,21 +155,28 @@ const firstFrameRecoveryStart=html.indexOf("function startInitialVideoRecovery()
 const firstFrameRecoveryEnd=html.indexOf("async function syncReceiveSubscriptions(",firstFrameRecoveryStart);
 assert.ok(firstFrameRecoveryStart>=0&&firstFrameRecoveryEnd>firstFrameRecoveryStart);
 const firstFrameRecovery=html.slice(firstFrameRecoveryStart,firstFrameRecoveryEnd);
-assert.match(firstFrameRecovery,/deadline=Date\.now\(\)\+12000/);
-assert.match(firstFrameRecovery,/previousRenderAt=Number\(window\.__ucrVideoCounters\?\.lastRenderedAt\)/);
-assert.match(firstFrameRecovery,/currentRenderAt>previousRenderAt/,
-  "reconnected call needs a newly rendered frame, not historic firstRenderedAt");
-assert.match(firstFrameRecovery,/syncReceiveSubscriptions\(\)/);
+assert.match(firstFrameRecovery,/const activatedAt=Date\.now\(\)/);
+assert.match(firstFrameRecovery,/const freshSince=Math\.max\(activatedAt,lastRenderedAt\)/,
+  "reconnected call needs a freshly rendered frame, not historic firstRenderedAt");
+assert.match(firstFrameRecovery,/if\(document\.hidden\)return;/,
+  "hidden video must not be marked stalled when the browser suppresses rendering");
+assert.match(firstFrameRecovery,/const cooldown=initial\?1500:8000/,
+  "continuous video recovery must bound authenticated subscription polling");
+assert.match(firstFrameRecovery,/syncReceiveSubscriptions\(null,true\)/,
+  "a verified stall must explicitly request a canonical subscription refresh");
 assert.match(firstFrameRecovery,/firstPartyAcceptedMediaKind!=="video"/,
   "explicit audio-only Direct Call must not poll video");
 assert.doesNotMatch(firstFrameRecovery,/!policyAllows\("camera"\)/,
   "receive-only spectators must recover video without publisher camera permission");
 assert.doesNotMatch(firstFrameRecovery,/\/v1\/realtime\/media\/publish|\.seal_wire\(/);
-assert.match(html,/window\.ucrFirstAuthenticatedVideoRendered=\(\)=>\{[\s\S]*?stopInitialVideoRecovery\(\)/);
+const firstPaintCallback=html.slice(html.indexOf("window.ucrFirstAuthenticatedVideoRendered=()=>{"),
+  html.indexOf("function ucrIceServerKinds(",html.indexOf("window.ucrFirstAuthenticatedVideoRendered=()=>{")));
+assert.doesNotMatch(firstPaintCallback,/stopInitialVideoRecovery\(/,
+  "first rendered frame must not stop later stall recovery");
 const firstFrameActivations=(html.match(/startInitialVideoRecovery\(\);/g)||[]).length;
 assert.equal(firstFrameActivations,2,
   "initial and reconnected E2EE must each recover first-video subscriptions");
-console.log("PASS: capture does not wait for device enumeration; first-frame recovery is bounded, authenticated and stops on actual canvas rendering");
+console.log("PASS: capture does not wait for enumeration; bounded authorized video recovery survives first render");
 
 
 // Exercise the actual canonical receive-roster handler: one new admitted peer
@@ -185,6 +192,7 @@ const channel={readyState:"open"};
 const rosterCtx={
   sessionActive:true,mediaActive:true,e2eeAdapterReady:true,receiveRosterInFlight:false,
   receiveRosterGeneration:7,claims:mediaSession,e2eeChannel:channel,
+  receiveSubscriptionFingerprint:"cached-selection",
   receiveRosterSources:[],receiveSpeakerId:null,
   body:()=>({}),api:async()=>{rosterFetches++;return {json:async()=>({ok:true,sources:[
     {source_id:"authenticated-peer",source_kind:1},
@@ -201,13 +209,19 @@ await rosterCtx.sync();
 assert.equal(refreshes,1,"identical roster must not regenerate reference frames");
 assert.equal(subscriptions,2);
 assert.equal(rosterFetches,2);
+rosterCtx.receiveSubscriptionFingerprint="cached-selection";
+await rosterCtx.sync(null,true);
+assert.equal(rosterCtx.receiveSubscriptionFingerprint,null,
+  "stalled video must invalidate the canonical subscription fingerprint");
+assert.equal(subscriptions,3,
+  "stalled video must reapply subscriptions even when roster did not change");
 await rosterCtx.sync(Promise.resolve({ok:true,sources:[
   {source_id:"authenticated-peer",source_kind:1},
 ]}));
-assert.equal(rosterFetches,2,
+assert.equal(rosterFetches,3,
   "a valid early canonical roster must avoid an extra critical-path HTTP request");
 await rosterCtx.sync(Promise.resolve(null));
-assert.equal(rosterFetches,3,
+assert.equal(rosterFetches,4,
   "failed early prefetch must re-read canonical authorization before subscribing");
 rosterCtx.e2eeChannel={readyState:"closed"};
 await rosterCtx.sync();

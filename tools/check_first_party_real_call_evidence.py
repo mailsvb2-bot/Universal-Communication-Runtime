@@ -20,6 +20,10 @@ MAX_JOIN_TO_E2EE_SECONDS = 10.0
 MAX_JOIN_TO_FIRST_VIDEO_SECONDS = 8.0
 MAX_E2EE_TO_FIRST_VIDEO_SECONDS = 2.0
 MAX_VIDEO_STALL_MS = 500
+MIN_SUSTAINED_VIDEO_MS = 5000
+MIN_SUSTAINED_VIDEO_FPS = 8
+MIN_SUSTAINED_AUDIO_FPS = 20
+MAX_AUDIO_DROP_FRACTION = 0.05
 MAX_ONE_WAY_AUDIO_MS = 300
 MAX_GLASS_TO_GLASS_VIDEO_MS = 500
 
@@ -66,7 +70,25 @@ def _events(report: dict) -> dict[str, datetime]:
     return found
 
 
+def _active_snapshot(report: dict, label: str) -> dict:
+    # The Save diagnostics action may run just after Leave. The frozen
+    # preDisconnect snapshot is the actual authenticated in-call measurement;
+    # the post-Leave root intentionally has revoked media and reset counters.
+    auth = report.get("authorization") or {}
+    if auth.get("sessionActive") is True:
+        return report
+    earlier = report.get("preDisconnect")
+    require(isinstance(earlier, dict), f"{label}: no active media snapshot")
+    require(earlier.get("schema") == SCHEMA and earlier.get("page") == "conference",
+            f"{label}: malformed pre-disconnect snapshot")
+    age = (_timestamp(report.get("capturedAt")) -
+           _timestamp(earlier.get("capturedAt"))).total_seconds()
+    require(0 <= age <= 120, f"{label}: pre-disconnect snapshot stale")
+    return earlier
+
+
 def inspect(report: dict, label: str) -> dict[str, object]:
+    report = _active_snapshot(report, label)
     require(report.get("schema") == SCHEMA and report.get("page") == "conference",
             f"{label}: not a conference diagnostics export")
     auth = report.get("authorization") or {}
@@ -84,10 +106,48 @@ def inspect(report: dict, label: str) -> dict[str, object]:
     audio = report.get("audioFrames") or {}
     require(isinstance(video.get("rendered"), int) and video["rendered"] > 0,
             f"{label}: no remote video rendered")
+    # First-paint success is not continuous video. Require a foreground
+    # observation spanning at least five seconds and meaningful rendered FPS.
+    # Using two timestamps from the SAME endpoint avoids unsynchronized
+    # device clocks or fabricated glass-to-glass estimates.
+    first_rendered = video.get("firstRenderedAt")
+    last_rendered = video.get("lastRenderedAt")
+    require(isinstance(first_rendered, int) and isinstance(last_rendered, int) and
+            first_rendered > 0 and last_rendered >= first_rendered,
+            f"{label}: video continuity timestamps missing")
+    observed_ms = last_rendered - first_rendered
+    require(observed_ms >= MIN_SUSTAINED_VIDEO_MS,
+            f"{label}: insufficient sustained video observation")
+    fps = (video["rendered"] - 1) * 1000 / observed_ms if observed_ms else 0
+    require(fps >= MIN_SUSTAINED_VIDEO_FPS,
+            f"{label}: rendered video {fps:.1f}fps below {MIN_SUSTAINED_VIDEO_FPS}fps")
+    visibility = report.get("videoVisibility") or {}
+    require(visibility.get("hiddenTotalMs") == 0,
+            f"{label}: video observation includes background/hidden time")
+    captured_ms = int(_timestamp(report.get("capturedAt")).timestamp() * 1000)
+    require(0 <= captured_ms - last_rendered <= MAX_VIDEO_STALL_MS,
+            f"{label}: final remote video frame stale")
     require(isinstance(audio.get("received"), int) and audio["received"] > 0,
             f"{label}: no remote audio received")
     require(isinstance(audio.get("scheduled"), int) and audio["scheduled"] > 0,
             f"{label}: no remote audio scheduled for playback")
+    require(report.get("audioPlayback") == "running",
+            f"{label}: audio playback not running")
+    # Enough decoded samples must reach the playback scheduler for the full
+    # E2EE-active observation, not merely a single nonzero counter.
+    e2ee_at = _events(report).get("Endpoint E2EE transport active")
+    require(e2ee_at is not None, f"{label}: E2EE timing evidence missing")
+    audio_seconds = (_timestamp(report.get("capturedAt")) - e2ee_at).total_seconds()
+    require(audio_seconds >= 5, f"{label}: insufficient sustained audio observation")
+    audio_fps = audio["scheduled"] / audio_seconds
+    require(audio_fps >= MIN_SUSTAINED_AUDIO_FPS,
+            f"{label}: scheduled audio {audio_fps:.1f}fps below {MIN_SUSTAINED_AUDIO_FPS}fps")
+    dropped_audio = audio.get("dropped")
+    require(isinstance(dropped_audio, int) and dropped_audio >= 0,
+            f"{label}: audio drop evidence missing")
+    drop_fraction = dropped_audio / (dropped_audio + audio["scheduled"])
+    require(drop_fraction <= MAX_AUDIO_DROP_FRACTION,
+            f"{label}: audio drop fraction {drop_fraction:.1%} exceeds {MAX_AUDIO_DROP_FRACTION:.0%}")
     stall = video.get("renderStallMs")
     require(isinstance(stall, (float, int)) and 0 <= stall <= MAX_VIDEO_STALL_MS,
             f"{label}: video stall {stall!r} ms exceeds {MAX_VIDEO_STALL_MS}")
@@ -129,7 +189,11 @@ def inspect(report: dict, label: str) -> dict[str, object]:
             "e2ee_to_first_video_seconds": round(e2ee_to_video_elapsed, 3),
             "video_render_stall_ms": stall,
             "rendered_frames": video["rendered"],
+            "sustained_video_fps": round(fps, 2),
+            "sustained_observation_ms": observed_ms,
             "received_audio_frames": audio["received"],
+            "scheduled_audio_fps": round(audio_fps, 2),
+            "audio_drop_fraction": round(drop_fraction, 4),
             "observed_phases": sorted(events)}
 
 

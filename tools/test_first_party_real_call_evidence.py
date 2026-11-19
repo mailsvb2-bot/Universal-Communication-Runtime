@@ -2,6 +2,8 @@
 """Only measured two-device user journeys can pass real-call quality."""
 import importlib.util
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from copy import deepcopy
 from unittest import TestCase, main
 
 FILE = Path(__file__).with_name("check_first_party_real_call_evidence.py")
@@ -20,15 +22,25 @@ def fixture(elapsed=6, stall=75, audio=True, first_video_delay=1):
         {"time": f"2026-11-18T09:00:{elapsed + first_video_delay:02d}.000Z",
          "safe": "First authenticated video rendered"},
     ]
+    first = datetime(2026, 11, 18, 9, 0, elapsed + first_video_delay,
+                     tzinfo=timezone.utc)
+    # The fixture asserts seven seconds of uninterrupted foreground rendering
+    # and captures the report 75 ms after the latest real frame.
+    first_ms = int(first.timestamp() * 1000)
+    last_ms = first_ms + 7000
     return {
         "schema": "ucr-local-diagnostics-v1", "page": "conference",
+        "capturedAt": (first + timedelta(milliseconds=7075)).isoformat(),
         "authorization": {"sessionActive": True, "mediaActive": True},
         "crypto": {"adapterReady": True, "transportOpen": True},
         "ice": {"connectionState": "connected"},
         "localMediaPolicy": {"acceptedCallMedia": "video"},
-        "videoFrames": {"rendered": 12, "renderStallMs": stall},
-        "audioFrames": {"received": 10 if audio else 0,
-                        "scheduled": 9 if audio else 0},
+        "videoFrames": {"rendered": 120, "renderStallMs": stall,
+                        "firstRenderedAt": first_ms, "lastRenderedAt": last_ms},
+        "videoVisibility": {"hiddenTotalMs": 0},
+        "audioFrames": {"received": 350 if audio else 0,
+                        "scheduled": 345 if audio else 0, "dropped": 1},
+        "audioPlayback": "running",
         "mediaFailure": {"category": None, "stopped": False},
         "recentEvents": events,
     }
@@ -38,6 +50,46 @@ class RealCallEvidenceTest(TestCase):
     def test_proven_call_with_measured_end_to_end_latency(self):
         r = gate.quality_gate(fixture(), fixture(), 130, 220)
         self.assertEqual(r["quality_gate"], "pass")
+
+    def test_only_two_video_frames_never_prove_a_real_video_call(self):
+        a = fixture()
+        a["videoFrames"]["rendered"] = 2
+        with self.assertRaisesRegex(gate.EvidenceError, "rendered video"):
+            gate.quality_gate(a, fixture(), 90, 120)
+
+    def test_thirty_frames_over_thirty_seconds_are_not_continuous_video(self):
+        a = fixture()
+        a["videoFrames"]["rendered"] = 30
+        a["videoFrames"]["lastRenderedAt"] = a["videoFrames"]["firstRenderedAt"] + 30000
+        a["capturedAt"] = datetime.fromtimestamp(
+            (a["videoFrames"]["lastRenderedAt"] + 75) / 1000,
+            timezone.utc).isoformat()
+        with self.assertRaisesRegex(gate.EvidenceError, "rendered video"):
+            gate.quality_gate(a, fixture(), 90, 120)
+
+    def test_short_one_frame_success_is_not_enough(self):
+        a = fixture()
+        a["videoFrames"]["lastRenderedAt"] = a["videoFrames"]["firstRenderedAt"] + 1000
+        with self.assertRaisesRegex(gate.EvidenceError, "insufficient sustained"):
+            gate.quality_gate(a, fixture(), 90, 120)
+
+    def test_hidden_tab_cannot_supply_sustained_video_proof(self):
+        a = fixture()
+        a["videoVisibility"]["hiddenTotalMs"] = 39000
+        with self.assertRaisesRegex(gate.EvidenceError, "hidden"):
+            gate.quality_gate(a, fixture(), 90, 120)
+
+    def test_pre_disconnect_snapshot_must_be_recent_and_authenticated(self):
+        original = fixture()
+        post = {"authorization": {"sessionActive": False},
+                "capturedAt": (datetime.fromisoformat(original["capturedAt"]) +
+                               timedelta(seconds=3)).isoformat(),
+                "preDisconnect": deepcopy(original)}
+        self.assertEqual(gate.quality_gate(post, fixture(), 90, 120)["quality_gate"], "pass")
+        post["capturedAt"] = (datetime.fromisoformat(original["capturedAt"]) +
+                              timedelta(seconds=180)).isoformat()
+        with self.assertRaisesRegex(gate.EvidenceError, "snapshot stale"):
+            gate.quality_gate(post, fixture(), 90, 120)
 
     def test_missing_first_render_evidence_is_blocked(self):
         a = fixture()
@@ -70,6 +122,24 @@ class RealCallEvidenceTest(TestCase):
     def test_audio_without_playback_is_blocked(self):
         with self.assertRaisesRegex(gate.EvidenceError, "remote audio"):
             gate.quality_gate(fixture(audio=False), fixture(), 90, 120)
+
+    def test_audio_that_only_schedules_a_few_packets_is_not_continuous(self):
+        a = fixture()
+        a["audioFrames"]["scheduled"] = 9
+        with self.assertRaisesRegex(gate.EvidenceError, "scheduled audio"):
+            gate.quality_gate(a, fixture(), 90, 120)
+
+    def test_audio_high_dropout_is_blocked(self):
+        a = fixture()
+        a["audioFrames"]["dropped"] = 50
+        with self.assertRaisesRegex(gate.EvidenceError, "audio drop fraction"):
+            gate.quality_gate(a, fixture(), 90, 120)
+
+    def test_inactive_audio_context_cannot_pass(self):
+        a = fixture()
+        a["audioPlayback"] = "suspended"
+        with self.assertRaisesRegex(gate.EvidenceError, "audio playback"):
+            gate.quality_gate(a, fixture(), 90, 120)
 
     def test_visible_video_stall_is_blocked(self):
         with self.assertRaisesRegex(gate.EvidenceError, "video stall"):
