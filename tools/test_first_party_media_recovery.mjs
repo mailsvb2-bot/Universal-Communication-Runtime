@@ -162,7 +162,8 @@ assert.match(firstFrameRecovery,/if\(document\.hidden\)return;/,
   "hidden video must not be marked stalled when the browser suppresses rendering");
 assert.match(firstFrameRecovery,/const cooldown=initial\?1500:8000/,
   "continuous video recovery must bound authenticated subscription polling");
-assert.match(firstFrameRecovery,/syncReceiveSubscriptions\(\)/);
+assert.match(firstFrameRecovery,/syncReceiveSubscriptions\(null,true\)/,
+  "a verified stall must explicitly request a canonical subscription refresh");
 assert.match(firstFrameRecovery,/firstPartyAcceptedMediaKind!=="video"/,
   "explicit audio-only Direct Call must not poll video");
 assert.doesNotMatch(firstFrameRecovery,/!policyAllows\("camera"\)/,
@@ -191,6 +192,7 @@ const channel={readyState:"open"};
 const rosterCtx={
   sessionActive:true,mediaActive:true,e2eeAdapterReady:true,receiveRosterInFlight:false,
   receiveRosterGeneration:7,claims:mediaSession,e2eeChannel:channel,
+  receiveSubscriptionFingerprint:"cached-selection",
   receiveRosterSources:[],receiveSpeakerId:null,
   body:()=>({}),api:async()=>{rosterFetches++;return {json:async()=>({ok:true,sources:[
     {source_id:"authenticated-peer",source_kind:1},
@@ -207,13 +209,19 @@ await rosterCtx.sync();
 assert.equal(refreshes,1,"identical roster must not regenerate reference frames");
 assert.equal(subscriptions,2);
 assert.equal(rosterFetches,2);
+rosterCtx.receiveSubscriptionFingerprint="cached-selection";
+await rosterCtx.sync(null,true);
+assert.equal(rosterCtx.receiveSubscriptionFingerprint,null,
+  "stalled video must invalidate the canonical subscription fingerprint");
+assert.equal(subscriptions,3,
+  "stalled video must reapply subscriptions even when roster did not change");
 await rosterCtx.sync(Promise.resolve({ok:true,sources:[
   {source_id:"authenticated-peer",source_kind:1},
 ]}));
-assert.equal(rosterFetches,2,
+assert.equal(rosterFetches,3,
   "a valid early canonical roster must avoid an extra critical-path HTTP request");
 await rosterCtx.sync(Promise.resolve(null));
-assert.equal(rosterFetches,3,
+assert.equal(rosterFetches,4,
   "failed early prefetch must re-read canonical authorization before subscribing");
 rosterCtx.e2eeChannel={readyState:"closed"};
 await rosterCtx.sync();
