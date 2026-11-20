@@ -227,6 +227,16 @@ assert.equal(await bob.prepare(),true,"recipient must consume durable Welcome be
 assert.deepEqual(order,["create","offer","commit","welcome"]);
 assert.equal(decode(snapshots.get("fp-mg-1:device-a")).epoch,1);
 assert.equal(decode(snapshots.get("fp-mg-1:device-b")).epoch,1);
+canonical.epoch=null;canonical.revision=null;canonical.ref=null;canonical.peerDevice=null;
+canonical.offers=[{
+  recipientDeviceId:"device-b",recipientSignerKeyId:"key-b",
+  recipientKeyPackageBase64Url:"Ag",recipientSignatureBase64Url:"signed-by-b"
+}];
+snapshots.clear();transitions.clear();order.length=0;creatorGenerations=0;
+assert.equal(await alice.prepare(),true,
+  "creator must commit the already published recipient key in the same prepare");
+assert.equal(creatorGenerations,1,"same-prepare commit must not mint a second Group");
+assert.deepEqual(order,["create","commit"]);
 bob.context.active.terminating=true;
 await assert.rejects(bob.prepare(),/Call withdrawal/);
 console.log("PASS: first-party pre-Join MLS coordinator: recover uncertain epoch-zero Group publication -> same sealed KeyPackage retry -> signed Commit -> recipient Welcome -> two-device roster -> revoke fence (MOCK, NOT live media)");
