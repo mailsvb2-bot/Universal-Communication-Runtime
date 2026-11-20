@@ -663,7 +663,7 @@ let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=nu
 let firstPartyAcceptedMediaKind=null;
 let localMediaPromise=null,earlyLocalCapture=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
-let e2eeChannelV2=null,e2eeV2Pending=new Map(),e2eeV2Delivered=null,e2eeV2Selected=false;
+let e2eeChannelV2=null,e2eeV2Pending=new Map(),e2eeV2ForgetThrough=null,e2eeV2Completed=new Set(),e2eeV2Selected=false;
 let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
 let heartbeatInFlight=false,heartbeatWatchdog=null;
 // A retiring Join may fence only the unauthenticated replacement preflight.
@@ -727,7 +727,8 @@ const E2EE_CHUNK_PAYLOAD_BYTES=E2EE_DATA_MESSAGE_BYTES-E2EE_CHUNK_HEADER_BYTES;
 const E2EE_V2_CHUNK_MAGIC="UCRCHK02";
 const E2EE_V2_HEADER_BYTES=25;
 const E2EE_V2_PAYLOAD_BYTES=E2EE_DATA_MESSAGE_BYTES-E2EE_V2_HEADER_BYTES;
-const E2EE_V2_PENDING_LIMIT=4;
+const E2EE_V2_PENDING_LIMIT=32;
+const E2EE_V2_COMPLETED_MEMORY=64;
 const E2EE_MAX_WIRE_BYTES=2*1024*1024+8192;
 const E2EE_MAX_BUFFERED_SEND_BYTES=2*1024*1024;
 const ENTRY_RETRY_MS=2000;
@@ -1667,7 +1668,7 @@ function detachE2eeChannel(){
     e2eeChannelV2.onclose=null;e2eeChannelV2.onerror=null;
     try{e2eeChannelV2.close();}catch(_){}
   }
-  e2eeChannelV2=null;e2eeV2Pending.clear();e2eeV2Delivered=null;e2eeV2Selected=false;
+  e2eeChannelV2=null;e2eeV2Pending.clear();e2eeV2ForgetThrough=null;e2eeV2Completed.clear();e2eeV2Selected=false;
   e2eeChannel=null;e2eePending=null;
   e2eeAdapterReady=false;
 }
@@ -1747,6 +1748,25 @@ function receiveE2eeChunk(data){
  * sole authorization/adapter owner and backward-compatible fallback.
  * v2 transports the SAME signed/MLS-sealed frames, never plaintext.
  */
+function e2eeV2Oldest(values){
+  let oldest=null;
+  for(const value of values){
+    if(oldest===null||value<oldest)oldest=value;
+  }
+  return oldest;
+}
+function e2eeV2RememberCompleted(sequence){
+  e2eeV2Completed.add(sequence);
+  while(e2eeV2Completed.size>E2EE_V2_COMPLETED_MEMORY){
+    e2eeV2Completed.delete(e2eeV2Oldest(e2eeV2Completed));
+  }
+}
+function e2eeV2Abandon(sequence){
+  if(e2eeV2ForgetThrough===null||sequence>e2eeV2ForgetThrough)e2eeV2ForgetThrough=sequence;
+  for(const value of [...e2eeV2Completed]){
+    if(value<=sequence)e2eeV2Completed.delete(value);
+  }
+}
 function receiveE2eeChunkV2(data){
   const bytes=data instanceof Uint8Array?data:new Uint8Array(data);
   if(bytes.length<=E2EE_V2_HEADER_BYTES||bytes.length>E2EE_DATA_MESSAGE_BYTES)
@@ -1764,13 +1784,22 @@ function receiveE2eeChunkV2(data){
     E2EE_V2_PAYLOAD_BYTES;
   if(bytes.length-E2EE_V2_HEADER_BYTES!==expected)
     throw new Error("Invalid unordered E2EE fragment length");
-  if(e2eeV2Delivered!==null&&sequence<=e2eeV2Delivered)return null;
+  // Audio and video share this sequence. A finished Opus frame must not
+  // discard an in-flight keyframe: that stall lasted until the next periodic
+  // keyframe and showed up as multi-second video delay.
+  if((e2eeV2ForgetThrough!==null&&sequence<=e2eeV2ForgetThrough)||e2eeV2Completed.has(sequence))
+    return null;
   let pending=e2eeV2Pending.get(sequence);
   if(!pending){
     if(e2eeV2Pending.size>=E2EE_V2_PENDING_LIMIT){
-      const oldest=[...e2eeV2Pending.keys()].reduce((a,b)=>a<b?a:b);
-      if(sequence<oldest)return null;
+      const oldest=e2eeV2Oldest(e2eeV2Pending.keys());
+      if(oldest===null||sequence<oldest){
+        if(oldest!==null)e2eeV2Abandon(sequence);
+        return null;
+      }
       e2eeV2Pending.delete(oldest);
+      e2eeV2Abandon(oldest);
+      if(e2eeV2ForgetThrough!==null&&sequence<=e2eeV2ForgetThrough)return null;
     }
     pending={total,count,flags,parts:new Array(count).fill(null),received:0};
     e2eeV2Pending.set(sequence,pending);
@@ -1784,9 +1813,7 @@ function receiveE2eeChunkV2(data){
   const wire=new Uint8Array(total);let offset=0;
   for(const part of pending.parts){wire.set(part,offset);offset+=part.length;}
   e2eeV2Pending.delete(sequence);
-  for(const previous of e2eeV2Pending.keys())
-    if(previous<=sequence)e2eeV2Pending.delete(previous);
-  e2eeV2Delivered=sequence;
+  e2eeV2RememberCompleted(sequence);
   return wire;
 }
 function attachUnorderedE2eeDataChannel(channel){
@@ -1820,7 +1847,7 @@ function attachUnorderedE2eeDataChannel(channel){
   };
   const closed=()=>{
     if(e2eeChannelV2!==channel)return;
-    e2eeChannelV2=null;e2eeV2Pending.clear();e2eeV2Delivered=null;
+    e2eeChannelV2=null;e2eeV2Pending.clear();e2eeV2ForgetThrough=null;e2eeV2Completed.clear();
     channel.onopen=null;channel.onmessage=null;channel.onerror=null;channel.onclose=null;
     if(e2eeV2Selected&&sessionActive&&mediaActive){
       // The server may have observed v2 capability and be sending only v2.

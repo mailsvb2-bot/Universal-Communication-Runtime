@@ -664,8 +664,14 @@ const WEBRTC_E2EE_CHUNK_MAGIC_V2: &[u8; 8] = b"UCRCHK02";
 const WEBRTC_E2EE_CHUNK_HEADER_BYTES_V2: usize = 25;
 const WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES_V2: usize =
     MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES - WEBRTC_E2EE_CHUNK_HEADER_BYTES_V2;
-/// Messages concurrently under reassembly; older incomplete ones are lost.
-const WEBRTC_E2EE_LOSSY_WINDOW: usize = 4;
+/// Incomplete messages kept concurrently. Audio and video share one sequence
+/// space, so this must cover a multi-chunk keyframe plus the Opus frames that
+/// finish while that keyframe is still arriving. Eviction is the only loss
+/// signal: completing a newer message must not abandon an older one.
+const WEBRTC_E2EE_LOSSY_WINDOW: usize = 32;
+/// Duplicate chunks of a finished message are ignored. The set is bounded;
+/// a replay that falls out of it is still rejected by endpoint anti-replay.
+const WEBRTC_E2EE_COMPLETED_MEMORY: usize = 64;
 const WEBRTC_E2EE_FLAG_KEYFRAME: u8 = 1;
 
 /// Splits an envelope into v2 chunks carrying sequence, keyframe flag and
@@ -712,14 +718,21 @@ struct LossyPending {
     received: usize,
 }
 
-/// Reassembles v2 chunks arriving unordered and with loss. A message that
-/// can no longer complete (evicted from the bounded window or overtaken by a
-/// completed newer one) is counted as lost and raises a keyframe request
-/// that stays pending until a keyframe is delivered.
+/// Reassembles v2 chunks arriving unordered and with loss.
+///
+/// A finished message never cancels other in-flight messages. Opus and camera
+/// frames share this channel: treating the latest completed sequence as a
+/// watermark discarded multi-chunk keyframes as soon as the next 20 ms audio
+/// frame assembled, so the decoder waited up to the periodic keyframe interval
+/// before showing a new picture. Only an explicit window eviction abandons a
+/// message. That eviction is counted as loss and raises one keyframe request,
+/// held until a keyframe is delivered.
 #[derive(Debug, Default)]
 pub struct WebRtcE2eeLossyReassembler {
     pending: Vec<LossyPending>,
-    last_delivered: Option<u64>,
+    completed: std::collections::BTreeSet<u64>,
+    /// Sequences at or below this value were evicted and must not restart.
+    forget_through: Option<u64>,
     keyframe_needed: bool,
     keyframe_request: bool,
     lost: u64,
@@ -741,6 +754,25 @@ impl WebRtcE2eeLossyReassembler {
     /// Returns (and clears) a new keyframe request.
     pub fn take_keyframe_request(&mut self) -> bool {
         std::mem::take(&mut self.keyframe_request)
+    }
+
+    fn note_abandoned(&mut self, sequence: u64) {
+        self.forget_through = Some(
+            self.forget_through
+                .map_or(sequence, |floor| floor.max(sequence)),
+        );
+        self.completed.retain(|done| *done > sequence);
+    }
+
+    fn remember_completed(&mut self, sequence: u64) {
+        self.completed.insert(sequence);
+        while self.completed.len() > WEBRTC_E2EE_COMPLETED_MEMORY {
+            if let Some(oldest) = self.completed.iter().next().copied() {
+                self.completed.remove(&oldest);
+            } else {
+                break;
+            }
+        }
     }
 
     fn mark_lost(&mut self, count: u64) {
@@ -795,8 +827,10 @@ impl WebRtcE2eeLossyReassembler {
         if payload.len() != expected {
             return Err(WebRtcE2eeWireError::Malformed);
         }
-        if self.last_delivered.is_some_and(|last| sequence <= last) {
-            return Ok(None); // Late duplicate / straggler of a resolved message.
+        if self.forget_through.is_some_and(|floor| sequence <= floor)
+            || self.completed.contains(&sequence)
+        {
+            return Ok(None);
         }
         let position =
             if let Some(position) = self.pending.iter().position(|p| p.sequence == sequence) {
@@ -807,10 +841,19 @@ impl WebRtcE2eeLossyReassembler {
                         .min_by_key(|&i| self.pending[i].sequence)
                         .unwrap_or(0);
                     if self.pending[oldest].sequence > sequence {
-                        return Ok(None); // Older than everything in flight: already lost.
+                        // A sequence older than every in-flight message can never
+                        // be useful once the window is full. Remember it so a
+                        // later chunk cannot resurrect a stale frame.
+                        self.note_abandoned(sequence);
+                        self.mark_lost(1);
+                        return Ok(None);
                     }
-                    self.pending.swap_remove(oldest);
+                    let evicted = self.pending.swap_remove(oldest);
+                    self.note_abandoned(evicted.sequence);
                     self.mark_lost(1);
+                    if self.forget_through.is_some_and(|floor| sequence <= floor) {
+                        return Ok(None);
+                    }
                 }
                 self.pending.push(LossyPending {
                     sequence,
@@ -834,15 +877,7 @@ impl WebRtcE2eeLossyReassembler {
             return Ok(None);
         }
         let done = self.pending.swap_remove(position);
-        let before = self.pending.len();
-        self.pending.retain(|p| p.sequence > sequence);
-        let skipped_gap = self
-            .last_delivered
-            .map_or(0, |last| sequence.saturating_sub(last).saturating_sub(1));
-        let dropped_pending = u64::try_from(before - self.pending.len()).unwrap_or(u64::MAX);
-        // Every sequence between the previous delivery and this one is gone.
-        self.mark_lost(skipped_gap.max(dropped_pending));
-        self.last_delivered = Some(sequence);
+        self.remember_completed(done.sequence);
         if done.keyframe {
             self.keyframe_needed = false;
             self.keyframe_request = false;
@@ -1230,36 +1265,64 @@ mod tests {
         assert_eq!(r.push_chunk(&last).unwrap(), Some(big.clone()));
         assert!(!r.take_keyframe_request());
 
-        // Message 2 loses a chunk; message 3 completes -> loss + keyframe request once.
-        let two = encode_webrtc_e2ee_chunks_v2(&big, 2).unwrap();
-        r.push_chunk(&two[0]).unwrap();
-        for c in encode_webrtc_e2ee_chunks_v2(&big, 3).unwrap() {
-            r.push_chunk(&c).unwrap();
+        // A finished later message must not abandon an earlier multi-chunk frame.
+        // That watermark made every keyframe lose to the next Opus packet.
+        let mut video = encode_webrtc_e2ee_chunks_v2(&big, 2).unwrap();
+        let video_tail = video.pop().unwrap();
+        for chunk in &video {
+            assert_eq!(r.push_chunk(chunk).unwrap(), None);
         }
-        assert_eq!(r.lost(), 1);
-        assert!(r.take_keyframe_request());
-        assert!(!r.take_keyframe_request(), "request is edge-triggered");
-        // Straggler of the lost message is ignored.
-        assert_eq!(r.push_chunk(&two[1]).unwrap(), None);
-        // Further loss before a keyframe does not spam requests.
-        for c in encode_webrtc_e2ee_chunks_v2(&big, 5).unwrap() {
-            r.push_chunk(&c).unwrap();
+        for sequence in 3..13 {
+            let audio = encode_webrtc_e2ee_chunks_v2(&envelope(), sequence).unwrap();
+            assert_eq!(audio.len(), 1);
+            assert!(r.push_chunk(&audio[0]).unwrap().is_some());
         }
-        assert_eq!(r.lost(), 2);
+        assert_eq!(r.lost(), 0);
         assert!(!r.take_keyframe_request());
-        // Keyframe clears the need; next loss raises a new request.
-        for c in encode_webrtc_e2ee_chunks_v2(&key, 6).unwrap() {
-            assert!(r.push_chunk(&c).is_ok());
+        assert_eq!(r.push_chunk(&video_tail).unwrap(), Some(big.clone()));
+
+        // Only the bounded window abandons a message. Its straggler stays dead,
+        // and a second eviction does not raise another keyframe request.
+        let mut crowded = WebRtcE2eeLossyReassembler::new();
+        for sequence in 1..=WEBRTC_E2EE_LOSSY_WINDOW as u64 {
+            let chunks = encode_webrtc_e2ee_chunks_v2(&big, sequence).unwrap();
+            assert_eq!(crowded.push_chunk(&chunks[0]).unwrap(), None);
         }
-        for c in encode_webrtc_e2ee_chunks_v2(&big, 8).unwrap() {
-            r.push_chunk(&c).unwrap();
+        let overflow =
+            encode_webrtc_e2ee_chunks_v2(&big, WEBRTC_E2EE_LOSSY_WINDOW as u64 + 1).unwrap();
+        assert_eq!(crowded.push_chunk(&overflow[0]).unwrap(), None);
+        assert_eq!(crowded.lost(), 1);
+        assert!(crowded.take_keyframe_request());
+        assert!(
+            !crowded.take_keyframe_request(),
+            "request is edge-triggered"
+        );
+        let abandoned = encode_webrtc_e2ee_chunks_v2(&big, 1).unwrap();
+        assert_eq!(crowded.push_chunk(&abandoned[1]).unwrap(), None);
+        let second =
+            encode_webrtc_e2ee_chunks_v2(&big, WEBRTC_E2EE_LOSSY_WINDOW as u64 + 2).unwrap();
+        assert_eq!(crowded.push_chunk(&second[0]).unwrap(), None);
+        assert_eq!(crowded.lost(), 2);
+        assert!(!crowded.take_keyframe_request());
+        for chunk in
+            encode_webrtc_e2ee_chunks_v2(&key, WEBRTC_E2EE_LOSSY_WINDOW as u64 + 3).unwrap()
+        {
+            assert!(crowded.push_chunk(&chunk).is_ok());
         }
-        assert!(r.take_keyframe_request());
-        // A gap healed by a keyframe itself needs no request.
-        for c in encode_webrtc_e2ee_chunks_v2(&key, 10).unwrap() {
-            r.push_chunk(&c).unwrap();
-        }
-        assert!(!r.take_keyframe_request());
+        assert!(
+            !crowded.take_keyframe_request(),
+            "delivered keyframe clears the pending request"
+        );
+        // Completing the keyframe frees its slot, so the window fills again
+        // before the next eviction can request another keyframe.
+        let filler =
+            encode_webrtc_e2ee_chunks_v2(&big, WEBRTC_E2EE_LOSSY_WINDOW as u64 + 4).unwrap();
+        assert_eq!(crowded.push_chunk(&filler[0]).unwrap(), None);
+        assert!(!crowded.take_keyframe_request());
+        let again =
+            encode_webrtc_e2ee_chunks_v2(&big, WEBRTC_E2EE_LOSSY_WINDOW as u64 + 5).unwrap();
+        assert_eq!(crowded.push_chunk(&again[0]).unwrap(), None);
+        assert!(crowded.take_keyframe_request());
     }
 
     #[test]

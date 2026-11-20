@@ -3300,6 +3300,8 @@ async fn run_sfu_placement_expiry_sweeper(
 /// Counters are process-global and contain no peer IDs or ciphertext.
 static WEBRTC_E2EE_LANE_AUDIO_FULL: AtomicU64 = AtomicU64::new(0);
 static WEBRTC_E2EE_LANE_VIDEO_FULL: AtomicU64 = AtomicU64::new(0);
+static WEBRTC_E2EE_LANE_AUDIO_STALE: AtomicU64 = AtomicU64::new(0);
+static WEBRTC_E2EE_LANE_VIDEO_STALE: AtomicU64 = AtomicU64::new(0);
 static WEBRTC_E2EE_LANE_CLOSED: AtomicU64 = AtomicU64::new(0);
 static WEBRTC_E2EE_FORWARD_FAILURE: AtomicU64 = AtomicU64::new(0);
 static WEBRTC_E2EE_BLOCKING_JOIN_FAILURE: AtomicU64 = AtomicU64::new(0);
@@ -3309,6 +3311,8 @@ pub struct WebRtcE2eeRoutingCounters {
     pub ingress: ucr_webrtc::WebRtcE2eeIngressDrops,
     pub audio_lane_full: u64,
     pub video_lane_full: u64,
+    pub audio_stale: u64,
+    pub video_stale: u64,
     pub lane_closed: u64,
     pub forward_failures: u64,
     pub worker_join_failures: u64,
@@ -3320,6 +3324,8 @@ pub fn webrtc_e2ee_routing_counters() -> WebRtcE2eeRoutingCounters {
         ingress: ucr_webrtc::ingress_drop_counters(),
         audio_lane_full: WEBRTC_E2EE_LANE_AUDIO_FULL.load(Ordering::Relaxed),
         video_lane_full: WEBRTC_E2EE_LANE_VIDEO_FULL.load(Ordering::Relaxed),
+        audio_stale: WEBRTC_E2EE_LANE_AUDIO_STALE.load(Ordering::Relaxed),
+        video_stale: WEBRTC_E2EE_LANE_VIDEO_STALE.load(Ordering::Relaxed),
         lane_closed: WEBRTC_E2EE_LANE_CLOSED.load(Ordering::Relaxed),
         forward_failures: WEBRTC_E2EE_FORWARD_FAILURE.load(Ordering::Relaxed),
         worker_join_failures: WEBRTC_E2EE_BLOCKING_JOIN_FAILURE.load(Ordering::Relaxed),
@@ -3414,6 +3420,89 @@ async fn run_webrtc_e2ee_bridge(
 const LIVE_WEBRTC_E2EE_AUDIO_BURST: u8 = 2;
 const LIVE_WEBRTC_E2EE_VIDEO_LANE_CAPACITY: usize = 8;
 
+/// Newest Opus frames retained per stream when the worker falls behind.
+/// Three 20 ms frames is 60 ms of speech, not a second of stale audio.
+const LIVE_WEBRTC_E2EE_FRESH_AUDIO: usize = 3;
+
+struct BacklogMeta {
+    audio: bool,
+    stream: String,
+    sequence: u64,
+    keyframe: bool,
+}
+
+fn backlog_meta(frame: &WebRtcE2eeIngressFrame) -> BacklogMeta {
+    let header = &frame.envelope.frame.header;
+    BacklogMeta {
+        audio: header.media_kind == ucr_model::MediaKind::Audio,
+        stream: header.stream_id.as_str().to_owned(),
+        sequence: header.sequence,
+        keyframe: header.keyframe,
+    }
+}
+
+/// Indexes to forward, in per-stream sequence order, and how many were dropped.
+///
+/// Audio keeps only the newest frames so a slow authorization/SCTP worker cannot
+/// play speech that is already a second old. Video drops frames older than a
+/// keyframe already waiting in this batch; later deltas stay in order.
+fn low_latency_keep(items: &[BacklogMeta]) -> (Vec<usize>, u64) {
+    if items.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let mut streams: Vec<&str> = Vec::new();
+    let mut grouped: Vec<Vec<usize>> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if let Some(group) = streams
+            .iter()
+            .position(|stream| *stream == item.stream.as_str())
+        {
+            grouped[group].push(index);
+        } else {
+            streams.push(item.stream.as_str());
+            grouped.push(vec![index]);
+        }
+    }
+    let mut keep = Vec::new();
+    for mut ordered in grouped {
+        ordered.sort_by_key(|&index| items[index].sequence);
+        if items[ordered[0]].audio {
+            let start = ordered.len().saturating_sub(LIVE_WEBRTC_E2EE_FRESH_AUDIO);
+            keep.extend_from_slice(&ordered[start..]);
+        } else if let Some(key_index) = ordered.iter().rev().find(|&&index| items[index].keyframe) {
+            let key_sequence = items[*key_index].sequence;
+            keep.extend(
+                ordered
+                    .into_iter()
+                    .filter(|&index| items[index].sequence >= key_sequence),
+            );
+        } else {
+            keep.extend(ordered);
+        }
+    }
+    let dropped = u64::try_from(items.len().saturating_sub(keep.len())).unwrap_or(u64::MAX);
+    (keep, dropped)
+}
+
+fn drain_ready<T>(first: T, inbound: &mut tokio::sync::mpsc::Receiver<T>) -> Vec<T> {
+    let mut batch = vec![first];
+    while let Ok(next) = inbound.try_recv() {
+        batch.push(next);
+    }
+    batch
+}
+
+fn take_fresh_batch(batch: Vec<WebRtcE2eeIngressFrame>) -> (Vec<WebRtcE2eeIngressFrame>, u64) {
+    let meta: Vec<BacklogMeta> = batch.iter().map(backlog_meta).collect();
+    let (indexes, dropped) = low_latency_keep(&meta);
+    let mut slots: Vec<Option<WebRtcE2eeIngressFrame>> = batch.into_iter().map(Some).collect();
+    let kept = indexes
+        .into_iter()
+        .filter_map(|index| slots[index].take())
+        .collect();
+    (kept, dropped)
+}
+
 /// Deterministic bounded priority: grant the first two waiting audio frames,
 /// then service a waiting video frame, without delaying audio when video is idle.
 async fn receive_prioritized_media<T>(
@@ -3438,6 +3527,41 @@ async fn receive_prioritized_media<T>(
     }
 }
 
+// Execute exactly one authorized SFU forward. Keeping it outside the lane
+// scheduler preserves the audio/video interleave on every forwarding turn.
+async fn forward_webrtc_e2ee_lane_frame(
+    service: &GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    registry: &Arc<RealtimeSessionRegistry>,
+    provider: &Arc<LiveWebRtcProvider>,
+    frame: WebRtcE2eeIngressFrame,
+) {
+    if service.has_sfu_media_router() {
+        if route_webrtc_e2ee_frame_via_configured_route(service, registry, provider, &frame)
+            .await
+            .is_err()
+        {
+            WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
+        }
+    } else {
+        let provider = Arc::clone(provider);
+        let registry = Arc::clone(registry);
+        let service = service.clone();
+        match tokio::task::spawn_blocking(move || {
+            route_webrtc_e2ee_frame(&service, &registry, &provider, &frame)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(())) => {
+                WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                WEBRTC_E2EE_BLOCKING_JOIN_FAILURE.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 async fn run_webrtc_e2ee_session_lane(
     mut audio: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
     mut video: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
@@ -3448,19 +3572,44 @@ async fn run_webrtc_e2ee_session_lane(
     let mut audio_open = true;
     let mut video_open = true;
     let mut audio_streak = 0_u8;
+    // A filtered video batch remains in the SAME session lane, but each
+    // forwarded frame gives newly arrived audio a chance to run. Never hold
+    // Opus behind an entire batch of slow authenticated SFU forwards.
+    let mut pending_video = std::collections::VecDeque::new();
     loop {
-        if !audio_open && !video_open {
+        if !audio_open && !video_open && pending_video.is_empty() {
             break;
         }
-        // Serve up to two Opus frames before an already queued video frame.
-        // This preserves speech priority without starving a 30 fps camera.
-        let Ok((candidate, from_audio)) = tokio::time::timeout(
-            Duration::from_mins(2),
-            receive_prioritized_media(&mut audio, &mut video, audio_open, video_open, audio_streak),
-        )
-        .await
-        else {
-            break;
+        let (candidate, from_audio, from_pending) = if pending_video.is_empty() {
+            // No buffered video: retain the existing bounded, biased scheduler.
+            let Ok((candidate, from_audio)) = tokio::time::timeout(
+                Duration::from_mins(2),
+                receive_prioritized_media(
+                    &mut audio,
+                    &mut video,
+                    audio_open,
+                    video_open,
+                    audio_streak,
+                ),
+            )
+            .await
+            else {
+                break;
+            };
+            (candidate, from_audio, false)
+        } else if audio_open && audio_streak < LIVE_WEBRTC_E2EE_AUDIO_BURST {
+            match audio.try_recv() {
+                Ok(frame) => (Some(frame), true, false),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    audio_open = false;
+                    (pending_video.pop_front(), false, true)
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    (pending_video.pop_front(), false, true)
+                }
+            }
+        } else {
+            (pending_video.pop_front(), false, true)
         };
         let Some(frame) = candidate else {
             if from_audio {
@@ -3470,35 +3619,37 @@ async fn run_webrtc_e2ee_session_lane(
             }
             continue;
         };
-        if from_audio {
-            audio_streak = audio_streak.saturating_add(1);
+        let batch = if from_pending {
+            vec![frame]
+        } else if from_audio {
+            drain_ready(frame, &mut audio)
+        } else {
+            drain_ready(frame, &mut video)
+        };
+        let (fresh, dropped) = take_fresh_batch(batch);
+        if dropped > 0 {
+            let counter = if from_audio {
+                &WEBRTC_E2EE_LANE_AUDIO_STALE
+            } else {
+                &WEBRTC_E2EE_LANE_VIDEO_STALE
+            };
+            counter.fetch_add(dropped, Ordering::Relaxed);
+        }
+        // Filtered video stays bounded in this lane but is forwarded ONE
+        // frame at a time. Reconsider newly arrived Opus after every frame.
+        // Audio backlogs still collapse to at most three fresh frames.
+        let frames = if from_audio {
+            audio_streak = LIVE_WEBRTC_E2EE_AUDIO_BURST;
+            fresh
         } else {
             audio_streak = 0;
-        }
-        if service.has_sfu_media_router() {
-            if route_webrtc_e2ee_frame_via_configured_route(&service, &registry, &provider, &frame)
-                .await
-                .is_err()
-            {
-                WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
-            }
-        } else {
-            let provider = Arc::clone(&provider);
-            let registry = Arc::clone(&registry);
-            let service = service.clone();
-            match tokio::task::spawn_blocking(move || {
-                route_webrtc_e2ee_frame(&service, &registry, &provider, &frame)
-            })
-            .await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(())) => {
-                    WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(_) => {
-                    WEBRTC_E2EE_BLOCKING_JOIN_FAILURE.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            let mut iter = fresh.into_iter();
+            let Some(first) = iter.next() else { continue };
+            pending_video.extend(iter);
+            vec![first]
+        };
+        for frame in frames {
+            forward_webrtc_e2ee_lane_frame(&service, &registry, &provider, frame).await;
         }
     }
 }
@@ -3565,6 +3716,55 @@ mod webrtc_e2ee_lane_tests {
         assert_eq!(delivered_audio, 40);
         assert_eq!(delivered_video, 20);
         assert_eq!(LIVE_WEBRTC_E2EE_VIDEO_LANE_CAPACITY, 8);
+    }
+
+    #[test]
+    fn stale_audio_collapses_to_the_newest_frames() {
+        let items: Vec<BacklogMeta> = (1..=10)
+            .map(|sequence| BacklogMeta {
+                audio: true,
+                stream: "mic".to_owned(),
+                sequence,
+                keyframe: false,
+            })
+            .collect();
+        let (keep, dropped) = low_latency_keep(&items);
+        assert_eq!(dropped, 7);
+        assert_eq!(keep, vec![7, 8, 9]);
+        assert_eq!(LIVE_WEBRTC_E2EE_FRESH_AUDIO, 3);
+    }
+
+    #[test]
+    fn queued_keyframe_drops_only_older_video() {
+        let items = vec![
+            BacklogMeta {
+                audio: false,
+                stream: "cam".to_owned(),
+                sequence: 1,
+                keyframe: false,
+            },
+            BacklogMeta {
+                audio: false,
+                stream: "cam".to_owned(),
+                sequence: 2,
+                keyframe: false,
+            },
+            BacklogMeta {
+                audio: false,
+                stream: "cam".to_owned(),
+                sequence: 3,
+                keyframe: true,
+            },
+            BacklogMeta {
+                audio: false,
+                stream: "cam".to_owned(),
+                sequence: 4,
+                keyframe: false,
+            },
+        ];
+        let (keep, dropped) = low_latency_keep(&items);
+        assert_eq!(dropped, 2);
+        assert_eq!(keep, vec![2, 3]);
     }
 
     #[tokio::test]
