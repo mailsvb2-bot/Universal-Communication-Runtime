@@ -40,7 +40,6 @@ pub fn egress_congestion_counters() -> WebRtcE2eeEgressCongestion {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebRtcE2eeIngressDrops {
     pub audio_full: u64,
