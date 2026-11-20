@@ -988,6 +988,9 @@ assert.equal(warmInstaller, 1, "invalid adapter cannot trigger installer preload
 
 // The same preflight must happen even earlier: before a signed invite can
 // create a realtime session or start a heartbeat in the first place.
+// VM excerpts intentionally exclude the page's global diagnostics owner.
+// Preserve its stage side-effect in isolated conformance fixtures only.
+const activationStageFixture = "function ucrSetMediaActivationStage(stage){globalThis.ucrMediaActivationStage=stage;}\\n";
 const preflightJoinSnippet = browser.slice(
   browser.indexOf("async function join(){"),
   browser.indexOf("function scheduleEntryRetry(){"),
@@ -1003,7 +1006,7 @@ const preflightJoinCtx: Record<string, any> = {
   api: async () => {unauthorizedJoinRequests++;throw new Error("unexpected join");},
   scheduleWaitingRoom() {},
 };
-runInNewContext(preflightJoinSnippet + "\nthis.joinCall = join;", preflightJoinCtx);
+runInNewContext(activationStageFixture + preflightJoinSnippet + "\nthis.joinCall = join;", preflightJoinCtx);
 await preflightJoinCtx.joinCall();
 assert.equal(unauthorizedJoinRequests, 0,
   "missing trusted media authority cannot create a realtime session");
@@ -1040,7 +1043,7 @@ const acceptedJoinCtx: Record<string, any> = {
   leave: async () => {acceptedJoinCleanup++;acceptedJoinCtx.sessionActive = false;},
   scheduleWaitingRoom() {}, scheduleEntryRetry() {},
 };
-runInNewContext(preflightJoinSnippet + "\nthis.joinCall = join;", acceptedJoinCtx);
+runInNewContext(activationStageFixture + preflightJoinSnippet + "\nthis.joinCall = join;", acceptedJoinCtx);
 await acceptedJoinCtx.joinCall();
 assert.equal(acceptedJoinCleanup, 1, "accepted session is retired on activation failure");
 assert.equal(acceptedJoinCtx.sessionActive, false, "no orphan active session");
@@ -1103,7 +1106,7 @@ const staleJoinCtx: Record<string, any> = {
   requireCanonicalMediaHostReady() {}, prewarmAuthorizedMediaRuntime() {},
   api: () => {staleJoinRequests++;throw new Error("stale Join resurrected");},
 };
-runInNewContext(preflightJoinSnippet + "\nthis.joinCall = join;", staleJoinCtx);
+runInNewContext(activationStageFixture + preflightJoinSnippet + "\nthis.joinCall = join;", staleJoinCtx);
 const staleJoinPending = staleJoinCtx.joinCall();
 staleJoinCtx.signedGrantRetired = true;
 staleJoinCtx.sessionLifecycleGeneration = 6;
@@ -1434,7 +1437,7 @@ const startCtx: Record<string, any> = {
   closeServerPeer: async () => {stalePeerCloses++;},
   RTCPeerConnection: class {constructor() {stalePeerCreates++;}},
 };
-runInNewContext(startCode + "\nthis.start = startWebRtc;", startCtx);
+runInNewContext(activationStageFixture + startCode + "\nthis.start = startWebRtc;", startCtx);
 const staleStart = startCtx.start();
 await startCaptureEntered;
 startCtx.mediaCaptureGeneration++;
@@ -1470,7 +1473,7 @@ const replacementCtx: Record<string, any> = {
     retiredOffers.push({offerId, claims, grant});
   },
 };
-runInNewContext(startCode + "\nthis.start = startWebRtc;", replacementCtx);
+runInNewContext(activationStageFixture + startCode + "\nthis.start = startWebRtc;", replacementCtx);
 await assert.rejects(replacementCtx.start(), /cancelled by conference media teardown/);
 assert.equal(retiredOffers.length, 1, "stale offer must be retired exactly once");
 assert.equal(retiredOffers[0].offerId, retiredOfferId, "cleanup must target the retired offer");
@@ -1494,7 +1497,7 @@ const rtcConfigCode = browser.slice(
   browser.indexOf("function rtcNetworkConfiguration("),
   browser.indexOf("async function startWebRtc("),
 );
-runInNewContext(rtcConfigCode + startCode + "\nthis.start = startWebRtc;", privateCtx);
+runInNewContext(activationStageFixture + rtcConfigCode + startCode + "\nthis.start = startWebRtc;", privateCtx);
 await assert.rejects(privateCtx.start(), /Higher privacy requires configured TURN relay/);
 assert.equal(privateCaptures, 0, "missing TURN cannot prompt for media");
 assert.equal(privateServerCloses, 1, "failed privacy negotiation closes the server peer");
@@ -1508,7 +1511,7 @@ const rejectedCtx: Record<string, any> = {
   ensureLocalMedia: async () => {rejectedCaptures++;},
   api: async () => {throw new Error("server rejected offer");},
 };
-runInNewContext(startCode + "\nthis.start = startWebRtc;", rejectedCtx);
+runInNewContext(activationStageFixture + startCode + "\nthis.start = startWebRtc;", rejectedCtx);
 await assert.rejects(rejectedCtx.start(), /server rejected offer/);
 assert.equal(rejectedCaptures, 0, "failed signaling cannot prompt for camera or microphone");
 
@@ -1527,7 +1530,7 @@ const constructorCtx: Record<string, any> = {
   closeServerPeer: async () => {constructorCloses++;},
   RTCPeerConnection: class {constructor() {throw new Error("browser peer unavailable");}},
 };
-runInNewContext(startCode + "\nthis.start = startWebRtc;", constructorCtx);
+runInNewContext(activationStageFixture + startCode + "\nthis.start = startWebRtc;", constructorCtx);
 await assert.rejects(constructorCtx.start(), /browser peer unavailable/);
 assert.equal(constructorCloses, 1, "failed peer construction must retire its server offer");
 
@@ -1552,7 +1555,7 @@ const serializedCtx: Record<string, any> = {
   },
   RTCPeerConnection: class {constructor() {throw new Error("peer constructor refused");}},
 };
-runInNewContext(startCode + "\nthis.start = startWebRtc;", serializedCtx);
+runInNewContext(activationStageFixture + startCode + "\nthis.start = startWebRtc;", serializedCtx);
 const firstOrphanStart = serializedCtx.start();
 await orphanCloseStarted;
 const secondOrphanStart = serializedCtx.start();
@@ -1825,7 +1828,7 @@ const negotiationCtx: Record<string, any> = {
     negotiationOfferCloses.push({offerId, claims, grant});
   },
 };
-runInNewContext(startCode + "\nthis.start = startWebRtc;", negotiationCtx);
+runInNewContext(activationStageFixture + startCode + "\nthis.start = startWebRtc;", negotiationCtx);
 const blockedNegotiation = negotiationCtx.start();
 await remoteDescriptionEntered;
 negotiationCtx.mediaCaptureGeneration++;
