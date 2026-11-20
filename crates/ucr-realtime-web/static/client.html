@@ -206,6 +206,8 @@ function ucrRecordDiagnostic(event,category="runtime"){
 // Rendering is the real user-visible success boundary, not DataChannel open.
 window.ucrFirstAuthenticatedVideoRendered=()=>{
   if(sessionActive&&mediaActive){
+    if(ucrActivationStartedAt&&ucrActivationFirstVideoMs===null)
+      ucrActivationFirstVideoMs=Math.max(0,Math.round(performance.now()-ucrActivationStartedAt));
     ucrRecordDiagnostic("First authenticated video rendered","media");
     // A first frame ends startup latency, but MUST NOT disable the ongoing
     // bounded liveness monitor; video may stall again after transport loss.
@@ -232,6 +234,39 @@ let ucrLastFailure=null;
 // Safe, bounded stage marker. A generic WebRTC category cannot tell whether
 // the offer/SDP/ICE phase was actually reached; never expose keys or SDP.
 let ucrMediaActivationStage="NOT_STARTED";
+// Local monotonic durations identify the slow MLS/offer/ICE/media stage without
+// correlating unsynchronized wall clocks across endpoints. Never store tokens,
+// grants, SDP, MLS material, identities or peer addresses in this trace.
+let ucrActivationStartedAt=0;
+let ucrActivationPhaseAt=0;
+let ucrActivationPhases=[];
+let ucrActivationFirstVideoMs=null;
+function ucrSetMediaActivationStage(stage){
+  const now=performance.now();
+  if(stage==="PREFLIGHT"||!ucrActivationStartedAt){
+    ucrActivationStartedAt=now;
+    ucrActivationPhaseAt=now;
+    ucrActivationPhases=[];
+    ucrActivationFirstVideoMs=null;
+  }else if(ucrActivationPhases.length){
+    ucrActivationPhases[ucrActivationPhases.length-1].durationMs=
+      Math.max(0,Math.round(now-ucrActivationPhaseAt));
+  }
+  ucrMediaActivationStage=stage;
+  ucrActivationPhaseAt=now;
+  ucrActivationPhases.push({stage,startMs:Math.max(0,Math.round(now-ucrActivationStartedAt)),durationMs:null});
+  if(ucrActivationPhases.length>24)ucrActivationPhases.shift();
+}
+function ucrActivationTimingSnapshot(){
+  const now=performance.now();
+  const phases=ucrActivationPhases.map((phase,index)=>({
+    stage:phase.stage,startMs:phase.startMs,
+    durationMs:index===ucrActivationPhases.length-1?
+      Math.max(0,Math.round(now-ucrActivationPhaseAt)):phase.durationMs
+  }));
+  return {elapsedMs:ucrActivationStartedAt?Math.max(0,Math.round(now-ucrActivationStartedAt)):null,
+    firstVideoMs:ucrActivationFirstVideoMs,phases};
+}
 function ucrRememberFailure(category){
   const safe=String(category||"unknown").replace(/[^A-Z0-9_]/g,"").slice(0,80);
   ucrLastFailure={category:safe||"unknown",at:new Date().toISOString()};
@@ -449,6 +484,7 @@ function ucrDiagnosticReport(){
     },
     lastFailure:ucrLastFailure,
     mediaActivationStage:ucrMediaActivationStage,
+    mediaActivationTiming:ucrActivationTimingSnapshot(),
     // Safe consent diagnostics: no Device ID, grant, key material or SDP.
     localMediaPolicy:{
       acceptedCallMedia:firstPartyAcceptedMediaKind==="video"?"video":firstPartyAcceptedMediaKind==="audio"?"audio":"unverified",
@@ -716,6 +752,7 @@ const COPY={
     shareScreen:"Share screen",raiseHand:"Raise hand",lowerHand:"Lower hand",reaction:"Reaction",react:"React",
     activeSpeakerNone:"Active speaker: none",activeSpeakerPrefix:"Active speaker: ",chat:"Conference chat",message:"Message",send:"Send",
     join:"Join conference",leave:"Leave",readingGrant:"Reading signed join grant…",
+    enableSound:"Enable sound",soundEnabled:"Sound enabled",
     footer:"Media permission is requested only after joining. Recording is a отдельная возможность PetrelLink with consent and retention policy.",
     waitingRoom:"You are in the waiting room. Media will start automatically when the host starts the conference.",
     waitingEntry:"Waiting for the host to open conference entry…",
@@ -731,6 +768,7 @@ const COPY={
     shareScreen:"Показать экран",raiseHand:"Поднять руку",lowerHand:"Опустить руку",reaction:"Реакция",react:"Отправить реакцию",
     activeSpeakerNone:"Активный спикер: нет",activeSpeakerPrefix:"Активный спикер: ",chat:"Чат конференции",message:"Сообщение",send:"Отправить",
     join:"Войти в конференцию",leave:"Выйти",readingGrant:"Проверка ссылки для входа…",
+    enableSound:"Включить звук",soundEnabled:"Звук включён",
     footer:"Доступ к камере и микрофону запрашивается только после входа. Запись — отдельная возможность PetrelLink с согласием участников и политикой хранения.",
     waitingRoom:"Вы в комнате ожидания. Медиа включится автоматически, когда ведущий начнёт конференцию.",
     waitingEntry:"Ожидание открытия входа ведущим…",
@@ -777,6 +815,8 @@ function applyLocale(language){
   ui.screenToggle.textContent=tr("shareScreen");ui.handToggle.textContent=tr("raiseHand");ui.reactionSend.textContent=tr("react");
   ui.activeSpeaker.textContent=tr("activeSpeakerNone");ui.chatCard.setAttribute("aria-label",tr("chat"));ui.chatInput.placeholder=tr("message");ui.chatSend.textContent=tr("send");
   ui.join.textContent=tr("join");ui.leave.textContent=tr("leave");ui.footerNote.textContent=tr("footer");ui.status.textContent=tr("readingGrant");
+  ui.soundUnlock.textContent=window.ucrLocalRoomAudioContext?.state==="running"?
+    tr("soundEnabled"):tr("enableSound");
   if(ui.state.textContent==="Ready")ui.state.textContent=tr("ready");
   if(ui.webrtcState.textContent==="Idle")ui.webrtcState.textContent=tr("idle");
   applyToggleLabels();
@@ -2593,7 +2633,7 @@ async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
   // Network/privacy validation precedes browser device permissions.
   let offer,rtcConfig,serverPeerOpened=false,startingOwner=null;
   try{
-    ucrMediaActivationStage="WEBRTC_OFFER";
+    ucrSetMediaActivationStage("WEBRTC_OFFER");
     if(prefetchedOffer){
       const result=await prefetchedOffer.promise;
       const original=prefetchedOffer.owner;
@@ -2728,7 +2768,7 @@ async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
     if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
   };
   try{
-    ucrMediaActivationStage="SDP_ICE_NEGOTIATION";
+    ucrSetMediaActivationStage("SDP_ICE_NEGOTIATION");
     await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
     ensureOwnedPeer();
     if(typeof ucrRecordDiagnostic==="function")
@@ -2895,7 +2935,7 @@ async function activateAdmittedMedia(){
   if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=true;
   if(typeof ensureLocalMedia==="function")ensureLocalMedia(false).catch(()=>{});
   ui.status.textContent="Загружаем защиту звонка. На компьютере первая загрузка модуля может занять до минуты…";
-  ucrMediaActivationStage="MLS_RESTORE";
+  ucrSetMediaActivationStage("MLS_RESTORE");
   // Overlap only canonical server offer generation; keep authenticated
   // capture/MLS activation and the complete peer ownership fence unchanged.
   const prefetchedOffer=typeof prefetchFirstPartyWebRtcOffer==="function"
@@ -2925,7 +2965,7 @@ async function activateAdmittedMedia(){
   ui.status.textContent=policyAllows("audio")||policyAllows("camera")?"The host has started the conference. Requesting permitted camera/microphone access…":"The host has started the conference. Viewing mode does not request camera or microphone access.";
   openStream.missing=false;
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive&&!(typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady))ui.status.textContent="Realtime stream closed: "+e.message;});
-  ucrMediaActivationStage="WEBRTC_START";
+  ucrSetMediaActivationStage("WEBRTC_START");
   try{await startWebRtc(false,prefetchedOffer);}catch(e){
     if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
       ucrRecordDiagnostic("WebRTC initial authorization rejected","webrtc");
@@ -3109,7 +3149,7 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
   requireCanonicalMediaHostReady();
 }
 async function join(){
-  ucrMediaActivationStage="PREFLIGHT";
+  ucrSetMediaActivationStage("PREFLIGHT");
   if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Join requested","lifecycle");
   if(signedGrantRetired){
     ui.state.textContent="Access ended";
@@ -3157,7 +3197,7 @@ async function join(){
     await prepareCanonicalDeviceAfterJoin(generation,true);
     if(generation!==sessionLifecycleGeneration)return;
     ui.status.textContent="Authenticating signed session grant…";
-    ucrMediaActivationStage="REALTIME_JOIN";
+    ucrSetMediaActivationStage("REALTIME_JOIN");
     const r=await api("/v1/realtime/join",body());const data=await r.json();
     if(generation!==sessionLifecycleGeneration)return;
     if(!data.ok)throw new Error(data.message||"Join rejected");
@@ -3936,7 +3976,7 @@ ui.soundUnlock.addEventListener("click",()=>{
   if(pending&&typeof pending.then==="function"){
     pending.then(()=>{
       if(!sessionActive)return;
-      ui.soundUnlock.textContent="Sound enabled";
+      ui.soundUnlock.textContent=tr("soundEnabled");
       ui.soundUnlock.disabled=true;
       ui.status.textContent="Audio playback context is running.";
     }).catch(e=>{if(sessionActive)ui.status.textContent="Audio playback failed: "+e.message;});
@@ -4005,20 +4045,31 @@ async function refreshLocalRoomEndpointAuthority(){
 }
 function resumeRoomAudio(audioContext){
   if(!audioContext||audioContext.state==="closed")return;
-  // resume() stays pending forever when this document has no user gesture.
-  // Waiting here blocks the encrypted camera and microphone.
-  ui.soundUnlock.disabled=false;
+  // A resumed AudioContext already produces sound. Never display an active
+  // "Enable sound" button when playback is running (as observed in the real
+  // 2026-11-19 two-device call). Never await a gesture-gated resume promise:
+  // it can stay pending and must not block the E2EE video pipeline.
+  const updateSound=()=>{
+    if(window.ucrLocalRoomAudioContext!==audioContext)return;
+    const running=audioContext.state==="running";
+    ui.soundUnlock.textContent=tr(running?"soundEnabled":"enableSound");
+    ui.soundUnlock.disabled=running;
+  };
+  updateSound();
   const attempt=()=>{
+    if(audioContext.state==="running"){updateSound();return;}
     const pending=audioContext.resume();
-    if(pending&&typeof pending.catch==="function")pending.catch(()=>{});
+    if(pending&&typeof pending.then==="function")
+      pending.then(updateSound,()=>{});
   };
   attempt();
   if(resumeRoomAudio.bound===audioContext)return;
   resumeRoomAudio.bound=audioContext;
+  audioContext.addEventListener?.("statechange",updateSound);
   const unlock=()=>{
     attempt();
     if(audioContext.state==="running"){
-      ui.soundUnlock.textContent="Sound enabled";ui.soundUnlock.disabled=true;
+      updateSound();
       window.removeEventListener("pointerdown",unlock,true);
       window.removeEventListener("keydown",unlock,true);
     }
@@ -4027,7 +4078,7 @@ function resumeRoomAudio(audioContext){
   window.addEventListener("keydown",unlock,true);
   setTimeout(()=>{
     if(audioContext.state==="suspended"&&sessionActive){
-      ui.status.textContent="Encrypted video is connected, but audio playback is suspended. Click Enable sound.";
+      ui.status.textContent="Encrypted video is connected, but audio playback is suspended. Click "+tr("enableSound")+".";
     }
   },800);
 }

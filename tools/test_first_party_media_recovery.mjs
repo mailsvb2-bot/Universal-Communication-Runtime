@@ -67,8 +67,32 @@ const confEnd=await runEnd(false);
 assert.equal(confEnd.ui.state.textContent,"Access ended");
 assert.equal(confEnd.ui.join.disabled,true);
 for(const stage of ["PREFLIGHT","REALTIME_JOIN","MLS_RESTORE","WEBRTC_START","WEBRTC_OFFER","SDP_ICE_NEGOTIATION"]){
- assert.ok(html.includes('ucrMediaActivationStage="'+stage+'"'),"missing safe media stage "+stage);
+ assert.ok(html.includes('ucrSetMediaActivationStage("'+stage+'")'),"missing safe media stage "+stage);
 }
+// The diagnostics clock is local and monotonic: phase timings must never
+// mistake clock skew between a phone and desktop for network latency.
+const timingStart=html.indexOf('let ucrMediaActivationStage="NOT_STARTED";');
+const timingEnd=html.indexOf("function ucrRememberFailure(",timingStart);
+assert.ok(timingStart>=0&&timingEnd>timingStart,"canonical activation clock is missing");
+let tick=100;
+const clock={performance:{now:()=>tick}};
+vm.runInNewContext(html.slice(timingStart,timingEnd)+
+  "\nthis.advance=ucrSetMediaActivationStage;this.snapshot=ucrActivationTimingSnapshot;",clock);
+clock.advance("PREFLIGHT");
+tick=125;clock.advance("REALTIME_JOIN");
+tick=175;clock.advance("MLS_RESTORE");
+tick=235;clock.advance("WEBRTC_OFFER");
+const phase=clock.snapshot();
+assert.equal(phase.elapsedMs,135);
+assert.equal(phase.phases.length,4);
+assert.equal(phase.phases[0].durationMs,25);
+assert.equal(phase.phases[1].durationMs,50);
+assert.equal(phase.phases[2].durationMs,60);
+tick=280;clock.advance("PREFLIGHT");
+assert.equal(clock.snapshot().phases.length,1,"new Join resets old phase attribution");
+assert.equal(clock.snapshot().firstVideoMs,null);
+assert.match(html,/mediaActivationTiming:ucrActivationTimingSnapshot\(\)/);
+console.log("PASS: bounded monotonic MLS/ICE/first-video diagnosis resets per Join");
 console.log("PASS: accepted first-party Join failure retires only the old media grant, offers canonical /start recovery, and records precise safe stage");
 
 // A rejected first-party /webrtc/start is not recoverable by endlessly
@@ -227,3 +251,39 @@ rosterCtx.e2eeChannel={readyState:"closed"};
 await rosterCtx.sync();
 assert.equal(refreshes,1,"retired channel cannot request new frames");
 console.log("PASS: only a newly admitted canonical peer requests one local encoder keyframe; stale channels and repeated polls do not");
+
+
+/* The real call showed an active "Enable sound" button while the audio
+ * playback context was already running. Preserve fast non-blocking media
+ * startup, but accurately reflect the actual context state in both locales. */
+const soundStart=html.indexOf("function resumeRoomAudio(audioContext){");
+const soundEnd=html.indexOf("function holdRoomPresence(){",soundStart);
+assert.ok(soundStart>=0&&soundEnd>soundStart,"canonical audio unlock owner is missing");
+const soundButton={disabled:false,textContent:"Enable sound"};
+const soundContext={state:"running",resume(){throw Error("running audio must not be resumed");},
+  addEventListener(){}};
+const soundWindow={ucrLocalRoomAudioContext:soundContext,
+  addEventListener(){},removeEventListener(){}};
+const soundCtx={
+  ui:{soundUnlock:soundButton,status:{textContent:""}},window:soundWindow,
+  tr:key=>({enableSound:"Включить звук",soundEnabled:"Звук включён"})[key]||key,
+  sessionActive:true,setTimeout(){return 1;},
+};
+vm.runInNewContext(html.slice(soundStart,soundEnd)+
+  "\nthis.activateSound=resumeRoomAudio;",soundCtx);
+soundCtx.activateSound(soundContext);
+assert.equal(soundButton.disabled,true,"running playback must not prompt for sound");
+assert.equal(soundButton.textContent,"Звук включён");
+let resolveResume;
+const suspended={state:"suspended",resume(){return new Promise(resolve=>{resolveResume=resolve;});},
+  addEventListener(){}};
+soundWindow.ucrLocalRoomAudioContext=suspended;
+soundCtx.activateSound(suspended);
+assert.equal(soundButton.disabled,false,"suspended playback must offer user gesture");
+assert.equal(soundButton.textContent,"Включить звук");
+suspended.state="running";
+resolveResume();
+await Promise.resolve();
+assert.equal(soundButton.disabled,true,"successful asynchronous resume updates the button");
+assert.equal(soundButton.textContent,"Звук включён");
+console.log("PASS: sound control reflects real running/suspended AudioContext without awaiting playback for video");

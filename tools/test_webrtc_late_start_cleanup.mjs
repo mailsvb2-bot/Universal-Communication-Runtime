@@ -63,7 +63,7 @@ async function exercise({withdraw=false,replace=false,permissionDenied=false,pee
     navigator:{onLine:true},claims:{expires:Date.now()+60000},
     ui:{privacyMode:{value:"secure"}},
     token:"old-grant",startWebRtc:{offerId:replace?newOffer:null},peer:null,
-    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{}, ucrCaptureIceStats:async()=>{},
+    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{}, ucrSetMediaActivationStage:()=>{}, ucrCaptureIceStats:async()=>{},
     body:()=>context.token==="old-grant"?oldClaims:newClaims,
     requireCanonicalMediaHostReady:()=>{},
     rtcNetworkConfiguration:()=>({}),
@@ -133,7 +133,7 @@ async function exerciseNegotiation({failAt=null,replace=false,rotateToken=false}
     ui:{privacyMode:{value:"secure"},remoteVideo:{srcObject:null},
       webrtcState:{textContent:""},state:{textContent:""},status:{textContent:""}},
     token:"original-grant",startWebRtc:{offerId:null},peer:null,
-    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{}, ucrCaptureIceStats:async()=>{},
+    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{}, ucrSetMediaActivationStage:()=>{}, ucrCaptureIceStats:async()=>{},
     body:()=>context.token==="original-grant"?oldClaims:newClaims,
     requireCanonicalMediaHostReady:()=>{},
     rtcNetworkConfiguration:()=>({}),
@@ -290,7 +290,7 @@ async function exerciseIceOwnership({replace=false,rotatedOffer=false}={}){
     ui:{webrtcState:{textContent:""},status:{textContent:""},privacyMode:{value:"secure"}},
     body:()=>context.token==="old-grant"?oldClaims:newClaims,
     rtcNetworkConfiguration:()=>({}),
-    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{}, ucrCaptureIceStats:async()=>{},
+    ucrDiagnosticAllowedPaths:new Set(),ucrRecordDiagnostic:()=>{}, ucrSetMediaActivationStage:()=>{}, ucrCaptureIceStats:async()=>{},
     fetch:async(path,options)=>{
       calls.push({path,auth:options.headers.Authorization,payload:JSON.parse(options.body)});
       if(path==="/v1/realtime/webrtc/restart")return pendingRestart;

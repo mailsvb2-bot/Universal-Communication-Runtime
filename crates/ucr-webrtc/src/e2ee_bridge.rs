@@ -21,6 +21,24 @@ use ucr_protocol::{
 static E2EE_INGRESS_AUDIO_FULL: AtomicU64 = AtomicU64::new(0);
 static E2EE_INGRESS_VIDEO_FULL: AtomicU64 = AtomicU64::new(0);
 static E2EE_INGRESS_CLOSED: AtomicU64 = AtomicU64::new(0);
+// Egress congestion is a different failure location from endpoint->SFU ingress
+// saturation. Never mix these counters when attributing video loss.
+static E2EE_EGRESS_AUDIO_CONGESTED: AtomicU64 = AtomicU64::new(0);
+static E2EE_EGRESS_VIDEO_CONGESTED: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebRtcE2eeEgressCongestion {
+    pub audio_frames: u64,
+    pub video_frames: u64,
+}
+
+#[must_use]
+pub fn egress_congestion_counters() -> WebRtcE2eeEgressCongestion {
+    WebRtcE2eeEgressCongestion {
+        audio_frames: E2EE_EGRESS_AUDIO_CONGESTED.load(Ordering::Relaxed),
+        video_frames: E2EE_EGRESS_VIDEO_CONGESTED.load(Ordering::Relaxed),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebRtcE2eeIngressDrops {
@@ -58,7 +76,23 @@ pub const LIVE_WEBRTC_E2EE_INGRESS_CAPACITY: usize = 128;
 // Video admission must leave queue room for time-sensitive audio. This is
 // a bounded transport preference, never a substitute for MLS authorization.
 const MAX_E2EE_INGRESS_AUDIO_RESERVE: usize = 16;
-pub const MAX_WEBRTC_E2EE_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
+// Align the server's outbound pressure ceiling with the first-party browser.
+// A 4 MiB SCTP backlog can hold seconds of obsolete 30 fps camera frames
+// while the decoder is waiting for a new reference frame.
+pub const MAX_WEBRTC_E2EE_BUFFERED_BYTES: usize = 384 * 1024;
+pub const MAX_WEBRTC_E2EE_VIDEO_BUFFERED_BYTES: usize = 256 * 1024;
+
+fn outbound_buffer_budget(kind: MediaKind, already_buffered: usize, new_bytes: usize) -> bool {
+    let limit = if kind == MediaKind::Video {
+        MAX_WEBRTC_E2EE_VIDEO_BUFFERED_BYTES
+    } else {
+        MAX_WEBRTC_E2EE_BUFFERED_BYTES
+    };
+    already_buffered
+        .checked_add(new_bytes)
+        .is_some_and(|total| total <= limit)
+}
+
 pub const MAX_WEBRTC_E2EE_WIRE_BYTES: usize = MAX_SFU_FORWARD_WIRE_BYTES;
 pub const MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES: usize = 16_000;
 const WEBRTC_E2EE_CHUNK_MAGIC: &[u8; 8] = b"UCRCHK01";
@@ -359,7 +393,20 @@ impl LiveWebRtcE2eeChannel {
             Ok,
         )
         .await?;
-        if buffered > MAX_WEBRTC_E2EE_BUFFERED_BYTES {
+        // The queue bound must account for the WHOLE fragmented encrypted
+        // envelope, not just the bytes already queued before we start.
+        // Reject it atomically before the first SCTP send; an incomplete key
+        // frame would otherwise poison the decoder until its next refresh.
+        let new_bytes = chunks
+            .iter()
+            .try_fold(0_usize, |total, chunk| total.checked_add(chunk.len()))
+            .ok_or(crate::WebRtcProviderError::CapacityExceeded)?;
+        if !outbound_buffer_budget(envelope.frame.header.media_kind, buffered, new_bytes) {
+            match envelope.frame.header.media_kind {
+                MediaKind::Audio => &E2EE_EGRESS_AUDIO_CONGESTED,
+                MediaKind::Video => &E2EE_EGRESS_VIDEO_CONGESTED,
+            }
+            .fetch_add(1, Ordering::Relaxed);
             return Err(crate::WebRtcProviderError::CapacityExceeded);
         }
         for chunk in chunks {
@@ -458,16 +505,23 @@ pub(crate) async fn create_live_e2ee_data_channel(
     })
 }
 
-/// `UCR_WEBRTC_E2EE_UNORDERED=1` (default off) additionally offers the
-/// unordered, `maxRetransmits=0` v2 channel.
+/// Offer the independently negotiated low-latency, no-retransmit v2 path by
+/// default. A v1-only browser continues on v1: outbound v2 only activates
+/// after a peer sends a structurally valid v2 ciphertext fragment.
+///
+/// Set `UCR_WEBRTC_E2EE_UNORDERED=0` to disable the offer without altering
+/// MLS, endpoint signer or canonical SFU authorization.
 #[must_use]
 pub fn unordered_e2ee_enabled_from_env() -> bool {
-    std::env::var("UCR_WEBRTC_E2EE_UNORDERED").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on"
-        )
-    })
+    unordered_e2ee_enabled(std::env::var("UCR_WEBRTC_E2EE_UNORDERED").ok().as_deref())
+}
+
+fn unordered_e2ee_enabled(value: Option<&str>) -> bool {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("1" | "true" | "on") => true,
+        // Unknown operator values never silently enable an experimental path.
+        Some(_) => false,
+    }
 }
 
 async fn create_unordered_channel(
@@ -509,19 +563,18 @@ async fn create_unordered_channel(
             if wants_keyframe {
                 keyframe_wanted.store(true, Ordering::SeqCst);
             }
-            match decoded {
-                Ok(Some(envelope)) => {
-                    peer_speaks_v2.store(true, Ordering::SeqCst);
-                    enqueue_ingress_with_audio_reserve(
-                        &ingress_tx,
-                        WebRtcE2eeIngressFrame {
-                            session_id,
-                            envelope,
-                        },
-                    );
-                }
-                Ok(None) => peer_speaks_v2.store(true, Ordering::SeqCst),
-                Err(_) => {}
+            // An incomplete first fragment is NOT evidence that the peer
+            // can receive an entire v2 envelope. Until a structurally
+            // complete message arrives keep the outbound v1 fallback.
+            if let Ok(Some(envelope)) = decoded {
+                peer_speaks_v2.store(true, Ordering::SeqCst);
+                enqueue_ingress_with_audio_reserve(
+                    &ingress_tx,
+                    WebRtcE2eeIngressFrame {
+                        session_id,
+                        envelope,
+                    },
+                );
             }
         })
     }));
@@ -1229,10 +1282,37 @@ mod tests {
     }
 
     #[test]
-    fn unordered_flag_defaults_off() {
-        if std::env::var_os("UCR_WEBRTC_E2EE_UNORDERED").is_none() {
-            assert!(!unordered_e2ee_enabled_from_env());
+    fn unordered_v2_offer_default_and_operator_opt_out() {
+        assert!(unordered_e2ee_enabled(None));
+        for value in ["1", "true", "ON", " true "] {
+            assert!(unordered_e2ee_enabled(Some(value)));
         }
+        for value in ["0", "false", "OFF", "", "garbage"] {
+            assert!(!unordered_e2ee_enabled(Some(value)));
+        }
+    }
+
+    #[test]
+    fn media_buffer_budget_rejects_whole_video_frame_before_sctp_send() {
+        assert!(outbound_buffer_budget(MediaKind::Video, 0, 16_000));
+        assert!(outbound_buffer_budget(
+            MediaKind::Video,
+            128 * 1024,
+            128 * 1024
+        ));
+        assert!(!outbound_buffer_budget(
+            MediaKind::Video,
+            128 * 1024,
+            128 * 1024 + 1
+        ));
+        assert!(!outbound_buffer_budget(MediaKind::Video, 0, 256 * 1024 + 1));
+        assert!(outbound_buffer_budget(
+            MediaKind::Audio,
+            256 * 1024,
+            128 * 1024
+        ));
+        assert!(!outbound_buffer_budget(MediaKind::Audio, 384 * 1024, 1));
+        assert!(!outbound_buffer_budget(MediaKind::Video, usize::MAX, 1));
     }
 
     #[test]
