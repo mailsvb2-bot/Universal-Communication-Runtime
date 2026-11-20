@@ -3537,19 +3537,40 @@ async fn run_webrtc_e2ee_session_lane(
     let mut audio_open = true;
     let mut video_open = true;
     let mut audio_streak = 0_u8;
+    // A filtered video batch remains in the SAME session lane, but each
+    // forwarded frame gives newly arrived audio a chance to run. Never hold
+    // Opus behind an entire batch of slow authenticated SFU forwards.
+    let mut pending_video = std::collections::VecDeque::new();
     loop {
-        if !audio_open && !video_open {
+        if !audio_open && !video_open && pending_video.is_empty() {
             break;
         }
-        // Serve up to two Opus frames before an already queued video frame.
-        // This preserves speech priority without starving a 30 fps camera.
-        let Ok((candidate, from_audio)) = tokio::time::timeout(
-            Duration::from_mins(2),
-            receive_prioritized_media(&mut audio, &mut video, audio_open, video_open, audio_streak),
-        )
-        .await
-        else {
-            break;
+        let (candidate, from_audio, from_pending) = if !pending_video.is_empty() {
+            if audio_open && audio_streak < LIVE_WEBRTC_E2EE_AUDIO_BURST {
+                match audio.try_recv() {
+                    Ok(frame) => (Some(frame), true, false),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        audio_open = false;
+                        (pending_video.pop_front(), false, true)
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        (pending_video.pop_front(), false, true)
+                    }
+                }
+            } else {
+                (pending_video.pop_front(), false, true)
+            }
+        } else {
+            // No buffered video: retain the existing bounded, biased scheduler.
+            let Ok((candidate, from_audio)) = tokio::time::timeout(
+                Duration::from_mins(2),
+                receive_prioritized_media(&mut audio, &mut video, audio_open, video_open, audio_streak),
+            )
+            .await
+            else {
+                break;
+            };
+            (candidate, from_audio, false)
         };
         let Some(frame) = candidate else {
             if from_audio {
@@ -3559,7 +3580,9 @@ async fn run_webrtc_e2ee_session_lane(
             }
             continue;
         };
-        let batch = if from_audio {
+        let batch = if from_pending {
+            vec![frame]
+        } else if from_audio {
             drain_ready(frame, &mut audio)
         } else {
             drain_ready(frame, &mut video)
@@ -3573,14 +3596,20 @@ async fn run_webrtc_e2ee_session_lane(
             };
             counter.fetch_add(dropped, Ordering::Relaxed);
         }
-        // A drained audio backlog already consumed this stream's priority.
-        // The next turn prefers a waiting video frame.
-        if from_audio {
+        // Filtered video stays bounded in this lane but is forwarded ONE
+        // frame at a time. Reconsider newly arrived Opus after every frame.
+        // Audio backlogs still collapse to at most three fresh frames.
+        let frames = if from_audio {
             audio_streak = LIVE_WEBRTC_E2EE_AUDIO_BURST;
+            fresh
         } else {
             audio_streak = 0;
-        }
-        for frame in fresh {
+            let mut iter = fresh.into_iter();
+            let Some(first) = iter.next() else { continue };
+            pending_video.extend(iter);
+            vec![first]
+        };
+        for frame in frames {
             if service.has_sfu_media_router() {
                 if route_webrtc_e2ee_frame_via_configured_route(
                     &service, &registry, &provider, &frame,
