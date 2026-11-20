@@ -6,7 +6,7 @@ pub use e2ee_bridge::{
     MAX_WEBRTC_E2EE_WIRE_BYTES, WEBRTC_E2EE_DATA_CHANNEL_LABEL, WebRtcE2eeIngressDrops,
     WebRtcE2eeIngressFrame, WebRtcE2eeReassembler, WebRtcE2eeWireError,
     decode_webrtc_e2ee_envelope, encode_webrtc_e2ee_chunks, encode_webrtc_e2ee_envelope,
-    ingress_drop_counters,
+    egress_congestion_counters, ingress_drop_counters, WebRtcE2eeEgressCongestion,
 };
 
 use core::fmt;
