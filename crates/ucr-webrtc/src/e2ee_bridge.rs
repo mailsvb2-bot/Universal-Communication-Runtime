@@ -21,6 +21,25 @@ use ucr_protocol::{
 static E2EE_INGRESS_AUDIO_FULL: AtomicU64 = AtomicU64::new(0);
 static E2EE_INGRESS_VIDEO_FULL: AtomicU64 = AtomicU64::new(0);
 static E2EE_INGRESS_CLOSED: AtomicU64 = AtomicU64::new(0);
+// Egress congestion is a different failure location from endpoint->SFU ingress
+// saturation. Never mix these counters when attributing video loss.
+static E2EE_EGRESS_AUDIO_CONGESTED: AtomicU64 = AtomicU64::new(0);
+static E2EE_EGRESS_VIDEO_CONGESTED: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebRtcE2eeEgressCongestion {
+    pub audio_frames: u64,
+    pub video_frames: u64,
+}
+
+#[must_use]
+pub fn egress_congestion_counters() -> WebRtcE2eeEgressCongestion {
+    WebRtcE2eeEgressCongestion {
+        audio_frames: E2EE_EGRESS_AUDIO_CONGESTED.load(Ordering::Relaxed),
+        video_frames: E2EE_EGRESS_VIDEO_CONGESTED.load(Ordering::Relaxed),
+    }
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebRtcE2eeIngressDrops {
@@ -384,6 +403,11 @@ impl LiveWebRtcE2eeChannel {
             .try_fold(0_usize, |total, chunk| total.checked_add(chunk.len()))
             .ok_or(crate::WebRtcProviderError::CapacityExceeded)?;
         if !outbound_buffer_budget(envelope.frame.header.media_kind, buffered, new_bytes) {
+            match envelope.frame.header.media_kind {
+                MediaKind::Audio => &E2EE_EGRESS_AUDIO_CONGESTED,
+                MediaKind::Video => &E2EE_EGRESS_VIDEO_CONGESTED,
+            }
+            .fetch_add(1, Ordering::Relaxed);
             return Err(crate::WebRtcProviderError::CapacityExceeded);
         }
         for chunk in chunks {
