@@ -1769,6 +1769,19 @@ function e2eeV2Abandon(sequence){
     if(value<=sequence)e2eeV2Completed.delete(value);
   }
 }
+function isE2eeKeyframeRequest(data){
+  const bytes=data instanceof Uint8Array?data:new Uint8Array(data instanceof ArrayBuffer?data:[]);
+  return bytes.length===8&&readAscii(bytes,0,8)==="UCRKFRQ1";
+}
+function noteE2eeKeyframeRequest(){
+  const now=Date.now();
+  // A loss burst must not force a keyframe on every unordered packet.
+  if(now-(noteE2eeKeyframeRequest.at||0)<200)return;
+  noteE2eeKeyframeRequest.at=now;
+  const adapter=e2eeAdapter();
+  if(adapter&&typeof adapter.requestPublishedVideoKeyframes==="function")
+    adapter.requestPublishedVideoKeyframes();
+}
 function receiveE2eeChunkV2(data){
   const bytes=data instanceof Uint8Array?data:new Uint8Array(data);
   if(bytes.length<=E2EE_V2_HEADER_BYTES||bytes.length>E2EE_DATA_MESSAGE_BYTES)
@@ -1831,6 +1844,7 @@ function attachUnorderedE2eeDataChannel(channel){
   channel.onmessage=event=>{
     if(e2eeChannelV2!==channel)return;
     try{
+      if(isE2eeKeyframeRequest(event.data)){noteE2eeKeyframeRequest();return;}
       const wire=receiveE2eeChunkV2(event.data);if(!wire)return;
       if(!e2eeAdapterReady||!e2eeChannel||e2eeChannel.readyState!=="open")return;
       const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());

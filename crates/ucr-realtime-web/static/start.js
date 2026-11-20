@@ -1226,41 +1226,50 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
           });
           if(!published)return false;
           descriptor=published;
-          // The first publication seals the Group before this local variable
-          // is reassigned. The epoch-zero continuation below restores from it.
-          sealed=await mlsSnapshot(key);
-          if(state&&typeof state.free==="function"){
-            const previous=state;
-            state=null;
-            previous.free();
+          // Keep the Group that just published. Rebuilding it from IndexedDB
+          // before looking for the recipient key added a disk round trip, and
+          // a failed snapshot read aborted a Group that was still in memory.
+          const liveEpochZero=!!(state&&descriptor.cryptoEpoch===0&&
+            state.crypto_state_ref()===descriptor.cryptoStateRef);
+          if(liveEpochZero){
+            await mlsSave(key,state.seal_snapshot(wrapping));
+          }else{
+            sealed=await mlsSnapshot(key);
+            if(state&&typeof state.free==="function"){
+              const previous=state;
+              state=null;
+              previous.free();
+            }
           }
         }
-        if(sealed===null)throw Error("Initiator's private OpenMLS snapshot is missing");
-        if(descriptor.cryptoEpoch===0){
-          // An accepted epoch-zero publication may have lost its HTTP reply
-          // or crashed before local promotion. Recover the SAME sealed Group,
-          // verify the canonical digest, then atomically promote the snapshot.
-          let unpublished=false;
-          try{
+        if(!state){
+          if(sealed===null)throw Error("Initiator's private OpenMLS snapshot is missing");
+          if(descriptor.cryptoEpoch===0){
+            // An accepted epoch-zero publication may have lost its HTTP reply
+            // or crashed before local promotion. Recover the SAME sealed Group,
+            // verify the canonical digest, then atomically promote the snapshot.
+            let unpublished=false;
+            try{
+              state=module.EndpointMlsState.restore(live.user.tenantId,live.user.namespaceId??undefined,
+                descriptor.groupId,live.user.deviceId,wrapping,sealed,
+                0n,descriptor.cryptoStateRef);
+            }catch{
+              state=module.EndpointMlsState.restore_unpublished_group(
+                live.user.tenantId,live.user.namespaceId??undefined,descriptor.groupId,
+                live.user.deviceId,wrapping,sealed);
+              unpublished=true;
+            }
+            if(state.crypto_state_ref()!==descriptor.cryptoStateRef)
+              throw Error("Published MLS epoch-zero digest differs from local Group");
+            if(unpublished){
+              await mlsSave(key,state.seal_snapshot(wrapping));
+              live=await check();
+            }
+          }else{
             state=module.EndpointMlsState.restore(live.user.tenantId,live.user.namespaceId??undefined,
               descriptor.groupId,live.user.deviceId,wrapping,sealed,
-              0n,descriptor.cryptoStateRef);
-          }catch{
-            state=module.EndpointMlsState.restore_unpublished_group(
-              live.user.tenantId,live.user.namespaceId??undefined,descriptor.groupId,
-              live.user.deviceId,wrapping,sealed);
-            unpublished=true;
+              BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef);
           }
-          if(state.crypto_state_ref()!==descriptor.cryptoStateRef)
-            throw Error("Published MLS epoch-zero digest differs from local Group");
-          if(unpublished){
-            await mlsSave(key,state.seal_snapshot(wrapping));
-            live=await check();
-          }
-        }else{
-          state=module.EndpointMlsState.restore(live.user.tenantId,live.user.namespaceId??undefined,
-            descriptor.groupId,live.user.deviceId,wrapping,sealed,
-            BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef);
         }
         if(descriptor.cryptoEpoch===0){
           let offers=await host.listEndpointMlsOffers(live.user,requestOf());

@@ -541,6 +541,7 @@ async fn create_unordered_channel(
     let peer_speaks_v2 = Arc::new(AtomicBool::new(false));
     let keyframe_wanted = Arc::new(AtomicBool::new(false));
     let reassembler = Arc::new(tokio::sync::Mutex::new(WebRtcE2eeLossyReassembler::new()));
+    let feedback = Arc::downgrade(&channel);
     let (cb_v2, cb_key, cb_session) = (
         Arc::clone(&peer_speaks_v2),
         Arc::clone(&keyframe_wanted),
@@ -550,6 +551,7 @@ async fn create_unordered_channel(
         let reassembler = Arc::clone(&reassembler);
         let ingress_tx = ingress_tx.clone();
         let session_id = cb_session.clone();
+        let feedback = feedback.clone();
         let (peer_speaks_v2, keyframe_wanted) = (Arc::clone(&cb_v2), Arc::clone(&cb_key));
         Box::pin(async move {
             if message.is_string {
@@ -562,6 +564,16 @@ async fn create_unordered_channel(
             };
             if wants_keyframe {
                 keyframe_wanted.store(true, Ordering::SeqCst);
+                // Ask the publisher for one fresh keyframe. A lost request
+                // still falls back to the periodic encoder interval. Spawned
+                // so this receive callback cannot block on the send lock.
+                tokio::spawn(async move {
+                    if let Some(channel) = feedback.upgrade() {
+                        let _ = channel
+                            .send(&Bytes::from_static(WEBRTC_E2EE_KEYFRAME_REQUEST))
+                            .await;
+                    }
+                });
             }
             // An incomplete first fragment is NOT evidence that the peer
             // can receive an entire v2 envelope. Until a structurally
@@ -660,6 +672,10 @@ pub fn decode_webrtc_e2ee_envelope(
 /// `UCRCHK02 | seq u64 | index u16 | count u16 | total u32 | flags u8 | payload`.
 /// `flags` bit 0 = keyframe. Chunks may arrive in any order or not at all.
 pub const WEBRTC_E2EE_UNORDERED_DATA_CHANNEL_LABEL: &str = "ucr.e2ee.media.v2";
+/// One-shot loss feedback on the unordered channel. Shorter than a v2 chunk,
+/// so reassembly rejects it instead of treating it as ciphertext. The
+/// publisher's browser turns it into the existing local encoder keyframe bit.
+pub const WEBRTC_E2EE_KEYFRAME_REQUEST: &[u8; 8] = b"UCRKFRQ1";
 const WEBRTC_E2EE_CHUNK_MAGIC_V2: &[u8; 8] = b"UCRCHK02";
 const WEBRTC_E2EE_CHUNK_HEADER_BYTES_V2: usize = 25;
 const WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES_V2: usize =
@@ -1340,6 +1356,12 @@ mod tests {
         assert_eq!(r.push_chunk(&bad), Err(WebRtcE2eeWireError::Malformed));
         let good = encode_webrtc_e2ee_chunks_v2(&envelope(), 1).unwrap();
         assert_eq!(r.push_chunk(&good[0]).unwrap(), Some(envelope()));
+        assert_eq!(
+            r.push_chunk(WEBRTC_E2EE_KEYFRAME_REQUEST),
+            Err(WebRtcE2eeWireError::Malformed),
+            "keyframe feedback must not reassemble as ciphertext or count as loss"
+        );
+        assert_eq!(r.lost(), 0);
         // v1 reassembler likewise ignores v2 chunks (fallback stays isolated).
         assert!(WebRtcE2eeReassembler::new().push_chunk(&good[0]).is_err());
     }

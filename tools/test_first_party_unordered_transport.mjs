@@ -21,7 +21,7 @@ const constants={
   Uint8Array,TextEncoder,DataView,BigInt,Map,Set,Math,Number,
 };
 const receiveCtx={...constants};
-vm.runInNewContext(receiver+"\nthis.receiveV2=receiveE2eeChunkV2;this.receiveV1=receiveE2eeChunk;",receiveCtx);
+vm.runInNewContext(receiver+"\nthis.receiveV2=receiveE2eeChunkV2;this.receiveV1=receiveE2eeChunk;this.isKeyframeRequest=isE2eeKeyframeRequest;",receiveCtx);
 const v2Chunk=(seq,part,index,count,total,keyframe=true)=>{
   const bytes=new Uint8Array(25+part.length);bytes.set(new TextEncoder().encode("UCRCHK02"));
   const view=new DataView(bytes.buffer);
@@ -40,6 +40,13 @@ const out=receiveCtx.receiveV2(chunks[0]);
 assert.deepEqual([...out],[...payload],"unordered chunks reconstruct EXACT encrypted envelope");
 assert.equal(receiveCtx.receiveV2(chunks[1]),null,"late duplicate cannot replay ciphertext");
 // Bad version/size cannot be reinterpreted as the older ordered wire protocol.
+assert.equal(receiveCtx.isKeyframeRequest(new TextEncoder().encode("UCRKFRQ1")),true,
+  "publisher must recognize server loss feedback");
+assert.equal(receiveCtx.isKeyframeRequest(Uint8Array.of(1,2,3)),false);
+assert.throws(()=>receiveCtx.receiveV2(new TextEncoder().encode("UCRKFRQ1")),/Invalid/,
+  "keyframe feedback must not be decoded as an encrypted frame");
+assert.match(receiver,/requestPublishedVideoKeyframes/,
+  "loss feedback must reuse the existing local encoder keyframe request");
 assert.throws(()=>receiveCtx.receiveV2(Uint8Array.of(1,2,3)),/Invalid/);
 assert.throws(()=>receiveCtx.receiveV2(
   Uint8Array.from([85,67,82,67,72,75,48,49,...new Array(30).fill(0)])),/protocol/);
