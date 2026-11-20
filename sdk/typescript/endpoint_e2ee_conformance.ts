@@ -2863,7 +2863,13 @@ try {
     "independent authenticated speakers must overlap while own frames stay ordered");
   // Drive a stalled sender queue past the bounded playout horizon.
   // Old WebAudio nodes must be stopped and disconnected before rebasing.
+  // The frame that crosses the horizon is the newest speech and must play.
+  const burstStarts = audioStartTimes.length;
   for (let i = 0; i < 30; i++) mixing.play(audioFrame("mic-a"), sourceHeader("alice"));
+  assert.equal(audioStartTimes.length, burstStarts + 30,
+    "catch-up must keep the newest speech frame");
+  assert.ok(audioStartTimes[audioStartTimes.length - 1] >= audioSink.currentTime,
+    "the kept frame must start at the rebased cushion, not in the cancelled queue");
   assert.ok(audioStops > 0, "congested audio must cancel old scheduled PCM");
   const disconnectedBeforeStop = audioDisconnects;
   assert.ok(disconnectedBeforeStop > 0, "congested audio must release old audio nodes");

@@ -1340,8 +1340,10 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       ucrAudioCounters.playoutJitterMs = Math.round(state.jitter * 1000);
       ucrAudioCounters.playoutQueuedMs = Math.max(0, Math.round((state.next - now) * 1000));
       // Bound queued audio by elapsed wall-clock time. On overflow cancel
-      // obsolete scheduled PCM, then rebuild from a fresh bounded cushion.
-      // Merely rebasing a timestamp would overlap old and new speech.
+      // obsolete scheduled PCM, then play THIS frame from a fresh cushion.
+      // Dropping the frame that discovered the backlog leaves a hole in
+      // speech right after the catch-up. Rebasing a timestamp without
+      // stopping the old nodes would overlap old and new speech.
       if (state.next - now > 0.25) {
         ucrAudioCounters.dropped++;
         ucrAudioCounters.playoutRebases++;
@@ -1356,8 +1358,6 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
           scheduled.clear();
         }
         state.next = now + cushion;
-        if (typeof node.disconnect === "function") node.disconnect();
-        return;
       }
       // Following starvation, restart promptly with a small measured cushion.
       if (state.next < now) state.next = now + cushion;

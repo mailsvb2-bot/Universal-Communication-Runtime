@@ -1215,9 +1215,25 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
             ...requestOf(),cryptoStateRef:state.crypto_state_ref()
           });
           live=await check();
-          // A recipient's independently signed offer may arrive later.
+          // Stay in this prepare. Returning here used to wait for the 800 ms
+          // page poll before the creator even looked for the recipient key,
+          // which is the long "Ждём ключ собеседника" stall.
           authDiagnostic("mls_publish_group","ok",null,{mlsPhase:"published_group"});
-          return false;
+          const confirmed=await pullDescriptor();
+          const published=confirmed.cryptoEpoch===0?confirmed:await pollMlsPeer("published_group",async()=>{
+            const next=await pullDescriptor();
+            return next.cryptoEpoch===0?next:null;
+          });
+          if(!published)return false;
+          descriptor=published;
+          // The first publication seals the Group before this local variable
+          // is reassigned. The epoch-zero continuation below restores from it.
+          sealed=await mlsSnapshot(key);
+          if(state&&typeof state.free==="function"){
+            const previous=state;
+            state=null;
+            previous.free();
+          }
         }
         if(sealed===null)throw Error("Initiator's private OpenMLS snapshot is missing");
         if(descriptor.cryptoEpoch===0){
