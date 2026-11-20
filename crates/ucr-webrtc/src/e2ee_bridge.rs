@@ -541,7 +541,7 @@ async fn create_unordered_channel(
     let peer_speaks_v2 = Arc::new(AtomicBool::new(false));
     let keyframe_wanted = Arc::new(AtomicBool::new(false));
     let reassembler = Arc::new(tokio::sync::Mutex::new(WebRtcE2eeLossyReassembler::new()));
-    let feedback = Arc::clone(&channel);
+    let feedback = Arc::downgrade(&channel);
     let (cb_v2, cb_key, cb_session) = (
         Arc::clone(&peer_speaks_v2),
         Arc::clone(&keyframe_wanted),
@@ -551,7 +551,7 @@ async fn create_unordered_channel(
         let reassembler = Arc::clone(&reassembler);
         let ingress_tx = ingress_tx.clone();
         let session_id = cb_session.clone();
-        let feedback = Arc::clone(&feedback);
+        let feedback = feedback.clone();
         let (peer_speaks_v2, keyframe_wanted) = (Arc::clone(&cb_v2), Arc::clone(&cb_key));
         Box::pin(async move {
             if message.is_string {
@@ -568,9 +568,11 @@ async fn create_unordered_channel(
                 // still falls back to the periodic encoder interval. Spawned
                 // so this receive callback cannot block on the send lock.
                 tokio::spawn(async move {
-                    let _ = feedback
-                        .send(&Bytes::from_static(WEBRTC_E2EE_KEYFRAME_REQUEST))
-                        .await;
+                    if let Some(channel) = feedback.upgrade() {
+                        let _ = channel
+                            .send(&Bytes::from_static(WEBRTC_E2EE_KEYFRAME_REQUEST))
+                            .await;
+                    }
                 });
             }
             // An incomplete first fragment is NOT evidence that the peer
