@@ -392,8 +392,8 @@ export function ucrAdvanceVideoPacing(
 // for many seconds after someone joins.
 // No confirmed receiver-to-sender keyframe request for joining/rekeying peers.
 // Bound decoder recovery at startup, then reduce steady-state refresh overhead.
-const VIDEO_KEYFRAME_INTERVAL_US = 2_000_000;
-const VIDEO_STARTUP_KEYFRAME_INTERVAL_US = 750_000;
+const VIDEO_KEYFRAME_INTERVAL_US = 1_000_000;
+const VIDEO_STARTUP_KEYFRAME_INTERVAL_US = 400_000;
 const VIDEO_STARTUP_WINDOW_US = 5_000_000;
 
 /** Stable, bounded stream identity for one actual encrypted camera quality layer.

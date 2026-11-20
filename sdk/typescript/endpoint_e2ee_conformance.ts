@@ -2434,8 +2434,8 @@ assert.match(codecProducerSource,
 assert.match(codecProducerSource,
   /const transportPressure = readTransportCongestion\(\)/,
   "the actual send rejection counter must feed the source-owned controller");
-assert.match(codecProducerSource, /VIDEO_KEYFRAME_INTERVAL_US = 2_000_000/,
-  "steady-state lost-reference recovery must not wait the prior three seconds");
+assert.match(codecProducerSource, /VIDEO_KEYFRAME_INTERVAL_US = 1_000_000/,
+  "steady-state lost-reference recovery must not wait the prior two seconds");
 assert.equal(ucrOutboundQueueAllows("video", 0, 64), true);
 assert.equal(ucrOutboundQueueAllows("video", 47, 64), true);
 assert.equal(ucrOutboundQueueAllows("video", 48, 64), false,
