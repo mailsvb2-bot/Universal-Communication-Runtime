@@ -61,10 +61,12 @@ const boundedWindow=await runScenario({
 });
 assert.equal(boundedWindow.error?.status,503);
 assert.ok(boundedWindow.requests<=61,"rendezvous must stop within 60 seconds");
-// 60-second peer wait must back off instead of hammering canonical admission.
+// The 60-second rendezvous stays on a sub-second poll. A 2 s backoff hid a
+// peer who had already joined (call 44 waited through 2.1 s gaps). The cap is
+// the request count of a 450 ms poll across the same 60 s deadline.
 const backoff=await runScenario({responses:Array(400).fill(503),advanceByDelay:true});
 assert.equal(backoff.error?.status,503);
-assert.ok(backoff.requests<=40,"MLS polling should back off; requests="+backoff.requests);
+assert.ok(backoff.requests<=140,"sub-second MLS poll must still stop at 60s; requests="+backoff.requests);
 assert.ok(backoff.elapsedMs<=60000&&backoff.elapsedMs>=59000,"keep 60s deadline");
 const lateRecipient=await runScenario({responses:[...Array(30).fill(503),200],advanceByDelay:true});
 assert.equal(lateRecipient.error,null,"late recipient must still join");

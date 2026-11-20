@@ -1116,6 +1116,32 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
   };
   let descriptor=await pullDescriptor();
   const creator=descriptor.creatorPrincipalId===live.user.participantId;
+  // The peer's KeyPackage, Group or Welcome arrives on their own device.
+  // Stay in this already-authorized read and notice it within a few hundred
+  // milliseconds. Returning immediately forced the caller to restart the whole
+  // MLS prepare on the 800 ms page poll, which is the long "Ждём ключ" stall.
+  // The isolated coordinator test has no timer: one probe, same false result.
+  const pollMlsPeer=async(phase,probe)=>{
+    if(typeof message==="function"){
+      message(phase==="wait_group"
+        ?"Звонок принят. Ждём криптогруппу собеседника…"
+        :phase==="wait_offer"||phase==="published_group"
+          ?"Криптогруппа создана. Ждём ключ собеседника…"
+          :"Ключ отправлен. Ждём подтверждение собеседника…");
+    }
+    const timed=typeof setTimeout==="function";
+    const attempts=timed?24:1;
+    let delay=200;
+    for(let attempt=0;attempt<attempts;attempt++){
+      const found=await probe();
+      if(found)return found;
+      authDiagnostic("mls_prepare","pending",null,{mlsPhase:phase});
+      if(!timed||attempt+1===attempts)break;
+      await new Promise(resolve=>setTimeout(resolve,delay));
+      delay=Math.min(400,delay+40);
+    }
+    return null;
+  };
   const key=mlsStateKey(live.user,descriptor);
   rememberCallInfo({callState:live.call.state,
     role:callRoleOf({call:live.call,identity:live.user.participantId}),
@@ -1221,9 +1247,18 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
             BigInt(descriptor.cryptoEpoch),descriptor.cryptoStateRef);
         }
         if(descriptor.cryptoEpoch===0){
-          const offers=await host.listEndpointMlsOffers(live.user,requestOf());
+          let offers=await host.listEndpointMlsOffers(live.user,requestOf());
           live=await check();
-          if(offers.length===0){authDiagnostic("mls_prepare","pending",null,{mlsPhase:"wait_offer"});return false;}
+          if(offers.length===0){
+            const found=await pollMlsPeer("wait_offer",async()=>{
+              live=await check();
+              const next=await host.listEndpointMlsOffers(live.user,requestOf());
+              live=await check();
+              return next.length?next:null;
+            });
+            if(!found)return false;
+            offers=found;
+          }
           if(offers.length!==1||offers[0].recipientDeviceId===live.user.deviceId)
             throw Error("Ambiguous authenticated MLS recipient offer");
           const offer=offers[0];
@@ -1274,7 +1309,14 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
       }else{
         // The durable public offer has a foreign key to the canonical Group:
         // never publish before the initiator's signed epoch-zero creation.
-        if(descriptor.cryptoEpoch===null){authDiagnostic("mls_prepare","pending",null,{mlsPhase:"wait_group"});return false;}
+        if(descriptor.cryptoEpoch===null){
+          const published=await pollMlsPeer("wait_group",async()=>{
+            const next=await pullDescriptor();
+            return next.cryptoEpoch===null?null:next;
+          });
+          if(!published)return false;
+          descriptor=published;
+        }
         if(sealed===null){
           if(descriptor.cryptoEpoch!==0)
             throw Error("Recipient KeyPackage missing after canonical MLS admission");
@@ -1295,7 +1337,12 @@ async function prepareFirstPartyEndpointMls(callId,selectedScope,locator){
           });
           live=await check();
           authDiagnostic("mls_publish_offer","ok",null,{mlsPhase:"published_offer"});
-          return false;
+          const admitted=await pollMlsPeer("wait_welcome",async()=>{
+            const next=await pullDescriptor();
+            return next.cryptoEpoch!==null&&next.cryptoEpoch>=1?next:null;
+          });
+          if(!admitted)return false;
+          descriptor=admitted;
         }
         try{
           state=module.EndpointMlsState.restore(live.user.tenantId,live.user.namespaceId??undefined,
@@ -1401,6 +1448,16 @@ async function beginMedia(callId) {
     else if(phase==="wait_offer"||phase==="published_group")message("Криптогруппа создана. Ждём ключ собеседника…");
     else if(phase==="published_offer"||phase==="wait_welcome")message("Ключ отправлен. Ждём подтверждение собеседника…");
     else message("Проверяем криптографический допуск собеседника…");
+    // The in-prepare poll already waited. One short continuation catches a
+    // KeyPackage that landed in the gap, without waiting out the 800 ms poll.
+    if(typeof setTimeout==="function"&&!sessionCallInfo.mlsPollTimer&&!navigating){
+      sessionCallInfo.mlsPollTimer=setTimeout(()=>{
+        sessionCallInfo.mlsPollTimer=null;
+        try{if(sessionStorage.getItem("ucrConferenceMediaActive")==="1")return;}catch(_){return;}
+        if(navigating||busy||active?.call?.state!=="active")return;
+        void refresh();
+      },250);
+    }
     return;
   }
   // A slow MLS preflight can outlive Hangup or a Device switch. Revalidate

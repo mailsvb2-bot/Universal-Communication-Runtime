@@ -1176,7 +1176,7 @@ async function fetchEndpointMlsContext(signal){
   // 503 retry re-enters the canonical server's session/Device/MLS admission.
   const deadline=Date.now()+Math.min(60000,Math.max(0,claims.expires-Date.now()));
   // Limit canonical admission checks for a waiting phone; retain the signed deadline.
-  let retryDelayMs=350;
+  let retryDelayMs=250;
   for(;;){
     if(signal?.aborted)throw new DOMException("MLS admission cancelled","AbortError");
     try{
@@ -1195,7 +1195,9 @@ async function fetchEndpointMlsContext(signal){
         throw error;
       ui.status.textContent="Собеседник подключается. Проверяем защищённый доступ…";
       await new Promise(resolve=>setTimeout(resolve,waitMs));
-      retryDelayMs=Math.min(2000,Math.round(retryDelayMs*1.6));
+      // A 2 s backoff left the joined peer unseen for seconds after the other
+      // device published its key. Stay on a short poll for the whole rendezvous.
+      retryDelayMs=Math.min(450,Math.round(retryDelayMs*1.25));
     }
   }
 }
