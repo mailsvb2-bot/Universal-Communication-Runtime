@@ -77,7 +77,7 @@ assert.ok(timingStart>=0&&timingEnd>timingStart,"canonical activation clock is m
 let tick=100;
 const clock={performance:{now:()=>tick}};
 vm.runInNewContext(html.slice(timingStart,timingEnd)+
-  "\\nthis.advance=ucrSetMediaActivationStage;this.snapshot=ucrActivationTimingSnapshot;",clock);
+  "\nthis.advance=ucrSetMediaActivationStage;this.snapshot=ucrActivationTimingSnapshot;",clock);
 clock.advance("PREFLIGHT");
 tick=125;clock.advance("REALTIME_JOIN");
 tick=175;clock.advance("MLS_RESTORE");
@@ -91,7 +91,7 @@ assert.equal(phase.phases[2].durationMs,60);
 tick=280;clock.advance("PREFLIGHT");
 assert.equal(clock.snapshot().phases.length,1,"new Join resets old phase attribution");
 assert.equal(clock.snapshot().firstVideoMs,null);
-assert.match(html,/mediaActivationTiming:ucrActivationTimingSnapshot\\(\\)/);
+assert.match(html,/mediaActivationTiming:ucrActivationTimingSnapshot\(\)/);
 console.log("PASS: bounded monotonic MLS/ICE/first-video diagnosis resets per Join");
 console.log("PASS: accepted first-party Join failure retires only the old media grant, offers canonical /start recovery, and records precise safe stage");
 
