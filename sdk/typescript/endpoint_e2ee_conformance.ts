@@ -1677,7 +1677,7 @@ const admissionCtx: Record<string, any> = {
   api: async () => {throw new Error("unexpected network request");},
 };
 runInNewContext(
-  mlsSnippet + "\n" + captureStopCode + "\n" + admissionCode +
+  activationStageFixture + mlsSnippet + "\n" + captureStopCode + "\n" + admissionCode +
   "\nthis.admission = applyAdmissionState;" +
   "\nthis.heartbeat = heartbeat; this.joinConference = join;" +
   "\nthis.activateAdmitted = activateAdmittedMedia;",
