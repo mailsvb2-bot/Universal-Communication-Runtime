@@ -206,6 +206,8 @@ function ucrRecordDiagnostic(event,category="runtime"){
 // Rendering is the real user-visible success boundary, not DataChannel open.
 window.ucrFirstAuthenticatedVideoRendered=()=>{
   if(sessionActive&&mediaActive){
+    if(ucrActivationStartedAt&&ucrActivationFirstVideoMs===null)
+      ucrActivationFirstVideoMs=Math.max(0,Math.round(performance.now()-ucrActivationStartedAt));
     ucrRecordDiagnostic("First authenticated video rendered","media");
     // A first frame ends startup latency, but MUST NOT disable the ongoing
     // bounded liveness monitor; video may stall again after transport loss.
@@ -232,6 +234,39 @@ let ucrLastFailure=null;
 // Safe, bounded stage marker. A generic WebRTC category cannot tell whether
 // the offer/SDP/ICE phase was actually reached; never expose keys or SDP.
 let ucrMediaActivationStage="NOT_STARTED";
+// Local monotonic durations identify the slow MLS/offer/ICE/media stage without
+// correlating unsynchronized wall clocks across endpoints. Never store tokens,
+// grants, SDP, MLS material, identities or peer addresses in this trace.
+let ucrActivationStartedAt=0;
+let ucrActivationPhaseAt=0;
+let ucrActivationPhases=[];
+let ucrActivationFirstVideoMs=null;
+function ucrSetMediaActivationStage(stage){
+  const now=performance.now();
+  if(stage==="PREFLIGHT"||!ucrActivationStartedAt){
+    ucrActivationStartedAt=now;
+    ucrActivationPhaseAt=now;
+    ucrActivationPhases=[];
+    ucrActivationFirstVideoMs=null;
+  }else if(ucrActivationPhases.length){
+    ucrActivationPhases[ucrActivationPhases.length-1].durationMs=
+      Math.max(0,Math.round(now-ucrActivationPhaseAt));
+  }
+  ucrMediaActivationStage=stage;
+  ucrActivationPhaseAt=now;
+  ucrActivationPhases.push({stage,startMs:Math.max(0,Math.round(now-ucrActivationStartedAt)),durationMs:null});
+  if(ucrActivationPhases.length>24)ucrActivationPhases.shift();
+}
+function ucrActivationTimingSnapshot(){
+  const now=performance.now();
+  const phases=ucrActivationPhases.map((phase,index)=>({
+    stage:phase.stage,startMs:phase.startMs,
+    durationMs:index===ucrActivationPhases.length-1?
+      Math.max(0,Math.round(now-ucrActivationPhaseAt)):phase.durationMs
+  }));
+  return {elapsedMs:ucrActivationStartedAt?Math.max(0,Math.round(now-ucrActivationStartedAt)):null,
+    firstVideoMs:ucrActivationFirstVideoMs,phases};
+}
 function ucrRememberFailure(category){
   const safe=String(category||"unknown").replace(/[^A-Z0-9_]/g,"").slice(0,80);
   ucrLastFailure={category:safe||"unknown",at:new Date().toISOString()};
@@ -449,6 +484,7 @@ function ucrDiagnosticReport(){
     },
     lastFailure:ucrLastFailure,
     mediaActivationStage:ucrMediaActivationStage,
+    mediaActivationTiming:ucrActivationTimingSnapshot(),
     // Safe consent diagnostics: no Device ID, grant, key material or SDP.
     localMediaPolicy:{
       acceptedCallMedia:firstPartyAcceptedMediaKind==="video"?"video":firstPartyAcceptedMediaKind==="audio"?"audio":"unverified",
@@ -2597,7 +2633,7 @@ async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
   // Network/privacy validation precedes browser device permissions.
   let offer,rtcConfig,serverPeerOpened=false,startingOwner=null;
   try{
-    ucrMediaActivationStage="WEBRTC_OFFER";
+    ucrSetMediaActivationStage("WEBRTC_OFFER");
     if(prefetchedOffer){
       const result=await prefetchedOffer.promise;
       const original=prefetchedOffer.owner;
@@ -2732,7 +2768,7 @@ async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
     if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
   };
   try{
-    ucrMediaActivationStage="SDP_ICE_NEGOTIATION";
+    ucrSetMediaActivationStage("SDP_ICE_NEGOTIATION");
     await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
     ensureOwnedPeer();
     if(typeof ucrRecordDiagnostic==="function")
@@ -2899,7 +2935,7 @@ async function activateAdmittedMedia(){
   if(typeof earlyLocalCapture!=="undefined")earlyLocalCapture=true;
   if(typeof ensureLocalMedia==="function")ensureLocalMedia(false).catch(()=>{});
   ui.status.textContent="Загружаем защиту звонка. На компьютере первая загрузка модуля может занять до минуты…";
-  ucrMediaActivationStage="MLS_RESTORE";
+  ucrSetMediaActivationStage("MLS_RESTORE");
   // Overlap only canonical server offer generation; keep authenticated
   // capture/MLS activation and the complete peer ownership fence unchanged.
   const prefetchedOffer=typeof prefetchFirstPartyWebRtcOffer==="function"
@@ -2929,7 +2965,7 @@ async function activateAdmittedMedia(){
   ui.status.textContent=policyAllows("audio")||policyAllows("camera")?"The host has started the conference. Requesting permitted camera/microphone access…":"The host has started the conference. Viewing mode does not request camera or microphone access.";
   openStream.missing=false;
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive&&!(typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady))ui.status.textContent="Realtime stream closed: "+e.message;});
-  ucrMediaActivationStage="WEBRTC_START";
+  ucrSetMediaActivationStage("WEBRTC_START");
   try{await startWebRtc(false,prefetchedOffer);}catch(e){
     if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
       ucrRecordDiagnostic("WebRTC initial authorization rejected","webrtc");
@@ -3113,7 +3149,7 @@ async function prepareCanonicalDeviceAfterJoin(generation,beforeJoin=false){
   requireCanonicalMediaHostReady();
 }
 async function join(){
-  ucrMediaActivationStage="PREFLIGHT";
+  ucrSetMediaActivationStage("PREFLIGHT");
   if(typeof ucrRecordDiagnostic==="function")ucrRecordDiagnostic("Join requested","lifecycle");
   if(signedGrantRetired){
     ui.state.textContent="Access ended";
@@ -3161,7 +3197,7 @@ async function join(){
     await prepareCanonicalDeviceAfterJoin(generation,true);
     if(generation!==sessionLifecycleGeneration)return;
     ui.status.textContent="Authenticating signed session grant…";
-    ucrMediaActivationStage="REALTIME_JOIN";
+    ucrSetMediaActivationStage("REALTIME_JOIN");
     const r=await api("/v1/realtime/join",body());const data=await r.json();
     if(generation!==sessionLifecycleGeneration)return;
     if(!data.ok)throw new Error(data.message||"Join rejected");
