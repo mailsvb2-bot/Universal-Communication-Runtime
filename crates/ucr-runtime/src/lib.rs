@@ -3527,6 +3527,41 @@ async fn receive_prioritized_media<T>(
     }
 }
 
+// Execute exactly one authorized SFU forward. Keeping it outside the lane
+// scheduler preserves the audio/video interleave on every forwarding turn.
+async fn forward_webrtc_e2ee_lane_frame(
+    service: &GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    registry: &Arc<RealtimeSessionRegistry>,
+    provider: &Arc<LiveWebRtcProvider>,
+    frame: WebRtcE2eeIngressFrame,
+) {
+    if service.has_sfu_media_router() {
+        if route_webrtc_e2ee_frame_via_configured_route(service, registry, provider, &frame)
+            .await
+            .is_err()
+        {
+            WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
+        }
+    } else {
+        let provider = Arc::clone(provider);
+        let registry = Arc::clone(registry);
+        let service = service.clone();
+        match tokio::task::spawn_blocking(move || {
+            route_webrtc_e2ee_frame(&service, &registry, &provider, &frame)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(())) => {
+                WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                WEBRTC_E2EE_BLOCKING_JOIN_FAILURE.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 async fn run_webrtc_e2ee_session_lane(
     mut audio: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
     mut video: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
@@ -3545,22 +3580,7 @@ async fn run_webrtc_e2ee_session_lane(
         if !audio_open && !video_open && pending_video.is_empty() {
             break;
         }
-        let (candidate, from_audio, from_pending) = if !pending_video.is_empty() {
-            if audio_open && audio_streak < LIVE_WEBRTC_E2EE_AUDIO_BURST {
-                match audio.try_recv() {
-                    Ok(frame) => (Some(frame), true, false),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        audio_open = false;
-                        (pending_video.pop_front(), false, true)
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                        (pending_video.pop_front(), false, true)
-                    }
-                }
-            } else {
-                (pending_video.pop_front(), false, true)
-            }
-        } else {
+        let (candidate, from_audio, from_pending) = if pending_video.is_empty() {
             // No buffered video: retain the existing bounded, biased scheduler.
             let Ok((candidate, from_audio)) = tokio::time::timeout(
                 Duration::from_mins(2),
@@ -3577,6 +3597,21 @@ async fn run_webrtc_e2ee_session_lane(
                 break;
             };
             (candidate, from_audio, false)
+        } else {
+            if audio_open && audio_streak < LIVE_WEBRTC_E2EE_AUDIO_BURST {
+                match audio.try_recv() {
+                    Ok(frame) => (Some(frame), true, false),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        audio_open = false;
+                        (pending_video.pop_front(), false, true)
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        (pending_video.pop_front(), false, true)
+                    }
+                }
+            } else {
+                (pending_video.pop_front(), false, true)
+            }
         };
         let Some(frame) = candidate else {
             if from_audio {
@@ -3616,33 +3651,7 @@ async fn run_webrtc_e2ee_session_lane(
             vec![first]
         };
         for frame in frames {
-            if service.has_sfu_media_router() {
-                if route_webrtc_e2ee_frame_via_configured_route(
-                    &service, &registry, &provider, &frame,
-                )
-                .await
-                .is_err()
-                {
-                    WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
-                }
-            } else {
-                let provider = Arc::clone(&provider);
-                let registry = Arc::clone(&registry);
-                let service = service.clone();
-                match tokio::task::spawn_blocking(move || {
-                    route_webrtc_e2ee_frame(&service, &registry, &provider, &frame)
-                })
-                .await
-                {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(())) => {
-                        WEBRTC_E2EE_FORWARD_FAILURE.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(_) => {
-                        WEBRTC_E2EE_BLOCKING_JOIN_FAILURE.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
+            forward_webrtc_e2ee_lane_frame(&service, &registry, &provider, frame).await;
         }
     }
 }
