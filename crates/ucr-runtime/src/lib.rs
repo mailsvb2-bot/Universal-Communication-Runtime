@@ -3564,7 +3564,13 @@ async fn run_webrtc_e2ee_session_lane(
             // No buffered video: retain the existing bounded, biased scheduler.
             let Ok((candidate, from_audio)) = tokio::time::timeout(
                 Duration::from_mins(2),
-                receive_prioritized_media(&mut audio, &mut video, audio_open, video_open, audio_streak),
+                receive_prioritized_media(
+                    &mut audio,
+                    &mut video,
+                    audio_open,
+                    video_open,
+                    audio_streak,
+                ),
             )
             .await
             else {
