@@ -15,8 +15,8 @@ const constants={
   E2EE_DATA_MESSAGE_BYTES:16000,E2EE_CHUNK_PAYLOAD_BYTES:15976,
   E2EE_MAX_WIRE_BYTES:2*1024*1024+8192,
   E2EE_V2_CHUNK_MAGIC:"UCRCHK02",E2EE_V2_HEADER_BYTES:25,
-  E2EE_V2_PAYLOAD_BYTES:15975,E2EE_V2_PENDING_LIMIT:4,
-  e2eeV2Pending:new Map(),e2eeV2Delivered:null,e2eePending:null,
+  E2EE_V2_PAYLOAD_BYTES:15975,E2EE_V2_PENDING_LIMIT:32,E2EE_V2_COMPLETED_MEMORY:64,
+  e2eeV2Pending:new Map(),e2eeV2ForgetThrough:null,e2eeV2Completed:new Set(),e2eePending:null,
   e2eeChannelV2:null,e2eeChannel:null,
   Uint8Array,TextEncoder,DataView,BigInt,Map,Set,Math,Number,
 };
@@ -43,15 +43,33 @@ assert.equal(receiveCtx.receiveV2(chunks[1]),null,"late duplicate cannot replay 
 assert.throws(()=>receiveCtx.receiveV2(Uint8Array.of(1,2,3)),/Invalid/);
 assert.throws(()=>receiveCtx.receiveV2(
   Uint8Array.from([85,67,82,67,72,75,48,49,...new Array(30).fill(0)])),/protocol/);
-// Lost intermediate envelope must NOT create a forever growing reassembly queue.
-const partial=v2Chunk(2,Uint8Array.from({length:15975},()=>8),0,2,17000);
+// A later one-chunk frame must not abandon an in-progress multi-chunk frame.
+const partial=v2Chunk(2,payload.subarray(0,15975),0,2,payload.length,true);
 assert.equal(receiveCtx.receiveV2(partial),null);
-for(let id=3;id<=8;id++) {
+for(let id=3;id<=12;id++) {
   const b=v2Chunk(id,Uint8Array.of(id),0,1,1,false);
   assert.deepEqual([...receiveCtx.receiveV2(b)],[id]);
 }
-assert.equal(receiveCtx.receiveV2(v2Chunk(2,Uint8Array.of(1),0,1,1)),null);
-assert.ok(receiveCtx.e2eeV2Pending.size<=4);
+assert.deepEqual([...receiveCtx.receiveV2(v2Chunk(2,payload.subarray(15975),1,2,payload.length,true))],
+  [...payload],"in-flight video survives later audio");
+// The bounded window still drops the oldest incomplete message, and that
+// message cannot be resurrected by a late fragment.
+receiveCtx.e2eeV2Pending.clear();
+receiveCtx.e2eeV2ForgetThrough=null;
+receiveCtx.e2eeV2Completed.clear();
+const head=Uint8Array.from({length:15975},()=>7);
+const tail=Uint8Array.of(8);
+const splitTotal=15976;
+for(let id=1;id<=32;id++) {
+  assert.equal(receiveCtx.receiveV2(v2Chunk(100+id,head,0,2,splitTotal,false)),null);
+}
+assert.equal(receiveCtx.receiveV2(v2Chunk(200,head,0,2,splitTotal,false)),null);
+assert.equal(receiveCtx.receiveV2(v2Chunk(101,tail,1,2,splitTotal,false)),null,
+  "evicted straggler stays dropped");
+assert.equal(receiveCtx.receiveV2(v2Chunk(50,head,0,2,splitTotal,false)),null);
+assert.equal(receiveCtx.receiveV2(v2Chunk(50,tail,1,2,splitTotal,false)),null,
+  "sequence older than the full window stays dead");
+assert.ok(receiveCtx.e2eeV2Pending.size<=32);
 
 const sendStart=html.indexOf("function ucrTransportError(code,message){");
 const sendEnd=html.indexOf("function endpointMediaSources(){",sendStart);
