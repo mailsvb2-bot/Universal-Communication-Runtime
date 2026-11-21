@@ -1008,8 +1008,8 @@ impl RealtimeSessionRegistry {
 
     /// Returns how many participants still have an open downlink on one canonical Call.
     ///
-    /// A registry entry can outlive the browser tab. A closed downlink means that tab is gone, so
-    /// the local room must not treat it as someone still in the call.
+    /// A registry entry can outlive the browser tab. Its last authenticated heartbeat,
+    /// not the legacy SSE downlink, determines whether the participant is still live.
     ///
     /// # Errors
     /// Fails when the bounded registry state is unavailable.
@@ -1024,12 +1024,14 @@ impl RealtimeSessionRegistry {
             .len())
     }
 
-    /// Participants whose downlink is still open and who have heartbeated recently.
+    /// Participants with an active authenticated Join and a recent heartbeat.
     ///
-    /// Accepted membership outlives a closed tab. Receive rosters use this set so a
-    /// subscriber is not pinned to someone who is no longer in the room. A join
-    /// counts as the first heartbeat: a fresh session is live before its first
-    /// timer, and a crashed tab leaves the roster after `CONNECTED_HEARTBEAT_GRACE_MS`.
+    /// The legacy SSE downlink can close while the independent encrypted WebRTC
+    /// DataChannel and its authenticated heartbeat remain alive. Treating
+    /// `sender.is_closed()` as a presence gate hid valid peers from the canonical
+    /// receive roster, leaving SFU subscriptions empty and inbound media at zero.
+    /// A fresh Join counts as the first heartbeat; a crashed tab disappears
+    /// after `CONNECTED_HEARTBEAT_GRACE_MS`, or immediately after terminal Leave.
     ///
     /// # Errors
     /// Fails when the bounded registry state is unavailable.
@@ -1048,7 +1050,6 @@ impl RealtimeSessionRegistry {
         for entry in entries.iter() {
             if entry.claims.scope == *scope
                 && entry.claims.call_id == *call_id
-                && !entry.sender.is_closed()
                 && now_unix_ms.saturating_sub(entry.last_seen_unix_ms)
                     <= CONNECTED_HEARTBEAT_GRACE_MS
             {
@@ -3044,6 +3045,62 @@ mod tests {
             )
             .expect("restored roster");
         assert!(restored.contains(&claims.participant.principal_id));
+    }
+
+    #[test]
+    fn legacy_sse_disconnect_cannot_hide_live_encrypted_peer_from_roster() {
+        let issuer = issuer();
+        let claims = issuer
+            .issue(
+                scope(),
+                CallId::from_opaque(id("encrypted-presence-after-sse-close")),
+                participant(),
+                None,
+                300,
+                30_000,
+            )
+            .expect("issue")
+            .claims;
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        let joined_at = 40_000;
+        registry.join(claims.clone(), joined_at).expect("join");
+        let downlink = registry
+            .attach_downlink(&claims, joined_at)
+            .expect("legacy SSE downlink");
+        drop(downlink.receiver);
+        assert!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, joined_at + 1)
+                .expect("encrypted receive roster")
+                .contains(&claims.participant.principal_id),
+            "closed plaintext/SSE downlink must not remove an authenticated WebRTC peer"
+        );
+        let current = joined_at + CONNECTED_HEARTBEAT_GRACE_MS + 1;
+        assert!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, current)
+                .expect("stale heartbeat")
+                .is_empty(),
+            "a disconnected tab must still age out after the existing heartbeat deadline"
+        );
+        // The valid heartbeat, rather than the legacy downlink, owns presence.
+        registry.heartbeat(&claims, current).expect("fresh heartbeat");
+        assert!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, current)
+                .expect("restored encrypted receive roster")
+                .contains(&claims.participant.principal_id)
+        );
+        registry
+            .leave(&claims, current + 1)
+            .expect("terminal leave");
+        assert!(
+            registry
+                .connected_call_participants_at(&claims.scope, &claims.call_id, current + 1)
+                .expect("post-leave roster")
+                .is_empty(),
+            "terminal Leave must immediately remove a peer even with a recent heartbeat"
+        );
     }
 
     #[test]
