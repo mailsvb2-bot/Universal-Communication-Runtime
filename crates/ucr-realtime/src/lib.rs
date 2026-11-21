@@ -3084,7 +3084,9 @@ mod tests {
             "a disconnected tab must still age out after the existing heartbeat deadline"
         );
         // The valid heartbeat, rather than the legacy downlink, owns presence.
-        registry.heartbeat(&claims, current).expect("fresh heartbeat");
+        registry
+            .heartbeat(&claims, current)
+            .expect("fresh heartbeat");
         assert!(
             registry
                 .connected_call_participants_at(&claims.scope, &claims.call_id, current)
