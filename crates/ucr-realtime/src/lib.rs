@@ -1027,7 +1027,7 @@ impl RealtimeSessionRegistry {
     /// Participants with an active authenticated Join and a recent heartbeat.
     ///
     /// The legacy SSE downlink can close while the independent encrypted WebRTC
-    /// DataChannel and its authenticated heartbeat remain alive. Treating
+    /// `DataChannel` and its authenticated heartbeat remain alive. Treating
     /// `sender.is_closed()` as a presence gate hid valid peers from the canonical
     /// receive roster, leaving SFU subscriptions empty and inbound media at zero.
     /// A fresh Join counts as the first heartbeat; a crashed tab disappears
