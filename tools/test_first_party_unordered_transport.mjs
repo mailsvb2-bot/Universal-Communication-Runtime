@@ -18,6 +18,7 @@ const constants={
   E2EE_V2_PAYLOAD_BYTES:15975,E2EE_V2_PENDING_LIMIT:32,E2EE_V2_COMPLETED_MEMORY:64,
   e2eeV2Pending:new Map(),e2eeV2ForgetThrough:null,e2eeV2Completed:new Set(),e2eePending:null,
   e2eeChannelV2:null,e2eeChannel:null,
+  e2eeV2LossCounters:{pendingEvictions:0,keyframeEvictions:0,staleFragments:0,duplicateFragments:0,pendingPeak:0},
   Uint8Array,TextEncoder,DataView,BigInt,Map,Set,Math,Number,
 };
 const receiveCtx={...constants};
@@ -39,6 +40,8 @@ assert.equal(receiveCtx.receiveV2(chunks[1]),null,"last fragment can arrive firs
 const out=receiveCtx.receiveV2(chunks[0]);
 assert.deepEqual([...out],[...payload],"unordered chunks reconstruct EXACT encrypted envelope");
 assert.equal(receiveCtx.receiveV2(chunks[1]),null,"late duplicate cannot replay ciphertext");
+assert.equal(receiveCtx.e2eeV2LossCounters.staleFragments,1,
+  "a duplicate complete ciphertext message is measured, not replayed");
 // Bad version/size cannot be reinterpreted as the older ordered wire protocol.
 assert.equal(receiveCtx.isKeyframeRequest(new TextEncoder().encode("UCRKFRQ1")),true,
   "publisher must recognize server loss feedback");
@@ -77,6 +80,10 @@ assert.equal(receiveCtx.receiveV2(v2Chunk(50,head,0,2,splitTotal,false)),null);
 assert.equal(receiveCtx.receiveV2(v2Chunk(50,tail,1,2,splitTotal,false)),null,
   "sequence older than the full window stays dead");
 assert.ok(receiveCtx.e2eeV2Pending.size<=32);
+assert.ok(receiveCtx.e2eeV2LossCounters.pendingEvictions>=1,
+  "bounded incomplete-v2 queue pressure must appear in diagnostics");
+assert.equal(receiveCtx.e2eeV2LossCounters.pendingPeak,32,
+  "diagnostics expose the peak in-flight reassembly window");
 
 const sendStart=html.indexOf("function ucrTransportError(code,message){");
 const sendEnd=html.indexOf("function endpointMediaSources(){",sendStart);
