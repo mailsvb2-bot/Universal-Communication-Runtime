@@ -35,6 +35,8 @@ const joinStart=html.indexOf("async function join(){");
 const joinEnd=html.indexOf("function scheduleEntryRetry(){",joinStart);
 assert.ok(joinStart>=0&&joinEnd>joinStart);
 const joinLogic=html.slice(joinStart,joinEnd);
+assert.match(joinLogic,/Object\.keys\(e2eeV2LossCounters\)/,
+  "new Join must not inherit fragment loss counters from an older call");
 assert.match(joinLogic,/const needsFreshFirstPartyGrant=firstPartyMediaGrant&&\s*\(sessionActive\|\|\(ucrMediaActivationStage==="REALTIME_JOIN"&&\[401,403,404\]\.includes\(e\?\.status\)\)\)/);
 assert.match(joinLogic,/if\(sessionActive\)\{\s*try\{await leave\(\{retireGrant:false\}\)/);
 assert.match(joinLogic,/if\(needsFreshFirstPartyGrant\)\{\s*[\s\S]*?signedGrantRetired=true;\s*ucrShowFreshFirstPartyAdmission\(\);\s*return;/);
