@@ -208,6 +208,7 @@ window.ucrFirstAuthenticatedVideoRendered=()=>{
   if(sessionActive&&mediaActive){
     if(ucrActivationStartedAt&&ucrActivationFirstVideoMs===null)
       ucrActivationFirstVideoMs=Math.max(0,Math.round(performance.now()-ucrActivationStartedAt));
+    ucrSetMediaActivationStage("FIRST_VIDEO_RENDERED");
     ucrRecordDiagnostic("First authenticated video rendered","media");
     // A first frame ends startup latency, but MUST NOT disable the ongoing
     // bounded liveness monitor; video may stall again after transport loss.
@@ -264,8 +265,13 @@ function ucrActivationTimingSnapshot(){
     durationMs:index===ucrActivationPhases.length-1?
       Math.max(0,Math.round(now-ucrActivationPhaseAt)):phase.durationMs
   }));
+  const started=stage=>phases.find(phase=>phase.stage===stage)?.startMs??null;
+  const e2eeAt=started("E2EE_ACTIVE"),firstAt=started("FIRST_VIDEO_RENDERED");
   return {elapsedMs:ucrActivationStartedAt?Math.max(0,Math.round(now-ucrActivationStartedAt)):null,
-    firstVideoMs:ucrActivationFirstVideoMs,phases};
+    firstVideoMs:ucrActivationFirstVideoMs,
+    iceConnectedMs:started("ICE_CONNECTED"),e2eeActiveMs:e2eeAt,
+    firstVideoAfterE2eeMs:e2eeAt!==null&&firstAt!==null?Math.max(0,firstAt-e2eeAt):null,
+    phases};
 }
 function ucrRememberFailure(category){
   const safe=String(category||"unknown").replace(/[^A-Z0-9_]/g,"").slice(0,80);
@@ -2191,6 +2197,7 @@ async function activateE2eeAdapter(){
           .finally(()=>clearTimeout(deadline));
       })()
       :Promise.resolve(null);
+  ucrSetMediaActivationStage("E2EE_SETUP");
   const restoreState=await restoreEndpointPersistedState(adapter);
   if(!isCurrent())throw new Error("Encrypted media session changed during restore");
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
@@ -2203,7 +2210,7 @@ async function activateE2eeAdapter(){
   e2eeAdapterReady=true;
   e2eeAdapterStarted=true;
   cancelMediaStartupWatchdog(sessionGeneration,sessionToken);
-  ucrMediaActivationStage="E2EE_ACTIVE";
+  ucrSetMediaActivationStage("E2EE_ACTIVE");
   ucrRecordDiagnostic("Endpoint E2EE transport active","lifecycle");
   ucrMediaFailureCount=0;ucrMediaFailureWindowStart=Date.now();ucrMediaFailureStopped=false;
   ucrMarkConferenceMediaActive(true);
@@ -2781,6 +2788,7 @@ async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
     void ucrCaptureIceStats(pc);
     const state=pc.connectionState;ui.webrtcState.textContent=state||"Connecting";
     if(state==="connected"){
+      if(ucrMediaActivationStage==="ICE_CONNECTING")ucrSetMediaActivationStage("ICE_CONNECTED");
       ucrRecordDiagnostic("WebRTC ICE connected","webrtc");
       if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
       ui.state.textContent=e2eeAdapterReady?"Connected":"Securing";
@@ -2830,6 +2838,8 @@ async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
     remoteDescriptionAccepted=true;
     if(typeof ucrRecordDiagnostic==="function")
       ucrRecordDiagnostic("WebRTC remote SDP accepted","webrtc");
+    ucrSetMediaActivationStage("ICE_CONNECTING");
+    if(pc.connectionState==="connected")ucrSetMediaActivationStage("ICE_CONNECTED");
     void ucrCaptureIceStats(pc);
     // ICE candidates are independent once the canonical SDP fence exists.
     // Serial HTTP posting held readiness behind N network round-trips.
@@ -2923,14 +2933,24 @@ async function restartIce(){
 }
 async function recoverWebRtc(){
   if(restarting||!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine)return;
+  const generation=sessionLifecycleGeneration;
   if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}
   if(peer){
     try{
       if(await restartIce())return;
     }catch(e){
+      // Rejected Join/Device authority is not transient ICE loss.
+      // Reusing the signed grant to build another offer must fail closed.
+      if([401,403].includes(e?.status)){
+        ucrRecordDiagnostic("ICE restart authorization rejected","webrtc");
+        if(claims?.call_id?.startsWith("fp-m-"))await retireRejectedFirstPartyMedia(generation);
+        else await endUnverifiedMedia(generation,"WebRTC authorization rejected; media capture stopped.");
+        return;
+      }
       ui.status.textContent="ICE restart failed; rebuilding only the WebRTC transport: "+e.message;
     }
   }
+  if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive)return;
   await restartWebRtc(false);
 }
 async function restartWebRtc(forceMedia){
@@ -2950,9 +2970,10 @@ async function restartWebRtc(forceMedia){
       // A canonical 401/403 is a rejected signed media grant, not packet loss.
       // Retrying /webrtc/start with the same one-time session cannot recover;
       // retire it and return to the independently authenticated Call owner.
-      if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
+      if([401,403].includes(e?.status)){
         ucrRecordDiagnostic("WebRTC reauthorization required","webrtc");
-        await retireRejectedFirstPartyMedia(generation);
+        if(claims?.call_id?.startsWith("fp-m-"))await retireRejectedFirstPartyMedia(generation);
+        else await endUnverifiedMedia(generation,"WebRTC authorization rejected; media capture stopped.");
         return;
       }
       ui.webrtcState.textContent="Retrying";
@@ -3690,15 +3711,17 @@ function startInitialVideoRecovery(){
     const currentRenderAt=Number(window.__ucrVideoCounters?.lastRenderedAt)||0;
     if(currentRenderAt>lastRenderedAt)lastRenderedAt=currentRenderAt;
     const freshSince=Math.max(activatedAt,lastRenderedAt);
-    if(now-freshSince<3000)return;
     const initial=lastRenderedAt<activatedAt&&now-activatedAt<12000;
-    const cooldown=initial?1500:8000;
+    // An early roster can be empty before the second peer joins.
+    // Revalidate promptly through the SAME canonical authenticated operation.
+    if(now-freshSince<(initial?750:3000))return;
+    const cooldown=initial?1000:8000;
     if(now-lastRecoveryAt<cooldown)return;
     lastRecoveryAt=now;
     // Reuse canonical authenticated subscriptions; never invent a peer,
     // bypass MLS, or pretend a roster retry is remote-keyframe feedback.
     syncReceiveSubscriptions(null,true).catch(()=>{});
-  },750);
+  },350);
 }
 async function syncReceiveSubscriptions(preparedRoster=null,recoverStalledVideo=false){
   if(!sessionActive||!mediaActive||!e2eeAdapterReady||receiveRosterInFlight||
