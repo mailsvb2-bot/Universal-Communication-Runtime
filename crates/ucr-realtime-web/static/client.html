@@ -2579,8 +2579,16 @@ async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims
     }
   }catch(error){
     const message=String(error?.message||error);
-    if(/\b404\b|\b401\b|\b403\b|not_found|offer_not_found|unauthorized|forbidden/i.test(message)){
-      ucrRecordDiagnostic("WebRTC offer already retired on close","webrtc");
+    const denied=[401,403].includes(error?.status)||
+      /\b401\b|\b403\b|unauthorized|forbidden/i.test(message);
+    const missing=error?.status===404||/\b404\b|not_found|offer_not_found/i.test(message);
+    if(denied||missing){
+      // A revoked grant may fail to close a still-live server peer. Fence the
+      // stale local offer immediately, but do NOT claim provider closure:
+      // canonical server Leave/cleanup retains responsibility for that peer.
+      ucrRecordDiagnostic(denied
+        ?"WebRTC close denied; canonical provider cleanup required"
+        :"WebRTC offer already retired on close","webrtc");
       if(startWebRtc.offerId===offerId){
         startWebRtc.offerId=null;
         if(startWebRtc.offerOwner===owner)startWebRtc.offerOwner=null;
