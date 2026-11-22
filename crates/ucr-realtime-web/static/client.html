@@ -206,9 +206,10 @@ function ucrRecordDiagnostic(event,category="runtime"){
 // Rendering is the real user-visible success boundary, not DataChannel open.
 window.ucrFirstAuthenticatedVideoRendered=()=>{
   if(sessionActive&&mediaActive){
-    if(ucrActivationStartedAt&&ucrActivationFirstVideoMs===null)
+    if(ucrActivationStartedAt&&ucrActivationFirstVideoMs===null){
       ucrActivationFirstVideoMs=Math.max(0,Math.round(performance.now()-ucrActivationStartedAt));
-    ucrSetMediaActivationStage("FIRST_VIDEO_RENDERED");
+      ucrSetMediaActivationStage("FIRST_VIDEO_RENDERED");
+    }
     ucrRecordDiagnostic("First authenticated video rendered","media");
     // A first frame ends startup latency, but MUST NOT disable the ongoing
     // bounded liveness monitor; video may stall again after transport loss.
@@ -506,6 +507,7 @@ function ucrDiagnosticReport(){
       mediaActive:typeof mediaActive!=="undefined"&&mediaActive,
       expiresInSeconds:grant?.expires?Math.round((grant.expires-Date.now())/1000):null,
       sessionSequenceValid:typeof activeSessionSequence!=="undefined"&&activeSessionSequence>0},
+    unorderedV2Loss:typeof e2eeV2LossCounters!=="undefined"?{...e2eeV2LossCounters}:null,
     crypto:{adapterReady:typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady,
       transportOpen:typeof e2eeChannel!=="undefined"&&e2eeChannel?.readyState==="open",
       // Transport mode is public protocol metadata, not an MLS secret.
@@ -670,6 +672,8 @@ let firstPartyAcceptedMediaKind=null;
 let localMediaPromise=null,earlyLocalCapture=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let e2eeChannelV2=null,e2eeV2Pending=new Map(),e2eeV2ForgetThrough=null,e2eeV2Completed=new Set(),e2eeV2Selected=false;
+// Aggregate protocol loss accounting only: never record ciphertext or peer IDs.
+let e2eeV2LossCounters={pendingEvictions:0,keyframeEvictions:0,staleFragments:0,duplicateFragments:0,pendingPeak:0};
 let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
 let heartbeatInFlight=false,heartbeatWatchdog=null;
 // A retiring Join may fence only the unauthenticated replacement preflight.
@@ -1808,8 +1812,10 @@ function receiveE2eeChunkV2(data){
   // Audio and video share this sequence. A finished Opus frame must not
   // discard an in-flight keyframe: that stall lasted until the next periodic
   // keyframe and showed up as multi-second video delay.
-  if((e2eeV2ForgetThrough!==null&&sequence<=e2eeV2ForgetThrough)||e2eeV2Completed.has(sequence))
+  if((e2eeV2ForgetThrough!==null&&sequence<=e2eeV2ForgetThrough)||e2eeV2Completed.has(sequence)){
+    e2eeV2LossCounters.staleFragments++;
     return null;
+  }
   let pending=e2eeV2Pending.get(sequence);
   if(!pending){
     if(e2eeV2Pending.size>=E2EE_V2_PENDING_LIMIT){
@@ -1818,16 +1824,19 @@ function receiveE2eeChunkV2(data){
         if(oldest!==null)e2eeV2Abandon(sequence);
         return null;
       }
+      if((e2eeV2Pending.get(oldest)?.flags&1)!==0)e2eeV2LossCounters.keyframeEvictions++;
+      e2eeV2LossCounters.pendingEvictions++;
       e2eeV2Pending.delete(oldest);
       e2eeV2Abandon(oldest);
       if(e2eeV2ForgetThrough!==null&&sequence<=e2eeV2ForgetThrough)return null;
     }
     pending={total,count,flags,parts:new Array(count).fill(null),received:0};
     e2eeV2Pending.set(sequence,pending);
+    e2eeV2LossCounters.pendingPeak=Math.max(e2eeV2LossCounters.pendingPeak,e2eeV2Pending.size);
   }
   if(pending.total!==total||pending.count!==count||pending.flags!==flags)
     throw new Error("Inconsistent unordered E2EE envelope");
-  if(pending.parts[index]!==null)return null;
+  if(pending.parts[index]!==null){e2eeV2LossCounters.duplicateFragments++;return null;}
   pending.parts[index]=bytes.slice(E2EE_V2_HEADER_BYTES);
   pending.received++;
   if(pending.received!==count)return null;
@@ -2109,7 +2118,7 @@ async function activateE2eeAdapter(){
     requireCompatibleE2eeAdapter(e2eeAdapter());
     e2eeAdapterReady=true;
     cancelMediaStartupWatchdog(sessionGeneration,sessionToken);
-    ucrMediaActivationStage="E2EE_ACTIVE";
+    ucrSetMediaActivationStage("E2EE_ACTIVE");
     ucrRecordDiagnostic("Endpoint E2EE transport active","lifecycle");
     webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
     startAdaptiveMediaMonitoring();
