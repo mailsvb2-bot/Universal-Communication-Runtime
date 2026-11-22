@@ -91,6 +91,25 @@ assert.equal(phase.phases[2].durationMs,60);
 tick=280;clock.advance("PREFLIGHT");
 assert.equal(clock.snapshot().phases.length,1,"new Join resets old phase attribution");
 assert.equal(clock.snapshot().firstVideoMs,null);
+// Monotonic phase slices must close on the actual ICE/E2EE/render event, not
+// accrue until Leave. Subsequent decoded frames cannot restart first-video.
+tick=300;clock.advance("SDP_ICE_NEGOTIATION");
+tick=315;clock.advance("ICE_CONNECTING");
+tick=337;clock.advance("ICE_CONNECTED");
+tick=346;clock.advance("E2EE_SETUP");
+tick=361;clock.advance("E2EE_ACTIVE");
+tick=389;clock.advance("FIRST_VIDEO_RENDERED");
+const detailed=clock.snapshot();
+assert.equal(detailed.sdpNegotiationMs,15);
+assert.equal(detailed.iceConnectionMs,22);
+assert.equal(detailed.iceConnectedMs,57);
+assert.equal(detailed.e2eeSetupMs,15);
+assert.equal(detailed.e2eeActiveMs,81);
+assert.equal(detailed.firstVideoAfterE2eeMs,28);
+assert.match(html,/if\(ucrActivationStartedAt&&ucrActivationFirstVideoMs===null\)\{/,
+  "later rendered frames must not mutate the first-video phase");
+assert.match(html,/ucrSetMediaActivationStage\("E2EE_ACTIVE"\)/);
+assert.match(html,/ucrSetMediaActivationStage\("ICE_CONNECTING"\)/);
 assert.match(html,/mediaActivationTiming:ucrActivationTimingSnapshot\(\)/);
 console.log("PASS: bounded monotonic MLS/ICE/first-video diagnosis resets per Join");
 console.log("PASS: accepted first-party Join failure retires only the old media grant, offers canonical /start recovery, and records precise safe stage");
@@ -102,7 +121,7 @@ const reconnectStart=html.indexOf("async function restartWebRtc(forceMedia){");
 const reconnectEnd=html.indexOf("function scheduleWebRtcRetryAfterRestart(){",reconnectStart);
 assert.ok(reconnectStart>=0&&reconnectEnd>reconnectStart);
 const reconnect=html.slice(reconnectStart,reconnectEnd);
-assert.match(reconnect,/claims\?\.call_id\?\.startsWith\("fp-m-"\)&&\[401,403\]\.includes\(e\?\.status\)/);
+assert.match(reconnect,/if\(\[401,403\]\.includes\(e\?\.status\)\)/);
 assert.match(reconnect,/await retireRejectedFirstPartyMedia\(generation\)/);
 assert.match(reconnect,/return scheduleWebRtcRetryAfterRestart\(\)/,
   "retry must remain for transient non-authorization transport failures");
@@ -184,7 +203,7 @@ assert.match(firstFrameRecovery,/const freshSince=Math\.max\(activatedAt,lastRen
   "reconnected call needs a freshly rendered frame, not historic firstRenderedAt");
 assert.match(firstFrameRecovery,/if\(document\.hidden\)return;/,
   "hidden video must not be marked stalled when the browser suppresses rendering");
-assert.match(firstFrameRecovery,/const cooldown=initial\?1500:8000/,
+assert.match(firstFrameRecovery,/const cooldown=initial\?1000:8000/,
   "continuous video recovery must bound authenticated subscription polling");
 assert.match(firstFrameRecovery,/syncReceiveSubscriptions\(null,true\)/,
   "a verified stall must explicitly request a canonical subscription refresh");
@@ -287,3 +306,52 @@ await Promise.resolve();
 assert.equal(soundButton.disabled,true,"successful asynchronous resume updates the button");
 assert.equal(soundButton.textContent,"Звук включён");
 console.log("PASS: sound control reflects real running/suspended AudioContext without awaiting playback for video");
+
+// Execute the actual recovery function with a revoked ICE grant, not just a
+// source regex. A 401 must retire the exact grant, never rebuild WebRTC.
+const recoverStart=html.indexOf("async function recoverWebRtc(){");
+const recoverEnd=html.indexOf("async function restartWebRtc(forceMedia){",recoverStart);
+assert.ok(recoverStart>=0&&recoverEnd>recoverStart);
+let rebuilt=0,revoked=0,retried=0;
+const revokedCtx={
+ restarting:false,sessionActive:true,mediaActive:true,navigator:{onLine:true},
+ Date,claims:{expires:Date.now()+60000,call_id:"fp-m-test"},
+ sessionLifecycleGeneration:7,webrtcNeedsPeerRebuild:false,peer:{},
+ restartIce:async()=>{const error=new Error("revoked");error.status=401;throw error;},
+ restartWebRtc:async()=>{rebuilt++},
+ retireRejectedFirstPartyMedia:async generation=>{
+   assert.equal(generation,7);revoked++;revokedCtx.sessionActive=false;
+ },
+ endUnverifiedMedia:async()=>{throw new Error("must preserve parent Call")},
+ ucrRecordDiagnostic:()=>{},ui:{status:{textContent:""}},
+ scheduleWebRtcRetry:()=>{retried++},
+};
+vm.runInNewContext(html.slice(recoverStart,recoverEnd)+"\nthis.recover=recoverWebRtc;",revokedCtx);
+await revokedCtx.recover();
+assert.equal(revoked,1);
+assert.equal(rebuilt,0,"a revoked ICE grant must not create a second offer");
+assert.equal(retried,0,"a revoked grant must not schedule retry");
+console.log("PASS: revoked ICE restart retires exact first-party grant without reusing it");
+
+// The source-executed first-frame callback must close its measured phase
+// exactly once, although each subsequent rendered video frame still updates
+// normal stream activity and cannot hide a later stall.
+const firstFrameStart=html.indexOf("window.ucrFirstAuthenticatedVideoRendered=()=>{");
+const firstFrameEnd=html.indexOf("function ucrIceServerKinds(",firstFrameStart);
+let marks=0,events=0,monotonic=200;
+const frameCtx={
+ window:{},sessionActive:true,mediaActive:true,
+ ucrActivationStartedAt:100,ucrActivationFirstVideoMs:null,
+ performance:{now:()=>monotonic},
+ ucrSetMediaActivationStage:stage=>{assert.equal(stage,"FIRST_VIDEO_RENDERED");marks++},
+ ucrRecordDiagnostic:()=>{events++},
+ Math,
+};
+vm.runInNewContext(html.slice(firstFrameStart,firstFrameEnd),frameCtx);
+frameCtx.window.ucrFirstAuthenticatedVideoRendered();
+monotonic=270;
+frameCtx.window.ucrFirstAuthenticatedVideoRendered();
+assert.equal(frameCtx.ucrActivationFirstVideoMs,100);
+assert.equal(marks,1,"later frames must not overwrite the initial timing phase");
+assert.equal(events,2);
+console.log("PASS: first frame closes telemetry once and later frames retain liveness");

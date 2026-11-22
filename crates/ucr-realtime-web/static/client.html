@@ -206,9 +206,11 @@ function ucrRecordDiagnostic(event,category="runtime"){
 // Rendering is the real user-visible success boundary, not DataChannel open.
 window.ucrFirstAuthenticatedVideoRendered=()=>{
   if(sessionActive&&mediaActive){
-    if(ucrActivationStartedAt&&ucrActivationFirstVideoMs===null)
+    if(ucrActivationStartedAt&&ucrActivationFirstVideoMs===null){
       ucrActivationFirstVideoMs=Math.max(0,Math.round(performance.now()-ucrActivationStartedAt));
-    ucrSetMediaActivationStage("FIRST_VIDEO_RENDERED");
+      // Only the FIRST authenticated frame closes the startup phase.
+      ucrSetMediaActivationStage("FIRST_VIDEO_RENDERED");
+    }
     ucrRecordDiagnostic("First authenticated video rendered","media");
     // A first frame ends startup latency, but MUST NOT disable the ongoing
     // bounded liveness monitor; video may stall again after transport loss.
@@ -266,10 +268,15 @@ function ucrActivationTimingSnapshot(){
       Math.max(0,Math.round(now-ucrActivationPhaseAt)):phase.durationMs
   }));
   const started=stage=>phases.find(phase=>phase.stage===stage)?.startMs??null;
+  const duration=stage=>phases.find(phase=>phase.stage===stage)?.durationMs??null;
   const e2eeAt=started("E2EE_ACTIVE"),firstAt=started("FIRST_VIDEO_RENDERED");
   return {elapsedMs:ucrActivationStartedAt?Math.max(0,Math.round(now-ucrActivationStartedAt)):null,
     firstVideoMs:ucrActivationFirstVideoMs,
-    iceConnectedMs:started("ICE_CONNECTED"),e2eeActiveMs:e2eeAt,
+    sdpNegotiationMs:duration("SDP_ICE_NEGOTIATION"),
+    iceConnectionMs:duration("ICE_CONNECTING"),
+    iceConnectedMs:started("ICE_CONNECTED"),
+    e2eeSetupMs:duration("E2EE_SETUP"),
+    e2eeActiveMs:e2eeAt,
     firstVideoAfterE2eeMs:e2eeAt!==null&&firstAt!==null?Math.max(0,firstAt-e2eeAt):null,
     phases};
 }
