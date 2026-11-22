@@ -137,7 +137,7 @@ async function exerciseIceRestart(status,firstParty){
     retireRejectedFirstPartyMedia:async()=>{events.push("retire");},
     endUnverifiedMedia:async()=>{events.push("end");},
     ucrRecordDiagnostic:()=>{},ui:{status:{textContent:""}}};
-  vm.runInNewContext(iceRecover+"\\nthis.run=recoverWebRtc;",ctx);
+  vm.runInNewContext(iceRecover+"\nthis.run=recoverWebRtc;",ctx);
   await ctx.run();return events;
 }
 assert.deepEqual(await exerciseIceRestart(401,true),["retire"]);
