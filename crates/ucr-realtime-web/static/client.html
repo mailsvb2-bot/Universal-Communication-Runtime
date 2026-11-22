@@ -1817,6 +1817,14 @@ function receiveE2eeChunkV2(data){
     return null;
   }
   let pending=e2eeV2Pending.get(sequence);
+  if(!pending&&count===1){
+    // One SCTP message already contains the WHOLE encrypted envelope.
+    // Do not evict an unfinished video keyframe to make room for a single
+    // Opus frame. It follows the same adapter.onEnvelope -> MLS/replay path.
+    const wire=bytes.slice(E2EE_V2_HEADER_BYTES);
+    e2eeV2RememberCompleted(sequence);
+    return wire;
+  }
   if(!pending){
     if(e2eeV2Pending.size>=E2EE_V2_PENDING_LIMIT){
       const oldest=e2eeV2Oldest(e2eeV2Pending.keys());
