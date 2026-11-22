@@ -73,6 +73,15 @@ const splitTotal=15976;
 for(let id=1;id<=32;id++) {
   assert.equal(receiveCtx.receiveV2(v2Chunk(100+id,head,0,2,splitTotal,false)),null);
 }
+// With 32 unfinished fragments, a COMPLETE encrypted Opus message must not
+// evict the unfinished reference/keyframe. Its MLS and replay checks still
+// happen at the one canonical onEnvelope call site.
+const beforeEvictions=receiveCtx.e2eeV2LossCounters.pendingEvictions;
+assert.deepEqual([...receiveCtx.receiveV2(v2Chunk(199,Uint8Array.of(99),0,1,1,false))],[99],
+  "complete single-chunk ciphertext bypasses partial reassembly pressure");
+assert.equal(receiveCtx.e2eeV2Pending.size,32);
+assert.equal(receiveCtx.e2eeV2LossCounters.pendingEvictions,beforeEvictions,
+  "audio may not evict an incomplete video keyframe");
 assert.equal(receiveCtx.receiveV2(v2Chunk(200,head,0,2,splitTotal,false)),null);
 assert.equal(receiveCtx.receiveV2(v2Chunk(101,tail,1,2,splitTotal,false)),null,
   "evicted straggler stays dropped");
