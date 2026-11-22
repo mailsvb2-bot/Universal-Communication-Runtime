@@ -3239,6 +3239,8 @@ async function join(){
     return;
   }
   if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
+  // Every fresh Join owns its local loss window; never mix earlier calls.
+  for(const metric of Object.keys(e2eeV2LossCounters))e2eeV2LossCounters[metric]=0;
   // A signed join URL alone does not provision an authorized media signer.
   // Reject before opening a realtime session/heartbeat when the host omitted
   // the canonical Device media authority; the user may retry after setup.
