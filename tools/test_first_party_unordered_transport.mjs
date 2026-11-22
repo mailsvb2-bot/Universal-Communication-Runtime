@@ -71,7 +71,7 @@ const head=Uint8Array.from({length:15975},()=>7);
 const tail=Uint8Array.of(8);
 const splitTotal=15976;
 for(let id=1;id<=32;id++) {
-  assert.equal(receiveCtx.receiveV2(v2Chunk(100+id,head,0,2,splitTotal,false)),null);
+  assert.equal(receiveCtx.receiveV2(v2Chunk(100+id,head,0,2,splitTotal,id===1)),null);
 }
 // With 32 unfinished fragments, a COMPLETE encrypted Opus message must not
 // evict the unfinished reference/keyframe. Its MLS and replay checks still
@@ -91,6 +91,8 @@ assert.equal(receiveCtx.receiveV2(v2Chunk(50,tail,1,2,splitTotal,false)),null,
 assert.ok(receiveCtx.e2eeV2Pending.size<=32);
 assert.ok(receiveCtx.e2eeV2LossCounters.pendingEvictions>=1,
   "bounded incomplete-v2 queue pressure must appear in diagnostics");
+assert.equal(receiveCtx.e2eeV2LossCounters.keyframeEvictions,1,
+  "a fragmented reference frame lost to sustained queue pressure must be visible");
 assert.equal(receiveCtx.e2eeV2LossCounters.pendingPeak,32,
   "diagnostics expose the peak in-flight reassembly window");
 
