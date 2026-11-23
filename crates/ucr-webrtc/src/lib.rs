@@ -2041,6 +2041,88 @@ mod tests {
         SecretVersion,
     };
 
+    #[tokio::test]
+    async fn in_flight_create_close_and_offer_lookup_keep_one_session_fence() {
+        let mut sessions = HashMap::new();
+        let mut pending = HashMap::new();
+        let (complete_tx, mut complete_rx) =
+            tokio::sync::mpsc::channel(LIVE_WEBRTC_MAX_PENDING_CREATES);
+        let shutdown = AtomicBool::new(false);
+        let session_id = SessionId::from_opaque(OpaqueId::new("pending-close").expect("id"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (create_tx, create_rx) = std_mpsc::channel();
+        dispatch_live_command(
+            LiveWebRtcCommand::Create {
+                config: config.clone(),
+                deadline,
+                reply: create_tx,
+            },
+            &mut sessions,
+            &mut pending,
+            &complete_tx,
+            &shutdown,
+            None,
+        )
+        .await;
+        assert_eq!(pending.len(), 1, "one reserved but not admitted peer");
+        let (close_tx, close_rx) = std_mpsc::channel();
+        dispatch_live_command(
+            LiveWebRtcCommand::Close {
+                session_id: session_id.clone(),
+                offer_id: None,
+                deadline,
+                reply: close_tx,
+            },
+            &mut sessions,
+            &mut pending,
+            &complete_tx,
+            &shutdown,
+            None,
+        )
+        .await;
+        let (offer_tx, offer_rx) = std_mpsc::channel();
+        dispatch_live_command(
+            LiveWebRtcCommand::GetOfferId {
+                session_id: session_id.clone(),
+                deadline,
+                reply: offer_tx,
+            },
+            &mut sessions,
+            &mut pending,
+            &complete_tx,
+            &shutdown,
+            None,
+        )
+        .await;
+        assert_eq!(close_rx.try_recv(), Err(std_mpsc::TryRecvError::Empty));
+        assert_eq!(offer_rx.try_recv(), Err(std_mpsc::TryRecvError::Empty));
+        let (key, outcome) = tokio::time::timeout(Duration::from_secs(5), complete_rx.recv())
+            .await
+            .expect("bounded ICE completion")
+            .expect("worker completion");
+        complete_live_create(&mut sessions, &mut pending, key, outcome, false).await;
+        assert_eq!(
+            create_rx.try_recv(),
+            Ok(Err(WebRtcProviderError::SessionUnavailable))
+        );
+        assert_eq!(close_rx.try_recv(), Ok(Ok(())));
+        assert_eq!(
+            offer_rx.try_recv(),
+            Ok(Err(WebRtcProviderError::SessionUnavailable)),
+            "a revoked pending peer cannot issue an offer fence"
+        );
+        assert!(sessions.is_empty(), "no quarantined transport after close");
+        assert!(
+            pending.is_empty(),
+            "reservation released after confirmed close"
+        );
+    }
+
     #[test]
     fn media_offer_lookup_is_reused_but_worker_fence_remains_required() {
         let cache = Mutex::new(HashMap::new());
