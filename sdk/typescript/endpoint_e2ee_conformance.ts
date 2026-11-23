@@ -1208,8 +1208,9 @@ await activating;
 assert.equal(lifecycleCtx.e2eeAdapterReady, true);
 assert.equal(lifecycleCtx.ui.state.textContent, "Connected",
   "the reference UI becomes connected only after protected endpoint startup");
-assert.deepEqual(protectedLifecycleEvents.slice(0, 4),
-  ["start-begins", "start-completes",
+assert.deepEqual(protectedLifecycleEvents.slice(0, 6),
+  ["activation:E2EE_SETUP", "start-begins", "start-completes",
+    "activation:E2EE_ACTIVE",
     "diagnostic:lifecycle:Endpoint E2EE transport active", "monitor-starts"],
   "protected startup must emit its safe E2EE milestone before monitoring");
 lifecycleCtx.e2eeChannel = lifecycleChannel;
