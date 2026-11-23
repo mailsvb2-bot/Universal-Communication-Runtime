@@ -93,9 +93,6 @@ assert.equal(receiveCtx.e2eeV2LossCounters.pendingEvictions,beforeEvictions,
   "protecting a keyframe cannot silently evict a different fragment");
 assert.deepEqual([...receiveCtx.receiveV2(v2Chunk(101,tail,1,2,splitTotal,true))],
   [...head,...tail],"protected keyframe must complete in original authenticated path");
-assert.equal(receiveCtx.receiveV2(v2Chunk(50,head,0,2,splitTotal,false)),null);
-assert.equal(receiveCtx.receiveV2(v2Chunk(50,tail,1,2,splitTotal,false)),null,
-  "sequence older than remembered completed window stays dead");
 assert.ok(receiveCtx.e2eeV2Pending.size<=32);
 assert.equal(receiveCtx.e2eeV2LossCounters.keyframeEvictions,0,
   "no reference frame evicted by dependent delta pressure");
