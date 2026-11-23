@@ -18,7 +18,7 @@ const constants={
   E2EE_V2_PAYLOAD_BYTES:15975,E2EE_V2_PENDING_LIMIT:32,E2EE_V2_COMPLETED_MEMORY:64,
   e2eeV2Pending:new Map(),e2eeV2ForgetThrough:null,e2eeV2Completed:new Set(),e2eePending:null,
   e2eeChannelV2:null,e2eeChannel:null,
-  e2eeV2LossCounters:{pendingEvictions:0,keyframeEvictions:0,staleFragments:0,duplicateFragments:0,pendingPeak:0},
+  e2eeV2LossCounters:{pendingEvictions:0,keyframeEvictions:0,pressureRejectedDeltas:0,staleFragments:0,duplicateFragments:0,pendingPeak:0},
   Uint8Array,TextEncoder,DataView,BigInt,Map,Set,Math,Number,
 };
 const receiveCtx={...constants};
@@ -82,19 +82,34 @@ assert.deepEqual([...receiveCtx.receiveV2(v2Chunk(199,Uint8Array.of(99),0,1,1,fa
 assert.equal(receiveCtx.e2eeV2Pending.size,32);
 assert.equal(receiveCtx.e2eeV2LossCounters.pendingEvictions,beforeEvictions,
   "audio may not evict an incomplete video keyframe");
+// A late dependent delta cannot evict the only pending decoder reference.
 assert.equal(receiveCtx.receiveV2(v2Chunk(200,head,0,2,splitTotal,false)),null);
-assert.equal(receiveCtx.receiveV2(v2Chunk(101,tail,1,2,splitTotal,false)),null,
-  "evicted straggler stays dropped");
-assert.equal(receiveCtx.receiveV2(v2Chunk(50,head,0,2,splitTotal,false)),null);
-assert.equal(receiveCtx.receiveV2(v2Chunk(50,tail,1,2,splitTotal,false)),null,
-  "sequence older than the full window stays dead");
+assert.equal(receiveCtx.e2eeV2Pending.has(101n),true,
+  "in-flight reference must survive multi-fragment delta pressure");
+assert.equal(receiveCtx.e2eeV2Pending.has(200n),false,
+  "new delta was rejected without retaining a partial frame");
+assert.equal(receiveCtx.e2eeV2LossCounters.pressureRejectedDeltas,1);
+assert.equal(receiveCtx.e2eeV2LossCounters.pendingEvictions,beforeEvictions,
+  "protecting a keyframe cannot silently evict a different fragment");
+assert.deepEqual([...receiveCtx.receiveV2(v2Chunk(101,tail,1,2,splitTotal,true))],
+  [...head,...tail],"protected keyframe must complete in original authenticated path");
 assert.ok(receiveCtx.e2eeV2Pending.size<=32);
-assert.ok(receiveCtx.e2eeV2LossCounters.pendingEvictions>=1,
-  "bounded incomplete-v2 queue pressure must appear in diagnostics");
-assert.equal(receiveCtx.e2eeV2LossCounters.keyframeEvictions,1,
-  "a fragmented reference frame lost to sustained queue pressure must be visible");
+assert.equal(receiveCtx.e2eeV2LossCounters.keyframeEvictions,0,
+  "no reference frame evicted by dependent delta pressure");
 assert.equal(receiveCtx.e2eeV2LossCounters.pendingPeak,32,
   "diagnostics expose the peak in-flight reassembly window");
+// When the oldest pending frame is NOT a keyframe, bounded eviction still
+// advances the anti-replay floor and rejects its late trailing fragment.
+receiveCtx.e2eeV2Pending.clear();
+receiveCtx.e2eeV2ForgetThrough=null;
+receiveCtx.e2eeV2Completed.clear();
+for(let id=1;id<=32;id++)
+  assert.equal(receiveCtx.receiveV2(v2Chunk(300+id,head,0,2,splitTotal,false)),null);
+const priorEvictions=receiveCtx.e2eeV2LossCounters.pendingEvictions;
+assert.equal(receiveCtx.receiveV2(v2Chunk(400,head,0,2,splitTotal,false)),null);
+assert.equal(receiveCtx.e2eeV2LossCounters.pendingEvictions,priorEvictions+1);
+assert.equal(receiveCtx.receiveV2(v2Chunk(301,tail,1,2,splitTotal,false)),null,
+  "evicted dependent delta cannot be revived after the replay floor advances");
 
 const sendStart=html.indexOf("function ucrTransportError(code,message){");
 const sendEnd=html.indexOf("function endpointMediaSources(){",sendStart);
