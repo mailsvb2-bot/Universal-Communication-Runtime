@@ -959,6 +959,99 @@ impl fmt::Debug for LiveWebRtcCreateFailure {
     }
 }
 
+// Complete ICE gathering must not hold the single session-map command loop.
+// Only the worker admits a completed peer into the canonical per-session map;
+// an in-flight Close quarantines that attempt until its transport is closed.
+const LIVE_WEBRTC_MAX_PENDING_CREATES: usize = 16;
+
+struct PendingLiveCreate {
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
+    close_replies: Vec<std_mpsc::Sender<Result<(), WebRtcProviderError>>>,
+    offer_replies: Vec<(
+        Instant,
+        std_mpsc::Sender<Result<String, WebRtcProviderError>>,
+    )>,
+}
+
+type LiveCreateOutcome =
+    Result<(LiveWebRtcSession, WebRtcSessionDescription), LiveWebRtcCreateFailure>;
+
+async fn complete_live_create(
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
+    pending: &mut HashMap<String, PendingLiveCreate>,
+    key: String,
+    outcome: LiveCreateOutcome,
+    shutdown: bool,
+) {
+    let Some(waiter) = pending.remove(&key) else {
+        // Defensive: a completion without its reservation must never publish a peer.
+        if let Ok((session, _)) = outcome {
+            let _ = bounded_peer_close(&session.peer_connection).await;
+        } else if let Err(failure) = outcome
+            && let Some(session) = failure.retained_peer
+        {
+            let _ = bounded_peer_close(&session.peer_connection).await;
+        }
+        return;
+    };
+    let revoked = shutdown || command_expired(waiter.deadline) || !waiter.close_replies.is_empty();
+    let offer_replies = waiter.offer_replies;
+    match outcome {
+        Ok((mut session, description)) => {
+            session.offer_id = webrtc_offer_id(&description.sdp);
+            if revoked {
+                // Retain the peer while closing so a failed close remains retryable.
+                session.shutdown_pending = true;
+                let peer = Arc::clone(&session.peer_connection);
+                sessions.insert(key.clone(), session);
+                let closed = bounded_peer_close(&peer).await;
+                let closed = retire_peer_only_after_confirmed_close(sessions, &key, closed);
+                let _ = waiter
+                    .reply
+                    .send(Err(WebRtcProviderError::SessionUnavailable));
+                for reply in waiter.close_replies {
+                    let _ = reply.send(closed);
+                }
+            } else {
+                sessions.insert(key.clone(), session);
+                if waiter.reply.send(Ok(description)).is_err()
+                    && let Some(retained) = sessions.get_mut(&key)
+                {
+                    retained.shutdown_pending = true;
+                    let peer = Arc::clone(&retained.peer_connection);
+                    let closed = bounded_peer_close(&peer).await;
+                    let _ = retire_peer_only_after_confirmed_close(sessions, &key, closed);
+                }
+            }
+        }
+        Err(failure) => {
+            retire_failed_live_create(sessions, key.clone(), failure, waiter.reply).await;
+            let closed = if sessions.contains_key(&key) {
+                Err(WebRtcProviderError::TemporarilyUnavailable)
+            } else {
+                Ok(())
+            };
+            for reply in waiter.close_replies {
+                let _ = reply.send(closed);
+            }
+        }
+    }
+    // Same-session queries wait for cleanup; other sessions are never stalled.
+    for (deadline, reply) in offer_replies {
+        let result = if command_expired(deadline) {
+            Err(WebRtcProviderError::TemporarilyUnavailable)
+        } else {
+            sessions
+                .get(&key)
+                .filter(|session| session.permits_signaling_and_media())
+                .map(|session| session.offer_id.clone())
+                .ok_or(WebRtcProviderError::SessionUnavailable)
+        };
+        let _ = reply.send(result);
+    }
+}
+
 async fn run_live_webrtc_worker(
     mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
     mut media_commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
@@ -967,40 +1060,80 @@ async fn run_live_webrtc_worker(
     e2ee_ingress: Option<tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
 ) {
     let mut sessions = HashMap::<String, LiveWebRtcSession>::new();
+    let mut pending = HashMap::<String, PendingLiveCreate>::new();
+    let (completed_tx, mut completed_rx) =
+        tokio::sync::mpsc::channel::<(String, LiveCreateOutcome)>(LIVE_WEBRTC_MAX_PENDING_CREATES);
     loop {
         if shutdown.load(Ordering::Acquire) || (commands.is_closed() && media_commands.is_closed())
         {
             break;
         }
-        let command = tokio::select! {
+        tokio::select! {
             biased;
             () = shutdown_notify.notified() => {
                 if shutdown.load(Ordering::Acquire) {
                     break;
                 }
-                continue;
             }
-            command = commands.recv(), if !commands.is_closed() => command,
-            command = media_commands.recv(), if !media_commands.is_closed() => command,
-        };
-        let Some(command) = command else {
-            continue;
-        };
-        if shutdown.load(Ordering::Acquire) {
-            break;
+            command = commands.recv(), if !commands.is_closed() => {
+                if let Some(command) = command {
+                    dispatch_live_command(
+                        command, &mut sessions, &mut pending, &completed_tx,
+                        &shutdown, e2ee_ingress.as_ref()
+                    ).await;
+                }
+            }
+            completion = completed_rx.recv(), if !pending.is_empty() => {
+                if let Some((key, outcome)) = completion {
+                    complete_live_create(&mut sessions, &mut pending, key, outcome, shutdown.load(Ordering::Acquire)).await;
+                }
+            }
+            command = media_commands.recv(), if !media_commands.is_closed() => {
+                if let Some(command) = command {
+                    handle_live_webrtc_command(command, &mut sessions, &shutdown, e2ee_ingress.as_ref()).await;
+                }
+            }
         }
-        handle_live_webrtc_command(command, &mut sessions, &shutdown, e2ee_ingress.as_ref()).await;
     }
     commands.close();
     media_commands.close();
+    // Never abandon in-flight peers while tearing down the worker runtime.
+    // Each ICE gather is bounded; all completions are retired, never admitted.
+    while !pending.is_empty() {
+        let Some((key, outcome)) = completed_rx.recv().await else {
+            break;
+        };
+        complete_live_create(&mut sessions, &mut pending, key, outcome, true).await;
+    }
     for (_, session) in sessions {
         let _ = bounded_peer_close(&session.peer_connection).await;
     }
 }
 
-async fn handle_live_webrtc_command(
+fn pending_live_create_admission(
+    sessions: &HashMap<String, LiveWebRtcSession>,
+    pending: &HashMap<String, PendingLiveCreate>,
+    key: &str,
+    deadline: Instant,
+) -> Option<WebRtcProviderError> {
+    if command_expired(deadline) {
+        Some(WebRtcProviderError::TemporarilyUnavailable)
+    } else if sessions.contains_key(key) || pending.contains_key(key) {
+        Some(WebRtcProviderError::Conflict)
+    } else if sessions.len() + pending.len() >= LIVE_WEBRTC_MAX_SESSIONS
+        || pending.len() >= LIVE_WEBRTC_MAX_PENDING_CREATES
+    {
+        Some(WebRtcProviderError::CapacityExceeded)
+    } else {
+        None
+    }
+}
+
+async fn dispatch_live_command(
     command: LiveWebRtcCommand,
     sessions: &mut HashMap<String, LiveWebRtcSession>,
+    pending: &mut HashMap<String, PendingLiveCreate>,
+    completed_tx: &tokio::sync::mpsc::Sender<(String, LiveCreateOutcome)>,
     shutdown: &AtomicBool,
     e2ee_ingress: Option<&tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
 ) {
@@ -1010,7 +1143,106 @@ async fn handle_live_webrtc_command(
             deadline,
             reply,
         } => {
-            handle_live_create(sessions, shutdown, e2ee_ingress, config, deadline, reply).await;
+            let key = session_key(&config.session_id);
+            let error = pending_live_create_admission(sessions, pending, &key, deadline);
+            if let Some(error) = error {
+                let _ = reply.send(Err(error));
+                return;
+            }
+            pending.insert(
+                key.clone(),
+                PendingLiveCreate {
+                    deadline,
+                    reply,
+                    close_replies: Vec::new(),
+                    offer_replies: Vec::new(),
+                },
+            );
+            let completed_tx = completed_tx.clone();
+            let ingress = e2ee_ingress.cloned();
+            tokio::spawn(async move {
+                let outcome = create_live_peer_connection(&config, ingress).await;
+                if let Err(error) = completed_tx.send((key, outcome)).await {
+                    // Worker teardown must not silently strand a created peer.
+                    match error.0.1 {
+                        Ok((session, _)) => {
+                            let _ = bounded_peer_close(&session.peer_connection).await;
+                        }
+                        Err(failure) => {
+                            if let Some(session) = failure.retained_peer {
+                                let _ = bounded_peer_close(&session.peer_connection).await;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        LiveWebRtcCommand::GetOfferId {
+            session_id,
+            deadline,
+            reply,
+        } => {
+            let key = session_key(&session_id);
+            if let Some(inflight) = pending.get_mut(&key) {
+                inflight.offer_replies.push((deadline, reply));
+            } else {
+                handle_live_webrtc_command(
+                    LiveWebRtcCommand::GetOfferId {
+                        session_id,
+                        deadline,
+                        reply,
+                    },
+                    sessions,
+                    shutdown,
+                    e2ee_ingress,
+                )
+                .await;
+            }
+        }
+        LiveWebRtcCommand::Close {
+            session_id,
+            offer_id,
+            deadline: _,
+            reply,
+        } => {
+            let key = session_key(&session_id);
+            if let Some(inflight) = pending.get_mut(&key) {
+                if offer_id.is_some() {
+                    // No SDP fence exists until the new offer is admitted.
+                    let _ = reply.send(Err(WebRtcProviderError::SessionUnavailable));
+                } else {
+                    // Acknowledgement is deferred until the new peer is really closed.
+                    inflight.close_replies.push(reply);
+                }
+            } else {
+                handle_live_webrtc_command(
+                    LiveWebRtcCommand::Close {
+                        session_id,
+                        offer_id,
+                        deadline: Instant::now(),
+                        reply,
+                    },
+                    sessions,
+                    shutdown,
+                    e2ee_ingress,
+                )
+                .await;
+            }
+        }
+        other => handle_live_webrtc_command(other, sessions, shutdown, e2ee_ingress).await,
+    }
+}
+
+async fn handle_live_webrtc_command(
+    command: LiveWebRtcCommand,
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
+    _shutdown: &AtomicBool,
+    _e2ee_ingress: Option<&tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
+) {
+    match command {
+        LiveWebRtcCommand::Create { reply, .. } => {
+            // All creates are reserved and dispatched by dispatch_live_command.
+            let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
         }
         LiveWebRtcCommand::Restart {
             config,
@@ -1074,57 +1306,6 @@ async fn handle_live_webrtc_command(
             deadline,
             reply,
         } => handle_live_close(sessions, session_id, offer_id, deadline, reply).await,
-    }
-}
-
-async fn handle_live_create(
-    sessions: &mut HashMap<String, LiveWebRtcSession>,
-    shutdown: &AtomicBool,
-    e2ee_ingress: Option<&tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
-    config: WebRtcSessionConfig,
-    deadline: Instant,
-    reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
-) {
-    if command_expired(deadline) {
-        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
-        return;
-    }
-    let key = session_key(&config.session_id);
-    if sessions.contains_key(&key) {
-        let _ = reply.send(Err(WebRtcProviderError::Conflict));
-        return;
-    }
-    if sessions.len() >= LIVE_WEBRTC_MAX_SESSIONS {
-        let _ = reply.send(Err(WebRtcProviderError::CapacityExceeded));
-        return;
-    }
-    match create_live_peer_connection(&config, e2ee_ingress.cloned()).await {
-        Ok((mut session, description)) => {
-            let peer_connection = Arc::clone(&session.peer_connection);
-            session.offer_id = webrtc_offer_id(&description.sdp);
-            // Track the peer before handling an expired or abandoned Create.
-            // A failed close must not lose the only handle to a live transport.
-            sessions.insert(key.clone(), session);
-            if shutdown.load(Ordering::Acquire) || command_expired(deadline) {
-                if let Some(retained) = sessions.get_mut(&key) {
-                    retained.shutdown_pending = true;
-                }
-                let result = bounded_peer_close(&peer_connection).await;
-                let _ = retire_peer_only_after_confirmed_close(sessions, &key, result);
-                let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
-                return;
-            }
-            if reply.send(Ok(description)).is_err() {
-                if let Some(retained) = sessions.get_mut(&key) {
-                    retained.shutdown_pending = true;
-                }
-                let result = bounded_peer_close(&peer_connection).await;
-                let _ = retire_peer_only_after_confirmed_close(sessions, &key, result);
-            }
-        }
-        Err(failure) => {
-            retire_failed_live_create(sessions, key, failure, reply).await;
-        }
     }
 }
 
