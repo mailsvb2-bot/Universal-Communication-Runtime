@@ -81,8 +81,8 @@ assert.deepEqual([...receiveCtx.receiveV2(v2Chunk(199,Uint8Array.of(99),0,1,1,fa
   "complete single-chunk ciphertext bypasses partial reassembly pressure");
 assert.equal(receiveCtx.e2eeV2Pending.size,32);
 assert.equal(receiveCtx.e2eeV2LossCounters.pendingEvictions,beforeEvictions,
-  "audio may not evict an inco// A late dependent delta cannot evict the only pending decoder reference.
-// The already-authenticated keyframe must remain reassemblable.
+  "audio may not evict an incomplete video keyframe");
+// A late dependent delta cannot evict the only pending decoder reference.
 assert.equal(receiveCtx.receiveV2(v2Chunk(200,head,0,2,splitTotal,false)),null);
 assert.equal(receiveCtx.e2eeV2Pending.has(101n),true,
   "in-flight reference must survive multi-fragment delta pressure");
