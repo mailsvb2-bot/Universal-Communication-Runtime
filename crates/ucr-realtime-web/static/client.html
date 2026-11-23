@@ -678,7 +678,7 @@ let localMediaPromise=null,earlyLocalCapture=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let e2eeChannelV2=null,e2eeV2Pending=new Map(),e2eeV2ForgetThrough=null,e2eeV2Completed=new Set(),e2eeV2Selected=false;
 // Aggregate protocol loss accounting only: never record ciphertext or peer IDs.
-let e2eeV2LossCounters={pendingEvictions:0,keyframeEvictions:0,staleFragments:0,duplicateFragments:0,pendingPeak:0};
+let e2eeV2LossCounters={pendingEvictions:0,keyframeEvictions:0,pressureRejectedDeltas:0,staleFragments:0,duplicateFragments:0,pendingPeak:0};
 let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
 let heartbeatInFlight=false,heartbeatWatchdog=null;
 // A retiring Join may fence only the unauthenticated replacement preflight.
@@ -1835,6 +1835,15 @@ function receiveE2eeChunkV2(data){
       const oldest=e2eeV2Oldest(e2eeV2Pending.keys());
       if(oldest===null||sequence<oldest){
         if(oldest!==null)e2eeV2Abandon(sequence);
+        return null;
+      }
+      // An incomplete authenticated reference frame is more valuable to the
+      // decoder than an arriving dependent delta. At bounded capacity, drop
+      // the new multi-fragment delta instead of evicting the oldest keyframe.
+      // Completed single-chunk Opus already bypasses this buffer entirely.
+      // No new replay, MLS or media publication path is introduced.
+      if((e2eeV2Pending.get(oldest)?.flags&1)!==0&&(flags&1)===0){
+        e2eeV2LossCounters.pressureRejectedDeltas++;
         return null;
       }
       if((e2eeV2Pending.get(oldest)?.flags&1)!==0)e2eeV2LossCounters.keyframeEvictions++;
