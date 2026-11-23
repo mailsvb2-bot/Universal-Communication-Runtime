@@ -990,7 +990,7 @@ assert.equal(warmInstaller, 1, "invalid adapter cannot trigger installer preload
 // create a realtime session or start a heartbeat in the first place.
 // VM excerpts intentionally exclude the page's global diagnostics owner.
 // Preserve its stage side-effect in isolated conformance fixtures only.
-const activationStageFixture = "function ucrSetMediaActivationStage(stage){globalThis.ucrMediaActivationStage=stage;}\n";
+const activationStageFixture = "const e2eeV2LossCounters={pendingEvictions:0,keyframeEvictions:0,staleFragments:0,duplicateFragments:0,pendingPeak:0};\nfunction ucrSetMediaActivationStage(stage){globalThis.ucrMediaActivationStage=stage;}\n";
 const preflightJoinSnippet = browser.slice(
   browser.indexOf("async function join(){"),
   browser.indexOf("function scheduleEntryRetry(){"),
