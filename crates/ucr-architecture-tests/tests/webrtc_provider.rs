@@ -299,7 +299,9 @@ fn cross_device_call_survives_congestion_and_keeps_rejoin() {
     // A denied close is NOT proof that the old peer was retired.
     // Preserve distinct revoked and missing-offer outcomes for canonical cleanup.
     assert!(browser.contains("const denied=[401,403].includes(error?.status)"));
-    assert!(browser.contains(r"const missing=error?.status===404||/\b404\b|not_found|offer_not_found"));
+    assert!(
+        browser.contains(r"const missing=error?.status===404||/\b404\b|not_found|offer_not_found")
+    );
     assert!(browser.contains("canonical provider cleanup required"));
     assert!(browser.contains("ucrJoinFailureMessage"));
 
