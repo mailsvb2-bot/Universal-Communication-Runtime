@@ -206,8 +206,10 @@ function ucrRecordDiagnostic(event,category="runtime"){
 // Rendering is the real user-visible success boundary, not DataChannel open.
 window.ucrFirstAuthenticatedVideoRendered=()=>{
   if(sessionActive&&mediaActive){
-    if(ucrActivationStartedAt&&ucrActivationFirstVideoMs===null)
+    if(ucrActivationStartedAt&&ucrActivationFirstVideoMs===null){
       ucrActivationFirstVideoMs=Math.max(0,Math.round(performance.now()-ucrActivationStartedAt));
+      ucrSetMediaActivationStage("FIRST_VIDEO_RENDERED");
+    }
     ucrRecordDiagnostic("First authenticated video rendered","media");
     // A first frame ends startup latency, but MUST NOT disable the ongoing
     // bounded liveness monitor; video may stall again after transport loss.
@@ -264,8 +266,18 @@ function ucrActivationTimingSnapshot(){
     durationMs:index===ucrActivationPhases.length-1?
       Math.max(0,Math.round(now-ucrActivationPhaseAt)):phase.durationMs
   }));
+  const started=stage=>phases.find(phase=>phase.stage===stage)?.startMs??null;
+  const duration=stage=>phases.find(phase=>phase.stage===stage)?.durationMs??null;
+  const e2eeAt=started("E2EE_ACTIVE"),firstAt=started("FIRST_VIDEO_RENDERED");
   return {elapsedMs:ucrActivationStartedAt?Math.max(0,Math.round(now-ucrActivationStartedAt)):null,
-    firstVideoMs:ucrActivationFirstVideoMs,phases};
+    firstVideoMs:ucrActivationFirstVideoMs,
+    sdpNegotiationMs:duration("SDP_ICE_NEGOTIATION"),
+    iceConnectionMs:duration("ICE_CONNECTING"),
+    iceConnectedMs:started("ICE_CONNECTED"),
+    e2eeSetupMs:duration("E2EE_SETUP"),
+    e2eeActiveMs:e2eeAt,
+    firstVideoAfterE2eeMs:e2eeAt!==null&&firstAt!==null?Math.max(0,firstAt-e2eeAt):null,
+    phases};
 }
 function ucrRememberFailure(category){
   const safe=String(category||"unknown").replace(/[^A-Z0-9_]/g,"").slice(0,80);
@@ -500,6 +512,7 @@ function ucrDiagnosticReport(){
       mediaActive:typeof mediaActive!=="undefined"&&mediaActive,
       expiresInSeconds:grant?.expires?Math.round((grant.expires-Date.now())/1000):null,
       sessionSequenceValid:typeof activeSessionSequence!=="undefined"&&activeSessionSequence>0},
+    unorderedV2Loss:typeof e2eeV2LossCounters!=="undefined"?{...e2eeV2LossCounters}:null,
     crypto:{adapterReady:typeof e2eeAdapterReady!=="undefined"&&e2eeAdapterReady,
       transportOpen:typeof e2eeChannel!=="undefined"&&e2eeChannel?.readyState==="open",
       // Transport mode is public protocol metadata, not an MLS secret.
@@ -664,6 +677,8 @@ let firstPartyAcceptedMediaKind=null;
 let localMediaPromise=null,earlyLocalCapture=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let e2eeChannelV2=null,e2eeV2Pending=new Map(),e2eeV2ForgetThrough=null,e2eeV2Completed=new Set(),e2eeV2Selected=false;
+// Aggregate protocol loss accounting only: never record ciphertext or peer IDs.
+let e2eeV2LossCounters={pendingEvictions:0,keyframeEvictions:0,staleFragments:0,duplicateFragments:0,pendingPeak:0};
 let mediaCaptureGeneration=0,sessionLifecycleGeneration=0,heartbeatRequestGeneration=0;
 let heartbeatInFlight=false,heartbeatWatchdog=null;
 // A retiring Join may fence only the unauthenticated replacement preflight.
@@ -1802,9 +1817,19 @@ function receiveE2eeChunkV2(data){
   // Audio and video share this sequence. A finished Opus frame must not
   // discard an in-flight keyframe: that stall lasted until the next periodic
   // keyframe and showed up as multi-second video delay.
-  if((e2eeV2ForgetThrough!==null&&sequence<=e2eeV2ForgetThrough)||e2eeV2Completed.has(sequence))
+  if((e2eeV2ForgetThrough!==null&&sequence<=e2eeV2ForgetThrough)||e2eeV2Completed.has(sequence)){
+    e2eeV2LossCounters.staleFragments++;
     return null;
+  }
   let pending=e2eeV2Pending.get(sequence);
+  if(!pending&&count===1){
+    // One SCTP message already contains the WHOLE encrypted envelope.
+    // Do not evict an unfinished video keyframe to make room for a single
+    // Opus frame. It follows the same adapter.onEnvelope -> MLS/replay path.
+    const wire=bytes.slice(E2EE_V2_HEADER_BYTES);
+    e2eeV2RememberCompleted(sequence);
+    return wire;
+  }
   if(!pending){
     if(e2eeV2Pending.size>=E2EE_V2_PENDING_LIMIT){
       const oldest=e2eeV2Oldest(e2eeV2Pending.keys());
@@ -1812,16 +1837,19 @@ function receiveE2eeChunkV2(data){
         if(oldest!==null)e2eeV2Abandon(sequence);
         return null;
       }
+      if((e2eeV2Pending.get(oldest)?.flags&1)!==0)e2eeV2LossCounters.keyframeEvictions++;
+      e2eeV2LossCounters.pendingEvictions++;
       e2eeV2Pending.delete(oldest);
       e2eeV2Abandon(oldest);
       if(e2eeV2ForgetThrough!==null&&sequence<=e2eeV2ForgetThrough)return null;
     }
     pending={total,count,flags,parts:new Array(count).fill(null),received:0};
     e2eeV2Pending.set(sequence,pending);
+    e2eeV2LossCounters.pendingPeak=Math.max(e2eeV2LossCounters.pendingPeak,e2eeV2Pending.size);
   }
   if(pending.total!==total||pending.count!==count||pending.flags!==flags)
     throw new Error("Inconsistent unordered E2EE envelope");
-  if(pending.parts[index]!==null)return null;
+  if(pending.parts[index]!==null){e2eeV2LossCounters.duplicateFragments++;return null;}
   pending.parts[index]=bytes.slice(E2EE_V2_HEADER_BYTES);
   pending.received++;
   if(pending.received!==count)return null;
@@ -2103,7 +2131,7 @@ async function activateE2eeAdapter(){
     requireCompatibleE2eeAdapter(e2eeAdapter());
     e2eeAdapterReady=true;
     cancelMediaStartupWatchdog(sessionGeneration,sessionToken);
-    ucrMediaActivationStage="E2EE_ACTIVE";
+    ucrSetMediaActivationStage("E2EE_ACTIVE");
     ucrRecordDiagnostic("Endpoint E2EE transport active","lifecycle");
     webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
     startAdaptiveMediaMonitoring();
@@ -2191,6 +2219,7 @@ async function activateE2eeAdapter(){
           .finally(()=>clearTimeout(deadline));
       })()
       :Promise.resolve(null);
+  ucrSetMediaActivationStage("E2EE_SETUP");
   const restoreState=await restoreEndpointPersistedState(adapter);
   if(!isCurrent())throw new Error("Encrypted media session changed during restore");
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
@@ -2203,7 +2232,7 @@ async function activateE2eeAdapter(){
   e2eeAdapterReady=true;
   e2eeAdapterStarted=true;
   cancelMediaStartupWatchdog(sessionGeneration,sessionToken);
-  ucrMediaActivationStage="E2EE_ACTIVE";
+  ucrSetMediaActivationStage("E2EE_ACTIVE");
   ucrRecordDiagnostic("Endpoint E2EE transport active","lifecycle");
   ucrMediaFailureCount=0;ucrMediaFailureWindowStart=Date.now();ucrMediaFailureStopped=false;
   ucrMarkConferenceMediaActive(true);
@@ -2565,8 +2594,15 @@ async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims
     }
   }catch(error){
     const message=String(error?.message||error);
-    if(/\b404\b|\b401\b|\b403\b|not_found|offer_not_found|unauthorized|forbidden/i.test(message)){
-      ucrRecordDiagnostic("WebRTC offer already retired on close","webrtc");
+    const denied=[401,403].includes(error?.status)||
+      /\b401\b|\b403\b|unauthorized|forbidden/i.test(message);
+    const missing=error?.status===404||/\b404\b|not_found|offer_not_found/i.test(message);
+    if(denied||missing){
+      // The revoked local offer is fenced immediately, but provider closure
+      // remains the responsibility of canonical server Leave/cleanup.
+      ucrRecordDiagnostic(denied
+        ?"WebRTC close denied; canonical provider cleanup required"
+        :"WebRTC offer already retired on close","webrtc");
       if(startWebRtc.offerId===offerId){
         startWebRtc.offerId=null;
         if(startWebRtc.offerOwner===owner)startWebRtc.offerOwner=null;
@@ -2781,6 +2817,7 @@ async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
     void ucrCaptureIceStats(pc);
     const state=pc.connectionState;ui.webrtcState.textContent=state||"Connecting";
     if(state==="connected"){
+      if(ucrMediaActivationStage==="ICE_CONNECTING")ucrSetMediaActivationStage("ICE_CONNECTED");
       ucrRecordDiagnostic("WebRTC ICE connected","webrtc");
       if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
       ui.state.textContent=e2eeAdapterReady?"Connected":"Securing";
@@ -2830,6 +2867,8 @@ async function startWebRtcOnce(forceMedia=false,prefetchedOffer=null){
     remoteDescriptionAccepted=true;
     if(typeof ucrRecordDiagnostic==="function")
       ucrRecordDiagnostic("WebRTC remote SDP accepted","webrtc");
+    ucrSetMediaActivationStage("ICE_CONNECTING");
+    if(pc.connectionState==="connected")ucrSetMediaActivationStage("ICE_CONNECTED");
     void ucrCaptureIceStats(pc);
     // ICE candidates are independent once the canonical SDP fence exists.
     // Serial HTTP posting held readiness behind N network round-trips.
@@ -2923,14 +2962,24 @@ async function restartIce(){
 }
 async function recoverWebRtc(){
   if(restarting||!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine)return;
+  const generation=sessionLifecycleGeneration;
   if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}
   if(peer){
     try{
       if(await restartIce())return;
     }catch(e){
+      // Rejected Join/Device authority is not transient ICE loss.
+      // Reusing the signed grant to build another offer must fail closed.
+      if([401,403].includes(e?.status)){
+        ucrRecordDiagnostic("ICE restart authorization rejected","webrtc");
+        if(claims?.call_id?.startsWith("fp-m-"))await retireRejectedFirstPartyMedia(generation);
+        else await endUnverifiedMedia(generation,"WebRTC authorization rejected; media capture stopped.");
+        return;
+      }
       ui.status.textContent="ICE restart failed; rebuilding only the WebRTC transport: "+e.message;
     }
   }
+  if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive)return;
   await restartWebRtc(false);
 }
 async function restartWebRtc(forceMedia){
@@ -2950,9 +2999,10 @@ async function restartWebRtc(forceMedia){
       // A canonical 401/403 is a rejected signed media grant, not packet loss.
       // Retrying /webrtc/start with the same one-time session cannot recover;
       // retire it and return to the independently authenticated Call owner.
-      if(claims?.call_id?.startsWith("fp-m-")&&[401,403].includes(e?.status)){
+      if([401,403].includes(e?.status)){
         ucrRecordDiagnostic("WebRTC reauthorization required","webrtc");
-        await retireRejectedFirstPartyMedia(generation);
+        if(claims?.call_id?.startsWith("fp-m-"))await retireRejectedFirstPartyMedia(generation);
+        else await endUnverifiedMedia(generation,"WebRTC authorization rejected; media capture stopped.");
         return;
       }
       ui.webrtcState.textContent="Retrying";
@@ -3201,6 +3251,8 @@ async function join(){
     return;
   }
   if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
+  // Every fresh Join owns its local loss window; never mix earlier calls.
+  for(const metric of Object.keys(e2eeV2LossCounters))e2eeV2LossCounters[metric]=0;
   // A signed join URL alone does not provision an authorized media signer.
   // Reject before opening a realtime session/heartbeat when the host omitted
   // the canonical Device media authority; the user may retry after setup.
@@ -3690,15 +3742,17 @@ function startInitialVideoRecovery(){
     const currentRenderAt=Number(window.__ucrVideoCounters?.lastRenderedAt)||0;
     if(currentRenderAt>lastRenderedAt)lastRenderedAt=currentRenderAt;
     const freshSince=Math.max(activatedAt,lastRenderedAt);
-    if(now-freshSince<3000)return;
     const initial=lastRenderedAt<activatedAt&&now-activatedAt<12000;
-    const cooldown=initial?1500:8000;
+    // An early roster can be empty before the second peer joins.
+    // Revalidate promptly through the SAME canonical authenticated operation.
+    if(now-freshSince<(initial?750:3000))return;
+    const cooldown=initial?1000:8000;
     if(now-lastRecoveryAt<cooldown)return;
     lastRecoveryAt=now;
     // Reuse canonical authenticated subscriptions; never invent a peer,
     // bypass MLS, or pretend a roster retry is remote-keyframe feedback.
     syncReceiveSubscriptions(null,true).catch(()=>{});
-  },750);
+  },350);
 }
 async function syncReceiveSubscriptions(preparedRoster=null,recoverStalledVideo=false){
   if(!sessionActive||!mediaActive||!e2eeAdapterReady||receiveRosterInFlight||

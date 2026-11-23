@@ -18,6 +18,7 @@ const constants={
   E2EE_V2_PAYLOAD_BYTES:15975,E2EE_V2_PENDING_LIMIT:32,E2EE_V2_COMPLETED_MEMORY:64,
   e2eeV2Pending:new Map(),e2eeV2ForgetThrough:null,e2eeV2Completed:new Set(),e2eePending:null,
   e2eeChannelV2:null,e2eeChannel:null,
+  e2eeV2LossCounters:{pendingEvictions:0,keyframeEvictions:0,staleFragments:0,duplicateFragments:0,pendingPeak:0},
   Uint8Array,TextEncoder,DataView,BigInt,Map,Set,Math,Number,
 };
 const receiveCtx={...constants};
@@ -39,6 +40,8 @@ assert.equal(receiveCtx.receiveV2(chunks[1]),null,"last fragment can arrive firs
 const out=receiveCtx.receiveV2(chunks[0]);
 assert.deepEqual([...out],[...payload],"unordered chunks reconstruct EXACT encrypted envelope");
 assert.equal(receiveCtx.receiveV2(chunks[1]),null,"late duplicate cannot replay ciphertext");
+assert.equal(receiveCtx.e2eeV2LossCounters.staleFragments,1,
+  "a duplicate complete ciphertext message is measured, not replayed");
 // Bad version/size cannot be reinterpreted as the older ordered wire protocol.
 assert.equal(receiveCtx.isKeyframeRequest(new TextEncoder().encode("UCRKFRQ1")),true,
   "publisher must recognize server loss feedback");
@@ -68,8 +71,17 @@ const head=Uint8Array.from({length:15975},()=>7);
 const tail=Uint8Array.of(8);
 const splitTotal=15976;
 for(let id=1;id<=32;id++) {
-  assert.equal(receiveCtx.receiveV2(v2Chunk(100+id,head,0,2,splitTotal,false)),null);
+  assert.equal(receiveCtx.receiveV2(v2Chunk(100+id,head,0,2,splitTotal,id===1)),null);
 }
+// With 32 unfinished fragments, a COMPLETE encrypted Opus message must not
+// evict the unfinished reference/keyframe. Its MLS and replay checks still
+// happen at the one canonical onEnvelope call site.
+const beforeEvictions=receiveCtx.e2eeV2LossCounters.pendingEvictions;
+assert.deepEqual([...receiveCtx.receiveV2(v2Chunk(199,Uint8Array.of(99),0,1,1,false))],[99],
+  "complete single-chunk ciphertext bypasses partial reassembly pressure");
+assert.equal(receiveCtx.e2eeV2Pending.size,32);
+assert.equal(receiveCtx.e2eeV2LossCounters.pendingEvictions,beforeEvictions,
+  "audio may not evict an incomplete video keyframe");
 assert.equal(receiveCtx.receiveV2(v2Chunk(200,head,0,2,splitTotal,false)),null);
 assert.equal(receiveCtx.receiveV2(v2Chunk(101,tail,1,2,splitTotal,false)),null,
   "evicted straggler stays dropped");
@@ -77,6 +89,12 @@ assert.equal(receiveCtx.receiveV2(v2Chunk(50,head,0,2,splitTotal,false)),null);
 assert.equal(receiveCtx.receiveV2(v2Chunk(50,tail,1,2,splitTotal,false)),null,
   "sequence older than the full window stays dead");
 assert.ok(receiveCtx.e2eeV2Pending.size<=32);
+assert.ok(receiveCtx.e2eeV2LossCounters.pendingEvictions>=1,
+  "bounded incomplete-v2 queue pressure must appear in diagnostics");
+assert.equal(receiveCtx.e2eeV2LossCounters.keyframeEvictions,1,
+  "a fragmented reference frame lost to sustained queue pressure must be visible");
+assert.equal(receiveCtx.e2eeV2LossCounters.pendingPeak,32,
+  "diagnostics expose the peak in-flight reassembly window");
 
 const sendStart=html.indexOf("function ucrTransportError(code,message){");
 const sendEnd=html.indexOf("function endpointMediaSources(){",sendStart);

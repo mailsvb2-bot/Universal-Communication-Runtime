@@ -990,7 +990,7 @@ assert.equal(warmInstaller, 1, "invalid adapter cannot trigger installer preload
 // create a realtime session or start a heartbeat in the first place.
 // VM excerpts intentionally exclude the page's global diagnostics owner.
 // Preserve its stage side-effect in isolated conformance fixtures only.
-const activationStageFixture = "function ucrSetMediaActivationStage(stage){globalThis.ucrMediaActivationStage=stage;}\n";
+const activationStageFixture = "const e2eeV2LossCounters={pendingEvictions:0,keyframeEvictions:0,staleFragments:0,duplicateFragments:0,pendingPeak:0};\nfunction ucrSetMediaActivationStage(stage){globalThis.ucrMediaActivationStage=stage;}\n";
 const preflightJoinSnippet = browser.slice(
   browser.indexOf("async function join(){"),
   browser.indexOf("function scheduleEntryRetry(){"),
@@ -1184,6 +1184,9 @@ const lifecycleCtx: Record<string, any> = {
   syncReceiveSubscriptions: async () => {protectedLifecycleEvents.push("roster-synced");},
   resetReceiveRoster: () => {protectedLifecycleEvents.push("roster-reset");},
   cancelMediaStartupWatchdog() {},
+  ucrSetMediaActivationStage(stage: string) {
+    protectedLifecycleEvents.push(`activation:${stage}`);
+  },
   ucrRecordDiagnostic(message: string, category: string) {
     protectedLifecycleEvents.push(`diagnostic:${category}:${message}`);
   },
@@ -1205,8 +1208,9 @@ await activating;
 assert.equal(lifecycleCtx.e2eeAdapterReady, true);
 assert.equal(lifecycleCtx.ui.state.textContent, "Connected",
   "the reference UI becomes connected only after protected endpoint startup");
-assert.deepEqual(protectedLifecycleEvents.slice(0, 4),
-  ["start-begins", "start-completes",
+assert.deepEqual(protectedLifecycleEvents.slice(0, 6),
+  ["activation:E2EE_SETUP", "start-begins", "start-completes",
+    "activation:E2EE_ACTIVE",
     "diagnostic:lifecycle:Endpoint E2EE transport active", "monitor-starts"],
   "protected startup must emit its safe E2EE milestone before monitoring");
 lifecycleCtx.e2eeChannel = lifecycleChannel;

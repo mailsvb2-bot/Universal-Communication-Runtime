@@ -35,6 +35,8 @@ const joinStart=html.indexOf("async function join(){");
 const joinEnd=html.indexOf("function scheduleEntryRetry(){",joinStart);
 assert.ok(joinStart>=0&&joinEnd>joinStart);
 const joinLogic=html.slice(joinStart,joinEnd);
+assert.match(joinLogic,/Object\.keys\(e2eeV2LossCounters\)/,
+  "new Join must not inherit fragment loss counters from an older call");
 assert.match(joinLogic,/const needsFreshFirstPartyGrant=firstPartyMediaGrant&&\s*\(sessionActive\|\|\(ucrMediaActivationStage==="REALTIME_JOIN"&&\[401,403,404\]\.includes\(e\?\.status\)\)\)/);
 assert.match(joinLogic,/if\(sessionActive\)\{\s*try\{await leave\(\{retireGrant:false\}\)/);
 assert.match(joinLogic,/if\(needsFreshFirstPartyGrant\)\{\s*[\s\S]*?signedGrantRetired=true;\s*ucrShowFreshFirstPartyAdmission\(\);\s*return;/);
@@ -88,6 +90,20 @@ assert.equal(phase.phases.length,4);
 assert.equal(phase.phases[0].durationMs,25);
 assert.equal(phase.phases[1].durationMs,50);
 assert.equal(phase.phases[2].durationMs,60);
+tick=245;clock.advance("ICE_CONNECTING");
+tick=252;clock.advance("ICE_CONNECTED");
+tick=258;clock.advance("E2EE_SETUP");
+tick=270;clock.advance("E2EE_ACTIVE");
+tick=280;clock.advance("FIRST_VIDEO_RENDERED");
+const measured=clock.snapshot();
+assert.equal(measured.iceConnectedMs,152);
+assert.equal(measured.e2eeActiveMs,170);
+assert.equal(measured.firstVideoAfterE2eeMs,10);
+assert.equal(measured.iceConnectionMs,7);
+assert.equal(measured.e2eeSetupMs,12);
+assert.equal(measured.sdpNegotiationMs,null,"stage absent from this Join is not fabricated");
+assert.equal(measured.phases.find(x=>x.stage==="ICE_CONNECTING").durationMs,7);
+assert.equal(measured.phases.find(x=>x.stage==="E2EE_SETUP").durationMs,12);
 tick=280;clock.advance("PREFLIGHT");
 assert.equal(clock.snapshot().phases.length,1,"new Join resets old phase attribution");
 assert.equal(clock.snapshot().firstVideoMs,null);
@@ -102,10 +118,37 @@ const reconnectStart=html.indexOf("async function restartWebRtc(forceMedia){");
 const reconnectEnd=html.indexOf("function scheduleWebRtcRetryAfterRestart(){",reconnectStart);
 assert.ok(reconnectStart>=0&&reconnectEnd>reconnectStart);
 const reconnect=html.slice(reconnectStart,reconnectEnd);
-assert.match(reconnect,/claims\?\.call_id\?\.startsWith\("fp-m-"\)&&\[401,403\]\.includes\(e\?\.status\)/);
+assert.match(reconnect,/if\(\[401,403\]\.includes\(e\?\.status\)\)/);
+assert.match(reconnect,/if\(claims\?\.call_id\?\.startsWith\("fp-m-"\)\)await retireRejectedFirstPartyMedia\(generation\)/);
+assert.match(reconnect,/else await endUnverifiedMedia\(generation,/);
 assert.match(reconnect,/await retireRejectedFirstPartyMedia\(generation\)/);
 assert.match(reconnect,/return scheduleWebRtcRetryAfterRestart\(\)/,
   "retry must remain for transient non-authorization transport failures");
+// ICE restart authorization rejection must never reuse an already-consumed
+// signed grant to allocate a replacement WebRTC offer. Transient failures
+// retain the canonical restart path only while the Join remains valid.
+const iceRecoverStart=html.indexOf("async function recoverWebRtc(){");
+const iceRecoverEnd=html.indexOf("async function restartWebRtc(forceMedia){",iceRecoverStart);
+assert.ok(iceRecoverStart>=0&&iceRecoverEnd>iceRecoverStart);
+const iceRecover=html.slice(iceRecoverStart,iceRecoverEnd);
+async function exerciseIceRestart(status,firstParty){
+  const events=[];
+  const ctx={restarting:false,sessionActive:true,mediaActive:true,
+    claims:{call_id:firstParty?"fp-m-test":"conference",expires:Date.now()+60000},
+    navigator:{onLine:true},peer:{},webrtcNeedsPeerRebuild:false,
+    sessionLifecycleGeneration:9,Date,
+    restartIce:async()=>{const e=new Error("rejected");e.status=status;throw e;},
+    restartWebRtc:async()=>{events.push("rebuild");},
+    retireRejectedFirstPartyMedia:async()=>{events.push("retire");},
+    endUnverifiedMedia:async()=>{events.push("end");},
+    ucrRecordDiagnostic:()=>{},ui:{status:{textContent:""}}};
+  vm.runInNewContext(iceRecover+"\nthis.run=recoverWebRtc;",ctx);
+  await ctx.run();return events;
+}
+assert.deepEqual(await exerciseIceRestart(401,true),["retire"]);
+assert.deepEqual(await exerciseIceRestart(403,false),["end"]);
+assert.deepEqual(await exerciseIceRestart(503,true),["rebuild"]);
+console.log("PASS: rejected ICE restart never rebuilds a revoked grant; transient retry stays canonical");
 const activationStart=html.indexOf("async function activateAdmittedMedia(){");
 const activationEnd=html.indexOf("async function applyAdmissionState(state){",activationStart);
 assert.ok(activationStart>=0&&activationEnd>activationStart);
@@ -184,7 +227,7 @@ assert.match(firstFrameRecovery,/const freshSince=Math\.max\(activatedAt,lastRen
   "reconnected call needs a freshly rendered frame, not historic firstRenderedAt");
 assert.match(firstFrameRecovery,/if\(document\.hidden\)return;/,
   "hidden video must not be marked stalled when the browser suppresses rendering");
-assert.match(firstFrameRecovery,/const cooldown=initial\?1500:8000/,
+assert.match(firstFrameRecovery,/const cooldown=initial\?1000:8000/,
   "continuous video recovery must bound authenticated subscription polling");
 assert.match(firstFrameRecovery,/syncReceiveSubscriptions\(null,true\)/,
   "a verified stall must explicitly request a canonical subscription refresh");
@@ -287,3 +330,27 @@ await Promise.resolve();
 assert.equal(soundButton.disabled,true,"successful asynchronous resume updates the button");
 assert.equal(soundButton.textContent,"Звук включён");
 console.log("PASS: sound control reflects real running/suspended AudioContext without awaiting playback for video");
+
+// The observed /webrtc/close 401 is not proof that the server peer closed.
+// Do not present revoked media as cleaned up or reuse the old offer fence.
+const closeStart=html.indexOf("async function closeServerPeer(");
+const closeEnd=html.indexOf("function scheduleWebRtcRetry(",closeStart);
+assert.ok(closeStart>=0&&closeEnd>closeStart);
+const oldOwner={offerId:"old-offer",claims:{session:"previous"},token:"old-grant"};
+const closeEvents=[];
+let closeCalls=0;
+const closeCtx={
+ sessionActive:true,startWebRtc:function(){},String,
+ api:async()=>{closeCalls++;const err=new Error("WEBRTC_CONNECTION_FAILURE");err.status=401;throw err;},
+ ucrRecordDiagnostic:message=>closeEvents.push(message),
+ ucrDiagnosticReason:message=>message,
+};
+closeCtx.startWebRtc.offerId=oldOwner.offerId;
+closeCtx.startWebRtc.offerOwner=oldOwner;
+vm.runInNewContext(html.slice(closeStart,closeEnd)+"\nthis.close=closeServerPeer;",closeCtx);
+await closeCtx.close();
+assert.equal(closeCalls,1);
+assert.equal(closeCtx.startWebRtc.offerId,null,"revoked offer cannot be reused");
+assert.ok(closeEvents.some(msg=>msg.includes("canonical provider cleanup required")));
+assert.ok(!closeEvents.some(msg=>msg.includes("already retired")));
+console.log("PASS: HTTP 401 close fences stale local offer without claiming server cleanup");
