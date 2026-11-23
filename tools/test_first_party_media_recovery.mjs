@@ -99,6 +99,9 @@ const measured=clock.snapshot();
 assert.equal(measured.iceConnectedMs,152);
 assert.equal(measured.e2eeActiveMs,170);
 assert.equal(measured.firstVideoAfterE2eeMs,10);
+assert.equal(measured.iceConnectionMs,7);
+assert.equal(measured.e2eeSetupMs,12);
+assert.equal(measured.sdpNegotiationMs,null,"stage absent from this Join is not fabricated");
 assert.equal(measured.phases.find(x=>x.stage==="ICE_CONNECTING").durationMs,7);
 assert.equal(measured.phases.find(x=>x.stage==="E2EE_SETUP").durationMs,12);
 tick=280;clock.advance("PREFLIGHT");
@@ -327,3 +330,27 @@ await Promise.resolve();
 assert.equal(soundButton.disabled,true,"successful asynchronous resume updates the button");
 assert.equal(soundButton.textContent,"Звук включён");
 console.log("PASS: sound control reflects real running/suspended AudioContext without awaiting playback for video");
+
+// The observed /webrtc/close 401 is not proof that the server peer closed.
+// Do not present revoked media as cleaned up or reuse the old offer fence.
+const closeStart=html.indexOf("async function closeServerPeer(");
+const closeEnd=html.indexOf("function scheduleWebRtcRetry(",closeStart);
+assert.ok(closeStart>=0&&closeEnd>closeStart);
+const oldOwner={offerId:"old-offer",claims:{session:"previous"},token:"old-grant"};
+const closeEvents=[];
+let closeCalls=0;
+const closeCtx={
+ sessionActive:true,startWebRtc:function(){},String,
+ api:async()=>{closeCalls++;const err=new Error("WEBRTC_CONNECTION_FAILURE");err.status=401;throw err;},
+ ucrRecordDiagnostic:message=>closeEvents.push(message),
+ ucrDiagnosticReason:message=>message,
+};
+closeCtx.startWebRtc.offerId=oldOwner.offerId;
+closeCtx.startWebRtc.offerOwner=oldOwner;
+vm.runInNewContext(html.slice(closeStart,closeEnd)+"\nthis.close=closeServerPeer;",closeCtx);
+await closeCtx.close();
+assert.equal(closeCalls,1);
+assert.equal(closeCtx.startWebRtc.offerId,null,"revoked offer cannot be reused");
+assert.ok(closeEvents.some(msg=>msg.includes("canonical provider cleanup required")));
+assert.ok(!closeEvents.some(msg=>msg.includes("already retired")));
+console.log("PASS: HTTP 401 close fences stale local offer without claiming server cleanup");
