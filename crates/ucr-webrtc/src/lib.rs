@@ -1202,7 +1202,7 @@ async fn dispatch_live_command(
         LiveWebRtcCommand::Close {
             session_id,
             offer_id,
-            deadline: _,
+            deadline,
             reply,
         } => {
             let key = session_key(&session_id);
@@ -1219,7 +1219,7 @@ async fn dispatch_live_command(
                     LiveWebRtcCommand::Close {
                         session_id,
                         offer_id,
-                        deadline: Instant::now(),
+                        deadline,
                         reply,
                     },
                     sessions,
