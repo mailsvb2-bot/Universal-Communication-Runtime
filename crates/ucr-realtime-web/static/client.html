@@ -267,10 +267,15 @@ function ucrActivationTimingSnapshot(){
       Math.max(0,Math.round(now-ucrActivationPhaseAt)):phase.durationMs
   }));
   const started=stage=>phases.find(phase=>phase.stage===stage)?.startMs??null;
+  const duration=stage=>phases.find(phase=>phase.stage===stage)?.durationMs??null;
   const e2eeAt=started("E2EE_ACTIVE"),firstAt=started("FIRST_VIDEO_RENDERED");
   return {elapsedMs:ucrActivationStartedAt?Math.max(0,Math.round(now-ucrActivationStartedAt)):null,
     firstVideoMs:ucrActivationFirstVideoMs,
-    iceConnectedMs:started("ICE_CONNECTED"),e2eeActiveMs:e2eeAt,
+    sdpNegotiationMs:duration("SDP_ICE_NEGOTIATION"),
+    iceConnectionMs:duration("ICE_CONNECTING"),
+    iceConnectedMs:started("ICE_CONNECTED"),
+    e2eeSetupMs:duration("E2EE_SETUP"),
+    e2eeActiveMs:e2eeAt,
     firstVideoAfterE2eeMs:e2eeAt!==null&&firstAt!==null?Math.max(0,firstAt-e2eeAt):null,
     phases};
 }
@@ -2589,8 +2594,15 @@ async function closeServerPeer(keepalive=false,retiredOfferId=null,retiredClaims
     }
   }catch(error){
     const message=String(error?.message||error);
-    if(/\b404\b|\b401\b|\b403\b|not_found|offer_not_found|unauthorized|forbidden/i.test(message)){
-      ucrRecordDiagnostic("WebRTC offer already retired on close","webrtc");
+    const denied=[401,403].includes(error?.status)||
+      /\b401\b|\b403\b|unauthorized|forbidden/i.test(message);
+    const missing=error?.status===404||/\b404\b|not_found|offer_not_found/i.test(message);
+    if(denied||missing){
+      // The revoked local offer is fenced immediately, but provider closure
+      // remains the responsibility of canonical server Leave/cleanup.
+      ucrRecordDiagnostic(denied
+        ?"WebRTC close denied; canonical provider cleanup required"
+        :"WebRTC offer already retired on close","webrtc");
       if(startWebRtc.offerId===offerId){
         startWebRtc.offerId=null;
         if(startWebRtc.offerOwner===owner)startWebRtc.offerOwner=null;
