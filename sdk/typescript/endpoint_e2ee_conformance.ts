@@ -1184,6 +1184,9 @@ const lifecycleCtx: Record<string, any> = {
   syncReceiveSubscriptions: async () => {protectedLifecycleEvents.push("roster-synced");},
   resetReceiveRoster: () => {protectedLifecycleEvents.push("roster-reset");},
   cancelMediaStartupWatchdog() {},
+  ucrSetMediaActivationStage(stage: string) {
+    protectedLifecycleEvents.push(`activation:${stage}`);
+  },
   ucrRecordDiagnostic(message: string, category: string) {
     protectedLifecycleEvents.push(`diagnostic:${category}:${message}`);
   },
