@@ -367,7 +367,8 @@ export function ucrLossRttPressure(
   return {pressure: false, hold: sample.lossFraction >= UCR_BWE_LOSS_HOLD, state: next};
 }
 // Aggregate quality telemetry exposed to privacy-safe call diagnostics.
-const ucrVideoAdaptation = {stage: 0, changes: 0, bufferedBytes: 0, encoderQueued: 0, encodeLatencyMs: 0, encodeLatencyMaxMs: 0};
+const ucrVideoAdaptation = {stage: 0, changes: 0, bufferedBytes: 0, encoderQueued: 0,
+  encodeLatencyMs: 0, encodeLatencyMaxMs: 0, transportPressureSkipped: 0};
 (globalThis as unknown as {__ucrVideoAdaptation?: typeof ucrVideoAdaptation})
   .__ucrVideoAdaptation = ucrVideoAdaptation;
 const MAX_VIDEO_ENCODER_QUEUE = 2;
@@ -844,6 +845,7 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
             ucrEncryptedTransportBufferedAmount?: () => number;
           }).ucrEncryptedTransportBufferedAmount === "function" &&
               !ucrVideoTransportMayEncode(readBuffered())) {
+            ucrVideoAdaptation.transportPressureSkipped++;
             forceKeyframe = true;
             nextVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
             continue;
