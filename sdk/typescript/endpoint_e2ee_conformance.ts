@@ -3020,6 +3020,10 @@ try {
     "ucrEncryptedTransportBufferedAmount");
   const resumedFrames: {timestamp: bigint; keyframe: boolean}[] = [];
   captureCount = 0;
+  const pressureCounters = (globalThis as unknown as {
+    __ucrVideoAdaptation?: {transportPressureSkipped:number};
+  }).__ucrVideoAdaptation;
+  const pressureBefore = pressureCounters?.transportPressureSkipped ?? 0;
   Object.defineProperty(globalThis, "ucrEncryptedTransportBufferedAmount", {
     configurable: true, value: () => captureCount <= 8 ? 200_000 : 0,
   });
@@ -3040,6 +3044,8 @@ try {
       "ucrEncryptedTransportBufferedAmount", bufferedProbe);
     else Reflect.deleteProperty(globalThis, "ucrEncryptedTransportBufferedAmount");
   }
+  assert.ok((pressureCounters?.transportPressureSkipped ?? 0) >= pressureBefore + 8,
+    "diagnostics must account for real camera frames skipped by transport pressure");
   assert.ok(resumedFrames.length > 0, "transport draining must resume real camera output");
   assert.ok(resumedFrames.every(frame => frame.timestamp >= BigInt(8 * 33_333)),
     "no camera codec output may be produced while encrypted transport is backed up");
