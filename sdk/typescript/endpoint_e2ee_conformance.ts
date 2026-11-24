@@ -32,6 +32,7 @@ import {
   ucrVideoAllowsH264,
   ucrAdaptiveVideoStep,
   ucrTransportCongestionDelta,
+  ucrVideoTransportMayEncode,
   ucrNormalizeOpusAudio,
 } from "./src/browser_webcodecs_media.ts";
 import {
@@ -45,6 +46,19 @@ import {
   UcrChameleonReceiveHandover,
   type UcrEncryptedReceivePath,
 } from "./src/chameleon_receive_handover.ts";
+
+// Verified encrypted buffer pressure should stop video BEFORE encoding, not
+// produce a long tail of signed ciphertext that the DataChannel must reject.
+{
+  assert.equal(ucrVideoTransportMayEncode(0), true);
+  assert.equal(ucrVideoTransportMayEncode(64 * 1024), true);
+  assert.equal(ucrVideoTransportMayEncode(128 * 1024 - 1), true);
+  assert.equal(ucrVideoTransportMayEncode(128 * 1024), false);
+  assert.equal(ucrVideoTransportMayEncode(1_048_577), false);
+  assert.equal(ucrVideoTransportMayEncode(Number.POSITIVE_INFINITY), false);
+  assert.equal(ucrVideoTransportMayEncode(Number.NaN), false);
+  assert.equal(ucrVideoTransportMayEncode(-1), false);
+}
 
 // The real capture cadence must be preserved at each adaptive encode target.
 // Integer microsecond timestamps must not turn 24 fps into 15 or 12 into 10.
@@ -3304,6 +3318,53 @@ for (const [name, publish, seal, transport] of [
   } finally {
     await recovery.stop();
     if (oldProbe) g.ucrEncryptedTransportBufferedAmount = oldProbe;
+    else Reflect.deleteProperty(g,"ucrEncryptedTransportBufferedAmount");
+  }
+}
+
+// An audio frame can prove that the shared encrypted channel has drained,
+// even if every recent video delta was refused. Recover once, not per Opus.
+{
+  const g = globalThis as unknown as {
+    ucrEncryptedTransportBufferedAmount?: () => number;
+  };
+  const oldProbe = g.ucrEncryptedTransportBufferedAmount;
+  let buffered = 200_000;
+  g.ucrEncryptedTransportBufferedAmount = () => buffered;
+  let emit: ((frame: {mediaKind:"video"|"audio";videoSourceKind?:"camera";
+    streamId:string;timestamp:bigint;keyframe:boolean;bytes:Uint8Array})
+    => void | Promise<void>) | undefined;
+  const requests:string[]=[];
+  const media=new UcrPortableEndpointMediaAdapter({
+    bridge:{seal_wire(){return Uint8Array.of(9);},open_wire(){return Uint8Array.of(9);},revoke(){}},
+    producer:{start(_src,callback){emit=callback;},
+      requestVideoKeyframe(streamId){requests.push(streamId);},stop(){}},
+    consumer:{play(){},stop(){}},
+    trustedKeys:{resolve(){return new Uint8Array(32);}},
+    binding:{tenantId:"tenant",namespaceId:null,callId:"call",groupId:"group",
+      cryptoEpoch:3n,negotiationRef:"current",negotiationGeneration:1n},
+    authorizeFrame:()=>true,authorizePublish:()=>true,
+  });
+  try {
+    await media.start({...src,sendEnvelope(_wire,kind){
+      if(kind==="video") throw Object.assign(new Error("pressure"),
+        {code:"UCR_TRANSPORT_QUEUE_CONGESTED"});
+    }});
+    assert.ok(emit);
+    const video=(n:bigint)=>({mediaKind:"video" as const,videoSourceKind:"camera" as const,
+      streamId:"camera",timestamp:n,keyframe:false,bytes:Uint8Array.of(1)});
+    const audio=(n:bigint)=>({mediaKind:"audio" as const,
+      streamId:"mic",timestamp:n,keyframe:false,bytes:Uint8Array.of(1)});
+    await emit!(video(1n));
+    await emit!(audio(2n));
+    assert.deepEqual(requests,[],"still-congested audio cannot demand a keyframe");
+    buffered=0;
+    await emit!(audio(3n));
+    await emit!(audio(4n));
+    assert.deepEqual(requests,["camera"],"one drained audio send recovers lost video reference");
+  } finally {
+    await media.stop();
+    if(oldProbe)g.ucrEncryptedTransportBufferedAmount=oldProbe;
     else Reflect.deleteProperty(g,"ucrEncryptedTransportBufferedAmount");
   }
 }
