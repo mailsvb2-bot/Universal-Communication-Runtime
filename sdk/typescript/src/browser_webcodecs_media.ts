@@ -847,7 +847,9 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               !ucrVideoTransportMayEncode(readBuffered())) {
             ucrVideoAdaptation.transportPressureSkipped++;
             forceKeyframe = true;
+            forceLowKeyframe = true;
             nextVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
+            nextLowEncodeTimestamp = Number.NEGATIVE_INFINITY;
             continue;
           }
           if (kind === "video" && frame.timestamp < lastVideoEncodeTimestamp)
