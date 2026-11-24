@@ -3018,7 +3018,7 @@ try {
   // independently decodable reference frame.
   const bufferedProbe = Object.getOwnPropertyDescriptor(globalThis,
     "ucrEncryptedTransportBufferedAmount");
-  const resumedFrames: {timestamp: bigint; keyframe: boolean}[] = [];
+  const resumedFrames: {streamId: string; timestamp: bigint; keyframe: boolean}[] = [];
   captureCount = 0;
   const pressureCounters = (globalThis as unknown as {
     __ucrVideoAdaptation?: {transportPressureSkipped:number};
@@ -3028,14 +3028,15 @@ try {
     configurable: true, value: () => captureCount <= 8 ? 200_000 : 0,
   });
   try {
-    const throttled = new UcrBrowserWebCodecsProducer();
+    const throttled = new UcrBrowserWebCodecsProducer(() => {}, true);
     await throttled.start({
       stream: {getAudioTracks: () => []},
       cameraStream: {getVideoTracks: () => [videoTrack]},
       screenStream: null,
     } as any, frame => {
       if (frame.mediaKind === "video")
-        resumedFrames.push({timestamp: frame.timestamp, keyframe: frame.keyframe});
+        resumedFrames.push({streamId: frame.streamId,
+          timestamp: frame.timestamp, keyframe: frame.keyframe});
     });
     for (let spin = 0; spin < 30; spin++) await Promise.resolve();
     await throttled.stop();
@@ -3049,8 +3050,15 @@ try {
   assert.ok(resumedFrames.length > 0, "transport draining must resume real camera output");
   assert.ok(resumedFrames.every(frame => frame.timestamp >= BigInt(8 * 33_333)),
     "no camera codec output may be produced while encrypted transport is backed up");
-  assert.equal(resumedFrames[0].keyframe, true,
-    "first real encoded frame after transport recovery must be a reference frame");
+  const firstAfterDrain = new Map<string, boolean>();
+  for (const frame of resumedFrames) {
+    if (!firstAfterDrain.has(frame.streamId))
+      firstAfterDrain.set(frame.streamId, frame.keyframe);
+  }
+  assert.equal(firstAfterDrain.size, 2,
+    "both camera layers must resume through the existing source owner");
+  assert.ok([...firstAfterDrain.values()].every(Boolean),
+    "both video layers must restart with independently decodable keyframes");
 
   // A revoked screen source must never re-attach after an earlier async reader
   // cancellation finishes. This exercises the real producer's updateSources.
