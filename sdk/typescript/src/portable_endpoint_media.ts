@@ -591,20 +591,24 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         throw new Error("media sender unavailable");
       }
       this.#sender(wire, ownedFrame.mediaKind, ownedFrame.keyframe === true);
-      if (frame.mediaKind === "video" &&
-          this.#videoBackpressureNeedsKeyframe.has(frame.streamId)) {
+      // A video reference may have been lost while the video channel was
+      // congested. Opus can drain first; use that successful media send as
+      // proof of transport recovery instead of waiting for another successful
+      // *video* delta that may never fit the same queue. Never request while
+      // the encrypted transport still reports a high or unknown backlog.
+      if (this.#videoBackpressureNeedsKeyframe.size > 0) {
         const probe = (globalThis as unknown as {
           ucrEncryptedTransportBufferedAmount?: () => number;
         }).ucrEncryptedTransportBufferedAmount;
-        // Without a valid measured channel backlog, no assumption is made
-        // that large keyframes are safe. A drop alone is not a green signal.
         let buffered = Number.POSITIVE_INFINITY;
         try { if (typeof probe === "function") buffered = probe(); } catch { /* no proof */ }
         if (Number.isFinite(buffered) && buffered >= 0 && buffered <= 64 * 1024 &&
             typeof this.#producer.requestVideoKeyframe === "function") {
-          this.#videoBackpressureNeedsKeyframe.delete(frame.streamId);
-          this.#producer.requestVideoKeyframe(frame.streamId);
-          ucrMediaStageMetrics.videoKeyframeRequests++;
+          for (const streamId of this.#videoBackpressureNeedsKeyframe) {
+            this.#videoBackpressureNeedsKeyframe.delete(streamId);
+            this.#producer.requestVideoKeyframe(streamId);
+            ucrMediaStageMetrics.videoKeyframeRequests++;
+          }
         }
       }
       if (metrics) {
