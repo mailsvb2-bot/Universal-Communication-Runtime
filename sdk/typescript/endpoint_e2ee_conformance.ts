@@ -3012,6 +3012,40 @@ try {
   assert.equal(new Set(fullLayer.map(f => f.streamId)).size, 1,
     "one producer start uses one authenticated media-session identity");
 
+  // Exercise the actual WebCodecs reader/encoder loop, not just the pure
+  // congestion predicate. During a verified DataChannel backlog the camera
+  // must not emit encrypted input; once the queue drains it resumes with an
+  // independently decodable reference frame.
+  const bufferedProbe = Object.getOwnPropertyDescriptor(globalThis,
+    "ucrEncryptedTransportBufferedAmount");
+  const resumedFrames: {timestamp: bigint; keyframe: boolean}[] = [];
+  captureCount = 0;
+  Object.defineProperty(globalThis, "ucrEncryptedTransportBufferedAmount", {
+    configurable: true, value: () => captureCount <= 8 ? 200_000 : 0,
+  });
+  try {
+    const throttled = new UcrBrowserWebCodecsProducer();
+    await throttled.start({
+      stream: {getAudioTracks: () => []},
+      cameraStream: {getVideoTracks: () => [videoTrack]},
+      screenStream: null,
+    } as any, frame => {
+      if (frame.mediaKind === "video")
+        resumedFrames.push({timestamp: frame.timestamp, keyframe: frame.keyframe});
+    });
+    for (let spin = 0; spin < 30; spin++) await Promise.resolve();
+    await throttled.stop();
+  } finally {
+    if (bufferedProbe) Object.defineProperty(globalThis,
+      "ucrEncryptedTransportBufferedAmount", bufferedProbe);
+    else Reflect.deleteProperty(globalThis, "ucrEncryptedTransportBufferedAmount");
+  }
+  assert.ok(resumedFrames.length > 0, "transport draining must resume real camera output");
+  assert.ok(resumedFrames.every(frame => frame.timestamp >= BigInt(8 * 33_333)),
+    "no camera codec output may be produced while encrypted transport is backed up");
+  assert.equal(resumedFrames[0].keyframe, true,
+    "first real encoded frame after transport recovery must be a reference frame");
+
   // A revoked screen source must never re-attach after an earlier async reader
   // cancellation finishes. This exercises the real producer's updateSources.
   captureCount = 12;
