@@ -579,7 +579,8 @@ function ucrDiagnosticReport(){
       bufferedBytes:window.__ucrVideoAdaptation.bufferedBytes,
       encoderQueued:window.__ucrVideoAdaptation.encoderQueued,
       encodeLatencyMs:window.__ucrVideoAdaptation.encodeLatencyMs,
-      encodeLatencyMaxMs:window.__ucrVideoAdaptation.encodeLatencyMaxMs
+      encodeLatencyMaxMs:window.__ucrVideoAdaptation.encodeLatencyMaxMs,
+      transportPressureSkipped:window.__ucrVideoAdaptation.transportPressureSkipped
     }:null),
     videoFrames:(window.__ucrVideoCounters?{
       captured:window.__ucrVideoCounters.captured,
