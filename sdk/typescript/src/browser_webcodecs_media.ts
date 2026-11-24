@@ -303,6 +303,16 @@ export function ucrTransportCongestionDelta(
   if (current! < previous) return {pressure: false, baseline: current!};
   return {pressure: current! > previous, baseline: current!};
 }
+/** Do not encode fresh video into an already saturated encrypted DataChannel.
+ * The v1/v2 sender still owns authoritative admission and ciphertext; this
+ * pre-encode throttle avoids burning codec/MLS work on frames that cannot be
+ * queued. Audio is never throttled here. An unknown buffer is not healthy.
+ */
+export function ucrVideoTransportMayEncode(bufferedBytes: number): boolean {
+  return Number.isFinite(bufferedBytes) && bufferedBytes >= 0 &&
+    bufferedBytes < 128 * 1024;
+}
+
 /** Source-owned congestion adaptation. Use thresholds below the canonical
  * 256 KiB video send ceiling so adaptation can react BEFORE hard rejection.
  * Only verified encrypted transport queue depth and local encoder pressure influence publish quality. Never change MLS
@@ -357,7 +367,8 @@ export function ucrLossRttPressure(
   return {pressure: false, hold: sample.lossFraction >= UCR_BWE_LOSS_HOLD, state: next};
 }
 // Aggregate quality telemetry exposed to privacy-safe call diagnostics.
-const ucrVideoAdaptation = {stage: 0, changes: 0, bufferedBytes: 0, encoderQueued: 0, encodeLatencyMs: 0, encodeLatencyMaxMs: 0};
+const ucrVideoAdaptation = {stage: 0, changes: 0, bufferedBytes: 0, encoderQueued: 0,
+  encodeLatencyMs: 0, encodeLatencyMaxMs: 0, transportPressureSkipped: 0};
 (globalThis as unknown as {__ucrVideoAdaptation?: typeof ucrVideoAdaptation})
   .__ucrVideoAdaptation = ucrVideoAdaptation;
 const MAX_VIDEO_ENCODER_QUEUE = 2;
@@ -824,6 +835,22 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
               }
               forceKeyframe = true;
             }
+          }
+          // After source-owned quality adaptation, shed video BEFORE encode
+          // when the actual encrypted transport backlog approaches the hard
+          // 256 KiB video admission ceiling. On recovery the next encoded
+          // reference must be a keyframe, never a delta dependent on frames
+          // that were deliberately skipped. No second publishing path.
+          if (kind === "video" && typeof (globalThis as unknown as {
+            ucrEncryptedTransportBufferedAmount?: () => number;
+          }).ucrEncryptedTransportBufferedAmount === "function" &&
+              !ucrVideoTransportMayEncode(readBuffered())) {
+            ucrVideoAdaptation.transportPressureSkipped++;
+            forceKeyframe = true;
+            forceLowKeyframe = true;
+            nextVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
+            nextLowEncodeTimestamp = Number.NEGATIVE_INFINITY;
+            continue;
           }
           if (kind === "video" && frame.timestamp < lastVideoEncodeTimestamp)
             nextVideoEncodeTimestamp = Number.NEGATIVE_INFINITY;
