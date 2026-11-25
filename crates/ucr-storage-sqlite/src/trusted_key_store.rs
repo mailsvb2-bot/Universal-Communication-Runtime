@@ -257,7 +257,7 @@ impl TrustedSigningKeyResolver for SqliteLocalStore {
                  WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
                    AND key_id=?4 AND device_id=?5 AND state='active'",
             )
-            .map_err(|error| map_sqlite_error(&error))?
+            .map_err(|error| map_resolution_store_error(map_sqlite_error(&error)))?
             .query_row(
                 params![
                     scope.tenant_id.as_opaque().as_str(),

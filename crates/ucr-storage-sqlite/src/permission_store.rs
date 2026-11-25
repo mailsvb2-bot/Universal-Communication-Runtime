@@ -200,14 +200,9 @@ impl AuthorizationEvaluator for SqliteLocalStore {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| map_sqlite_error(&error))?;
             let value: i64 = transaction
-                .prepare_cached(
-                    "SELECT revision FROM authorization_revision WHERE singleton = 1",
-                )
+                .prepare_cached("SELECT revision FROM authorization_revision WHERE singleton = 1")
                 .map_err(|error| map_sqlite_error(&error))?
-                .query_row(
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row([], |row| row.get(0))
                 .map_err(|error| map_sqlite_error(&error))?;
             let current = u64::try_from(value).map_err(|_| DurableStoreError::Corrupt)?;
             if current != expected_revision {
