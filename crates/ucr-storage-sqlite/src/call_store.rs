@@ -958,12 +958,15 @@ fn load_call_from(
 ) -> Result<Option<CallSession>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let row = connection
-        .query_row(
+        .prepare_cached(
             "SELECT conversation_id, conversation_kind, initiated_by_principal_id,
                     initiated_by_principal_kind, signalling_state, reconnecting_principal_id,
                     reconnecting_principal_kind, media_negotiation_ref, media_negotiation_generation,
                     replication_generation, revision, termination_reason
              FROM calls WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND call_id=?4",
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .query_row(
             params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, call_id.as_opaque().as_str()],
             |row| {
                 Ok((
@@ -1060,7 +1063,7 @@ fn load_participants(
 ) -> Result<Vec<CallParticipant>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let mut statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT principal_id, principal_kind, state, joined_revision, left_revision
              FROM call_participants
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND call_id=?4

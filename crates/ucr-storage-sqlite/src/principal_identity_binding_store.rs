@@ -305,10 +305,13 @@ pub(super) fn load_binding_from(
 ) -> Result<Option<PrincipalIdentityBinding>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let identity = connection
-        .query_row(
+        .prepare_cached(
             "SELECT identity_id FROM principal_identity_bindings
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
                AND principal_id=?4 AND principal_kind=?5",
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .query_row(
             params![
                 scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
