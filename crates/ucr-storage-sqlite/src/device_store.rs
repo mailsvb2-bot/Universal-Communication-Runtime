@@ -371,9 +371,12 @@ pub(super) fn load_device(
 ) -> Result<Option<DeviceDescriptor>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let row = connection
-        .query_row(
+        .prepare_cached(
             "SELECT identity_id, state FROM devices
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND device_id=?4",
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .query_row(
             params![
                 scope.tenant_id.as_opaque().as_str(),
                 namespace.present,

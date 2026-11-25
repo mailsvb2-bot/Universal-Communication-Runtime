@@ -180,8 +180,11 @@ impl SqliteLocalStore {
     pub fn authorization_revision_value(&self) -> Result<u64, DurableStoreError> {
         let connection = self.lock_connection()?;
         let value: i64 = connection
-            .query_row(
+            .prepare_cached(
                 "SELECT revision FROM authorization_revision WHERE singleton = 1",
+            )
+            .map_err(|error| map_sqlite_error(&error))?
+            .query_row(
                 [],
                 |row| row.get(0),
             )

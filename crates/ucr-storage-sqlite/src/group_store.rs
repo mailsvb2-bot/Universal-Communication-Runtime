@@ -1008,8 +1008,12 @@ pub fn load_group_from(
     group_id: &GroupId,
 ) -> Result<Option<GroupRecord>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
-    let row = connection.query_row(
-        "SELECT conversation_id, conversation_kind, ownership_kind, owner_principal_id, owner_principal_kind, ownership_expires_at_unix_ms, history_kind, history_value, history_custom, delivery_policy, crypto_capability_id, crypto_epoch, crypto_state_ref, public_join_policy, public_discovery, public_indexed, media_state, replication_generation, revision FROM groups WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4",
+    let row = connection
+        .prepare_cached(
+            "SELECT conversation_id, conversation_kind, ownership_kind, owner_principal_id, owner_principal_kind, ownership_expires_at_unix_ms, history_kind, history_value, history_custom, delivery_policy, crypto_capability_id, crypto_epoch, crypto_state_ref, public_join_policy, public_discovery, public_indexed, media_state, replication_generation, revision FROM groups WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4",
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .query_row(
         params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group_id.as_opaque().as_str()],
         |row| Ok((
             row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?,
@@ -1144,8 +1148,12 @@ pub fn load_membership_from(
     member: &PrincipalRef,
 ) -> Result<Option<GroupMembership>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
-    let row = connection.query_row(
-        "SELECT principal_kind, role, state, joined_revision, removed_revision, history_floor_logical_order FROM group_memberships WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 AND principal_id=?5 AND principal_kind=?6",
+    let row = connection
+        .prepare_cached(
+            "SELECT principal_kind, role, state, joined_revision, removed_revision, history_floor_logical_order FROM group_memberships WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 AND principal_id=?5 AND principal_kind=?6",
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .query_row(
         params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group_id.as_opaque().as_str(), member.principal_id.as_opaque().as_str(), principal_kind_name(member.kind)],
         |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,Vec<u8>>(3)?, row.get::<_,Option<Vec<u8>>>(4)?, row.get::<_,Vec<u8>>(5)?)),
     ).optional().map_err(|error| map_sqlite_error(&error))?;
@@ -1175,7 +1183,7 @@ fn load_memberships_from(
     let namespace = namespace_storage_key(&group.scope);
     let limit = max_items.saturating_add(1);
     let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT principal_id, principal_kind, role, state, joined_revision, removed_revision, history_floor_logical_order FROM group_memberships WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 ORDER BY principal_id, principal_kind LIMIT ?5"
     ).map_err(|error| map_sqlite_error(&error))?;
     let rows = statement

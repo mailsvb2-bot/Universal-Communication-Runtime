@@ -200,8 +200,11 @@ impl AuthorizationEvaluator for SqliteLocalStore {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| map_sqlite_error(&error))?;
             let value: i64 = transaction
-                .query_row(
+                .prepare_cached(
                     "SELECT revision FROM authorization_revision WHERE singleton = 1",
+                )
+                .map_err(|error| map_sqlite_error(&error))?
+                .query_row(
                     [],
                     |row| row.get(0),
                 )
@@ -228,7 +231,7 @@ fn load_permission_grants(
 ) -> Result<Vec<PermissionGrant>, DurableStoreError> {
     let namespace = namespace_storage_key(&subject.scope);
     let mut statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT permission, scope_kind, resource_tenant_id,
                     resource_namespace_present, resource_namespace_id
              FROM permission_grants

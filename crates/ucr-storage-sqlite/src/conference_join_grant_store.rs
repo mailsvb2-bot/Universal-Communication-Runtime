@@ -519,12 +519,15 @@ fn load_grant(
 ) -> Result<Option<ConferenceJoinGrantRecord>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     connection
-        .query_row(
+        .prepare_cached(
             "SELECT COALESCE(conference_id, media_group_id), integration_id, call_id, participant_kind, participant_id,
                     device_id, issued_at_unix_ms, not_before_unix_ms, expires_at_unix_ms,
                     use_policy, revoked, redeemed
              FROM conference_join_grants
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND session_id=?4",
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .query_row(
             params![
                 scope.tenant_id.as_opaque().as_str(),
                 namespace.present,

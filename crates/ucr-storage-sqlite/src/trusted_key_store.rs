@@ -251,11 +251,14 @@ impl TrustedSigningKeyResolver for SqliteLocalStore {
         }
         let namespace = namespace_storage_key(scope);
         let row = connection
-            .query_row(
+            .prepare_cached(
                 "SELECT algorithm_id, algorithm_version, key_format_version, public_key
                  FROM trusted_signing_keys
                  WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
                    AND key_id=?4 AND device_id=?5 AND state='active'",
+            )
+            .map_err(|error| map_sqlite_error(&error))?
+            .query_row(
                 params![
                     scope.tenant_id.as_opaque().as_str(),
                     namespace.present,
@@ -353,10 +356,13 @@ pub(super) fn active_key_id(
 ) -> Result<Option<KeyId>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let value = connection
-        .query_row(
+        .prepare_cached(
             "SELECT key_id FROM trusted_signing_keys
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
                AND device_id=?4 AND state='active'",
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .query_row(
             params![
                 scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
@@ -377,10 +383,13 @@ pub(super) fn load_key_record(
 ) -> Result<Option<TrustedSigningKeyRecord>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let row = connection
-        .query_row(
+        .prepare_cached(
             "SELECT device_id, algorithm_id, algorithm_version, key_format_version, public_key, state
              FROM trusted_signing_keys
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND key_id=?4",
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .query_row(
             params![
                 scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
