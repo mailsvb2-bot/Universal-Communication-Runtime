@@ -139,7 +139,7 @@ pub(super) fn has_live_call_grant(
     }
     let ns = namespace_storage_key(&request.subject.scope);
     connection
-        .query_row(
+        .prepare_cached(
             "SELECT 1 FROM call_permission_grants g
                JOIN calls c ON c.tenant_id=g.tenant_id AND c.namespace_present=g.namespace_present
                 AND c.namespace_id=g.namespace_id AND c.call_id=g.call_id
@@ -152,6 +152,9 @@ pub(super) fn has_live_call_grant(
                 AND g.permission=?7
                 AND c.signalling_state<>'terminated'
                 AND p.state IN ('invited','ringing','accepted') AND p.left_revision IS NULL",
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .query_row(
             params![
                 request.subject.scope.tenant_id.as_opaque().as_str(),
                 ns.present,
