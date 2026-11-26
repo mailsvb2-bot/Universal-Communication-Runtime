@@ -166,17 +166,14 @@ impl SqliteLocalStore {
                    FROM first_party_sessions WHERE token_digest=?1 AND expires_unix_ms > ?2",
             )
             .map_err(|error| map_sqlite_error(&error))?
-            .query_row(
-                params![token_digest.as_slice(), now_unix_ms],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
+            .query_row(params![token_digest.as_slice(), now_unix_ms], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
             .optional()
             .map_err(|error| map_sqlite_error(&error))?;
         row.map(|(binding_key, signer_key_id, key, expires_unix_ms)| {
