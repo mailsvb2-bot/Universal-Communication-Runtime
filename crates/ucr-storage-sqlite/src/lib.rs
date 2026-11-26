@@ -249,6 +249,10 @@ impl SqliteLocalStore {
         group_mls_store::backfill_legacy_host_quarantine(&connection)?;
         initialize_or_validate_group_mls_storage(&mut connection)?;
         harden_store_permissions(path)?;
+        // Keep the bounded per-connection SQL statement cache large enough for
+        // interleaved media authorization and session/control reads. No rows or
+        // authorization decisions are cached here.
+        connection.set_prepared_statement_cache_capacity(64);
         Ok(Self {
             connection: Mutex::new(connection),
         })
