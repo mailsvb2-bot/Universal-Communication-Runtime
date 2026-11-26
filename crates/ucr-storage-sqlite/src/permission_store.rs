@@ -154,14 +154,16 @@ impl AuthorizationEvaluator for SqliteLocalStore {
         request: &AuthorizationRequest,
         call_id: &ucr_model::CallId,
     ) -> Result<(), CanonicalError> {
-        let denied = match self.authorize(request) {
+        let connection = self
+            .lock_connection()
+            .map_err(map_authorization_store_error)?;
+        let grants = load_permission_grants(&connection, &request.subject)
+            .map_err(map_authorization_store_error)?;
+        let denied = match ucr_protocol::authorize(request, &grants).map_err(CanonicalError::from) {
             Ok(()) => return Ok(()),
             Err(error) if error.code == CanonicalErrorCode::PermissionDenied => error,
             Err(error) => return Err(error),
         };
-        let connection = self
-            .lock_connection()
-            .map_err(map_authorization_store_error)?;
         if super::call_permission_grant_store::has_live_call_grant(&connection, request, call_id)
             .map_err(map_authorization_store_error)?
         {
