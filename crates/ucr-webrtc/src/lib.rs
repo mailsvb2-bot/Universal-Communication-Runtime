@@ -2497,7 +2497,9 @@ mod tests {
             a.try_begin_media_send("stale-offer"),
             Err(WebRtcProviderError::SessionUnavailable)
         ));
-        let held_b = b.try_begin_media_send(&b.offer_id).expect("independent lane B");
+        let held_b = b
+            .try_begin_media_send(&b.offer_id)
+            .expect("independent lane B");
         drop(held_b);
         let mut sessions = HashMap::from([(key_a.clone(), a), (key_b.clone(), b)]);
         let (reply, receiver) = std_mpsc::channel();
@@ -2515,7 +2517,10 @@ mod tests {
                 .is_err(),
             "close must not acknowledge while a media send holds the lane"
         );
-        assert!(matches!(receiver.try_recv(), Err(std_mpsc::TryRecvError::Empty)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std_mpsc::TryRecvError::Empty)
+        ));
         drop(held_a);
         close.await;
         assert_eq!(receiver.try_recv(), Ok(Ok(())));
