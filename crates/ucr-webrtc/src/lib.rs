@@ -1151,7 +1151,14 @@ fn route_live_control(
     if let Some(key) = key
         && let Some(queue) = controls.get_mut(&key)
     {
-        if queue.len() < LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY {
+        // Reserve one slot for revocation/Close even when ordinary signaling
+        // has saturated this session. Keep FIFO ordering for admitted commands.
+        let capacity = if matches!(&command, LiveWebRtcCommand::Close { .. }) {
+            LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY
+        } else {
+            LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY - 1
+        };
+        if queue.len() < capacity {
             queue.push_back(command);
         } else {
             reject_live_control(command);
@@ -2611,6 +2618,72 @@ mod tests {
         let replacement = provider.create_session(&config).expect("new owned offer");
         assert_eq!(replacement.session_id, session_id);
         assert_eq!(provider.close_session(&session_id), Ok(()));
+    }
+
+    #[test]
+    fn reserved_control_queue_keeps_capacity_for_close() {
+        let session_id = SessionId::from_opaque(OpaqueId::new("control-close-slot").expect("id"));
+        let key = session_key(&session_id);
+        let mut sessions = HashMap::new();
+        let mut controls = HashMap::from([(key.clone(), std::collections::VecDeque::new())]);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::channel(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for _ in 0..LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY - 1 {
+            let (reply, _receiver) = std_mpsc::channel();
+            assert!(
+                route_live_control(
+                    LiveWebRtcCommand::GetOfferId {
+                        session_id: session_id.clone(),
+                        deadline,
+                        reply,
+                    },
+                    &mut sessions,
+                    &mut controls,
+                    &control_tx,
+                )
+                .is_none()
+            );
+        }
+        let (reply, receiver) = std_mpsc::channel();
+        assert!(
+            route_live_control(
+                LiveWebRtcCommand::GetOfferId {
+                    session_id: session_id.clone(),
+                    deadline,
+                    reply,
+                },
+                &mut sessions,
+                &mut controls,
+                &control_tx,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(Err(WebRtcProviderError::TemporarilyUnavailable))
+        );
+        let (reply, receiver) = std_mpsc::channel();
+        assert!(
+            route_live_control(
+                LiveWebRtcCommand::Close {
+                    session_id,
+                    offer_id: None,
+                    deadline,
+                    reply,
+                },
+                &mut sessions,
+                &mut controls,
+                &control_tx,
+            )
+            .is_none()
+        );
+        let queue = controls.get(&key).expect("reserved session");
+        assert_eq!(queue.len(), LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
+        assert!(matches!(queue.back(), Some(LiveWebRtcCommand::Close { .. })));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std_mpsc::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
