@@ -1105,10 +1105,10 @@ fn reject_live_control(command: LiveWebRtcCommand) {
         }
         LiveWebRtcCommand::SetRemoteDescription { reply, .. }
         | LiveWebRtcCommand::AddRemoteCandidate { reply, .. }
-        | LiveWebRtcCommand::Close { reply, .. } => {
+        | LiveWebRtcCommand::Close { reply, .. }
+        | LiveWebRtcCommand::SendE2ee { reply, .. } => {
             let _ = reply.send(Err(error));
         }
-        _ => {}
     }
 }
 
