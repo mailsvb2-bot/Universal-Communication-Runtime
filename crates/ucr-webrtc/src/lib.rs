@@ -1251,7 +1251,15 @@ async fn run_live_webrtc_worker(
             }
             command = media_commands.recv(), if !media_commands.is_closed() => {
                 if let Some(command) = command {
-                    handle_live_webrtc_command(command, &mut sessions, &shutdown, e2ee_ingress.as_ref()).await;
+                    // A reserved peer is temporarily busy, not missing. Do not
+                    // invalidate its cached offer or admit media during control.
+                    if let LiveWebRtcCommand::SendE2ee { session_id, .. } = &command
+                        && controls.contains_key(&session_key(session_id))
+                    {
+                        reject_live_control(command);
+                    } else {
+                        handle_live_webrtc_command(command, &mut sessions, &shutdown, e2ee_ingress.as_ref()).await;
+                    }
                 }
             }
         }
