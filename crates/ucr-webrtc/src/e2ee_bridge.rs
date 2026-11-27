@@ -382,8 +382,8 @@ impl LiveWebRtcE2eeChannel {
             ),
         };
         // Close is queued before its matching cancellation signal. This select
-        // drops a blocked DataChannel future so the sole worker can process that
-        // control command; no later chunk is submitted after the fence.
+        // drops a blocked DataChannel future so the session lane can retire
+        // before Close drains it; no later chunk is submitted after the fence.
         let buffered = cancellable_transport_operation(
             channel.buffered_amount(),
             deadline,
