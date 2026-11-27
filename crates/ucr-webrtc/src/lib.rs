@@ -1315,7 +1315,13 @@ async fn handle_live_webrtc_command(
             reply,
         } => {
             handle_live_send_e2ee(
-                sessions, session_id, offer_id, *envelope, close_rx, deadline, reply,
+                sessions,
+                &session_id,
+                offer_id,
+                *envelope,
+                close_rx,
+                deadline,
+                reply,
             );
         }
         LiveWebRtcCommand::Close {
@@ -1521,7 +1527,7 @@ async fn handle_live_remote_candidate(
 
 fn handle_live_send_e2ee(
     sessions: &HashMap<String, LiveWebRtcSession>,
-    session_id: SessionId,
+    session_id: &SessionId,
     offer_id: String,
     envelope: SfuForwardEnvelope,
     mut close_rx: tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>,
@@ -1532,7 +1538,7 @@ fn handle_live_send_e2ee(
         let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
         return;
     }
-    let key = session_key(&session_id);
+    let key = session_key(session_id);
     let channel = sessions
         .get(&key)
         .ok_or(WebRtcProviderError::SessionUnavailable)
@@ -2457,6 +2463,66 @@ mod tests {
         let replacement = provider.create_session(&config).expect("new owned offer");
         assert_eq!(replacement.session_id, session_id);
         assert_eq!(provider.close_session(&session_id), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn busy_media_lane_is_session_local_and_close_waits_for_its_owner() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config_a = WebRtcSessionConfig {
+            session_id: SessionId::from_opaque(OpaqueId::new("media-lane-a").expect("id")),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let config_b = WebRtcSessionConfig {
+            session_id: SessionId::from_opaque(OpaqueId::new("media-lane-b").expect("id")),
+            ..config_a.clone()
+        };
+        let (ingress, _receiver) = tokio::sync::mpsc::channel(4);
+        let (a, b) = tokio::join!(
+            create_live_peer_connection(&config_a, Some(ingress.clone())),
+            create_live_peer_connection(&config_b, Some(ingress)),
+        );
+        let (mut a, offer_a) = a.expect("peer A");
+        let (mut b, offer_b) = b.expect("peer B");
+        a.offer_id = webrtc_offer_id(&offer_a.sdp);
+        b.offer_id = webrtc_offer_id(&offer_b.sdp);
+        let key_a = session_key(&config_a.session_id);
+        let key_b = session_key(&config_b.session_id);
+        let held_a = a.try_begin_media_send(&a.offer_id).expect("lane A");
+        assert!(matches!(
+            a.try_begin_media_send(&a.offer_id),
+            Err(WebRtcProviderError::CapacityExceeded)
+        ));
+        assert!(matches!(
+            a.try_begin_media_send("stale-offer"),
+            Err(WebRtcProviderError::SessionUnavailable)
+        ));
+        let held_b = b.try_begin_media_send(&b.offer_id).expect("independent lane B");
+        drop(held_b);
+        let mut sessions = HashMap::from([(key_a.clone(), a), (key_b.clone(), b)]);
+        let (reply, receiver) = std_mpsc::channel();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut close = Box::pin(handle_live_close(
+            &mut sessions,
+            config_a.session_id,
+            None,
+            deadline,
+            reply,
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut close)
+                .await
+                .is_err(),
+            "close must not acknowledge while a media send holds the lane"
+        );
+        assert!(matches!(receiver.try_recv(), Err(std_mpsc::TryRecvError::Empty)));
+        drop(held_a);
+        close.await;
+        assert_eq!(receiver.try_recv(), Ok(Ok(())));
+        assert!(!sessions.contains_key(&key_a));
+        let b = sessions.get(&key_b).expect("peer B retained");
+        assert!(b.try_begin_media_send(&b.offer_id).is_ok());
+        b.peer_connection.close().await.expect("close peer B");
     }
 
     #[test]
