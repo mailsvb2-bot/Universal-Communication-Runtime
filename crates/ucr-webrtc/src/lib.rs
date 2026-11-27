@@ -1097,7 +1097,10 @@ fn live_control_key(command: &LiveWebRtcCommand) -> Option<String> {
 fn reject_live_control(command: LiveWebRtcCommand) {
     let error = WebRtcProviderError::TemporarilyUnavailable;
     match command {
-        LiveWebRtcCommand::Restart { reply, .. } => {
+        LiveWebRtcCommand::Create { reply, .. } | LiveWebRtcCommand::Restart { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        LiveWebRtcCommand::GetOfferId { reply, .. } => {
             let _ = reply.send(Err(error));
         }
         LiveWebRtcCommand::SetRemoteDescription { reply, .. }
@@ -1130,6 +1133,56 @@ fn spawn_live_control(
     });
 }
 
+// Follow-up commands must observe the completed session state, even when
+// the previous handler has already replied to its caller. Keep the reservation
+// until the registry has consumed the completion, then replay in FIFO order.
+fn route_live_control(
+    command: LiveWebRtcCommand,
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
+    controls: &mut HashMap<String, std::collections::VecDeque<LiveWebRtcCommand>>,
+    control_tx: &tokio::sync::mpsc::Sender<LiveControlOutcome>,
+) -> Option<LiveWebRtcCommand> {
+    let control_key = live_control_key(&command);
+    let key = match &command {
+        LiveWebRtcCommand::Create { config, .. } => Some(session_key(&config.session_id)),
+        LiveWebRtcCommand::GetOfferId { session_id, .. } => Some(session_key(session_id)),
+        _ => control_key.clone(),
+    };
+    if let Some(key) = key
+        && let Some(queue) = controls.get_mut(&key)
+    {
+        if queue.len() < LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY {
+            queue.push_back(command);
+        } else {
+            reject_live_control(command);
+        }
+        return None;
+    }
+    if let Some(key) = control_key
+        && let Some(session) = sessions.remove(&key)
+    {
+        controls.insert(key.clone(), std::collections::VecDeque::new());
+        spawn_live_control(key, session, command, control_tx.clone());
+        return None;
+    }
+    Some(command)
+}
+
+fn restore_live_control(
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
+    controls: &mut HashMap<String, std::collections::VecDeque<LiveWebRtcCommand>>,
+    deferred: &mut std::collections::VecDeque<LiveWebRtcCommand>,
+    (key, session): LiveControlOutcome,
+) {
+    if let Some(session) = session {
+        sessions.insert(key.clone(), session);
+    }
+    if let Some(mut queue) = controls.remove(&key) {
+        queue.append(deferred);
+        *deferred = queue;
+    }
+}
+
 async fn run_live_webrtc_worker(
     mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
     mut media_commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
@@ -1140,6 +1193,7 @@ async fn run_live_webrtc_worker(
     let mut sessions = HashMap::<String, LiveWebRtcSession>::new();
     let mut pending = HashMap::<String, PendingLiveCreate>::new();
     let mut controls = HashMap::<String, std::collections::VecDeque<LiveWebRtcCommand>>::new();
+    let mut deferred = std::collections::VecDeque::new();
     let (control_tx, mut control_rx) =
         tokio::sync::mpsc::channel::<LiveControlOutcome>(LIVE_WEBRTC_MAX_SESSIONS);
     let (completed_tx, mut completed_rx) =
@@ -1156,59 +1210,31 @@ async fn run_live_webrtc_worker(
                     break;
                 }
             }
-            command = commands.recv(), if !commands.is_closed() => {
-                if let Some(command) = command {
-                    let key = live_control_key(&command);
-                    if let Some(key) = key
-                        && (sessions.contains_key(&key) || controls.contains_key(&key))
-                    {
-                        if let Some(queue) = controls.get_mut(&key) {
-                            // Bound deferred commands; callers receive an explicit
-                            // failure and may retry. Close is never acknowledged early.
-                            if queue.len() < LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY {
-                                queue.push_back(command);
-                            } else {
-                                reject_live_control(command);
-                            }
-                        } else if let Some(session) = sessions.remove(&key) {
-                            controls.insert(key.clone(), std::collections::VecDeque::new());
-                            spawn_live_control(key, session, command, control_tx.clone());
-                        }
-                    } else {
-                        // A reserved peer must not be replaced or exceed capacity.
-                        if let LiveWebRtcCommand::Create { config, reply, .. } = &command {
-                            if controls.contains_key(&session_key(&config.session_id)) {
-                                let _ = reply.send(Err(WebRtcProviderError::Conflict));
-                                continue;
-                            }
-                            if sessions.len() + pending.len() + controls.len() >= LIVE_WEBRTC_MAX_SESSIONS {
-                                let _ = reply.send(Err(WebRtcProviderError::CapacityExceeded));
-                                continue;
-                            }
-                        }
-                        dispatch_live_command(
-                            command, &mut sessions, &mut pending, &completed_tx,
-                            &shutdown, e2ee_ingress.as_ref()
-                        ).await;
-                    }
+            control = control_rx.recv(), if !controls.is_empty() => {
+                if let Some(outcome) = control {
+                    restore_live_control(&mut sessions, &mut controls, &mut deferred, outcome);
                 }
             }
-            control = control_rx.recv(), if !controls.is_empty() => {
-                if let Some((key, session)) = control {
-                    if let Some(mut queue) = controls.remove(&key) {
-                        if let Some(session) = session {
-                            if let Some(next) = queue.pop_front() {
-                                controls.insert(key.clone(), queue);
-                                spawn_live_control(key, session, next, control_tx.clone());
-                            } else {
-                                sessions.insert(key, session);
-                            }
-                        } else {
-                            for command in queue {
-                                reject_live_control(command);
-                            }
-                        }
+            command = async {
+                if let Some(command) = deferred.pop_front() {
+                    Some(command)
+                } else {
+                    commands.recv().await
+                }
+            }, if !deferred.is_empty() || !commands.is_closed() => {
+                if let Some(command) = command
+                    && let Some(command) = route_live_control(command, &mut sessions, &mut controls, &control_tx)
+                {
+                    if let LiveWebRtcCommand::Create { reply, .. } = &command
+                        && sessions.len() + pending.len() + controls.len() >= LIVE_WEBRTC_MAX_SESSIONS
+                    {
+                        let _ = reply.send(Err(WebRtcProviderError::CapacityExceeded));
+                        continue;
                     }
+                    dispatch_live_command(
+                        command, &mut sessions, &mut pending, &completed_tx,
+                        &shutdown, e2ee_ingress.as_ref()
+                    ).await;
                 }
             }
             completion = completed_rx.recv(), if !pending.is_empty() => {
@@ -1225,6 +1251,9 @@ async fn run_live_webrtc_worker(
     }
     commands.close();
     media_commands.close();
+    for command in deferred {
+        reject_live_control(command);
+    }
     // Do not drop peers owned by an in-flight control task at runtime teardown.
     while !controls.is_empty() {
         let Some((key, session)) = control_rx.recv().await else {
