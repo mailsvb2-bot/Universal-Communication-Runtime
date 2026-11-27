@@ -2679,7 +2679,10 @@ mod tests {
         );
         let queue = controls.get(&key).expect("reserved session");
         assert_eq!(queue.len(), LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
-        assert!(matches!(queue.back(), Some(LiveWebRtcCommand::Close { .. })));
+        assert!(matches!(
+            queue.back(),
+            Some(LiveWebRtcCommand::Close { .. })
+        ));
         assert!(matches!(
             receiver.try_recv(),
             Err(std_mpsc::TryRecvError::Empty)
