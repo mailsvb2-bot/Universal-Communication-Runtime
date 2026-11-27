@@ -1076,6 +1076,60 @@ async fn complete_live_create(
     }
 }
 
+// A reserved session is absent from the admission map until its control
+// operation completes. The reservation still owns its capacity slot.
+type LiveControlOutcome = (String, Option<LiveWebRtcSession>);
+
+fn live_control_key(command: &LiveWebRtcCommand) -> Option<String> {
+    match command {
+        LiveWebRtcCommand::Restart { config, .. } => Some(session_key(&config.session_id)),
+        LiveWebRtcCommand::SetRemoteDescription { description, .. } => {
+            Some(session_key(&description.session_id))
+        }
+        LiveWebRtcCommand::AddRemoteCandidate { candidate, .. } => {
+            Some(session_key(&candidate.session_id))
+        }
+        LiveWebRtcCommand::Close { session_id, .. } => Some(session_key(session_id)),
+        _ => None,
+    }
+}
+
+fn reject_live_control(command: LiveWebRtcCommand) {
+    let error = WebRtcProviderError::TemporarilyUnavailable;
+    match command {
+        LiveWebRtcCommand::Restart { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        LiveWebRtcCommand::SetRemoteDescription { reply, .. }
+        | LiveWebRtcCommand::AddRemoteCandidate { reply, .. }
+        | LiveWebRtcCommand::Close { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        _ => {}
+    }
+}
+
+fn spawn_live_control(
+    key: String,
+    session: LiveWebRtcSession,
+    command: LiveWebRtcCommand,
+    completed: tokio::sync::mpsc::Sender<LiveControlOutcome>,
+) {
+    tokio::spawn(async move {
+        // The existing handlers remain the only execution path for control.
+        // Exclusive ownership prevents media admission during SDP mutation.
+        let mut owned = HashMap::from([(key.clone(), session)]);
+        handle_live_webrtc_command(command, &mut owned, &AtomicBool::new(false), None).await;
+        let outcome = (key.clone(), owned.remove(&key));
+        if let Err(error) = completed.send(outcome).await
+            && let Some(session) = error.0.1
+        {
+            session.wait_for_media_idle().await;
+            let _ = bounded_peer_close(&session.peer_connection).await;
+        }
+    });
+}
+
 async fn run_live_webrtc_worker(
     mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
     mut media_commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
@@ -1085,6 +1139,9 @@ async fn run_live_webrtc_worker(
 ) {
     let mut sessions = HashMap::<String, LiveWebRtcSession>::new();
     let mut pending = HashMap::<String, PendingLiveCreate>::new();
+    let mut controls = HashMap::<String, std::collections::VecDeque<LiveWebRtcCommand>>::new();
+    let (control_tx, mut control_rx) =
+        tokio::sync::mpsc::channel::<LiveControlOutcome>(LIVE_WEBRTC_MAX_SESSIONS);
     let (completed_tx, mut completed_rx) =
         tokio::sync::mpsc::channel::<(String, LiveCreateOutcome)>(LIVE_WEBRTC_MAX_PENDING_CREATES);
     loop {
@@ -1101,10 +1158,57 @@ async fn run_live_webrtc_worker(
             }
             command = commands.recv(), if !commands.is_closed() => {
                 if let Some(command) = command {
-                    dispatch_live_command(
-                        command, &mut sessions, &mut pending, &completed_tx,
-                        &shutdown, e2ee_ingress.as_ref()
-                    ).await;
+                    let key = live_control_key(&command);
+                    if let Some(key) = key
+                        && (sessions.contains_key(&key) || controls.contains_key(&key))
+                    {
+                        if let Some(queue) = controls.get_mut(&key) {
+                            // Bound deferred commands; callers receive an explicit
+                            // failure and may retry. Close is never acknowledged early.
+                            if queue.len() < LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY {
+                                queue.push_back(command);
+                            } else {
+                                reject_live_control(command);
+                            }
+                        } else if let Some(session) = sessions.remove(&key) {
+                            controls.insert(key.clone(), std::collections::VecDeque::new());
+                            spawn_live_control(key, session, command, control_tx.clone());
+                        }
+                    } else {
+                        // A reserved peer must not be replaced or exceed capacity.
+                        if let LiveWebRtcCommand::Create { config, reply, .. } = &command {
+                            if controls.contains_key(&session_key(&config.session_id)) {
+                                let _ = reply.send(Err(WebRtcProviderError::Conflict));
+                                continue;
+                            }
+                            if sessions.len() + pending.len() + controls.len() >= LIVE_WEBRTC_MAX_SESSIONS {
+                                let _ = reply.send(Err(WebRtcProviderError::CapacityExceeded));
+                                continue;
+                            }
+                        }
+                        dispatch_live_command(
+                            command, &mut sessions, &mut pending, &completed_tx,
+                            &shutdown, e2ee_ingress.as_ref()
+                        ).await;
+                    }
+                }
+            }
+            control = control_rx.recv(), if !controls.is_empty() => {
+                if let Some((key, session)) = control {
+                    if let Some(mut queue) = controls.remove(&key) {
+                        if let Some(session) = session {
+                            if let Some(next) = queue.pop_front() {
+                                controls.insert(key.clone(), queue);
+                                spawn_live_control(key, session, next, control_tx.clone());
+                            } else {
+                                sessions.insert(key, session);
+                            }
+                        } else {
+                            for command in queue {
+                                reject_live_control(command);
+                            }
+                        }
+                    }
                 }
             }
             completion = completed_rx.recv(), if !pending.is_empty() => {
@@ -1121,6 +1225,21 @@ async fn run_live_webrtc_worker(
     }
     commands.close();
     media_commands.close();
+    // Do not drop peers owned by an in-flight control task at runtime teardown.
+    while !controls.is_empty() {
+        let Some((key, session)) = control_rx.recv().await else {
+            break;
+        };
+        if let Some(queue) = controls.remove(&key) {
+            for command in queue {
+                reject_live_control(command);
+            }
+        }
+        if let Some(session) = session {
+            session.wait_for_media_idle().await;
+            let _ = bounded_peer_close(&session.peer_connection).await;
+        }
+    }
     // Never abandon in-flight peers while tearing down the worker runtime.
     // Each ICE gather is bounded; all completions are retired, never admitted.
     while !pending.is_empty() {
