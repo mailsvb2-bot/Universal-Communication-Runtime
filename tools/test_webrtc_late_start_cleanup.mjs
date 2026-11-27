@@ -25,7 +25,11 @@ assert.match(engine,/let offer_id = self\.media_offer_id\(session_id\)\?;[\s\S]*
   "encrypted send must always use the worker-verified offer fence");
 assert.match(engine,/self\.invalidate_media_offer\(session_id, Some\(&offer_id\)\)/,
   "stale transport offers must be evicted on send rejection");
-assert.match(engine,/Some\(session\) if !session\.shutdown_pending && session\.offer_id == offer_id/);
+// The registry delegates admission to the session-local lane. Verify both
+// rejection predicates before acquisition, and the actual send's use of that lane.
+assert.match(engine,/fn try_begin_media_send\([\s\S]*?if self\.shutdown_pending \|\| self\.offer_id != offer_id \{\s*return Err\(WebRtcProviderError::SessionUnavailable\);\s*\}[\s\S]*?\.try_lock_owned\(\)/);
+assert.match(engine,/fn handle_live_send_e2ee\([\s\S]*?\.and_then\(\|session\| session\.try_begin_media_send\(&offer_id\)\)[\s\S]*?tokio::spawn\(async move \{[\s\S]*?\.send\(&envelope, deadline, &mut close_rx, &key, &offer_id\)/);
+assert.match(engine,/session\.shutdown_pending = true;[\s\S]*?channel\.lock\(\)\.await\.drain_before_close\(deadline\)\.await/);
 assert.match(engine,/fn request_close\([\s\S]*?try_send\(LiveWebRtcCommand::Close[\s\S]*?close_tx\.send/);
 assert.match(e2ee,/async fn wait_for_matching_close\(/);
 assert.match(e2ee,/async fn cancellable_transport_operation</);

@@ -443,8 +443,8 @@ enum LiveWebRtcCommand {
 
 pub struct LiveWebRtcProvider {
     command_tx: Option<tokio::sync::mpsc::Sender<LiveWebRtcCommand>>,
-    // Media frames share the SAME worker/session map, but cannot starve
-    // security-critical Join, Close or ICE control operations.
+    // Media admission uses the SAME worker/session map. Each session has
+    // its own bounded send lane, while control commands retain priority.
     media_tx: Option<tokio::sync::mpsc::Sender<LiveWebRtcCommand>>,
     // Broadcast is only a cancellation signal for in-flight transport futures;
     // canonical Call/Device authorization remains in the existing stores.
@@ -921,7 +921,7 @@ fn validate_live_config(config: &WebRtcSessionConfig) -> Result<(), WebRtcProvid
 struct LiveWebRtcSession {
     offer_id: String,
     peer_connection: Arc<RTCPeerConnection>,
-    e2ee_channel: Option<LiveWebRtcE2eeChannel>,
+    e2ee_channel: Option<Arc<tokio::sync::Mutex<LiveWebRtcE2eeChannel>>>,
     // Failed close retains the peer for retry, not for further media/signaling.
     shutdown_pending: bool,
 }
@@ -929,6 +929,30 @@ struct LiveWebRtcSession {
 impl LiveWebRtcSession {
     fn permits_signaling_and_media(&self) -> bool {
         !self.shutdown_pending
+    }
+
+    // Only the registry worker admits sends. While it processes a control
+    // command, no new send can acquire this session's lane.
+    async fn wait_for_media_idle(&self) {
+        if let Some(channel) = &self.e2ee_channel {
+            drop(channel.lock().await);
+        }
+    }
+
+    fn try_begin_media_send(
+        &self,
+        offer_id: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<LiveWebRtcE2eeChannel>, WebRtcProviderError> {
+        if self.shutdown_pending || self.offer_id != offer_id {
+            return Err(WebRtcProviderError::SessionUnavailable);
+        }
+        let channel = self
+            .e2ee_channel
+            .as_ref()
+            .ok_or(WebRtcProviderError::SessionUnavailable)?;
+        Arc::clone(channel)
+            .try_lock_owned()
+            .map_err(|_| WebRtcProviderError::CapacityExceeded)
     }
 }
 
@@ -1106,6 +1130,7 @@ async fn run_live_webrtc_worker(
         complete_live_create(&mut sessions, &mut pending, key, outcome, true).await;
     }
     for (_, session) in sessions {
+        session.wait_for_media_idle().await;
         let _ = bounded_peer_close(&session.peer_connection).await;
     }
 }
@@ -1285,20 +1310,19 @@ async fn handle_live_webrtc_command(
             session_id,
             offer_id,
             envelope,
-            mut close_rx,
+            close_rx,
             deadline,
             reply,
         } => {
             handle_live_send_e2ee(
                 sessions,
-                session_id,
-                &offer_id,
+                &session_id,
+                offer_id,
                 *envelope,
-                &mut close_rx,
+                close_rx,
                 deadline,
                 reply,
-            )
-            .await;
+            );
         }
         LiveWebRtcCommand::Close {
             session_id,
@@ -1349,7 +1373,14 @@ async fn handle_live_restart(
         return;
     }
     let result = match sessions.get(&key) {
-        Some(session) => restart_live_peer_connection(&session.peer_connection, &config).await,
+        Some(session) => {
+            session.wait_for_media_idle().await;
+            if command_expired(deadline) {
+                let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+                return;
+            }
+            restart_live_peer_connection(&session.peer_connection, &config).await
+        }
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
     // Even a *failed* ICE restart can already have changed the ICE
@@ -1451,7 +1482,12 @@ async fn handle_live_remote_description(
             Err(WebRtcProviderError::SessionUnavailable)
         }
         Some(session) => {
-            set_engine_remote_description(&session.peer_connection, &description).await
+            session.wait_for_media_idle().await;
+            if command_expired(deadline) {
+                Err(WebRtcProviderError::TemporarilyUnavailable)
+            } else {
+                set_engine_remote_description(&session.peer_connection, &description).await
+            }
         }
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
@@ -1476,18 +1512,25 @@ async fn handle_live_remote_candidate(
         Some(session) if offer_id.as_deref().is_some_and(|id| id != session.offer_id) => {
             Err(WebRtcProviderError::SessionUnavailable)
         }
-        Some(session) => add_engine_remote_candidate(&session.peer_connection, &candidate).await,
+        Some(session) => {
+            session.wait_for_media_idle().await;
+            if command_expired(deadline) {
+                Err(WebRtcProviderError::TemporarilyUnavailable)
+            } else {
+                add_engine_remote_candidate(&session.peer_connection, &candidate).await
+            }
+        }
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
     let _ = reply.send(result);
 }
 
-async fn handle_live_send_e2ee(
-    sessions: &mut HashMap<String, LiveWebRtcSession>,
-    session_id: SessionId,
-    offer_id: &str,
+fn handle_live_send_e2ee(
+    sessions: &HashMap<String, LiveWebRtcSession>,
+    session_id: &SessionId,
+    offer_id: String,
     envelope: SfuForwardEnvelope,
-    close_rx: &mut tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>,
+    mut close_rx: tokio::sync::broadcast::Receiver<LiveWebRtcCloseSignal>,
     deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
 ) {
@@ -1495,21 +1538,30 @@ async fn handle_live_send_e2ee(
         let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
         return;
     }
-    let key = session_key(&session_id);
-    let result = match sessions.get_mut(&key) {
-        Some(session) if !session.shutdown_pending && session.offer_id == offer_id => {
-            match session.e2ee_channel.as_mut() {
-                Some(channel) => {
-                    channel
-                        .send(&envelope, deadline, close_rx, &key, offer_id)
-                        .await
-                }
-                None => Err(WebRtcProviderError::SessionUnavailable),
-            }
+    let key = session_key(session_id);
+    let channel = sessions
+        .get(&key)
+        .ok_or(WebRtcProviderError::SessionUnavailable)
+        .and_then(|session| session.try_begin_media_send(&offer_id));
+    let mut channel = match channel {
+        Ok(channel) => channel,
+        Err(error) => {
+            let _ = reply.send(Err(error));
+            return;
         }
-        Some(_) | None => Err(WebRtcProviderError::SessionUnavailable),
     };
-    let _ = reply.send(result);
+    // One in-flight send per session, no unbounded task queue. The worker
+    // remains the sole owner of peer admission and the offer fence. Other
+    // sessions can make progress while this transport awaits SCTP.
+    tokio::spawn(async move {
+        let result = channel
+            .send(&envelope, deadline, &mut close_rx, &key, &offer_id)
+            .await;
+        drop(channel);
+        // Keep the existing synchronous acceptance contract: never report
+        // queue admission as successful transport acceptance.
+        let _ = reply.send(result);
+    });
 }
 
 async fn handle_live_close(
@@ -1540,12 +1592,11 @@ async fn handle_live_close(
         Some(session) => {
             // Quarantine BEFORE either fallible operation: a retained peer is retry-only.
             session.shutdown_pending = true;
-            // The active SendE2ee future has already observed Close and returned.
-            // Drain ciphertext accepted before that signal before acknowledging
-            // provider closure; if the local transport cannot drain within the
-            // bounded request, keep the peer handle for the canonical retry path.
+            // The matching Close signal interrupts any in-flight send. Wait
+            // for that session's lane before draining accepted ciphertext.
+            // No new send can be admitted while the worker handles Close.
             let drained = match session.e2ee_channel.as_ref() {
-                Some(channel) => channel.drain_before_close(deadline).await,
+                Some(channel) => channel.lock().await.drain_before_close(deadline).await,
                 None => Ok(()),
             };
             let closed = bounded_peer_close(&session.peer_connection).await;
@@ -1638,7 +1689,7 @@ async fn create_live_peer_connection(
             match create_live_e2ee_data_channel(&peer_connection, &config.session_id, ingress_tx)
                 .await
             {
-                Ok(channel) => Some(channel),
+                Ok(channel) => Some(Arc::new(tokio::sync::Mutex::new(channel))),
                 Err(error) => {
                     return Err(LiveWebRtcCreateFailure {
                         error,
@@ -2412,6 +2463,71 @@ mod tests {
         let replacement = provider.create_session(&config).expect("new owned offer");
         assert_eq!(replacement.session_id, session_id);
         assert_eq!(provider.close_session(&session_id), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn busy_media_lane_is_session_local_and_close_waits_for_its_owner() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config_a = WebRtcSessionConfig {
+            session_id: SessionId::from_opaque(OpaqueId::new("media-lane-a").expect("id")),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let config_b = WebRtcSessionConfig {
+            session_id: SessionId::from_opaque(OpaqueId::new("media-lane-b").expect("id")),
+            ..config_a.clone()
+        };
+        let (ingress, _receiver) = tokio::sync::mpsc::channel(4);
+        let (a, b) = tokio::join!(
+            create_live_peer_connection(&config_a, Some(ingress.clone())),
+            create_live_peer_connection(&config_b, Some(ingress)),
+        );
+        let (mut a, offer_a) = a.expect("peer A");
+        let (mut b, offer_b) = b.expect("peer B");
+        a.offer_id = webrtc_offer_id(&offer_a.sdp);
+        b.offer_id = webrtc_offer_id(&offer_b.sdp);
+        let key_a = session_key(&config_a.session_id);
+        let key_b = session_key(&config_b.session_id);
+        let held_a = a.try_begin_media_send(&a.offer_id).expect("lane A");
+        assert!(matches!(
+            a.try_begin_media_send(&a.offer_id),
+            Err(WebRtcProviderError::CapacityExceeded)
+        ));
+        assert!(matches!(
+            a.try_begin_media_send("stale-offer"),
+            Err(WebRtcProviderError::SessionUnavailable)
+        ));
+        let held_b = b
+            .try_begin_media_send(&b.offer_id)
+            .expect("independent lane B");
+        drop(held_b);
+        let mut sessions = HashMap::from([(key_a.clone(), a), (key_b.clone(), b)]);
+        let (reply, receiver) = std_mpsc::channel();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut close = Box::pin(handle_live_close(
+            &mut sessions,
+            config_a.session_id,
+            None,
+            deadline,
+            reply,
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut close)
+                .await
+                .is_err(),
+            "close must not acknowledge while a media send holds the lane"
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std_mpsc::TryRecvError::Empty)
+        ));
+        drop(held_a);
+        close.await;
+        assert_eq!(receiver.try_recv(), Ok(Ok(())));
+        assert!(!sessions.contains_key(&key_a));
+        let b = sessions.get(&key_b).expect("peer B retained");
+        assert!(b.try_begin_media_send(&b.offer_id).is_ok());
+        b.peer_connection.close().await.expect("close peer B");
     }
 
     #[test]
